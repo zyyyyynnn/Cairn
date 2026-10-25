@@ -1,0 +1,55 @@
+[package]
+name = "cairn-service"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "cairn_service"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cairnd"
+path = "src/main.rs"
+
+[dependencies]
+cairn-core.workspace = true
+cairn-ntfs.workspace = true
+cairn-content.workspace = true
+cairn-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+windows-service.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+toml.workspace = true
+crc32fast.workspace = true
+clap.workspace = true
+thiserror.workspace = true
+rayon.workspace = true
+memchr.workspace = true
+
+[dependencies.windows]
+workspace = true
+features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Pipes",
+    "Win32_System_IO",
+    "Win32_System_Threading",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_UI_Shell",
+]
+
+[dev-dependencies]
+tempfile.workspace = true
+# Black-box pipe integration tests (SPEC SVC-02, SVC-07) drive the real client library against the real
+# server; this is a dev-only dependency and does not change the runtime layering of the workspace.
+cairn-client.workspace = true
+
+[build-dependencies]
+winres.workspace = true
