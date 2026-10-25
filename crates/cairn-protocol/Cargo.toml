@@ -1,0 +1,13 @@
+[package]
+name = "cairn-protocol"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+cairn-core.workspace = true
+serde.workspace = true
+postcard.workspace = true
+thiserror.workspace = true

@@ -1,0 +1,86 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/cairn-core",
+    "crates/cairn-protocol",
+    "crates/cairn-ntfs",
+    "crates/cairn-content",
+    "crates/cairn-service",
+    "crates/cairn-worker",
+    "crates/cairn-client",
+    "crates/cairn-app",
+    "crates/cairn-cli",
+    "xtask",
+]
+
+[workspace.package]
+version = "0.1.2"
+edition = "2021"
+authors = ["Cairn Contributors"]
+license = "Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+# Internal workspace crates
+cairn-core = { path = "crates/cairn-core" }
+cairn-protocol = { path = "crates/cairn-protocol" }
+cairn-ntfs = { path = "crates/cairn-ntfs" }
+cairn-content = { path = "crates/cairn-content" }
+cairn-service = { path = "crates/cairn-service" }
+cairn-worker = { path = "crates/cairn-worker" }
+cairn-client = { path = "crates/cairn-client" }
+
+# Serialization & IPC
+serde = { version = "1.0", features = ["derive"] }
+postcard = { version = "1.1", features = ["alloc"] }
+serde_json = "1.0"
+toml = "0.8"
+
+# Concurrency & Performance
+rayon = "1.10"
+memchr = "2.7"
+regex = "1.11"
+tokio = { version = "1.43", features = ["full"] }
+
+# Windows OS APIs
+windows = { version = "0.58.0" }
+windows-service = "0.8.1"
+
+# Content Search & Text
+tantivy = "0.26.2"
+chardetng = "1.0.0"
+encoding_rs = "0.8.42"
+zip = { version = "9.0", default-features = false, features = ["deflate"] }
+quick-xml = "0.42"
+lopdf = { version = "0.45", default-features = false }
+
+# GUI & Desktop
+# `component` carries the shell this app is built from (Sidebar, Toolbar, Table, Menu, StatusBar,
+# theme tokens). gpui-kit 0.8 owns the matching gpui-base/gpui-component versions; the application
+# does not list them directly.
+gpui-kit = { version = "0.8.0", default-features = false, features = ["assets", "component"] }
+tray-icon = "0.26"
+global-hotkey = "0.8"
+fluent-bundle = "0.15"
+unic-langid = "0.9"
+
+# CLI & Tooling
+clap = { version = "4.5", features = ["derive"] }
+csv = "1.3"
+crc32fast = "1.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+proptest = "1.12"
+thiserror = "2.0"
+tempfile = "3.27"
+winres = "0.1.12"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+[profile.bench]
+opt-level = 3
+lto = "thin"
