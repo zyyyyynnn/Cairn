@@ -1,0 +1,69 @@
+name: Bug Report / 缺陷报告
+description: 提交在使用 Cairn 过程中遇到的异常、崩溃或错误行为
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢提交缺陷反馈！请尽可能提供详细的复现步骤与环境信息，以帮助维护者快速定位并解决问题。
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述 / Bug Description
+      description: 清晰、简洁地描述遇到了什么问题。
+      placeholder: 在执行某种操作时，发生了...
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 复现步骤 / Steps to Reproduce
+      description: 触发该问题的具体操作步骤。
+      placeholder: |
+        1. 启动 Cairn...
+        2. 输入搜索关键词...
+        3. 点击或按快捷键...
+        4. 观察到...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为与实际行为 / Expected vs Actual
+      description: 预期应该发生什么，实际上发生了什么。
+      placeholder: |
+        - 期望行为: 
+        - 实际行为: 
+    validations:
+      required: true
+  - type: dropdown
+    id: module
+    attributes:
+      label: 相关模块 / Affected Module
+      description: 请选择问题发生的组件范围（若不确定可选择 Unknown）。
+      options:
+        - "App UI (界面与交互)"
+        - "Treemap (磁盘空间分析)"
+        - "Recycle Bin (回收站)"
+        - "Core / NTFS (MFT 索引与扫描)"
+        - "Service / IPC (后台服务与命名管道)"
+        - "CLI / Client (命令行工具)"
+        - "Installer (安装与卸载)"
+        - "Unknown / Other"
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: 运行环境 / Environment
+      description: 操作系统版本、Cairn 版本及架构信息。
+      placeholder: "Windows 11 23H2 (x64) / Cairn v0.1.2"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志与错误信息 / Logs or Screenshots
+      description: 粘贴相关错误堆栈、控制台输出或直接粘贴截图。
+      render: shell

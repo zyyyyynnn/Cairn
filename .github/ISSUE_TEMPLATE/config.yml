@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: GitHub Releases / 官方版本下载
+    url: https://github.com/zyyyyynnn/Cairn/releases
+    about: 获取 Cairn 最新的安装包与发布产物

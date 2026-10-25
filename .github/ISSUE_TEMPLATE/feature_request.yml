@@ -1,0 +1,47 @@
+name: Feature Request / 功能建议
+description: 为 Cairn 提出新功能、性能优化或设计改进建议
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        欢迎为 Cairn 构思新特性！在提交前请确认该需求是否符合项目的高性能与本地化核心定位。
+  - type: textarea
+    id: problem
+    attributes:
+      label: 需求背景与问题 / Problem or Use Case
+      description: 描述您遇到了什么痛点，或者在什么使用场景下需要该功能。
+      placeholder: 当前在处理...时，缺少...导致...
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: 建议方案 / Proposed Solution
+      description: 您期望的具体实现方式或交互设计。
+      placeholder: 希望增加...功能，预期交互方式是...
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 考虑过的替代方案 / Alternatives Considered
+      description: 您是否考虑过其他现有的解决途径或同类工具的做法。
+    validations:
+      required: false
+  - type: dropdown
+    id: module
+    attributes:
+      label: 建议的作用域 / Target Scope
+      options:
+        - "App UI / UX"
+        - "Treemap Visualization"
+        - "Recycle Bin Integration"
+        - "Search Engine / Query Syntax"
+        - "Service & Background Sync"
+        - "CLI & Scripting"
+        - "Packaging & Distribution"
+        - "Documentation"
+    validations:
+      required: true
