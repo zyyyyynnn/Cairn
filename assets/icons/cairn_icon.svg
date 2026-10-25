@@ -1,0 +1,178 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <!-- 1. iOS 连续曲率超椭圆 (Squircle) 裁剪蒙版 (1024x1024 标准曲率) -->
+    <clipPath id="ios-squircle-clip">
+      <path d="M 512,0
+               C 695,0 786,0 854,29
+               C 920,57 967,104 995,170
+               C 1024,238 1024,329 1024,512
+               C 1024,695 1024,786 995,854
+               C 967,920 920,967 854,995
+               C 786,1024 695,1024 512,1024
+               C 329,1024 238,1024 170,995
+               C 104,967 57,920 29,854
+               C 0,786 0,695 0,512
+               C 0,329 0,238 29,170
+               C 57,104 104,57 170,29
+               C 238,0 329,0 512,0 Z" />
+    </clipPath>
+
+    <!-- 2. 背景底色系统：以 #101010 为基准，向左上延伸为亮炭灰 (#292929)，向右下沉入极黑 (#040404) -->
+    <!-- “上亮下暗”的背景场与“左上暗、右下亮”的花瓣形成反向对比度剪刀差，强化“右下在前、左上在后”的纵深感 -->
+    <linearGradient id="bg-main-gradient" x1="18%" y1="4%" x2="82%" y2="96%">
+      <stop offset="0%" stop-color="#292929" />
+      <stop offset="26%" stop-color="#1E1E1E" />
+      <stop offset="52%" stop-color="#101010" />
+      <stop offset="78%" stop-color="#080808" />
+      <stop offset="100%" stop-color="#030303" />
+    </linearGradient>
+
+    <!-- 左上远景漫射天光 (降低左上区域局部对比度，使远景花瓣自然退后) -->
+    <radialGradient id="bg-top-left-haze" cx="24%" cy="14%" r="62%" fx="18%" fy="10%">
+      <stop offset="0%" stop-color="#333333" stop-opacity="0.48" />
+      <stop offset="50%" stop-color="#1C1C1C" stop-opacity="0.18" />
+      <stop offset="100%" stop-color="#101010" stop-opacity="0" />
+    </radialGradient>
+
+    <!-- 右下近景深邃暗场 (拉大右下区域局部对比度，使 #F9F9F9 前景花瓣跃出画面) -->
+    <radialGradient id="bg-bottom-right-abyss" cx="64%" cy="88%" r="58%">
+      <stop offset="0%" stop-color="#020202" stop-opacity="0.82" />
+      <stop offset="55%" stop-color="#070707" stop-opacity="0.35" />
+      <stop offset="100%" stop-color="#101010" stop-opacity="0" />
+    </radialGradient>
+
+    <!-- 3. 3D 拟物玻璃倒角高光渐变 (Rim Bevel Lighting) -->
+    <!-- 外沿锐利高光：左上角最强 (#F9F9F9 延伸高光)，两侧平缓过渡，右下角具有微弱环境反光 -->
+    <linearGradient id="rim-specular-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#F9F9F9" stop-opacity="0.72" />
+      <stop offset="16%" stop-color="#D8D8D8" stop-opacity="0.42" />
+      <stop offset="42%" stop-color="#787878" stop-opacity="0.16" />
+      <stop offset="70%" stop-color="#383838" stop-opacity="0.10" />
+      <stop offset="88%" stop-color="#7E7E7E" stop-opacity="0.28" />
+      <stop offset="100%" stop-color="#C8C8C8" stop-opacity="0.48" />
+    </linearGradient>
+
+    <!-- 内侧宽幅弧面折射过渡 (模拟原版约 24px 宽度的圆润边缘体积感) -->
+    <linearGradient id="rim-cushion-grad" x1="5%" y1="2%" x2="95%" y2="98%">
+      <stop offset="0%" stop-color="#E5E5E5" stop-opacity="0.42" />
+      <stop offset="28%" stop-color="#9A9A9A" stop-opacity="0.18" />
+      <stop offset="55%" stop-color="#1A1A1A" stop-opacity="0.04" />
+      <stop offset="82%" stop-color="#525252" stop-opacity="0.16" />
+      <stop offset="100%" stop-color="#B0B0B0" stop-opacity="0.34" />
+    </linearGradient>
+
+    <!-- 倒角多层高斯模糊滤镜 -->
+    <filter id="blur-cushion" x="-8%" y="-8%" width="116%" height="116%">
+      <feGaussianBlur stdDeviation="10" />
+    </filter>
+    <filter id="blur-mid-bevel" x="-5%" y="-5%" width="110%" height="110%">
+      <feGaussianBlur stdDeviation="4" />
+    </filter>
+    <filter id="blur-fine-rim" x="-2%" y="-2%" width="104%" height="104%">
+      <feGaussianBlur stdDeviation="1.2" />
+    </filter>
+
+    <!-- 花瓣空间悬浮阴影 (赋予前景花瓣脱离背景的景深感) -->
+    <filter id="petal-ambient-shadow" x="-15%" y="-15%" width="130%" height="130%">
+      <feDropShadow dx="0" dy="8" stdDeviation="11" flood-color="#000000" flood-opacity="0.48" />
+    </filter>
+
+    <!-- 4. 六枚花瓣的空气透视渐变 (#F9F9F9 及其向 #101010 方向延伸的灰阶序列) -->
+    <!-- [第1层·最远景] 10点方向 (左上): 视觉退晕最强，明度压低至 #CECECE ~ #DCDCDC -->
+    <linearGradient id="grad-petal-10" x1="100%" y1="50%" x2="0%" y2="50%">
+      <stop offset="0%" stop-color="#CECECE" />
+      <stop offset="55%" stop-color="#D6D6D6" />
+      <stop offset="100%" stop-color="#DCDCDC" />
+    </linearGradient>
+
+    <!-- [第2层·中远景] 12点方向 (正上偏左): 亮灰过渡 #D5D5D5 ~ #E4E4E4 -->
+    <linearGradient id="grad-petal-12" x1="0%" y1="50%" x2="100%" y2="50%">
+      <stop offset="0%" stop-color="#D5D5D5" />
+      <stop offset="55%" stop-color="#DDDDDD" />
+      <stop offset="100%" stop-color="#E4E4E4" />
+    </linearGradient>
+
+    <!-- [第2层·中远景] 8点方向 (左下): 亮灰过渡 #D5D5D5 ~ #E3E3E3 -->
+    <linearGradient id="grad-petal-8" x1="100%" y1="50%" x2="0%" y2="50%">
+      <stop offset="0%" stop-color="#D5D5D5" />
+      <stop offset="55%" stop-color="#DDDDDD" />
+      <stop offset="100%" stop-color="#E3E3E3" />
+    </linearGradient>
+
+    <!-- [第3层·中近景] 2点方向 (右上): 受光面舒展，明度提升至 #DBDBDB ~ #EFEFEF -->
+    <linearGradient id="grad-petal-2" x1="0%" y1="50%" x2="100%" y2="50%">
+      <stop offset="0%" stop-color="#DBDBDB" />
+      <stop offset="50%" stop-color="#E5E5E5" />
+      <stop offset="100%" stop-color="#EFEFEF" />
+    </linearGradient>
+
+    <!-- [第4层·近景次主瓣] 6点方向 (正下偏左): 向前景推进，底部尖端提亮至 #F4F4F4 -->
+    <linearGradient id="grad-petal-6" x1="100%" y1="50%" x2="0%" y2="50%">
+      <stop offset="0%" stop-color="#DCDCDC" />
+      <stop offset="45%" stop-color="#E9E9E9" />
+      <stop offset="100%" stop-color="#F4F4F4" />
+    </linearGradient>
+
+    <!-- [第5层·最前景核心主瓣] 4点方向 (右下): 透视最前端，由中心 #DFDFDF 强力拉升至纯亮 #F9F9F9 -->
+    <linearGradient id="grad-petal-4" x1="0%" y1="50%" x2="100%" y2="50%">
+      <stop offset="0%" stop-color="#DFDFDF" />
+      <stop offset="38%" stop-color="#EDEDED" />
+      <stop offset="78%" stop-color="#F6F6F6" />
+      <stop offset="100%" stop-color="#F9F9F9" />
+    </linearGradient>
+  </defs>
+
+  <!-- 图标主体 (1024x1024 超椭圆容器) -->
+  <g clip-path="url(#ios-squircle-clip)">
+    <!-- A. 背景层 (#101010 及其明暗延伸色) -->
+    <rect width="1024" height="1024" fill="url(#bg-main-gradient)" />
+    <rect width="1024" height="1024" fill="url(#bg-top-left-haze)" />
+    <rect width="1024" height="1024" fill="url(#bg-bottom-right-abyss)" />
+
+    <!-- B. 六瓣三维透视放射花朵 (汇聚中心偏移至 H=(452.2, 501.2)，营造“右下在前、左上在后”的强烈的单点透视倾斜感) -->
+    <g filter="url(#petal-ambient-shadow)">
+      <!-- 1. 远景瓣 (10点方向 · 左上): 最小最细 (rx=103.0, ry=25.5, 长宽比 4.04, 面积 8,251) -->
+      <ellipse cx="304.4" cy="422.0" rx="103.0" ry="25.5"
+               transform="rotate(27.75 304.4 422.0)"
+               fill="url(#grad-petal-10)" />
+
+      <!-- 2. 中远景瓣 (12点方向 · 正上): 纵向透视压缩 (rx=145.7, ry=37.4, 长宽比 3.90, 面积 17,119) -->
+      <ellipse cx="474.0" cy="281.3" rx="145.7" ry="37.4"
+               transform="rotate(-83.77 474.0 281.3)"
+               fill="url(#grad-petal-12)" />
+
+      <!-- 3. 中远景瓣 (8点方向 · 左下): 侧翼过渡 (rx=133.4, ry=42.6, 长宽比 3.13, 面积 17,853) -->
+      <ellipse cx="277.1" cy="605.6" rx="133.4" ry="42.6"
+               transform="rotate(-33.24 277.1 605.6)"
+               fill="url(#grad-petal-8)" />
+
+      <!-- 4. 中近景瓣 (2点方向 · 右上): 向右侧前景伸展 (rx=194.8, ry=66.0, 长宽比 2.95, 面积 40,391) -->
+      <ellipse cx="687.0" cy="351.8" rx="194.8" ry="66.0"
+               transform="rotate(-32.87 687.0 351.8)"
+               fill="url(#grad-petal-2)" />
+
+      <!-- 5. 近景瓣 (6点方向 · 正下): 饱满厚重 (rx=160.2, ry=60.4, 长宽比 2.65, 面积 30,398) -->
+      <ellipse cx="432.9" cy="725.3" rx="160.2" ry="60.4"
+               transform="rotate(-83.08 432.9 725.3)"
+               fill="url(#grad-petal-6)" />
+
+      <!-- 6. 最前景主瓣 (4点方向 · 右下): 迎面扑来的主视觉焦点 (rx=188.3, ry=70.5, 长宽比 2.67, 面积 41,705，为左上远景瓣面积的 5.05 倍) -->
+      <ellipse cx="683.6" cy="607.7" rx="188.3" ry="70.5"
+               transform="rotate(23.26 683.6 607.7)"
+               fill="url(#grad-petal-4)" />
+    </g>
+
+    <!-- C. iOS 图标边缘 3D 弧面倒角高光层 (三层式体积高光复刻) -->
+    <!-- 第一层：宽幅内侧弧面漫反射垫层 -->
+    <path d="M 512,0 C 695,0 786,0 854,29 C 920,57 967,104 995,170 C 1024,238 1024,329 1024,512 C 1024,695 1024,786 995,854 C 967,920 920,967 854,995 C 786,1024 695,1024 512,1024 C 329,1024 238,1024 170,995 C 104,967 57,920 29,854 C 0,786 0,695 0,512 C 0,329 0,238 29,170 C 57,104 104,57 170,29 C 238,0 329,0 512,0 Z"
+          fill="none" stroke="url(#rim-cushion-grad)" stroke-width="34" filter="url(#blur-cushion)" />
+
+    <!-- 第二层：中幅边缘高光过渡带 -->
+    <path d="M 512,0 C 695,0 786,0 854,29 C 920,57 967,104 995,170 C 1024,238 1024,329 1024,512 C 1024,695 1024,786 995,854 C 967,920 920,967 854,995 C 786,1024 695,1024 512,1024 C 329,1024 238,1024 170,995 C 104,967 57,920 29,854 C 0,786 0,695 0,512 C 0,329 0,238 29,170 C 57,104 104,57 170,29 C 238,0 329,0 512,0 Z"
+          fill="none" stroke="url(#rim-specular-grad)" stroke-width="12" filter="url(#blur-mid-bevel)" />
+
+    <!-- 第三层：锐利外沿镜面反光棱线 -->
+    <path d="M 512,0 C 695,0 786,0 854,29 C 920,57 967,104 995,170 C 1024,238 1024,329 1024,512 C 1024,695 1024,786 995,854 C 967,920 920,967 854,995 C 786,1024 695,1024 512,1024 C 329,1024 238,1024 170,995 C 104,967 57,920 29,854 C 0,786 0,695 0,512 C 0,329 0,238 29,170 C 57,104 104,57 170,29 C 238,0 329,0 512,0 Z"
+          fill="none" stroke="url(#rim-specular-grad)" stroke-width="3.5" filter="url(#blur-fine-rim)" />
+  </g>
+</svg>
