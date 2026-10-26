@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        感谢提交缺陷反馈！提交前请确认该问题在最新发布版本中依然存在，并尽量提供清晰的复现步骤与关键日志。
+        提交前请确认该问题在最新发布版本中依然存在，并提供清晰的复现步骤与关键日志。
   - type: textarea
     id: description
     attributes:
