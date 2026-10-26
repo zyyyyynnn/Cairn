@@ -1586,10 +1586,40 @@ impl CairnApp {
         );
     }
 
+    /// Confirms emptying the Recycle Bin through Cairn's unified dialog style before
+    /// dispatching the operation to the shell.
+    pub fn empty_bin(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.recycle_bin.is_none() || self.recycle_bin_loading {
+            return;
+        }
+        if matches!(&self.recycle_bin, Some(items) if items.is_empty()) {
+            return;
+        }
+        self.close_group();
+        let title = self.i18n.get_text("recycle_bin_empty_confirm_title");
+        let description = self.i18n.get_text("recycle_bin_empty_confirm_description");
+        let ok = self.i18n.get_text("recycle_bin_empty_confirm_action");
+        let cancel = self.i18n.get_text("delete_confirm_cancel");
+        let view = cx.entity();
+        window.open_alert_dialog(cx, move |alert, window, _| {
+            style_confirmation_alert(alert, window, ok.clone(), cancel.clone())
+                .title(title.clone())
+                .description(description.clone())
+                .confirm()
+                .on_ok({
+                    let view = view.clone();
+                    move |_, _, cx| {
+                        view.update(cx, |this, cx| this.execute_empty_bin(cx));
+                        true
+                    }
+                })
+        });
+    }
+
     /// Empties the bin through the shell's own command, then re-reads it. The loading flag is
     /// set before the background operation starts, so it is also the in-flight guard: a second
     /// invocation before the first listing lands must not start a second shell empty.
-    pub fn empty_bin(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    pub fn execute_empty_bin(&mut self, cx: &mut Context<Self>) {
         if self.recycle_bin.is_none() || self.recycle_bin_loading {
             return;
         }

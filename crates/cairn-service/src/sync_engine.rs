@@ -2878,15 +2878,15 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let engine = MultiVolumeEngine::with_index_dir_and_drives(temp_dir.path(), vec![]);
 
-        // Create volume C
-        let mut vol_c = VolumeIndex::new('C');
-        vol_c.volume_serial = 0xCCCC;
-        vol_c.journal_id = 100;
-        vol_c.last_usn = 5000;
-        vol_c.ingest_items(vec![ExtractedItem {
+        // Create volume X
+        let mut vol_x = VolumeIndex::new('X');
+        vol_x.volume_serial = 0x1111;
+        vol_x.journal_id = 100;
+        vol_x.last_usn = 5000;
+        vol_x.ingest_items(vec![ExtractedItem {
             frn: 100,
             parent_frn: 5,
-            name: "c_file.txt".to_string(),
+            name: "x_file.txt".to_string(),
             is_dir: false,
             size: 100,
             created_ts: 100,
@@ -2895,15 +2895,15 @@ mod tests {
             is_reparse_point: false,
         }]);
 
-        // Create volume D
-        let mut vol_d = VolumeIndex::new('D');
-        vol_d.volume_serial = 0xDDDD;
-        vol_d.journal_id = 200;
-        vol_d.last_usn = 6000;
-        vol_d.ingest_items(vec![ExtractedItem {
+        // Create volume Y
+        let mut vol_y = VolumeIndex::new('Y');
+        vol_y.volume_serial = 0x2222;
+        vol_y.journal_id = 200;
+        vol_y.last_usn = 6000;
+        vol_y.ingest_items(vec![ExtractedItem {
             frn: 200,
             parent_frn: 5,
-            name: "d_file.txt".to_string(),
+            name: "y_file.txt".to_string(),
             is_dir: false,
             size: 200,
             created_ts: 200,
@@ -2912,15 +2912,15 @@ mod tests {
             is_reparse_point: false,
         }]);
 
-        engine.add_volume(vol_c);
-        engine.add_volume(vol_d);
+        engine.add_volume(vol_x);
+        engine.add_volume(vol_y);
 
         // Atomic save to disk
         engine.save_all_indexes().expect("save_all_indexes");
 
         // Restore into a new MultiVolumeEngine from the same temp_dir
         let loaded_engine =
-            MultiVolumeEngine::with_index_dir_and_drives(temp_dir.path(), vec!['C', 'D']);
+            MultiVolumeEngine::with_index_dir_and_drives(temp_dir.path(), vec!['X', 'Y']);
 
         let cancel = CancellationToken::new();
         let (results, total, highlights, _) = loaded_engine.execute_search_multi(
@@ -2937,9 +2937,9 @@ mod tests {
 
         let summaries = loaded_engine.get_volume_summaries();
         assert_eq!(summaries.len(), 2);
-        assert_eq!(summaries[0].drive_letter, 'C');
+        assert_eq!(summaries[0].drive_letter, 'X');
         assert_eq!(summaries[0].indexed_count, 1);
-        assert_eq!(summaries[1].drive_letter, 'D');
+        assert_eq!(summaries[1].drive_letter, 'Y');
         assert_eq!(summaries[1].indexed_count, 1);
     }
 

@@ -825,24 +825,28 @@ pub fn delete_permanently_from_recycle_bin(
     }
 }
 
-/// Empties the Recycle Bin through `SHEmptyRecycleBinW`, the shell's own
-/// command: native confirmation, progress and error UI stay with Windows.
+/// Empties the Recycle Bin through `SHEmptyRecycleBinW`. The app's unified dialog
+/// has already confirmed the irreversible action, so `SHERB_NOCONFIRMATION` suppresses
+/// the redundant legacy shell prompt while keeping native deletion progress and sound.
 pub fn empty_recycle_bin(owner: isize) -> Result<(), BinOperationError> {
     #[cfg(windows)]
     {
         let _com = initialize_com_apartment();
-        // SAFETY: the app's live window owns the native confirmation; no root-path restriction, so
-        // this is the shell's own Recycle Bin command, exactly as Explorer's 清空回收站.
-        unsafe { SHEmptyRecycleBinW(owner_hwnd(owner), PCWSTR::null(), 0) }.map_err(|err| {
-            if hresult_is_cancelled(err.code()) {
-                BinOperationError::Cancelled
-            } else {
-                BinOperationError::failed(format!("SHEmptyRecycleBinW: {err}"), Vec::new())
-            }
-        })
+        const SHERB_NOCONFIRMATION: u32 = 0x00000001;
+        // SAFETY: the app's live window owns the shell call; no root-path restriction, so
+        // this empties all recycle bins across drives.
+        unsafe { SHEmptyRecycleBinW(owner_hwnd(owner), PCWSTR::null(), SHERB_NOCONFIRMATION) }
+            .map_err(|err| {
+                if hresult_is_cancelled(err.code()) {
+                    BinOperationError::Cancelled
+                } else {
+                    BinOperationError::failed(format!("SHEmptyRecycleBinW: {err}"), Vec::new())
+                }
+            })
     }
     #[cfg(not(windows))]
     {
+        let _ = owner;
         Ok(())
     }
 }

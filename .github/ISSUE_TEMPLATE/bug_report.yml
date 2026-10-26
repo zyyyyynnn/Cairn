@@ -64,7 +64,7 @@ body:
     attributes:
       label: 运行环境 / Environment
       description: 操作系统版本、Cairn 版本、驱动器文件系统及执行权限。
-      placeholder: "Windows 11 23H2 (x64) / Cairn v0.1.2 / NTFS 驱动器 (C:, D:) / 普通用户权限"
+      placeholder: "Windows 11 23H2 (x64) / Cairn v0.1.0 / NTFS 驱动器 (C:, D:) / 普通用户权限"
     validations:
       required: true
   - type: textarea

@@ -97,6 +97,9 @@ recycle_bin_delete_confirm_title_many = 永久删除 { $count } 个项目？
 recycle_bin_delete_confirm_description = 此项目将永久删除，无法还原。
 recycle_bin_delete_confirm_description_many = 这些项目将永久删除，无法还原。
 recycle_bin_delete_confirm_action = 永久删除
+recycle_bin_empty_confirm_title = 清空回收站？
+recycle_bin_empty_confirm_description = 确定要永久删除回收站中的所有项目吗？此操作无法撤销。
+recycle_bin_empty_confirm_action = 清空回收站
 delete_failed_title = 无法删除所选项目
 
 service_not_running_title = 索引暂不可用

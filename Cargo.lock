@@ -913,7 +913,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "cairn-app"
-version = "0.1.2"
+version = "0.1.0"
 dependencies = [
  "cairn-client",
  "cairn-core",
@@ -936,7 +936,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-cli"
-version = "0.1.2"
+version = "0.1.0"
 dependencies = [
  "cairn-client",
  "cairn-protocol",
@@ -951,7 +951,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-client"
-version = "0.1.2"
+version = "0.1.0"
 dependencies = [
  "cairn-protocol",
  "thiserror 2.0.21",
@@ -962,7 +962,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-content"
-version = "0.1.2"
+version = "0.1.0"
 dependencies = [
  "cairn-core",
  "chardetng",
@@ -978,7 +978,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-core"
-version = "0.1.2"
+version = "0.1.0"
 dependencies = [
  "crc32fast",
  "memchr",
@@ -992,7 +992,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-ntfs"
-version = "0.1.2"
+version = "0.1.0"
 dependencies = [
  "cairn-core",
  "rayon",
@@ -1003,7 +1003,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-protocol"
-version = "0.1.2"
+version = "0.1.0"
 dependencies = [
  "cairn-core",
  "postcard",
@@ -1013,7 +1013,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-service"
-version = "0.1.2"
+version = "0.1.0"
 dependencies = [
  "cairn-client",
  "cairn-content",
@@ -1039,7 +1039,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-worker"
-version = "0.1.2"
+version = "0.1.0"
 dependencies = [
  "cairn-content",
  "cairn-protocol",
@@ -9803,7 +9803,7 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "xtask"
-version = "0.1.2"
+version = "0.1.0"
 dependencies = [
  "cairn-client",
  "cairn-core",

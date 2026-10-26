@@ -320,16 +320,25 @@ fn strengthen_ghost_hover(cx: &mut App) {
 fn apply_unified_interaction_fill(theme: &mut Theme) {
     let hover = theme.list_hover;
     theme.list_active = hover;
-    theme.secondary_active = hover;
     theme.tokens.accent = hover.into();
     theme.tokens.button_hover = hover.into();
     theme.tokens.button_active = hover.into();
-    theme.tokens.button_secondary_hover = hover.into();
-    theme.tokens.button_secondary_active = hover.into();
-    theme.tokens.secondary_active = hover.into();
     // Sidebar rows paint their selected and hover fills from this role; both are the same light
     // gray, with weight and foreground carrying the selected state.
     theme.sidebar_accent = hover;
+    // The secondary fill (used by the dialog Cancel button and other secondary buttons)
+    // must have a distinct optical step on hover and pressed. Setting hover to list_hover
+    // caused near-zero contrast against the button's own resting fill. Tint toward the ink
+    // with mix_oklab so light mode darkens and dark mode lightens with clear target contrast.
+    let secondary = theme.tokens.button_secondary.color;
+    let secondary_ink = theme.tokens.button_secondary_foreground.color;
+    let sec_hover = secondary_ink.mix_oklab(secondary, 0.15);
+    let sec_active = secondary_ink.mix_oklab(secondary, 0.22);
+    theme.tokens.button_secondary_hover = sec_hover.into();
+    theme.tokens.button_secondary_active = sec_active.into();
+    theme.tokens.secondary_hover = sec_hover.into();
+    theme.tokens.secondary_active = sec_active.into();
+    theme.secondary_active = sec_active;
     // The palette's primary hover is only one neutral step from rest (and nearly invisible on the
     // dark theme's near-white fill). Tint it toward the label ink instead: light mode lightens,
     // dark mode darkens, and the label keeps its contrast in both. `mix_oklab` weights its first
@@ -679,12 +688,63 @@ mod tests {
         assert_eq!(theme.tokens.accent.color, theme.list_hover);
         assert_eq!(theme.tokens.button_hover.color, theme.list_hover);
         assert_eq!(theme.tokens.button_active.color, theme.list_hover);
-        assert_eq!(theme.tokens.button_secondary_hover.color, theme.list_hover);
-        assert_eq!(theme.tokens.button_secondary_active.color, theme.list_hover);
-        assert_eq!(theme.tokens.secondary_active.color, theme.list_hover);
         assert_eq!(theme.list_active, theme.list_hover);
-        assert_eq!(theme.secondary_active, theme.list_hover);
         assert_eq!(theme.sidebar_accent, theme.list_hover);
+    }
+
+    /// The secondary action (e.g. dialog Cancel button) must answer the pointer with a visible step
+    /// in both light and dark themes.
+    #[test]
+    fn secondary_hover_and_pressed_move_toward_the_label_ink() {
+        let mut dark = Theme {
+            mode: ThemeMode::Dark,
+            ..Default::default()
+        };
+        dark.tokens.button_secondary = Hsla {
+            h: 0.0,
+            s: 0.0,
+            l: 0.15,
+            a: 1.0,
+        }
+        .into();
+        dark.tokens.button_secondary_foreground = Hsla {
+            h: 0.0,
+            s: 0.0,
+            l: 0.90,
+            a: 1.0,
+        }
+        .into();
+        apply_unified_interaction_fill(&mut dark);
+        let dark_rest = relative_luminance(dark.tokens.button_secondary.color);
+        let dark_hover = relative_luminance(dark.tokens.button_secondary_hover.color);
+        let dark_active = relative_luminance(dark.tokens.button_secondary_active.color);
+        assert!(dark_hover > dark_rest, "dark secondary must lighten on hover");
+        assert!(dark_active > dark_hover, "dark secondary must lighten further on active");
+
+        let mut light = Theme {
+            mode: ThemeMode::Light,
+            ..Default::default()
+        };
+        light.tokens.button_secondary = Hsla {
+            h: 0.0,
+            s: 0.0,
+            l: 0.90,
+            a: 1.0,
+        }
+        .into();
+        light.tokens.button_secondary_foreground = Hsla {
+            h: 0.0,
+            s: 0.0,
+            l: 0.06,
+            a: 1.0,
+        }
+        .into();
+        apply_unified_interaction_fill(&mut light);
+        let light_rest = relative_luminance(light.tokens.button_secondary.color);
+        let light_hover = relative_luminance(light.tokens.button_secondary_hover.color);
+        let light_active = relative_luminance(light.tokens.button_secondary_active.color);
+        assert!(light_hover < light_rest, "light secondary must darken on hover");
+        assert!(light_active < light_hover, "light secondary must darken further on active");
     }
 
     /// Verifies that repair_ink_contrast enforces pure grayscale tokens (#E6E6E6, #101010,

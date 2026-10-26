@@ -101,6 +101,9 @@ recycle_bin_delete_confirm_title_many = Delete { $count } items permanently?
 recycle_bin_delete_confirm_description = This item will be permanently deleted and can’t be recovered.
 recycle_bin_delete_confirm_description_many = These items will be permanently deleted and can’t be recovered.
 recycle_bin_delete_confirm_action = Delete permanently
+recycle_bin_empty_confirm_title = Empty Recycle Bin?
+recycle_bin_empty_confirm_description = Are you sure you want to permanently delete all items in the Recycle Bin? This action cannot be undone.
+recycle_bin_empty_confirm_action = Empty Recycle Bin
 delete_failed_title = Could not delete the selected items
 
 service_not_running_title = Indexing is unavailable
