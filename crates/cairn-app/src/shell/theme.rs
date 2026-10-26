@@ -718,8 +718,14 @@ mod tests {
         let dark_rest = relative_luminance(dark.tokens.button_secondary.color);
         let dark_hover = relative_luminance(dark.tokens.button_secondary_hover.color);
         let dark_active = relative_luminance(dark.tokens.button_secondary_active.color);
-        assert!(dark_hover > dark_rest, "dark secondary must lighten on hover");
-        assert!(dark_active > dark_hover, "dark secondary must lighten further on active");
+        assert!(
+            dark_hover > dark_rest,
+            "dark secondary must lighten on hover"
+        );
+        assert!(
+            dark_active > dark_hover,
+            "dark secondary must lighten further on active"
+        );
 
         let mut light = Theme {
             mode: ThemeMode::Light,
@@ -743,8 +749,14 @@ mod tests {
         let light_rest = relative_luminance(light.tokens.button_secondary.color);
         let light_hover = relative_luminance(light.tokens.button_secondary_hover.color);
         let light_active = relative_luminance(light.tokens.button_secondary_active.color);
-        assert!(light_hover < light_rest, "light secondary must darken on hover");
-        assert!(light_active < light_hover, "light secondary must darken further on active");
+        assert!(
+            light_hover < light_rest,
+            "light secondary must darken on hover"
+        );
+        assert!(
+            light_active < light_hover,
+            "light secondary must darken further on active"
+        );
     }
 
     /// Verifies that repair_ink_contrast enforces pure grayscale tokens (#E6E6E6, #101010,
