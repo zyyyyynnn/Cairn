@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        欢迎为 Cairn 提交特性建议！请详细说明新功能的使用场景、期望交互及预期收益。
+        请说明新功能的使用场景、期望交互及预期收益。
   - type: textarea
     id: problem
     attributes:

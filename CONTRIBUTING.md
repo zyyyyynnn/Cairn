@@ -1,8 +1,6 @@
-# 贡献指南 / Contributing to Cairn
+# 贡献指南 / Contributing
 
-感谢您对 Cairn 项目的关注与支持！Cairn 是一款采用 Rust 与 GPUI 构建的高性能 Windows NTFS 文件检索与磁盘分析工具。
-
-为了保证代码库的高质量、健壮性与架构一致性，请在提交代码前仔细阅读本指南。
+Cairn 采用 Rust 与 GPUI 构建 Windows NTFS 文件检索与磁盘分析工具。参与开发与提交变更请遵循以下工程约定与工作流程。
 
 ---
 
