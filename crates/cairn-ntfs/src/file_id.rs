@@ -20,7 +20,7 @@ use std::path::Path;
 pub fn directory_file_id(path: &Path) -> Option<u64> {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
-    use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+    use windows::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, FileIdInfo, GetFileInformationByHandleEx, FILE_FLAGS_AND_ATTRIBUTES,
         FILE_FLAG_BACKUP_SEMANTICS, FILE_ID_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ,
@@ -44,7 +44,7 @@ pub fn directory_file_id(path: &Path) -> Option<u64> {
             None,
             OPEN_EXISTING,
             FILE_FLAGS_AND_ATTRIBUTES(FILE_FLAG_BACKUP_SEMANTICS.0),
-            HANDLE(std::ptr::null_mut()),
+            None,
         )
     }
     .ok()?;

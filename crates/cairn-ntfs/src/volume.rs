@@ -114,7 +114,7 @@ impl RawVolumeHandle {
                 None,
                 OPEN_EXISTING,
                 FILE_FLAGS_AND_ATTRIBUTES(FILE_FLAG_BACKUP_SEMANTICS.0),
-                HANDLE(std::ptr::null_mut()),
+                None,
             )
         };
 

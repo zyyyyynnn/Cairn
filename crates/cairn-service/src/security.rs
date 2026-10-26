@@ -70,7 +70,7 @@ impl Drop for SafeSecurityDescriptor {
         if !self.sd_ptr.0.is_null() {
             // SAFETY: Memory allocated by ConvertStringSecurityDescriptorToSecurityDescriptorW must be freed with LocalFree.
             unsafe {
-                let _ = LocalFree(HLOCAL(self.sd_ptr.0));
+                let _ = LocalFree(Some(HLOCAL(self.sd_ptr.0)));
             }
         }
     }
@@ -430,10 +430,10 @@ pub enum DataDirectoryError {
 mod windows_acl {
     use super::{DataDirectoryError, PathTrust, RESTRICTED_SDDL};
     use std::path::{Path, PathBuf};
-    use windows::core::{PCWSTR, PWSTR};
+    use windows::core::{BOOL, PCWSTR, PWSTR};
     use windows::Win32::Foundation::{
-        CloseHandle, GetLastError, LocalFree, SetLastError, BOOL, ERROR_NOT_ALL_ASSIGNED,
-        ERROR_SUCCESS, HANDLE, HLOCAL, LUID, WIN32_ERROR,
+        CloseHandle, GetLastError, LocalFree, SetLastError, ERROR_NOT_ALL_ASSIGNED, ERROR_SUCCESS,
+        HANDLE, HLOCAL, LUID, WIN32_ERROR,
     };
     use windows::Win32::Security::Authorization::{
         ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
@@ -481,7 +481,7 @@ mod windows_acl {
                 // SAFETY: LocalAlloc'd block handed out by ConvertStringSidToSidW; the SID is not
                 // used after this point.
                 unsafe {
-                    let _ = LocalFree(HLOCAL(self.0 .0));
+                    let _ = LocalFree(Some(HLOCAL(self.0 .0)));
                 }
             }
         }
@@ -497,7 +497,7 @@ mod windows_acl {
                 // ConvertStringSecurityDescriptorToSecurityDescriptorW. Every pointer derived from it
                 // is consumed while the guard is still alive.
                 unsafe {
-                    let _ = LocalFree(HLOCAL(self.0 .0));
+                    let _ = LocalFree(Some(HLOCAL(self.0 .0)));
                 }
             }
         }
@@ -556,7 +556,7 @@ mod windows_acl {
                 return "<unrenderable-sid>".to_string();
             }
             let text = wide.to_string().unwrap_or_default();
-            let _ = LocalFree(HLOCAL(wide.0 as *mut core::ffi::c_void));
+            let _ = LocalFree(Some(HLOCAL(wide.0 as *mut core::ffi::c_void)));
             text
         }
     }
@@ -794,8 +794,8 @@ mod windows_acl {
                 PCWSTR(wide_path.as_ptr()),
                 SE_FILE_OBJECT,
                 DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-                PSID(std::ptr::null_mut()),
-                PSID(std::ptr::null_mut()),
+                None,
+                None,
                 Some(dacl),
                 None,
             )
@@ -859,7 +859,7 @@ mod windows_acl {
             SetLastError(ERROR_SUCCESS);
             AdjustTokenPrivileges(
                 token.0,
-                BOOL::from(false),
+                false,
                 Some(&request),
                 std::mem::size_of::<TOKEN_PRIVILEGES>() as u32,
                 Some(&mut previous),
@@ -929,8 +929,8 @@ mod windows_acl {
                 PCWSTR(wide_path.as_ptr()),
                 SE_FILE_OBJECT,
                 OWNER_SECURITY_INFORMATION,
-                owner,
-                PSID(std::ptr::null_mut()),
+                Some(owner),
+                None,
                 None,
                 None,
             )

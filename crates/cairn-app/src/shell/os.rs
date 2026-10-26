@@ -15,7 +15,7 @@ use windows::core::PCWSTR;
 use windows::core::{Interface as _, PWSTR};
 #[cfg(windows)]
 use windows::Win32::Foundation::{
-    CloseHandle, GetLastError, ERROR_CANCELLED, FILETIME, HANDLE, HWND, WAIT_OBJECT_0,
+    CloseHandle, GetLastError, ERROR_CANCELLED, FILETIME, HWND, PROPERTYKEY, WAIT_OBJECT_0,
 };
 #[cfg(windows)]
 use windows::Win32::System::Com::{
@@ -27,7 +27,7 @@ use windows::Win32::System::SystemServices::{SFGAO_FLAGS, SFGAO_FOLDER};
 #[cfg(windows)]
 use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject, INFINITE};
 #[cfg(windows)]
-use windows::Win32::UI::Shell::PropertiesSystem::{PSGetPropertyKeyFromName, PROPERTYKEY};
+use windows::Win32::UI::Shell::PropertiesSystem::PSGetPropertyKeyFromName;
 #[cfg(windows)]
 use windows::Win32::UI::Shell::{
     BHID_EnumItems, FOLDERID_RecycleBinFolder, FileOperation, IEnumShellItems, IFileOperation,
@@ -361,10 +361,8 @@ fn enumerate_recycle_bin() -> Result<Vec<BinEntry>, String> {
 
     // SAFETY: the known-folder GUID is a constant; the returned PIDL is
     // consumed by SHCreateItemFromIDList and freed with CoTaskMemFree.
-    let bin_pidl = unsafe {
-        SHGetKnownFolderIDList(&FOLDERID_RecycleBinFolder, 0, HANDLE(std::ptr::null_mut()))
-    }
-    .map_err(|err| format!("SHGetKnownFolderIDList: {err}"))?;
+    let bin_pidl = unsafe { SHGetKnownFolderIDList(&FOLDERID_RecycleBinFolder, 0, None) }
+        .map_err(|err| format!("SHGetKnownFolderIDList: {err}"))?;
     // SAFETY: the shell item copies the identity it needs from the PIDL.
     let bin_item: IShellItem2 = match unsafe { SHCreateItemFromIDList(bin_pidl) } {
         Ok(item) => item,
@@ -835,14 +833,20 @@ pub fn empty_recycle_bin(owner: isize) -> Result<(), BinOperationError> {
         const SHERB_NOCONFIRMATION: u32 = 0x00000001;
         // SAFETY: the app's live window owns the shell call; no root-path restriction, so
         // this empties all recycle bins across drives.
-        unsafe { SHEmptyRecycleBinW(owner_hwnd(owner), PCWSTR::null(), SHERB_NOCONFIRMATION) }
-            .map_err(|err| {
-                if hresult_is_cancelled(err.code()) {
-                    BinOperationError::Cancelled
-                } else {
-                    BinOperationError::failed(format!("SHEmptyRecycleBinW: {err}"), Vec::new())
-                }
-            })
+        unsafe {
+            SHEmptyRecycleBinW(
+                Some(owner_hwnd(owner)),
+                PCWSTR::null(),
+                SHERB_NOCONFIRMATION,
+            )
+        }
+        .map_err(|err| {
+            if hresult_is_cancelled(err.code()) {
+                BinOperationError::Cancelled
+            } else {
+                BinOperationError::failed(format!("SHEmptyRecycleBinW: {err}"), Vec::new())
+            }
+        })
     }
     #[cfg(not(windows))]
     {
@@ -986,7 +990,7 @@ pub fn set_clipboard_text(text: &str) -> Result<(), Box<dyn std::error::Error>> 
 
         // SAFETY: OpenClipboard opens the clipboard for the current process.
         unsafe {
-            if OpenClipboard(HWND(std::ptr::null_mut())).is_err() {
+            if OpenClipboard(None).is_err() {
                 return Err("Failed to open clipboard".into());
             }
 
@@ -999,7 +1003,7 @@ pub fn set_clipboard_text(text: &str) -> Result<(), Box<dyn std::error::Error>> 
                     std::ptr::copy_nonoverlapping(u16_chars.as_ptr(), ptr, u16_chars.len());
                     let _ = GlobalUnlock(h_val);
                     // CF_UNICODETEXT = 13
-                    let _ = SetClipboardData(13, windows::Win32::Foundation::HANDLE(h_val.0));
+                    let _ = SetClipboardData(13, Some(windows::Win32::Foundation::HANDLE(h_val.0)));
                 }
             }
 
@@ -1024,7 +1028,7 @@ pub fn get_clipboard_text() -> Option<String> {
             if IsClipboardFormatAvailable(13).is_err() {
                 return None;
             }
-            if OpenClipboard(HWND(std::ptr::null_mut())).is_err() {
+            if OpenClipboard(None).is_err() {
                 return None;
             }
             let res = (|| {
