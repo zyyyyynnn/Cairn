@@ -34,7 +34,7 @@ cairn-client = { path = "crates/cairn-client" }
 serde = { version = "1.0", features = ["derive"] }
 postcard = { version = "1.1", features = ["alloc"] }
 serde_json = "1.0"
-toml = "0.8"
+toml = "1.1"
 
 # Concurrency & Performance
 rayon = "1.10"
