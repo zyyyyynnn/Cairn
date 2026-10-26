@@ -145,7 +145,7 @@ const CODE_EXTENSIONS: &[&str] = &[
 impl TreemapCategory {
     /// Every category in discriminant order. Content propagation indexes its
     /// per-directory byte totals with the discriminant, so variants must not be
-    /// reordered without updating [`CATEGORY_COUNT`].
+    /// reordered without updating `CATEGORY_COUNT`.
     pub const ALL: [Self; CATEGORY_COUNT] = [
         Self::Folder,
         Self::System,

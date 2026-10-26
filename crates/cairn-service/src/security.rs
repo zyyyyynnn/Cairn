@@ -146,7 +146,7 @@ impl Drop for RestorePrivilege {
 
 /// Puts this process into the state the SPEC SET-02 ownership repair needs, on a best-effort basis.
 ///
-/// [`windows_acl::enforce`] writes the protected DACL first and only then restores the SYSTEM owner.
+/// `windows_acl::enforce` writes the protected DACL first and only then restores the SYSTEM owner.
 /// That second step names a SID the caller is not, which requires **two** privileges:
 /// `SeTakeOwnershipPrivilege` lets a holder set an owner only among the
 /// SIDs it may legitimately claim — an elevated administrator can claim itself, not `SY` — while
@@ -268,7 +268,7 @@ pub fn prepare_service_data_layout() -> Result<ServiceDataLayout, DataDirectoryE
 /// first failure is then returned instead of a layout, so a partially locked tree is never handed to
 /// the service as if it were usable.
 ///
-/// Only a location [`location_presence`] proves absent is created; one that exists while this process
+/// Only a location `location_presence` proves absent is created; one that exists while this process
 /// is refused the query for it goes straight to the SPEC SET-02 check, so its failure is the access-control
 /// failure it is and not a creation failure.
 pub fn prepare_data_layout(
@@ -343,7 +343,7 @@ pub fn prepare_data_layout(
 ///
 /// The protected DACL and the owner are written as two independent operations: a refusal to
 /// restore ownership is reported, but it never cancels the DACL lockdown. See
-/// [`windows_acl::enforce`].
+/// `windows_acl::enforce`.
 pub fn enforce_restricted_acl(path: &std::path::Path) -> Result<(), DataDirectoryError> {
     #[cfg(windows)]
     {

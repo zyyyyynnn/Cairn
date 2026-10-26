@@ -7,7 +7,7 @@
 //!
 //! This module owns the window's *state and behaviour*. The layout itself lives in [`crate::view`],
 //! which reads these fields and hands interactions back to the owner methods below. Keyboard commands
-//! are Actions declared in [`crate::commands`] and dispatched as Actions against this view's
+//! are Actions declared in `crate::commands` and dispatched as Actions against this view's
 //! `key_context`, which the window root tracks; they therefore reach the owner methods whichever
 //! descendant holds focus.
 //!
@@ -44,10 +44,10 @@ use std::sync::Arc;
 ///
 /// # The ladder has two rungs
 ///
-/// [`CONTROL_HEIGHT`] and [`ROW_HEIGHT`] are the only numbers chosen for themselves. Everything else
+/// `CONTROL_HEIGHT` and `ROW_HEIGHT` are the only numbers chosen for themselves. Everything else
 /// is an expression over them so every band scales from the same two density tokens. A band that
 /// wants its own step gets a new named relationship, not a new literal, and the invariant test
-/// below verifies that every band height is derived from [`CONTROL_HEIGHT`] or [`ROW_HEIGHT`]:
+/// below verifies that every band height is derived from `CONTROL_HEIGHT` or `ROW_HEIGHT`:
 /// `CairnApp::the_band_measures_rows_in_the_same_rem_step_the_row_renders_at` fails the suite when
 /// someone writes a literal where an expression belongs.
 pub mod layout {

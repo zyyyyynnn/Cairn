@@ -59,8 +59,7 @@ lopdf = { version = "0.46", default-features = false }
 # theme tokens). gpui-kit 0.8 owns the matching gpui-base/gpui-component versions; the application
 # does not list them directly.
 gpui-kit = { version = "0.8.0", default-features = false, features = ["assets", "component"] }
-tray-icon = "0.26"
-global-hotkey = "0.9"
+tray-icon = { version = "0.26", default-features = false }
 fluent-bundle = "0.16"
 unic-langid = "0.9"
 

@@ -381,7 +381,7 @@ impl CairnApp {
     /// That overflow needs to be *said*, and one offset has to answer all three of the ways a person
     /// can act on it, so the region owns them together: the scrollbar drawn at the region's own edge,
     /// the four keys of [`RESULTS_CONTEXT`], and the wheel. All three read and write
-    /// [`crate::app::CairnApp::table_scroll`] (SPEC UI-03; Design Guides *Designing data-heavy
+    /// `crate::app::CairnApp::table_scroll` (SPEC UI-03; Design Guides *Designing data-heavy
     /// interfaces*: "keep headers and primary row identity visually stable").
     pub(crate) fn render_results(
         &mut self,

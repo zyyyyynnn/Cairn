@@ -16,8 +16,6 @@ cairn-client.workspace = true
 cairn-core.workspace = true
 cairn-protocol.workspace = true
 gpui-kit.workspace = true
-tray-icon.workspace = true
-global-hotkey.workspace = true
 fluent-bundle.workspace = true
 unic-langid.workspace = true
 tokio.workspace = true
@@ -56,3 +54,6 @@ features = [
     "Win32_System_Pipes",
     "Win32_Graphics_Gdi",
 ]
+
+[target.'cfg(windows)'.dependencies]
+tray-icon = { workspace = true }

@@ -39,7 +39,7 @@ struct CliArgs {
     sort: String,
 
     /// Sort direction: ascending
-    #[arg(long, default_value_t = true)]
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     asc: bool,
 }
 
@@ -208,4 +208,106 @@ fn export_to_csv(
 
     writer.flush()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cli_args_defaults() {
+        let args = CliArgs::try_parse_from(["cairn-cli"]).expect("parse default args");
+        assert_eq!(args.query, "");
+        assert!(!args.status);
+        assert!(!args.json);
+        assert!(args.export_csv.is_none());
+        assert_eq!(args.max, 100);
+        assert_eq!(args.sort, "name");
+        assert!(args.asc);
+    }
+
+    #[test]
+    fn test_cli_args_custom_options() {
+        let args = CliArgs::try_parse_from([
+            "cairn-cli",
+            "my_query",
+            "--status",
+            "--json",
+            "--max",
+            "50",
+            "--sort",
+            "size",
+            "--asc=false",
+            "--export-csv",
+            "results.csv",
+        ])
+        .expect("parse custom args");
+
+        assert_eq!(args.query, "my_query");
+        assert!(args.status);
+        assert!(args.json);
+        assert_eq!(args.max, 50);
+        assert_eq!(args.sort, "size");
+        assert!(!args.asc);
+        assert_eq!(args.export_csv, Some(PathBuf::from("results.csv")));
+    }
+
+    #[test]
+    fn test_format_file_size() {
+        assert_eq!(format_file_size(0), "0 B");
+        assert_eq!(format_file_size(512), "512 B");
+        assert_eq!(format_file_size(1024), "1.0 KB");
+        assert_eq!(format_file_size(1536), "1.5 KB");
+        assert_eq!(format_file_size(1024 * 1024), "1.0 MB");
+        assert_eq!(format_file_size(1024 * 1024 * 1024), "1.00 GB");
+    }
+
+    #[test]
+    fn test_truncate_str() {
+        assert_eq!(truncate_str("hello", 10), "hello");
+        assert_eq!(truncate_str("hello", 5), "hello");
+        assert_eq!(truncate_str("hello world", 8), "hello...");
+    }
+
+    #[test]
+    fn test_export_to_csv() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let csv_path = temp.path().join("out.csv");
+
+        let rows = vec![
+            cairn_protocol::message::FileRowData {
+                flags: 0,
+                name_highlights: vec![],
+                path_highlights: vec![],
+                snippet: None,
+                frn: 100,
+                name: "file1.txt".to_string(),
+                path: r"C:\test\file1.txt".to_string(),
+                size: 2048,
+                modified_ts: 1600000000,
+                created_ts: 1500000000,
+                is_dir: false,
+            },
+            cairn_protocol::message::FileRowData {
+                flags: 0,
+                name_highlights: vec![],
+                path_highlights: vec![],
+                snippet: None,
+                frn: 101,
+                name: "subfolder".to_string(),
+                path: r"C:\test\subfolder".to_string(),
+                size: 0,
+                modified_ts: 1600000100,
+                created_ts: 1500000100,
+                is_dir: true,
+            },
+        ];
+
+        export_to_csv(&csv_path, &rows).expect("export_to_csv");
+
+        let content = std::fs::read_to_string(&csv_path).expect("read csv");
+        assert!(content.contains("Name,Path,Size,Modified,Created,IsDir"));
+        assert!(content.contains(r"file1.txt,C:\test\file1.txt,2048,1600000000,1500000000,false"));
+        assert!(content.contains(r"subfolder,C:\test\subfolder,0,1600000100,1500000100,true"));
+    }
 }

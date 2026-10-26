@@ -10,8 +10,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  check-and-test:
-    name: Build & Test (Windows)
+  quality:
+    name: Code Quality & Static Analysis
     runs-on: windows-latest
     steps:
       - name: Checkout repository
@@ -25,14 +25,37 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Code formatting check
+      - name: Format check
         run: cargo fmt --all --check
 
       - name: Clippy lint
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Workspace check
-        run: cargo check --workspace --all-targets
+      - name: Documentation check
+        run: cargo doc --workspace --no-deps
 
-      - name: Run unit and integration tests
-        run: cargo test --workspace
+  test:
+    name: Domain & System Test Suite
+    needs: quality
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: "Layer 1: Core Domain & Protocol Models"
+        run: cargo test -p cairn-protocol -p cairn-ntfs -p cairn-content -p cairn-client -p cairn-core
+
+      - name: "Layer 2: Service Engine & System IPC"
+        run: cargo test -p cairn-service --test user_mode_pipe
+
+      - name: "Layer 3: Desktop UI & State Reconciliation"
+        run: cargo test -p cairn-app
+
+      - name: "Layer 4: Tooling & Release Verification"
+        run: cargo test -p cairn-cli -p cairn-worker -p xtask

@@ -22,3 +22,6 @@ thiserror.workspace = true
 
 [build-dependencies]
 winres.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

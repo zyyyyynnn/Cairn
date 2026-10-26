@@ -186,3 +186,94 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     index.finish()?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_worker_cli_defaults() {
+        let args = WorkerCli::try_parse_from(["cairn-worker"]).expect("parse defaults");
+        assert_eq!(
+            args.index_dir,
+            PathBuf::from(r"C:\ProgramData\Cairn\content")
+        );
+        assert!(args.batch.is_none());
+        assert!(args.delete_batch.is_none());
+        assert!(args.file.is_none());
+        assert_eq!(args.max_bytes, 10 * 1024 * 1024);
+        assert!(!args.clear);
+    }
+
+    #[test]
+    fn test_worker_cli_custom_flags() {
+        let args = WorkerCli::try_parse_from([
+            "cairn-worker",
+            "--index-dir",
+            r"C:\test\idx",
+            "--batch",
+            r"C:\test\batch.jsonl",
+            "--delete-batch",
+            r"C:\test\del.jsonl",
+            "--max-bytes",
+            "4096",
+            "--clear",
+        ])
+        .expect("parse custom");
+
+        assert_eq!(args.index_dir, PathBuf::from(r"C:\test\idx"));
+        assert_eq!(args.batch, Some(PathBuf::from(r"C:\test\batch.jsonl")));
+        assert_eq!(args.delete_batch, Some(PathBuf::from(r"C:\test\del.jsonl")));
+        assert_eq!(args.max_bytes, 4096);
+        assert!(args.clear);
+    }
+
+    #[test]
+    fn test_apply_batches_empty_and_malformed() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let idx_dir = temp.path().join("idx");
+        let index = ContentIndex::open_or_create(&idx_dir).expect("create index");
+        let extractor = CompositeExtractor::new();
+
+        // 1. Empty runs
+        let (processed, failed) =
+            apply_batches(&extractor, &index, None, None, false, 1024 * 1024).expect("empty batch");
+        assert_eq!(processed, 0);
+        assert_eq!(failed, 0);
+
+        // 2. Malformed deletions and tasks
+        let del_file = temp.path().join("dels.jsonl");
+        std::fs::write(&del_file, "not a json\n[1, 2]\n").expect("write dels");
+
+        let batch_file = temp.path().join("batch.jsonl");
+        let valid_doc = temp.path().join("doc.txt");
+        std::fs::write(&valid_doc, "Searchable text content here").expect("write doc");
+
+        let valid_task = ContentIndexTask {
+            volume_id: 1,
+            frn: 10,
+            size: 27,
+            modified_ts: 1000,
+            path: valid_doc.to_string_lossy().into_owned(),
+        };
+
+        let batch_contents = format!(
+            "invalid task line\n{}\n",
+            serde_json::to_string(&valid_task).expect("json")
+        );
+        std::fs::write(&batch_file, batch_contents).expect("write batch");
+
+        let (processed, failed) = apply_batches(
+            &extractor,
+            &index,
+            Some(&batch_file),
+            Some(&del_file),
+            false,
+            1024 * 1024,
+        )
+        .expect("apply batches");
+
+        assert_eq!(processed, 1);
+        assert_eq!(failed, 2); // 1 malformed delete + 1 malformed task
+    }
+}
