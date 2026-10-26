@@ -192,7 +192,7 @@ pub fn set_autostart_registry(enable: bool) -> Result<(), Box<dyn std::error::Er
 
     unsafe {
         let mut hkey = windows::Win32::System::Registry::HKEY::default();
-        let status = RegOpenKeyExW(HKEY_CURRENT_USER, subkey, 0, KEY_SET_VALUE, &mut hkey);
+        let status = RegOpenKeyExW(HKEY_CURRENT_USER, subkey, None, KEY_SET_VALUE, &mut hkey);
         if status.is_err() {
             return Err(format!("RegOpenKeyExW failed with code {:?}", status).into());
         }
@@ -205,7 +205,7 @@ pub fn set_autostart_registry(enable: bool) -> Result<(), Box<dyn std::error::Er
             let res = RegSetValueExW(
                 hkey,
                 value_name,
-                0,
+                None,
                 REG_SZ,
                 Some(std::slice::from_raw_parts(
                     wide.as_ptr() as *const u8,

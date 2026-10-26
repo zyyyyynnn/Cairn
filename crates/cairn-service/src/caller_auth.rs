@@ -139,8 +139,9 @@ pub fn authorize(
 mod platform {
     use super::{CallerAuthError, CallerAuthorization, CallerIdentity};
     use std::io;
+    use windows::core::BOOL;
     use windows::core::PWSTR;
-    use windows::Win32::Foundation::{CloseHandle, GetLastError, LocalFree, BOOL, HANDLE, HLOCAL};
+    use windows::Win32::Foundation::{CloseHandle, GetLastError, LocalFree, HANDLE, HLOCAL};
     use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
     use windows::Win32::Security::{
         CheckTokenMembership, CreateWellKnownSid, GetTokenInformation, RevertToSelf, TokenGroups,
@@ -199,7 +200,7 @@ mod platform {
         unsafe {
             ConvertSidToStringSidW(sid, &mut wide).ok()?;
             let text = wide.to_string().ok();
-            let _ = LocalFree(HLOCAL(wide.0 as *mut core::ffi::c_void));
+            let _ = LocalFree(Some(HLOCAL(wide.0 as *mut core::ffi::c_void)));
             text
         }
     }
@@ -210,13 +211,7 @@ mod platform {
         let mut size = 0u32;
         // SAFETY: with a null target buffer CreateWellKnownSid only reports the required size.
         unsafe {
-            CreateWellKnownSid(
-                kind,
-                PSID(std::ptr::null_mut()),
-                PSID(std::ptr::null_mut()),
-                &mut size,
-            )
-            .ok()?;
+            CreateWellKnownSid(kind, None, None, &mut size).ok()?;
         }
         if size == 0 {
             return None;
@@ -226,8 +221,8 @@ mod platform {
         let result = unsafe {
             CreateWellKnownSid(
                 kind,
-                PSID(std::ptr::null_mut()),
-                PSID(buffer.as_mut_ptr() as *mut core::ffi::c_void),
+                None,
+                Some(PSID(buffer.as_mut_ptr() as *mut core::ffi::c_void)),
                 &mut size,
             )
         };
@@ -276,7 +271,7 @@ mod platform {
                     // SAFETY: `sid_buffer` holds a valid well-known SID for the duration of the
                     // call and CheckTokenMembership only reads it.
                     CheckTokenMembership(
-                        token,
+                        Some(token),
                         PSID(sid_buffer.as_ptr() as *mut core::ffi::c_void),
                         &mut member,
                     )
@@ -315,7 +310,7 @@ mod platform {
         // which holds the right; the handle returned still refers to the impersonated client token.
         let token = unsafe {
             let mut token = HANDLE::default();
-            OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, BOOL(1), &mut token)
+            OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, true, &mut token)
                 .map_err(|_| CallerAuthError::TokenUnavailable(last_os_error()))?;
             token
         };
@@ -357,7 +352,7 @@ mod platform {
             let mut member = BOOL::default();
             // SAFETY: `sid_buffer` holds a valid well-known SID for the duration of the call.
             let probe = CheckTokenMembership(
-                token,
+                Some(token),
                 PSID(sid_buffer.as_ptr() as *mut core::ffi::c_void),
                 &mut member,
             );
