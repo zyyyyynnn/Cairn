@@ -85,9 +85,15 @@ fn apply_batches(
     let mut failed = 0u64;
     let mut deletions = Vec::new();
     if let Some(delete_path) = delete_batch {
-        let contents = std::fs::read_to_string(delete_path)?;
-        for line in contents.lines().filter(|line| !line.trim().is_empty()) {
-            match serde_json::from_str::<(u64, u64)>(line) {
+        use std::io::BufRead;
+        let file = std::fs::File::open(delete_path)?;
+        let reader = std::io::BufReader::new(file);
+        for line in reader.lines() {
+            let line = line?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<(u64, u64)>(&line) {
                 Ok(pair) => deletions.push(pair),
                 Err(err) => {
                     // Deletion lines share the summary's failure counter so a corrupt batch
@@ -101,9 +107,15 @@ fn apply_batches(
     }
 
     if let Some(batch_path) = batch {
-        let contents = std::fs::read_to_string(batch_path)?;
-        for line in contents.lines().filter(|line| !line.trim().is_empty()) {
-            let task: ContentIndexTask = match serde_json::from_str(line) {
+        use std::io::BufRead;
+        let file = std::fs::File::open(batch_path)?;
+        let reader = std::io::BufReader::new(file);
+        for line in reader.lines() {
+            let line = line?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let task: ContentIndexTask = match serde_json::from_str(&line) {
                 Ok(task) => task,
                 Err(err) => {
                     failed += 1;
@@ -163,7 +175,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if let Some(file_path) = args.file {
-        let metadata = std::fs::metadata(&file_path)?;
+        let metadata = std::fs::symlink_metadata(&file_path)?;
+        #[cfg(windows)]
+        let is_reparse = {
+            use std::os::windows::fs::MetadataExt;
+            (metadata.file_attributes() & 0x400) != 0
+        };
+        #[cfg(not(windows))]
+        let is_reparse = false;
+        if metadata.file_type().is_symlink() || is_reparse {
+            return Err("Refusing to index symlink or reparse point".into());
+        }
         let task = ContentIndexTask {
             volume_id: 0,
             frn: 0,

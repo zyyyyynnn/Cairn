@@ -356,6 +356,13 @@ impl MultiVolumeEngine {
         self.apply_config_toml(&config_toml)
     }
 
+    /// Signals any active `cairn-worker` subprocess to terminate on service shutdown without
+    /// mutating the persisted configuration or removing the completed backfill marker.
+    pub fn stop_content_worker(&self) {
+        self.content_cancel.store(true, Ordering::SeqCst);
+        let _ = self.content_commands.lock().unwrap().take();
+    }
+
     /// Accepts a clear request. The controller processes it after any running batch so the worker
     /// never competes with another writer for the index lock.
     pub fn request_clear_content_index(&self) -> bool {
@@ -1111,14 +1118,28 @@ impl MultiVolumeEngine {
                 return BatchOutcome::Failed(format!("could not start cairn-worker: {err}"));
             }
         };
-        let mut stdout = child.stdout.take();
-        // Drain stderr while the worker runs. Reading only after exit deadlocks as soon as the
-        // worker logs more than the pipe buffer, which a file with many skips can do.
-        let stderr_reader = child.stderr.take().map(|mut pipe| {
+        // Drain both stdout and stderr while the worker runs, capping kept bytes to 64 KiB and
+        // discarding any excess so neither pipe can fill its OS buffer and deadlock the child or
+        // exhaust service memory.
+        const MAX_WORKER_PIPE_BYTES: u64 = 64 * 1024;
+        let stdout_reader = child.stdout.take().map(|pipe| {
             std::thread::spawn(move || {
-                let mut errors = String::new();
-                let _ = pipe.read_to_string(&mut errors);
-                errors
+                let mut capped = pipe.take(MAX_WORKER_PIPE_BYTES);
+                let mut buf = Vec::new();
+                let _ = capped.read_to_end(&mut buf);
+                let mut rest = capped.into_inner();
+                let _ = std::io::copy(&mut rest, &mut std::io::sink());
+                String::from_utf8_lossy(&buf).into_owned()
+            })
+        });
+        let stderr_reader = child.stderr.take().map(|pipe| {
+            std::thread::spawn(move || {
+                let mut capped = pipe.take(MAX_WORKER_PIPE_BYTES);
+                let mut buf = Vec::new();
+                let _ = capped.read_to_end(&mut buf);
+                let mut rest = capped.into_inner();
+                let _ = std::io::copy(&mut rest, &mut std::io::sink());
+                String::from_utf8_lossy(&buf).into_owned()
             })
         });
         let deadline = Instant::now() + CONTENT_WORKER_TIMEOUT;
@@ -1132,10 +1153,9 @@ impl MultiVolumeEngine {
             }
             match child.try_wait() {
                 Ok(Some(status)) => {
-                    let mut output = String::new();
-                    if let Some(mut pipe) = stdout.take() {
-                        let _ = pipe.read_to_string(&mut output);
-                    }
+                    let output = stdout_reader
+                        .and_then(|reader| reader.join().ok())
+                        .unwrap_or_default();
                     let errors = stderr_reader
                         .and_then(|reader| reader.join().ok())
                         .unwrap_or_default();

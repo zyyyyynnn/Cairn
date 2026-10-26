@@ -428,7 +428,7 @@ impl CairnApp {
                 SKELETON_DELAY
             };
             Some(
-                self.render_skeleton_band(tokens, row_height, delay)
+                self.render_skeleton_band(tokens, row_height, delay, cx.reduce_motion())
                     .into_any_element(),
             )
         } else if local_location && self.results.table.total_rows() > 0 {
@@ -629,6 +629,7 @@ impl CairnApp {
         tokens: &ShellTokens,
         row_height: Pixels,
         delay: Duration,
+        reduce_motion: bool,
     ) -> impl IntoElement {
         let vh = self.results.table.viewport_height;
         let count = if f32::from(row_height) > 0.0 && vh > 0.0 {
@@ -637,8 +638,9 @@ impl CairnApp {
             14
         };
         let decay_step = 0.65 / (count as f32).max(1.0);
-        let skeleton_rows = (0..count)
-            .map(move |ix| self.render_skeleton_row(ix, tokens, row_height, decay_step, delay));
+        let skeleton_rows = (0..count).map(move |ix| {
+            self.render_skeleton_row(ix, tokens, row_height, decay_step, delay, reduce_motion)
+        });
 
         v_flex()
             .flex_1()
@@ -654,6 +656,7 @@ impl CairnApp {
         row_height: Pixels,
         decay_step: f32,
         delay: Duration,
+        reduce_motion: bool,
     ) -> AnyElement {
         const SKELETON_NAME_WIDTHS: [f32; 8] = [8.0, 11.0, 6.5, 9.5, 12.0, 7.5, 10.0, 8.5];
         const SKELETON_PATH_WIDTHS: [f32; 8] = [14.0, 18.0, 12.0, 16.5, 20.0, 13.5, 17.0, 15.0];
@@ -758,7 +761,11 @@ impl CairnApp {
                     // visible. A fast answer unmounts it before this timer ever elapses.
                     row.opacity(0.0)
                 } else {
-                    row.opacity(pulse_opacity(ix, delta))
+                    if reduce_motion {
+                        row.opacity(1.0)
+                    } else {
+                        row.opacity(pulse_opacity(ix, delta))
+                    }
                 }
             },
         )
@@ -1011,6 +1018,7 @@ impl CairnApp {
         let band_top = painted.top;
         let pinned = painted.pinned;
         let first = visible.start;
+        let reduce_motion = cx.reduce_motion();
 
         let control = accessibility::control("result-band");
         let band = accessibility::element(control)
@@ -1090,7 +1098,13 @@ impl CairnApp {
         band.with_animation(
             "result-rows-reveal",
             Animation::new(ROW_REVEAL).with_easing(ease_out_quint()),
-            |band, delta| band.opacity(delta),
+            move |band, delta| {
+                if reduce_motion {
+                    band
+                } else {
+                    band.opacity(delta)
+                }
+            },
         )
     }
 

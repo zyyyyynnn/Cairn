@@ -5,11 +5,18 @@
 //! Query session cache and pagination manager with multi-volume support.
 
 use crate::sync_engine::VolumeIndex;
+use cairn_core::engine::CancellationToken;
 use cairn_protocol::message::FileRowData;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// Idle sessions older than 5 minutes are evicted when a new session is created.
+const SESSION_TTL: Duration = Duration::from_secs(300);
+
+/// Maximum total `SearchResultItem` entries retained across all cached sessions (~256 MiB ceiling).
+const MAX_TOTAL_CACHED_ITEMS: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SearchResultItem {
@@ -30,11 +37,7 @@ pub enum RowsError {
     Stale { drive_letter: char },
 }
 
-#[allow(dead_code)]
 pub struct QuerySession {
-    pub session_id: u64,
-    pub query_text: String,
-    pub highlight_terms: Vec<String>,
     pub pre_folded_terms: Vec<Vec<u8>>,
     pub matched_items: Vec<SearchResultItem>,
     pub snippets: HashMap<(char, u64), String>,
@@ -44,6 +47,7 @@ pub struct QuerySession {
 
 pub struct SessionManager {
     sessions: RwLock<HashMap<u64, QuerySession>>,
+    active_queries: RwLock<HashMap<u64, CancellationToken>>,
     next_session_id: AtomicU64,
     max_sessions: usize,
 }
@@ -58,23 +62,65 @@ impl SessionManager {
     pub fn new(max_sessions: usize) -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
+            active_queries: RwLock::new(HashMap::new()),
             next_session_id: AtomicU64::new(1),
             max_sessions,
         }
     }
 
+    /// Registers an in-flight query and preemptively cancels any earlier in-flight queries so
+    /// rapid typing over short-lived pipe connections immediately aborts superseded searches.
+    pub fn begin_query(&self, query_id: u64, conn_cancel: &CancellationToken) -> CancellationToken {
+        let token = CancellationToken::new();
+        if conn_cancel.is_cancelled() {
+            token.cancel();
+        }
+        let mut active = self.active_queries.write().unwrap();
+        for prev in active.values() {
+            prev.cancel();
+        }
+        active.insert(query_id, token.clone());
+        token
+    }
+
+    /// Removes a completed query from the active-query registry.
+    pub fn finish_query(&self, query_id: u64) {
+        self.active_queries.write().unwrap().remove(&query_id);
+    }
+
+    /// Cancels an in-flight query by `query_id` (or all active queries if `query_id == 0` or not found).
+    pub fn cancel_query(&self, query_id: u64) {
+        let active = self.active_queries.read().unwrap();
+        if let Some(token) = active.get(&query_id) {
+            token.cancel();
+        } else {
+            for token in active.values() {
+                token.cancel();
+            }
+        }
+    }
+
     pub fn create_session(
         &self,
-        query_text: String,
+        _query_text: String,
         highlight_terms: Vec<String>,
         matched_items: Vec<SearchResultItem>,
         snippets: HashMap<(char, u64), String>,
     ) -> u64 {
         let session_id = self.next_session_id.fetch_add(1, Ordering::Relaxed);
         let mut lock = self.sessions.write().unwrap();
+        let now = Instant::now();
 
-        // LRU eviction if exceeded (by least recently accessed with deterministic tie-breaking)
-        while lock.len() >= self.max_sessions && !lock.is_empty() {
+        // Evict idle sessions that have exceeded their TTL.
+        lock.retain(|_, s| now.saturating_duration_since(s.last_accessed_at) < SESSION_TTL);
+
+        // LRU eviction if session count or total retained item budget is exceeded.
+        let new_items = matched_items.len();
+        while !lock.is_empty() && {
+            let total_items: usize = lock.values().map(|s| s.matched_items.len()).sum();
+            lock.len() >= self.max_sessions
+                || total_items.saturating_add(new_items) > MAX_TOTAL_CACHED_ITEMS
+        } {
             if let Some((&oldest_id, _)) = lock
                 .iter()
                 .min_by_key(|(&id, s)| (s.last_accessed_at, s.created_at, id))
@@ -91,13 +137,9 @@ impl SessionManager {
             .filter(|t| !t.is_empty())
             .collect();
 
-        let now = Instant::now();
         lock.insert(
             session_id,
             QuerySession {
-                session_id,
-                query_text,
-                highlight_terms,
                 pre_folded_terms,
                 matched_items,
                 snippets,
@@ -134,23 +176,6 @@ impl SessionManager {
 
         rows_for(session, offset, limit, &session.pre_folded_terms, |item| {
             volumes.get(&item.drive_letter)
-        })
-    }
-
-    #[allow(dead_code)]
-    pub fn get_rows(
-        &self,
-        session_id: u64,
-        offset: usize,
-        limit: usize,
-        vol: &VolumeIndex,
-    ) -> Result<Vec<FileRowData>, RowsError> {
-        let mut lock = self.sessions.write().unwrap();
-        let session = lock.get_mut(&session_id).ok_or(RowsError::UnknownSession)?;
-        session.last_accessed_at = Instant::now();
-
-        rows_for(session, offset, limit, &session.pre_folded_terms, |_| {
-            Some(vol)
         })
     }
 }
@@ -304,5 +329,24 @@ mod tests {
             Err(RowsError::UnknownSession)
         );
         assert!(sessions.get_rows_multi(s3, 0, 10, &volumes).is_ok());
+    }
+
+    #[test]
+    fn begin_query_cancels_superseded_queries_and_cancel_query_signals_active_token() {
+        let sessions = SessionManager::default();
+        let conn = CancellationToken::new();
+
+        let q1 = sessions.begin_query(1, &conn);
+        assert!(!q1.is_cancelled());
+
+        // Starting query 2 preemptively cancels query 1.
+        let q2 = sessions.begin_query(2, &conn);
+        assert!(q1.is_cancelled());
+        assert!(!q2.is_cancelled());
+
+        // Cross-connection Cancel(2) cancels query 2.
+        sessions.cancel_query(2);
+        assert!(q2.is_cancelled());
+        sessions.finish_query(2);
     }
 }

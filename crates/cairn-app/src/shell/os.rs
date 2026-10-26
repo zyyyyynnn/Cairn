@@ -80,8 +80,11 @@ pub fn open_file(path: &str) -> Result<(), Box<dyn std::error::Error>> {
 
         // SAFETY: ShellExecuteExW called with valid null-terminated paths and size.
         let ok = unsafe { ShellExecuteExW(&mut exec_info) };
-        if ok.is_err() {
-            return Err("Failed to execute open_file".into());
+        if let Err(err) = ok {
+            if win32_code_from_hresult(err.code().0) == Some(WIN32_ERROR_USER_CANCELLED) {
+                return Ok(());
+            }
+            return Err(format!("Failed to execute open_file: {err}").into());
         }
     }
     Ok(())
@@ -110,8 +113,11 @@ pub fn open_folder_and_select(path: &str) -> Result<(), Box<dyn std::error::Erro
 
         // SAFETY: ShellExecuteExW launches explorer with /select parameter.
         let ok = unsafe { ShellExecuteExW(&mut exec_info) };
-        if ok.is_err() {
-            return Err("Failed to highlight file in Explorer".into());
+        if let Err(err) = ok {
+            if win32_code_from_hresult(err.code().0) == Some(WIN32_ERROR_USER_CANCELLED) {
+                return Ok(());
+            }
+            return Err(format!("Failed to highlight file in Explorer: {err}").into());
         }
     }
     Ok(())
@@ -138,8 +144,11 @@ pub fn show_properties_dialog(path: &str) -> Result<(), Box<dyn std::error::Erro
 
         // SAFETY: ShellExecuteExW with SEE_MASK_INVOKEIDLIST requests standard properties dialog.
         let ok = unsafe { ShellExecuteExW(&mut exec_info) };
-        if ok.is_err() {
-            return Err("Failed to display properties dialog".into());
+        if let Err(err) = ok {
+            if win32_code_from_hresult(err.code().0) == Some(WIN32_ERROR_USER_CANCELLED) {
+                return Ok(());
+            }
+            return Err(format!("Failed to display properties dialog: {err}").into());
         }
     }
     Ok(())
@@ -996,15 +1005,30 @@ pub fn set_clipboard_text(text: &str) -> Result<(), Box<dyn std::error::Error>> 
 
             let _ = EmptyClipboard();
 
+            use windows::Win32::Foundation::GlobalFree;
             let h_mem = GlobalAlloc(GMEM_MOVEABLE, bytes_len);
-            if let Ok(h_val) = h_mem {
-                let ptr = GlobalLock(h_val) as *mut u16;
-                if !ptr.is_null() {
-                    std::ptr::copy_nonoverlapping(u16_chars.as_ptr(), ptr, u16_chars.len());
-                    let _ = GlobalUnlock(h_val);
-                    // CF_UNICODETEXT = 13
-                    let _ = SetClipboardData(13, Some(windows::Win32::Foundation::HANDLE(h_val.0)));
+            let h_val = match h_mem {
+                Ok(h) => h,
+                Err(err) => {
+                    let _ = CloseClipboard();
+                    return Err(format!("Failed to allocate clipboard memory: {err}").into());
                 }
+            };
+            let ptr = GlobalLock(h_val) as *mut u16;
+            if ptr.is_null() {
+                let _ = GlobalFree(Some(h_val));
+                let _ = CloseClipboard();
+                return Err("Failed to lock clipboard memory".into());
+            }
+            std::ptr::copy_nonoverlapping(u16_chars.as_ptr(), ptr, u16_chars.len());
+            let _ = GlobalUnlock(h_val);
+            // CF_UNICODETEXT = 13. On success the clipboard owns h_val; on failure we must free it.
+            if let Err(err) =
+                SetClipboardData(13, Some(windows::Win32::Foundation::HANDLE(h_val.0)))
+            {
+                let _ = GlobalFree(Some(h_val));
+                let _ = CloseClipboard();
+                return Err(format!("Failed to set clipboard data: {err}").into());
             }
 
             let _ = CloseClipboard();

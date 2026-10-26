@@ -76,6 +76,7 @@ fn acquire_single_instance_mutex() -> Option<windows::Win32::Foundation::HANDLE>
                     // Another instance is already running; restore its window and terminate current process (UI-08)
                     let activated = activate_existing_cairn_window();
                     if activated {
+                        let _ = windows::Win32::Foundation::CloseHandle(h);
                         return None;
                     }
                     // If no existing window could be found or activated (e.g. headless orphan process),

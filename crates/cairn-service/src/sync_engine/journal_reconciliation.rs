@@ -41,6 +41,34 @@ pub fn live_state_after_poll(
     tail_usn.map(|tail| catch_up_state(previous_usn, next_usn, tail))
 }
 
+/// Whether a volume in `state` should update its live synchronization state when a USN poll
+/// succeeds. Including [`VolumeState::Offline`] allows an ejected or temporarily disconnected
+/// volume to recover automatically to a live state once it reconnects and its USN journal
+/// responds again.
+pub const fn is_live_poll_trackable(state: VolumeState) -> bool {
+    matches!(
+        state,
+        VolumeState::Synced | VolumeState::CatchingUp(_) | VolumeState::Offline
+    )
+}
+
+/// Whether a Win32 error code from opening a volume or reading its USN journal indicates that the
+/// underlying device was disconnected, ejected, or is not ready (`VolumeState::Offline`).
+pub const fn is_device_offline_win32_error(code: u32) -> bool {
+    matches!(
+        code,
+        2    // ERROR_FILE_NOT_FOUND
+        | 3    // ERROR_PATH_NOT_FOUND
+        | 15   // ERROR_INVALID_DRIVE
+        | 21   // ERROR_NOT_READY
+        | 22   // ERROR_BAD_COMMAND
+        | 31   // ERROR_GEN_FAILURE
+        | 433  // ERROR_NO_SUCH_DEVICE
+        | 1117 // ERROR_IO_DEVICE
+        | 1167 // ERROR_DEVICE_NOT_CONNECTED
+    )
+}
+
 #[cfg(windows)]
 pub fn replay_usn_backlog(
     handle: &cairn_ntfs::RawVolumeHandle,
@@ -225,6 +253,20 @@ mod tests {
             Some(VolumeState::CatchingUp(0))
         );
         assert_eq!(live_state_after_poll(2000, 1000, None), None);
+    }
+
+    #[test]
+    fn offline_volume_is_trackable_for_live_recovery_and_device_removal_codes_are_recognized() {
+        assert!(is_live_poll_trackable(VolumeState::Offline));
+        assert!(is_live_poll_trackable(VolumeState::Synced));
+        assert!(is_live_poll_trackable(VolumeState::CatchingUp(50)));
+        assert!(!is_live_poll_trackable(VolumeState::SnapshotMode));
+        assert!(!is_live_poll_trackable(VolumeState::Rebuilding));
+
+        // ERROR_DEVICE_NOT_CONNECTED (1167) and ERROR_NOT_READY (21) mark the volume Offline.
+        assert!(is_device_offline_win32_error(1167));
+        assert!(is_device_offline_win32_error(21));
+        assert!(!is_device_offline_win32_error(0));
     }
 
     #[test]

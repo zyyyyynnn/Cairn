@@ -123,6 +123,7 @@ impl ServiceRuntime {
         usn_task.abort();
         persist_task.abort();
         snapshot_task.abort();
+        engine.stop_content_worker();
 
         info!("Saving all volume indexes to disk on service shutdown...");
         match engine.save_all_indexes() {

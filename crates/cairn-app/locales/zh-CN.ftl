@@ -98,7 +98,7 @@ recycle_bin_delete_confirm_description = 此项目将永久删除，无法还原
 recycle_bin_delete_confirm_description_many = 这些项目将永久删除，无法还原。
 recycle_bin_delete_confirm_action = 永久删除
 recycle_bin_empty_confirm_title = 清空回收站？
-recycle_bin_empty_confirm_description = 确定要永久删除回收站中的所有项目吗？此操作无法撤销。
+recycle_bin_empty_confirm_description = 回收站中的所有项目都将永久删除，无法还原。
 recycle_bin_empty_confirm_action = 清空回收站
 delete_failed_title = 无法删除所选项目
 
@@ -163,6 +163,7 @@ menu_content_index_cancel = 取消回填
 menu_content_index_retry = 重试内容索引
 menu_content_index_reload = 重新读取状态
 menu_content_index_clear = 清空内容索引…
+index_clear = 清空内容索引？
 index_clear_description = 已建立的正文索引会被删除，需要重新回填才能再次检索。
 index_clear_confirm_action = 清空
 index_clear_cancel = 取消

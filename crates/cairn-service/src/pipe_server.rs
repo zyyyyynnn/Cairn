@@ -192,7 +192,7 @@ async fn handle_client(
                     &mut write_buf,
                     header.version,
                     &Envelope {
-                        volumes: engine.get_volume_summaries(),
+                        volumes: Vec::new(),
                         payload: version_mismatch(protocol_version, header.version),
                     },
                 )?;
@@ -239,8 +239,22 @@ async fn handle_client(
                     process_request(req, &engine, &sessions, caller, admin_only_query, &cancel)
                 };
 
+                let omit_volumes = matches!(
+                    resp_payload,
+                    ResponsePayload::Error {
+                        code: ERROR_CODE_HANDSHAKE_REQUIRED
+                            | ERROR_CODE_PROTOCOL_VERSION_MISMATCH
+                            | cairn_protocol::message::ERROR_CODE_UNAUTHORIZED
+                            | cairn_protocol::message::ERROR_CODE_ADMIN_ONLY_QUERY,
+                        ..
+                    }
+                );
                 let envelope = Envelope {
-                    volumes: engine.get_volume_summaries(),
+                    volumes: if omit_volumes {
+                        Vec::new()
+                    } else {
+                        engine.get_volume_summaries()
+                    },
                     payload: resp_payload,
                 };
 
@@ -340,8 +354,10 @@ fn process_request(
                 _ => SortColumn::Name,
             };
 
-            let (matched_items, total_matches, highlight_terms, snippets) =
-                engine.execute_search_multi(&raw_query, &defaults, sort_col, sort_asc, cancel);
+            let query_cancel = sessions.begin_query(query_id, cancel);
+            let (matched_items, total_matches, highlight_terms, snippets) = engine
+                .execute_search_multi(&raw_query, &defaults, sort_col, sort_asc, &query_cancel);
+            sessions.finish_query(query_id);
 
             let session_id =
                 sessions.create_session(raw_query, highlight_terms, matched_items, snippets);
@@ -398,8 +414,9 @@ fn process_request(
                 }
             }
         }
-        ClientRequest::Cancel { query_id: _ } => {
+        ClientRequest::Cancel { query_id } => {
             cancel.cancel();
+            sessions.cancel_query(query_id);
             ResponsePayload::StatusUpdate {
                 worker_status: WorkerStatus::Idle,
             }

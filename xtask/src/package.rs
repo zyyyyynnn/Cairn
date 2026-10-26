@@ -571,7 +571,7 @@ fn generate_wix_template(wxs_path: &Path) -> Result<(), Box<dyn Error>> {
     <InstallExecuteSequence>
       <Custom Action="GrantInteractiveServiceStart"
               After="StartServices"
-              Condition="NOT Installed" />
+              Condition="NOT REMOVE~=&quot;ALL&quot;" />
     </InstallExecuteSequence>
   </Package>
 </Wix>

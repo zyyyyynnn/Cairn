@@ -169,7 +169,12 @@ impl CairnApp {
             .on_click(cx.listener(|this, _, _, cx| this.dismiss_toast(cx)));
 
         let bottom = rems(layout::STATUS_HEIGHT + layout::SPACE_8);
-        let travel = rems(layout::SPACE_8);
+        let reduce_motion = cx.reduce_motion();
+        let travel = if reduce_motion {
+            rems(0.0)
+        } else {
+            rems(layout::SPACE_8)
+        };
         accessibility::element(control)
             .aria_label(format!("{}. {}", toast.title, toast.message))
             // The shell root paints this after its content, so a click on the
@@ -237,7 +242,13 @@ impl CairnApp {
                 },
                 Animation::new(TOAST_MOTION).with_easing(ease_out_quint()),
                 move |card, delta| {
-                    let progress = if closing { 1.0 - delta } else { delta };
+                    let progress = if reduce_motion {
+                        1.0
+                    } else if closing {
+                        1.0 - delta
+                    } else {
+                        delta
+                    };
                     card.bottom(bottom - travel * (1.0 - progress))
                         .opacity(progress)
                 },

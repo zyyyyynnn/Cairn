@@ -267,7 +267,9 @@ impl CairnClient {
 
     /// Subscribes to status updates.
     pub async fn get_status(&mut self) -> Result<Envelope<ResponsePayload>, ClientError> {
-        self.send_request(&ClientRequest::SubscribeStatus).await
+        let mut envelope = self.send_request(&ClientRequest::SubscribeStatus).await?;
+        envelope.payload = Self::unwrap_service_error(envelope.payload)?;
+        Ok(envelope)
     }
 
     /// Reads the directory tree below `path` from the service's volume index.

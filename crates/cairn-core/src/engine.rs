@@ -53,17 +53,32 @@ pub fn execute_query_ordered(
     cancel: &CancellationToken,
 ) -> Vec<u32> {
     if query.is_empty() {
+        if cancel.is_cancelled() {
+            return Vec::new();
+        }
         // Return all non-tombstone records
         if let Some(order_indices) = order {
-            return order_indices
-                .iter()
-                .copied()
-                .filter(|&idx| !records[idx as usize].is_tombstone())
-                .collect();
+            let mut matched = Vec::with_capacity(order_indices.len());
+            for (i, &idx) in order_indices.iter().enumerate() {
+                if (i & 0x3FFF) == 0 && cancel.is_cancelled() {
+                    return Vec::new();
+                }
+                if !records[idx as usize].is_tombstone() {
+                    matched.push(idx);
+                }
+            }
+            return matched;
         } else {
-            return (0..records.len() as u32)
-                .filter(|&idx| !records[idx as usize].is_tombstone())
-                .collect();
+            let mut matched = Vec::with_capacity(records.len());
+            for (idx, rec) in records.iter().enumerate() {
+                if (idx & 0x3FFF) == 0 && cancel.is_cancelled() {
+                    return Vec::new();
+                }
+                if !rec.is_tombstone() {
+                    matched.push(idx as u32);
+                }
+            }
+            return matched;
         }
     }
 
@@ -184,9 +199,6 @@ pub(crate) struct CompiledTerm {
     pub(crate) glob_tokens: Option<Vec<GlobToken>>,
     pub(crate) glob_tokens_cs: Option<Vec<GlobToken>>,
 }
-
-#[allow(dead_code)]
-pub(crate) type PrecomputedTerm = CompiledTerm;
 
 /// Precompiled query execution state containing regex programs and precomputed query term representations.
 pub struct CompiledQuery {

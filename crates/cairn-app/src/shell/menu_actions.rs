@@ -1589,10 +1589,8 @@ impl CairnApp {
     /// Confirms emptying the Recycle Bin through Cairn's unified dialog style before
     /// dispatching the operation to the shell.
     pub fn empty_bin(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.recycle_bin.is_none() || self.recycle_bin_loading {
-            return;
-        }
-        if matches!(&self.recycle_bin, Some(items) if items.is_empty()) {
+        if self.recycle_bin.is_none() || self.recycle_bin_loading || self.recycle_bin_all.is_empty()
+        {
             return;
         }
         self.close_group();
@@ -2133,6 +2131,31 @@ mod confirmation_tests {
                 assert!(title_many.contains("2"));
                 assert!(description.contains("Recycle Bin"));
                 assert!(description_many.contains("These items"));
+            }
+            for key in [
+                "delete_confirm_description",
+                "delete_confirm_description_many",
+                "delete_confirm_action",
+                "delete_confirm_cancel",
+                "recycle_bin_delete_confirm_description",
+                "recycle_bin_delete_confirm_description_many",
+                "recycle_bin_delete_confirm_action",
+                "recycle_bin_empty_confirm_title",
+                "recycle_bin_empty_confirm_description",
+                "recycle_bin_empty_confirm_action",
+                "index_clear",
+                "index_clear_description",
+                "index_clear_confirm_action",
+                "index_clear_cancel",
+            ] {
+                let resolved = i18n
+                    .try_text(key)
+                    .unwrap_or_else(|| panic!("{key} missing in {locale}"));
+                assert_ne!(resolved, key, "{key} fell back to raw key in {locale}");
+                assert!(
+                    !resolved.contains("Are you sure") && !resolved.contains("确定要"),
+                    "{key} in {locale} repeats the title question in the body: {resolved}"
+                );
             }
         }
     }

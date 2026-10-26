@@ -20,8 +20,6 @@ use windows_service::{
 };
 
 pub const SERVICE_NAME: &str = "CairnService";
-#[allow(dead_code)]
-pub const SERVICE_DISPLAY_NAME: &str = "Cairn Instant Search Service";
 
 /// Time allowed by the SCM for the service to report the next checkpoint.
 const START_WAIT_HINT: Duration = Duration::from_secs(3);

@@ -79,7 +79,7 @@ impl ContentSearcher {
 
         let reader = index
             .reader_builder()
-            .reload_policy(ReloadPolicy::OnCommitWithDelay)
+            .reload_policy(ReloadPolicy::Manual)
             .try_into()?;
 
         Ok(Self {
@@ -103,6 +103,21 @@ impl ContentSearcher {
 
     /// Bytes occupied by the index directory on disk.
     pub fn index_size_bytes(&self) -> u64 {
+        fn is_reparse_or_symlink(meta: &fs::Metadata) -> bool {
+            if meta.file_type().is_symlink() {
+                return true;
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::MetadataExt;
+                const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+                if (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
+                    return true;
+                }
+            }
+            false
+        }
+
         fn dir_size(path: &Path) -> u64 {
             let Ok(entries) = fs::read_dir(path) else {
                 return 0;
@@ -110,11 +125,17 @@ impl ContentSearcher {
             entries
                 .flatten()
                 .map(|entry| {
-                    let path = entry.path();
-                    if path.is_dir() {
-                        dir_size(&path)
+                    let entry_path = entry.path();
+                    let Ok(meta) = fs::symlink_metadata(&entry_path) else {
+                        return 0;
+                    };
+                    if is_reparse_or_symlink(&meta) {
+                        return 0;
+                    }
+                    if meta.is_dir() {
+                        dir_size(&entry_path)
                     } else {
-                        entry.metadata().map(|m| m.len()).unwrap_or(0)
+                        meta.len()
                     }
                 })
                 .sum()
@@ -631,5 +652,36 @@ mod tests {
         let snippet = create_snippet(&long_cjk, "关键字搜索", 40);
         assert!(!snippet.is_empty());
         assert!(snippet.contains("关键字搜索"));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn index_size_bytes_ignores_directory_junctions() {
+        let temp = tempdir().unwrap();
+        let index_dir = temp.path().join("index");
+        let external_dir = temp.path().join("external");
+        fs::create_dir_all(&external_dir).unwrap();
+        fs::write(external_dir.join("large.bin"), vec![b'x'; 64 * 1024]).unwrap();
+
+        let index = ContentIndex::open_or_create(&index_dir).expect("open index");
+        index.commit().unwrap();
+        let searcher = ContentSearcher::open(&index_dir).expect("open searcher");
+        let base_size = searcher.index_size_bytes();
+
+        // Create an NTFS junction inside index_dir pointing to external_dir.
+        let junction_path = index_dir.join("loop_junction");
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&junction_path)
+            .arg(&external_dir)
+            .output()
+            .expect("run mklink /J");
+        assert!(status.status.success(), "mklink /J failed");
+
+        assert_eq!(
+            searcher.index_size_bytes(),
+            base_size,
+            "index_size_bytes must not traverse reparse points / directory junctions"
+        );
     }
 }

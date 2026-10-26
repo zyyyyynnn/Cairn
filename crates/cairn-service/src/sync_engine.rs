@@ -1746,13 +1746,39 @@ impl MultiVolumeEngine {
                     continue;
                 }
 
-                let Ok(handle) = cairn_ntfs::RawVolumeHandle::open(drive) else {
-                    continue;
+                let handle = match cairn_ntfs::RawVolumeHandle::open(drive) {
+                    Ok(handle) => handle,
+                    Err(cairn_ntfs::VolumeError::OpenFailed { code, .. })
+                        if is_device_offline_win32_error(code) =>
+                    {
+                        let mut lock = self.volumes.write().unwrap();
+                        if let Some(vol) = lock.get_mut(&drive) {
+                            if vol.status != VolumeState::Offline {
+                                tracing::info!(
+                                    "Volume {} open failed with Win32 error {:#x}: marked Offline",
+                                    drive,
+                                    code
+                                );
+                                vol.status = VolumeState::Offline;
+                            }
+                        }
+                        continue;
+                    }
+                    Err(_) => continue,
                 };
 
                 let (active_jid, query_usn) = if journal_id == 0 {
                     match handle.query_usn_journal() {
                         Ok(data) => (data.journal_id, data.next_usn),
+                        Err(cairn_ntfs::usn::UsnError::QueryFailed(code))
+                            if is_device_offline_win32_error(code) =>
+                        {
+                            let mut lock = self.volumes.write().unwrap();
+                            if let Some(vol) = lock.get_mut(&drive) {
+                                vol.status = VolumeState::Offline;
+                            }
+                            continue;
+                        }
                         Err(_) => continue,
                     }
                 } else {
@@ -1777,16 +1803,27 @@ impl MultiVolumeEngine {
                                 // Mark dirty; do NOT synchronously rebuild PresortedIndices under write lock (SPEC SM-4, QRY-05)
                                 vol.presorted_dirty = true;
                             }
-                            let tracked_live = matches!(
-                                vol.status,
-                                VolumeState::Synced | VolumeState::CatchingUp(_)
-                            );
-                            if tracked_live {
+                            if is_live_poll_trackable(vol.status) {
                                 if let Some(state) =
                                     live_state_after_poll(previous_usn, next_usn, tail_usn)
                                 {
                                     vol.status = state;
                                 }
+                            }
+                        }
+                    }
+                    Err(cairn_ntfs::usn::UsnError::ReadFailed(code))
+                        if is_device_offline_win32_error(code) =>
+                    {
+                        let mut lock = self.volumes.write().unwrap();
+                        if let Some(vol) = lock.get_mut(&drive) {
+                            if vol.status != VolumeState::Offline {
+                                tracing::info!(
+                                    "USN read on drive {}: failed with device error {:#x}: marked Offline",
+                                    drive,
+                                    code
+                                );
+                                vol.status = VolumeState::Offline;
                             }
                         }
                     }
@@ -1971,7 +2008,10 @@ impl MultiVolumeEngine {
                 );
 
                 all_results.reserve(matches.len());
-                for idx in matches {
+                for (i, idx) in matches.into_iter().enumerate() {
+                    if (i & 0xFFF) == 0 && cancel.is_cancelled() {
+                        return (Vec::new(), 0, highlight_terms, snippets);
+                    }
                     if !excluded_paths.is_empty() {
                         let full_path = vol.path_cache.get_full_path(
                             &vol.records,
@@ -1996,7 +2036,7 @@ impl MultiVolumeEngine {
             } else {
                 for vol in active_vols {
                     if cancel.is_cancelled() {
-                        break;
+                        return (Vec::new(), 0, highlight_terms, snippets);
                     }
                     let presorted_col = presorted_order(vol, sort_by);
                     let matches = cairn_core::engine::execute_query_ordered(
@@ -2008,7 +2048,10 @@ impl MultiVolumeEngine {
                         presorted_col,
                         cancel,
                     );
-                    for idx in matches {
+                    for (i, idx) in matches.into_iter().enumerate() {
+                        if (i & 0xFFF) == 0 && cancel.is_cancelled() {
+                            return (Vec::new(), 0, highlight_terms, snippets);
+                        }
                         if !excluded_paths.is_empty() {
                             let full_path = vol.path_cache.get_full_path(
                                 &vol.records,
@@ -2104,6 +2147,10 @@ impl MultiVolumeEngine {
                     (key, item)
                 })
                 .collect();
+
+            if cancel.is_cancelled() {
+                return (Vec::new(), 0, highlight_terms, snippets);
+            }
 
             decorated.par_sort_unstable_by(|(ka, a), (kb, b)| {
                 let ord = match (ka, kb) {

@@ -32,7 +32,6 @@ pub enum PersistenceError {
     UnsupportedVersion(u32),
     #[error("Index checksum mismatch (corrupted index file)")]
     ChecksumMismatch,
-    #[allow(dead_code)]
     #[error("Invalid data payload length")]
     InvalidPayloadLength,
 }
@@ -137,7 +136,22 @@ pub fn load_volume_index(path: &Path) -> Result<LoadedIndexData, PersistenceErro
     let expected_checksum = u32::from_le_bytes(header[52..56].try_into().unwrap());
 
     let record_size = std::mem::size_of::<FileRecord>();
-    let records_byte_len = record_count * record_size;
+    let records_byte_len = record_count
+        .checked_mul(record_size)
+        .ok_or(PersistenceError::InvalidPayloadLength)?;
+    let expected_file_len = HEADER_SIZE
+        .checked_add(records_byte_len)
+        .and_then(|n| n.checked_add(arena_len))
+        .and_then(|n| n.checked_add(folded_len))
+        .ok_or(PersistenceError::InvalidPayloadLength)?;
+    let actual_file_len =
+        usize::try_from(f.metadata()?.len()).map_err(|_| PersistenceError::InvalidPayloadLength)?;
+    if actual_file_len != expected_file_len {
+        return Err(PersistenceError::InvalidPayloadLength);
+    }
+    if arena_len != folded_len {
+        return Err(PersistenceError::InvalidPayloadLength);
+    }
 
     let mut records_buf = vec![0u8; records_byte_len];
     f.read_exact(&mut records_buf)?;
@@ -180,7 +194,6 @@ pub fn load_volume_index(path: &Path) -> Result<LoadedIndexData, PersistenceErro
     })
 }
 
-#[allow(dead_code)]
 fn atomic_replace_file(src: &Path, dst: &Path) -> Result<(), std::io::Error> {
     #[cfg(windows)]
     {
@@ -336,5 +349,25 @@ mod tests {
         assert_eq!(loaded.records.len(), 1);
         assert_eq!(loaded.last_usn, 3);
         assert!(!loaded.directory_sizes_valid);
+    }
+
+    #[test]
+    fn corrupted_header_lengths_fail_before_allocating_unbounded_buffers() {
+        let temp = tempdir().unwrap();
+        let pool = NamePool::default();
+        let saved_path = save_volume_index_atomic(temp.path(), 'C', 1, 2, 3, &[], &pool, true)
+            .expect("save should succeed");
+
+        let mut bytes = fs::read(&saved_path).expect("read cache");
+        // Set record_count = u32::MAX (~192 GiB if allocated unchecked) on a 64-byte file.
+        bytes[40..44].copy_from_slice(&u32::MAX.to_le_bytes());
+        fs::write(&saved_path, &bytes).expect("write corrupted header");
+
+        let err = load_volume_index(&saved_path)
+            .expect_err("crafted header length must fail before allocation");
+        assert!(
+            matches!(err, PersistenceError::InvalidPayloadLength),
+            "expected InvalidPayloadLength, got {err:?}"
+        );
     }
 }
