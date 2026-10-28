@@ -6,12 +6,14 @@
 
 | 进程 | 权限 | 职责 |
 | --- | --- | --- |
-| `cairn.exe` | 标准用户 | GPUI 界面、结果渲染、用户交互；不直接读取 `$MFT` |
-| `cairnd.exe`（服务） | LocalSystem | 后台索引、NTFS `$MFT`/USN Journal 读取、服务数据目录维护 |
-| `cairnd.exe --user-mode` | 启动它的标准用户 | 服务不可用时的本地降级索引器；只遍历当前账户可读目录，跳过 reparse point |
+| `Cairn.exe` | 标准用户 | GPUI 界面、结果渲染、用户交互；不直接读取 `$MFT` |
+| `CairnService.exe`（服务） | LocalSystem | 后台索引、NTFS `$MFT`/USN Journal 读取、服务数据目录维护 |
+| `CairnService.exe --user-mode` | 启动它的标准用户 | 服务不可用或选择“可读文件”时的共享本地索引器；只遍历当前账户可读目录，跳过 reparse point |
+| `CairnCli.exe` | 标准用户 | 命令行检索与受控文件操作；服务停止时自动连接共享用户索引器 |
+| `CairnWorker.exe` | 标准用户/独立低优先级 | 内容解析工作子进程，隔离重型格式解析与崩溃风险 |
 
-- 用户模式索引器通过 `--parent-pid` 随桌面进程退出，不注册为服务。
-- `cairnd --console` 只用于开发/测试；生产必须由 Windows 服务承载。
+- 共享用户索引器按需启动、10–15 分钟无租约退出，由 GUI/CLI/agent 共享，单用户唯一实例，不注册为服务（当前过渡实现仍随父进程退出，见 `docs/SPEC.md` §3.10-12）。
+- `CairnService --console` 只用于开发/测试；生产必须由 Windows 服务承载。
 - 服务名：`CairnService`。
 
 ## 2. 命名管道
@@ -27,7 +29,7 @@
 
 - 客户端身份由服务端从管道客户端的 **OS access token** 推导；请求中的 `pid` / `client_version` 只是提示，不可作为权限依据。
 - 管道拒绝远程客户端；DACL 由当前配置生成。`admin_only_query` 变更对后续管道实例生效，并对既有连接上的每个请求再次授权。
-- 协议版本：`PROTOCOL_VERSION = 4`。连接必须先完成 `Hello` 握手；版本不匹配、未握手和未授权分别返回专用错误码。
+- 协议版本：`PROTOCOL_VERSION = 6`。连接必须先完成 `Hello` 握手；版本不匹配、未握手和未授权分别返回专用错误码。查询结果携带匹配文件总字节数。
 - 查询结果采用会话游标分页，不在一次响应中反序列化完整结果集。
 - 客户端连接使用退避重试；服务端每个连接独立处理，支持并发客户端。
 
@@ -57,7 +59,7 @@
 | **管道配置权限边界** | 未认证连接禁止修改服务端配置；本地已认证用户可提交索引配置，由 LocalSystem 服务校验并原子落盘，GUI 无需提权（SVC-05）；`admin_only_query` 仅管理员可改 |
 | **索引文件存储权限** | 磁盘持久化缓存目录 `%ProgramData%\Cairn\` 严格限制仅 SYSTEM 与管理员组具备读写权限 |
 | **Unsafe 代码严格收敛** | `cairn-core` 声明 `#![forbid(unsafe_code)]`；Windows API 与裸扇区操作收敛于 `cairn-ntfs`，每个 `unsafe` 块配 `// SAFETY:` 说明 |
-| **第三方抽取进程隔离** | 富文档与外部文件内容抽取在独立 `cairn-worker.exe` 中执行，主服务不受异常格式或崩溃波及 |
+| **第三方抽取进程隔离** | 富文档与外部文件内容抽取在独立 `CairnWorker.exe` 中执行，主服务不受异常格式或崩溃波及 |
 | **隐私第一原则** | 零遥测、零回传、零网络通信；内容索引默认关闭，只有用户显式开启后才建立本地索引 |
 
 ## 代码位置
@@ -67,4 +69,4 @@
 - `crates/cairn-service/src/caller_auth.rs`：基于 access token 的调用方识别与授权。
 - `crates/cairn-service/src/security.rs`：数据目录 ACL 与特权使用。
 - `crates/cairn-service/src/user_mode.rs`：用户模式降级索引器。
-- `crates/cairn-service/src/main.rs`：`cairnd` 的 console / service / user-mode 入口。
+- `crates/cairn-service/src/main.rs`：`CairnService` 的 console / service / user-mode 入口。

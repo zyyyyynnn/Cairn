@@ -8,22 +8,24 @@
 
 | 测试层级 | 工具与方式 | 验证目标与覆盖内容 |
 |:---|:---|:---|
-| **单元测试** | `cargo test` / `cargo nextest` | 覆盖语法解析 AST、运算符优先级、通配符、过滤条件、日期与大小计算 |
+| **单元测试** | `cargo test`（CI）/ 可选 `cargo nextest` | 覆盖语法解析 AST、运算符优先级、通配符、过滤条件、日期与大小计算 |
 | **属性测试** | `proptest` | 随机生成 10,000 条复杂查询表达式，与朴素参考实现结果集保持 100% 一致 |
-| **NTFS / VHD 集成测试** | `xtask test-ntfs-vhd` | 通过 `diskpart` 挂载测试 VHD，验证真实 MFT 扫描、USN 回放、硬链接、单卷自愈与 10,000 组文件随机操作序列零差异（SM-5） |
-| **安全与权限测试** | `xtask test-security` | 验证标准用户正常连接、远程管道拒绝连接、未授权账户拦截以及配置文件越权写入拦截 |
-| **UI 与无障碍测试** | 真实窗口截图/输入 + 控件注册表测试 | 当前未接入无头 UI 测试；验证键盘流转、焦点、AccessKit 角色与可见状态 |
+| **NTFS / USN 行为测试** | `xtask test-ntfs-vhd` | 在内存卷索引上验证 MFT 记录、USN 回放、硬链接、单卷自愈与操作序列；真实 VHD/`diskpart` 挂载与 10,000 组随机文件操作尚未接入 |
+| **安全与权限测试** | `xtask test-security` + `cargo test -p cairn-service --test user_mode_pipe` | 校验 SDDL 与安全描述符构造，并验证用户模式管道可回答查询；标准用户/管理员/远程/未授权账户的真实权限矩阵尚未系统化 |
+| **UI 与无障碍测试** | 真实窗口截图/输入 + 控件注册表测试 | 当前未接入无头 UI 测试；状态栏计数的 `CAIRN_PERF_LOG` 逐帧 `count frame` 轨迹用于真实窗口验收；GPUI `test-support` 层待接入 |
 | **输入法专项测试** | 手工与集成核验清单 | 微软拼音、搜狗拼音、微信输入法三款主流 IME 组合无丢字、不重字、候选窗不遮挡 |
-| **端到端基准对比** | `xtask bench-everything` | 合成语料下对比 Everything 1.4，输出中位延迟、稳态内存与峰值内存对标报告 |
+| **端到端基准对比** | `xtask bench-everything` | 合成语料下测量查询中位/P95 延迟并打印；自动延迟门槛与 Everything 1.4 对比尚未接入 |
 
 ### 1.2 静态检查门禁
 合入与构建交付必须无条件通过：
-1. `cargo fmt --check`
+1. `cargo fmt --all -- --check`
 2. `cargo clippy --workspace --all-targets -- -D warnings`（零警告）
 3. `cargo run -p xtask -- check-i18n`（`zh-CN.ftl` 与 `en-US.ftl` 翻译键 100% 对齐）
 4. `cargo deny check`（许可证、安全漏洞与 yanked 检查；仓库已提供 `deny.toml`）
 
 `deny.toml` 只针对 `x86_64-pc-windows-msvc`；许可证白名单与 4 条 GPUI/font 栈的 unmaintained 例外均有理由记录。漏洞与 yanked 不设全局忽略，新增 ignore 必须附上游依据。
+
+> CI 质量任务覆盖 `fmt`、`clippy`、`doc`、`check-i18n`、`cargo deny` 与分层测试。
 
 ### 1.3 中文输入法（IME）验收清单
 对微软拼音、搜狗拼音、微信输入法分别执行以下 6 项标准用例：
