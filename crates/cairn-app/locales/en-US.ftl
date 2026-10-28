@@ -5,8 +5,7 @@
 # punctuation; full explanatory and error sentences do. `…` marks a command that opens a dialog or
 # needs more input. Shortcuts live in the keymap and in AccessKit keyshortcuts, never in the label.
 
-# The title bar carries the brand alone: what the product does is established by the window
-# itself, so "Instant File Search" here was a note restating what the user can already see.
+# The title bar carries the brand alone; the window itself shows what the product does.
 app_title = Cairn
 
 sidebar_locations = Locations
@@ -15,8 +14,7 @@ sidebar_no_drives = No drives found yet
 sidebar_recycle_bin = Recycle Bin
 drive_label = Drive { $drive }
 
-# The title-bar menu bar: six top-level menus on the same row as the brand, aligned with
-# Everything 1.5.
+# The title-bar menu bar: six top-level menus on the same row as the brand.
 menu_file = File
 menu_edit = Edit
 menu_view = View
@@ -24,7 +22,6 @@ menu_search = Search
 menu_tools = Tools
 menu_help = Help
 
-breadcrumb_label = Current location
 
 result_list_label = Search results
 table_header_label = Result table column headings
@@ -88,7 +85,7 @@ ctx_copy_name = Copy file name
 ctx_delete = Delete…
 ctx_restore = Restore
 ctx_delete_permanently = Delete permanently…
-ctx_empty_recycle_bin = Empty Recycle Bin
+ctx_empty_recycle_bin = Empty Recycle Bin…
 ctx_properties = Properties
 delete_confirm_title = Delete “{ $name }”?
 delete_confirm_title_many = Delete { $count } items?
@@ -109,7 +106,7 @@ delete_failed_title = Could not delete the selected items
 service_not_running_title = Indexing is unavailable
 service_not_running_desc = Cairn could not reach the background service. If the component is missing, reinstall Cairn and try again.
 service_not_installed_title = The local indexer is missing
-service_not_installed_desc = cairnd.exe was not found next to the app. Reinstall Cairn, then try again.
+service_not_installed_desc = CairnService.exe was not found next to the app. Reinstall Cairn, then try again.
 service_incompatible_title = Protocol versions don’t match
 service_incompatible_desc = Update the client and the service to the same version, then try again.
 service_unauthorized_title = This account can’t use the service
@@ -121,11 +118,7 @@ service_retry_button = Retry connection
 service_start_button = Start background service
 service_start_hint = File search resumes after the service starts.
 
-# Content-index configuration is submitted directly over the pipe; the window never elevates.
-# Content-index configuration is submitted over the pipe; the window never asks for elevation.
-config_submit_in_progress = Applying the content index setting
-
-# Preferences now live in the title bar's View and Tools menus (SET-01).
+# Preferences live in the title bar's View and Tools menus (SET-01).
 # Choices commit as they are made; the menu checkmark is the current value, and there is no
 # separate settings dialog.
 settings_theme = Theme
@@ -136,46 +129,21 @@ settings_section_language = Language
 # Language options keep the name each language gives itself: someone who can't read the current
 # interface language can only recognise a language by its own spelling.
 settings_language_system = System
-settings_language_zh = Chinese
+settings_language_zh = 简体中文
 settings_language_en = English
 settings_section_zoom = Zoom
 settings_zoom_compact = Compact
 settings_zoom_standard = Standard
 settings_zoom_relaxed = Relaxed
 settings_autostart = Start with Windows
-settings_section_index_source = Index source
-settings_content_index = Content index
 menu_sort = Sort
 menu_startup = Startup
-menu_index = Index
 menu_about = About Cairn
 menu_about_body = Fast Windows file search
-menu_index_source_service = Index source: background service running
-menu_index_source_local = Index source: local index (background service not running)
-menu_index_source_local_only = Index source: local index (background service not installed)
-menu_index_source_unavailable = Index source: background service unavailable
-menu_content_index_service_unavailable = Content index (background service unavailable)
-menu_content_index_loading = Content index (reading configuration…)
-menu_content_index_unavailable = Content index (status unavailable)
-menu_content_index_unavailable_reason = Content index (status unavailable: { $reason })
-menu_content_index_disabled = Content index (off)
-menu_content_index_backfilling = Content index (backfilling { $processed } / { $total })
-menu_content_index_ready = Content index (ready)
-menu_content_index_error = Content index (failed)
-menu_content_index_error_reason = Content index (failed: { $reason })
-menu_content_index_enable = Enable content index
-menu_content_index_disable = Turn off content index
-menu_content_index_action_failed = The content index setting did not take effect
-menu_content_index_action_failed_reason = The content index setting did not take effect: { $reason }
-menu_content_index_cancel = Cancel backfill
-menu_content_index_retry = Retry content index
-menu_content_index_reload = Reload status
-menu_content_index_clear = Clear content index…
 index_clear = Clear content index?
 index_clear_description = The existing full-text index will be deleted and must be rebuilt before body search works again.
 index_clear_confirm_action = Clear
 index_clear_cancel = Cancel
-menu_content_index_local = Content index (not available in local index)
 
 sidebar_toggle = Toggle sidebar
 nav_back = Back
@@ -199,6 +167,8 @@ recycle_bin_unavailable_hint = The Recycle Bin list is unavailable. Try again.
 recycle_bin_retry = Try again
 status_recycle_bin_unavailable = Recycle Bin unavailable
 status_loading = Loading
+status_objects_summary = { $count } items { $size }
+status_refresh = Refresh
 toast_status = Notification
 toast_dismiss = Dismiss notification
 bin_error_access_denied = Access denied
@@ -237,6 +207,7 @@ tray_exit = Exit
 
 view_in_table = View in Table
 treemap_empty_directory = This folder is empty
+treemap_unreadable = Cannot read this folder
 treemap_aggregate = { $count } items
 treemap_status_selected = { $name } · { $path } · { $size } ({ $percent }%) · { $date }
 treemap_status_summary = { $count } items { $size }
@@ -255,3 +226,32 @@ treemap_category_video = Video
 treemap_category_other = Other
 treemap_filter_hide = Hide the { $category } category
 treemap_filter_show = Show the { $category } category
+menu_search_scope = Search scope
+menu_search_scope_all_files = All files
+menu_search_scope_readable_files = Readable files
+menu_search_scope_cancelled = The switch was cancelled; the search scope is unchanged.
+menu_search_scope_not_installed = The background service is not installed, so “All files” is unavailable.
+menu_search_scope_unreadable = Cairn could not read the background service registration, so the search scope is unchanged.
+menu_search_scope_change_failed = Cairn could not switch the search scope, so it is unchanged.
+menu_search_scope_not_in_effect = The switch did not change the service, so the search scope is unchanged.
+menu_search_scope_restricted = An administrator restricted the search scope. Contact the administrator or use an authorized account.
+menu_search_scope_all_files_unavailable = All files (the background service is not installed, so it cannot be selected)
+menu_content_search = Search file contents
+menu_content_search_enable = Search file contents
+menu_content_search_disable = Stop searching file contents
+menu_content_search_details = Content search details
+menu_content_search_off = Content search is off
+menu_content_search_loading = Reading the content index status…
+menu_content_search_unavailable = The content index status is unavailable
+menu_content_search_unavailable_reason = The content index status is unavailable: { $reason }
+menu_content_search_backfilling = Building the content index { $processed } / { $total }
+menu_content_search_ready = The content index is ready
+menu_content_search_failed = The content index failed
+menu_content_search_failed_reason = The content index failed: { $reason }
+menu_content_search_retry = Rebuild the content index
+menu_content_search_clear = Clear the content index…
+menu_content_search_state = Content search status
+menu_content_search_usage = Size: { $size }
+menu_content_search_updated = Last updated: { $time }
+menu_content_search_usage_unknown = Size: unknown
+menu_content_search_never_updated = Last updated: never

@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! `cairnd.exe`: Windows background service host for Cairn.
+//! `CairnService.exe`: Windows background service host for Cairn.
 
 use cairn_service::service;
 use cairn_service::startup::ServiceRuntime;
@@ -12,7 +12,7 @@ use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Parser, Debug)]
-#[command(name = "cairnd", about = "Cairn Service")]
+#[command(name = "CairnService", about = "Cairn Service")]
 struct Cli {
     /// Run as a standalone console process (for development and testing)
     #[arg(short, long)]

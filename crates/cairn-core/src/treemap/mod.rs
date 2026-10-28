@@ -30,4 +30,4 @@ pub use layout::{
 };
 pub use path::{is_drive_root, parent_directory};
 pub use scan::{scan_directory_tree_progressive, TreemapScanEvent, TreemapScanUpdate};
-pub use tree::{format_size_bytes, TreemapItem, TreemapTreeNode};
+pub use tree::{TreemapItem, TreemapTreeNode};

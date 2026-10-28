@@ -66,13 +66,6 @@ impl VolumeState {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub enum WorkerStatus {
-    Idle,
-    Indexing { count: usize },
-    Disabled,
-}
-
 /// Lifecycle of the optional full-text content index. The phase is authoritative for whether a
 /// `content:` query may run; a disabled, backfilling or failed index must never look like a query
 /// that simply found nothing.
@@ -121,7 +114,7 @@ impl Default for ContentIndexStatus {
     }
 }
 
-/// One file handed to `cairn-worker.exe`. The service owns discovery and MFT metadata; the worker
+/// One file handed to `CairnWorker.exe`. The service owns discovery and MFT metadata; the worker
 /// owns extraction and Tantivy writes, so a malformed document cannot take down the LocalSystem
 /// process.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -16,16 +16,16 @@ use crate::treemap::paint::{
 use crate::treemap::palette::{block_fill_states, TreemapPalette};
 use crate::treemap::state::{next_scan_epoch, TreemapViewState};
 use crate::treemap::zoom::TreemapViewport;
+use cairn_core::format_size_bytes;
 use cairn_core::treemap::{
-    aggregate_parent_path, format_size_bytes, scan_directory_tree_progressive,
-    NestedTreemapLayoutNode, TreemapCategory, TreemapRect, TreemapScanEvent,
+    aggregate_parent_path, scan_directory_tree_progressive, NestedTreemapLayoutNode,
+    TreemapCategory, TreemapRect, TreemapScanEvent,
 };
 use cairn_protocol::message::ResponsePayload;
 use fluent_bundle::FluentArgs;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::StyledExt;
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
-use gpui_kit::component::skeleton::Skeleton;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{h_flex, v_flex, Icon, Sizable as _};
 use gpui_kit::gpui::prelude::FluentBuilder as _;
@@ -45,7 +45,11 @@ const TREEMAP_LABEL_MIN_HEIGHT: f32 = 28.0;
 
 /// Depth cap for a tree served by the index. Matches the on-disk volume-index
 /// loader, so both service paths present the same hierarchy.
-const TREEMAP_SERVICE_DEPTH: usize = 6;
+// The response must fit the protocol's frame budget. Depth 2 is ~47k entries on a 1.4M-index
+// drive and answers in ~160 ms; depth 6 overflows the 16 MiB frame and drops the connection,
+// which forced the six-thread filesystem fallback. Deeper levels are requested per directory as
+// the reader drills in.
+const TREEMAP_SERVICE_DEPTH: usize = 2;
 
 /// Horizontal inset used by headers, leaves and summary labels.
 const TREEMAP_TEXT_PADDING: f32 = 4.0;
@@ -64,6 +68,7 @@ fn text_width(window: &Window, text: &str, weight: FontWeight) -> f32 {
     let mut style = window.text_style();
     style.font_size = rems(0.75).into();
     style.font_weight = weight;
+    style.font_features = theme::tabular_figures();
     let font_size = style.font_size.to_pixels(window.rem_size());
     f32::from(
         window
@@ -93,17 +98,12 @@ impl CairnApp {
         cx: &mut Context<Self>,
     ) {
         let drive_upper = drive.to_ascii_uppercase();
-        if self.recycle_bin.take().is_some() {
+        if self.recycle_bin.leave() {
             // A bin filter is a location-local search, not a query to carry into the drive view.
             self.query.search_input.clear();
         }
         self.drive_view = Some(drive_upper);
         self.query.scope_drive = Some(drive_upper);
-        self.recycle_bin_loading = false;
-        self.recycle_bin_all = Vec::new();
-        self.recycle_bin_icon_extensions.clear();
-        self.recycle_bin_selected_keys = std::collections::HashSet::new();
-        self.recycle_bin_error = None;
         let (state, scan_target) = TreemapViewState::new(drive_upper, cx.focus_handle());
         state.request_focus(window, cx);
         self.treemap_state = Some(state);
@@ -140,6 +140,10 @@ impl CairnApp {
         state.scan_generation = next_scan_epoch();
         let gen = state.scan_generation;
         state.is_scanning = true;
+        state.content_revealed = false;
+        state.scan_unreadable = false;
+        state.layout_nodes.clear();
+        state.root_tree = None;
         cx.notify();
 
         let path_for_service = scan_path.to_string_lossy().into_owned();
@@ -162,16 +166,23 @@ impl CairnApp {
             let served = match rx.await {
                 Ok(Ok(envelope)) => match envelope.payload {
                     ResponsePayload::TreeResult { entries, .. } if !entries.is_empty() => {
+                        crate::shell::perf::mark(&format!(
+                            "treemap tree service entries={}",
+                            entries.len()
+                        ));
                         let applied = this.update(cx, |this, cx| {
                             if let Some(ref mut st) = this.treemap_state {
                                 if st.scan_generation != gen {
-                                    return;
+                                    return false;
                                 }
-                                st.adopt_service_tree(entries);
+                                let ok = st.adopt_service_tree(entries);
                                 cx.notify();
+                                ok
+                            } else {
+                                false
                             }
                         });
-                        applied.is_ok()
+                        applied.unwrap_or(false)
                     }
                     _ => false,
                 },
@@ -181,6 +192,7 @@ impl CairnApp {
                 return;
             }
 
+            crate::shell::perf::mark("treemap tree filesystem scan");
             // Fall back to the progressive filesystem scan.
             let fallback = this.update(cx, |this, cx| {
                 this.run_treemap_filesystem_scan(scan_path, gen, cx);
@@ -210,6 +222,9 @@ impl CairnApp {
         let cancel = Arc::new(AtomicBool::new(false));
         state.scan_cancel = Some(cancel.clone());
         state.is_scanning = true;
+        state.content_revealed = false;
+        state.scan_unreadable = false;
+        state.layout_nodes.clear();
         cx.notify();
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<TreemapScanEvent>();
@@ -233,8 +248,15 @@ impl CairnApp {
                         if st.scan_generation != gen {
                             return;
                         }
+                        // Progress folds the tree in memory; the canvas shows the skeleton
+                        // until the finished event reveals it, and the status band shows no
+                        // counters during the scan. Repainting for each batch would cost a
+                        // full frame per batch for nothing the reader can see.
+                        let finished = event.is_finished;
                         st.apply_scan_event(event);
-                        cx.notify();
+                        if finished {
+                            cx.notify();
+                        }
                     }
                 });
                 if update_res.is_err() {
@@ -247,9 +269,15 @@ impl CairnApp {
             // loading skeleton: stop the spinner and reveal whatever arrived.
             let _ = this.update(cx, |this: &mut CairnApp, cx| {
                 if let Some(ref mut st) = this.treemap_state {
-                    if st.scan_generation == gen && st.is_scanning {
-                        st.is_scanning = false;
-                        if st.root_tree.is_some() {
+                    if st.scan_generation == gen {
+                        if st.is_scanning {
+                            st.is_scanning = false;
+                            if let Some(tree) = st.root_tree.as_mut() {
+                                let tree = Arc::make_mut(tree);
+                                tree.compute_aggregated_sizes();
+                                tree.sort_recursive();
+                                st.recompute_layout();
+                            }
                             st.reveal_content();
                         }
                         cx.notify();
@@ -379,11 +407,11 @@ impl CairnApp {
         // later navigation also clears the old layout, and until the new
         // listing arrives the same skeleton stands in for a false "empty
         // folder".
-        if shows_loading_skeleton(
-            state.content_revealed,
-            state.is_scanning,
-            state.layout_nodes.is_empty(),
-        ) {
+        //
+        // The blocks are still. A scan can last minutes, and the design system's Skeleton
+        // animates at the display rate; the status band's mark is the one moving element,
+        // capped so a long build does not repaint the window at the display rate.
+        if shows_loading_skeleton(state.content_revealed, state.is_scanning) {
             return v_flex()
                 .id("treemap-loading-skeleton")
                 .size_full()
@@ -394,11 +422,12 @@ impl CairnApp {
                         .h_full()
                         .gap_x(rems(layout::SPACE_4))
                         .child(
-                            Skeleton::new()
+                            div()
                                 .h_full()
                                 .w(relative(0.65))
                                 .flex_shrink_0()
-                                .rounded(px(4.0)),
+                                .rounded(px(4.0))
+                                .bg(tokens.skeleton),
                         )
                         .child(
                             v_flex()
@@ -406,18 +435,18 @@ impl CairnApp {
                                 .flex_1()
                                 .gap_y(rems(layout::SPACE_4))
                                 .child(
-                                    Skeleton::new()
-                                        .secondary()
+                                    div()
                                         .flex_1()
                                         .w_full()
-                                        .rounded(px(4.0)),
+                                        .rounded(px(4.0))
+                                        .bg(tokens.skeleton.opacity(0.5)),
                                 )
                                 .child(
-                                    Skeleton::new()
-                                        .secondary()
+                                    div()
                                         .flex_1()
                                         .w_full()
-                                        .rounded(px(4.0)),
+                                        .rounded(px(4.0))
+                                        .bg(tokens.skeleton.opacity(0.5)),
                                 ),
                         ),
                 )
@@ -438,6 +467,11 @@ impl CairnApp {
         // An empty directory is content, not a separate surface: it must keep
         // the canvas focus, Backspace/Enter and wheel zoom.
         let content = if state.layout_nodes.is_empty() {
+            let empty_text_key = if state.is_unreadable() {
+                "treemap_unreadable"
+            } else {
+                "treemap_empty_directory"
+            };
             v_flex()
                 .absolute()
                 .left(px(0.0))
@@ -447,7 +481,7 @@ impl CairnApp {
                 .justify_center()
                 .text_color(tokens.muted_foreground)
                 .text_sm()
-                .child(self.i18n.get_text("treemap_empty_directory"))
+                .child(self.i18n.get_text(empty_text_key))
                 .into_any_element()
         } else {
             let mut block_elements = Vec::with_capacity(state.layout_nodes.len() * 4);
@@ -859,6 +893,7 @@ fn compact_block_content(
             div()
                 .whitespace_nowrap()
                 .text_xs()
+                .font_features(theme::tabular_figures())
                 .text_color(secondary)
                 .child(size.to_string()),
         );
@@ -1074,6 +1109,7 @@ fn render_nested_node(
                             .flex_shrink_0()
                             .whitespace_nowrap()
                             .text_xs()
+                            .font_features(theme::tabular_figures())
                             .text_color(rcx.palette.ink_secondary())
                             .child(header_size_label),
                     )
@@ -1206,8 +1242,8 @@ fn category_icon(category: TreemapCategory) -> IconName {
     }
 }
 
-fn shows_loading_skeleton(content_revealed: bool, is_scanning: bool, layout_empty: bool) -> bool {
-    !content_revealed || (is_scanning && layout_empty)
+fn shows_loading_skeleton(content_revealed: bool, is_scanning: bool) -> bool {
+    !content_revealed || is_scanning
 }
 
 fn same_directory(left: &str, right: &str) -> bool {
@@ -1221,63 +1257,61 @@ fn build_context_menu(
     is_dir: bool,
     i18n: &Rc<crate::shell::i18n::I18nManager>,
 ) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
-    let fp = full_path;
     let i18n = i18n.clone();
     move |menu: PopupMenu, _window: &mut Window, _cx: &mut Context<PopupMenu>| {
-        let fp1 = fp.clone();
-        let fp2 = fp.clone();
-        let fp3 = fp.clone();
-        let fp4 = fp.clone();
-        let fp5 = fp.clone();
-        let fp6 = fp.clone();
-        let cv1 = view.clone();
-        let cv2 = view.clone();
-        let cv3 = view.clone();
-        let cv4 = view.clone();
-        let cv5 = view.clone();
-        let cv6 = view.clone();
-        let cv_name = view.clone();
-
-        let file_name = Path::new(&fp)
+        let file_name = Path::new(&full_path)
             .file_name()
             .and_then(|n| n.to_str())
-            .unwrap_or(&fp)
+            .unwrap_or(&full_path)
             .to_string();
 
         let table_dir = if is_dir {
-            fp4
+            full_path.clone()
         } else {
-            Path::new(&fp4)
+            Path::new(&full_path)
                 .parent()
                 .and_then(|p| p.to_str())
-                .unwrap_or(&fp4)
+                .unwrap_or(&full_path)
                 .to_string()
         };
 
+        let open_view = view.clone();
+        let reveal_view = view.clone();
+        let copy_path_view = view.clone();
+        let copy_name_view = view.clone();
+        let delete_view = view.clone();
+        let properties_view = view.clone();
+        let table_view = view.clone();
+        let open_path = full_path.clone();
+        let reveal_path = full_path.clone();
+        let copy_path = full_path.clone();
+        let delete_path = full_path.clone();
+        let properties_path = full_path.clone();
+
         menu.item(
             PopupMenuItem::new(i18n.get_text("ctx_open")).on_click(move |_, _, cx| {
-                cv1.update(cx, |_, _| {
-                    let _ = open_file(&fp1);
+                open_view.update(cx, |_, _| {
+                    let _ = open_file(&open_path);
                 });
             }),
         )
         .item(
             PopupMenuItem::new(i18n.get_text("ctx_open_path")).on_click(move |_, _, cx| {
-                cv2.update(cx, |_, _| {
-                    let _ = open_folder_and_select(&fp2);
+                reveal_view.update(cx, |_, _| {
+                    let _ = open_folder_and_select(&reveal_path);
                 });
             }),
         )
         .item(
             PopupMenuItem::new(i18n.get_text("ctx_copy_path")).on_click(move |_, _, cx| {
-                cv3.update(cx, |_, cx| {
-                    cx.write_to_clipboard(ClipboardItem::new_string(fp3.clone()));
+                copy_path_view.update(cx, |_, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(copy_path.clone()));
                 });
             }),
         )
         .item(
             PopupMenuItem::new(i18n.get_text("ctx_copy_name")).on_click(move |_, _, cx| {
-                cv_name.update(cx, |_, cx| {
+                copy_name_view.update(cx, |_, cx| {
                     cx.write_to_clipboard(ClipboardItem::new_string(file_name.clone()));
                 });
             }),
@@ -1285,15 +1319,15 @@ fn build_context_menu(
         .separator()
         .item(
             PopupMenuItem::new(i18n.get_text("ctx_delete")).on_click(move |_, window, cx| {
-                cv6.update(cx, |this, cx| {
-                    this.confirm_delete_paths(vec![fp6.clone()], window, cx);
+                delete_view.update(cx, |this, cx| {
+                    this.confirm_delete_paths(vec![delete_path.clone()], window, cx);
                 });
             }),
         )
         .separator()
         .item(
             PopupMenuItem::new(i18n.get_text("view_in_table")).on_click(move |_, window, cx| {
-                cv4.update(cx, |this, cx| {
+                table_view.update(cx, |this, cx| {
                     this.switch_to_table_with_path(&table_dir, window, cx);
                 });
             }),
@@ -1301,8 +1335,8 @@ fn build_context_menu(
         .separator()
         .item(
             PopupMenuItem::new(i18n.get_text("ctx_properties")).on_click(move |_, _, cx| {
-                cv5.update(cx, |_, _| {
-                    let _ = show_properties_dialog(&fp5);
+                properties_view.update(cx, |_, _| {
+                    let _ = show_properties_dialog(&properties_path);
                 });
             }),
         )
@@ -1322,10 +1356,10 @@ mod tests {
     /// skeleton; only a finished, empty directory shows the empty message.
     #[test]
     fn loading_skeleton_wins_over_a_false_empty_directory() {
-        assert!(shows_loading_skeleton(false, true, true));
-        assert!(shows_loading_skeleton(true, true, true));
-        assert!(!shows_loading_skeleton(true, false, true));
-        assert!(!shows_loading_skeleton(true, true, false));
+        assert!(shows_loading_skeleton(false, true));
+        assert!(shows_loading_skeleton(true, true));
+        assert!(shows_loading_skeleton(false, false));
+        assert!(!shows_loading_skeleton(true, false));
     }
 
     /// A root-owned summary has no parent to enter; drilling would reload the

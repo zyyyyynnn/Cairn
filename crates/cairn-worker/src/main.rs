@@ -4,7 +4,7 @@
 
 #![forbid(unsafe_code)]
 
-//! `cairn-worker.exe`: Isolated content extraction and indexing subprocess.
+//! `CairnWorker.exe`: Isolated content extraction and indexing subprocess.
 //!
 //! The service owns the MFT and the decision of which files are eligible. This process owns the
 //! risky half: decoding a document, extracting its text and writing the Tantivy index. A malformed
@@ -19,7 +19,7 @@ use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Parser, Debug)]
-#[command(name = "cairn-worker", about = "Cairn Service Worker")]
+#[command(name = "CairnWorker", about = "Cairn Service Worker")]
 struct WorkerCli {
     /// Directory where Tantivy content index is stored
     #[arg(short, long, default_value = r"C:\ProgramData\Cairn\content")]
@@ -215,7 +215,7 @@ mod tests {
 
     #[test]
     fn test_worker_cli_defaults() {
-        let args = WorkerCli::try_parse_from(["cairn-worker"]).expect("parse defaults");
+        let args = WorkerCli::try_parse_from(["CairnWorker"]).expect("parse defaults");
         assert_eq!(
             args.index_dir,
             PathBuf::from(r"C:\ProgramData\Cairn\content")
@@ -230,7 +230,7 @@ mod tests {
     #[test]
     fn test_worker_cli_custom_flags() {
         let args = WorkerCli::try_parse_from([
-            "cairn-worker",
+            "CairnWorker",
             "--index-dir",
             r"C:\test\idx",
             "--batch",

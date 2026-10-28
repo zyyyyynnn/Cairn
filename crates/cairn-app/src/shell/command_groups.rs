@@ -15,6 +15,7 @@
 //! its label through Fluent at the call site. A [`GroupCommand::Heading`] is a section label, not a
 //! command, and renders as plain text inside the popup.
 
+use crate::service::search_scope::{SEARCH_SCOPE_ALL_FILES, SEARCH_SCOPE_READABLE_FILES};
 use crate::shell::commands::{
     CopyFileNames, CopyFullPaths, CutQueryText, DeleteSelected, EscapeQuery, OpenSelected,
     PasteQueryText, RedoQueryText, RestoreSelected, RevealSelectedLocation, SelectAllQueryText,
@@ -166,22 +167,40 @@ pub enum GroupCommand {
     Submenu(&'static str, &'static [GroupCommand]),
     SetLanguage(&'static str),
     ToggleAutostart,
-    IndexSource,
-    /// A read-only status row. It reports what the service says; it is not the switch that changes
-    /// it, so clicking it can never resubmit a setting.
-    ContentIndexStatus,
-    /// A read-only line naming a local action failure that the state row cannot carry.
-    ContentIndexNotice,
-    ToggleContentIndex,
-    CancelContentIndex,
-    RetryContentIndex,
-    /// Re-reads the status after a status-read failure. Kept apart from the retry that asks the
-    /// service to rebuild the index: the two recover different conditions.
-    RefreshContentIndexStatus,
-    ClearContentIndex,
+    /// The "搜索范围" submenu's two choices. They are the only two scopes the product offers
+    /// (UI-10), and picking one either takes effect at once or is refused outright.
+    SetSearchScope(&'static str),
+    /// The single "搜索文件内容" switch. Turning it off pauses the content index and keeps what
+    /// is already indexed; turning it on resumes it.
+    ToggleContentSearch,
+    /// The popup that carries the content-search facts and the two recovery actions. It is a
+    /// command of its own because the whole container disappears where no content index exists:
+    /// hiding only its rows would leave a trigger that opens an empty popup (UI-10).
+    ContentSearchDetailsMenu,
+    /// Whether the content index is off, backfilling, ready or failed.
+    ContentSearchDetails,
+    /// How much space the content index takes on disk.
+    ContentSearchUsage,
+    /// When the content index was last committed.
+    ContentSearchUpdated,
+    /// Restarts a content index that failed.
+    RetryContentSearch,
+    /// Removes the indexed contents without touching the file-name index.
+    ClearContentSearch,
     // ---- help -----------------------------------------------------------------------
     About,
 }
+
+/// The rows the content-search details popup carries: the three facts about the index, then the
+/// two actions that can change it. One list, so the menu and its coverage check cannot disagree
+/// about what the popup holds.
+pub(crate) const CONTENT_SEARCH_DETAILS_CHILDREN: &[GroupCommand] = &[
+    GroupCommand::ContentSearchDetails,
+    GroupCommand::ContentSearchUsage,
+    GroupCommand::ContentSearchUpdated,
+    GroupCommand::RetryContentSearch,
+    GroupCommand::ClearContentSearch,
+];
 
 impl GroupCommand {
     /// The Fluent message that names this command, visible and announced alike. A command the result
@@ -217,17 +236,14 @@ impl GroupCommand {
             GroupCommand::Submenu(label, _) => label,
             GroupCommand::SetLanguage(code) => language_label_key(code),
             GroupCommand::ToggleAutostart => "settings_autostart",
-            GroupCommand::IndexSource => "settings_section_index_source",
-            // The status rows are named by the owner, which resolves the current state and its
-            // reason; this is the fallback for the coverage checks.
-            GroupCommand::ContentIndexStatus | GroupCommand::ContentIndexNotice => {
-                "settings_content_index"
-            }
-            GroupCommand::ToggleContentIndex => "settings_content_index",
-            GroupCommand::CancelContentIndex => "menu_content_index_cancel",
-            GroupCommand::RetryContentIndex => "menu_content_index_retry",
-            GroupCommand::RefreshContentIndexStatus => "menu_content_index_reload",
-            GroupCommand::ClearContentIndex => "menu_content_index_clear",
+            GroupCommand::SetSearchScope(scope) => scope_label_key(scope),
+            GroupCommand::ToggleContentSearch => "menu_content_search",
+            GroupCommand::ContentSearchDetailsMenu => "menu_content_search_details",
+            GroupCommand::ContentSearchDetails => "menu_content_search_state",
+            GroupCommand::ContentSearchUsage => "menu_content_search_usage",
+            GroupCommand::ContentSearchUpdated => "menu_content_search_updated",
+            GroupCommand::RetryContentSearch => "menu_content_search_retry",
+            GroupCommand::ClearContentSearch => "menu_content_search_clear",
             GroupCommand::About => "menu_about",
         }
     }
@@ -313,6 +329,7 @@ impl GroupCommand {
     pub const fn submenu_children(self) -> &'static [GroupCommand] {
         match self {
             GroupCommand::Submenu(_, children) => children,
+            GroupCommand::ContentSearchDetailsMenu => CONTENT_SEARCH_DETAILS_CHILDREN,
             _ => &[],
         }
     }
@@ -325,6 +342,16 @@ fn theme_label_key(mode: &str) -> &'static str {
         "settings_theme_light"
     } else {
         "settings_theme_dark"
+    }
+}
+
+/// The wording of a search-scope choice. The scope owns its own two names; the menu only asks
+/// for the right one.
+fn scope_label_key(scope: &str) -> &'static str {
+    if scope == SEARCH_SCOPE_ALL_FILES {
+        "menu_search_scope_all_files"
+    } else {
+        "menu_search_scope_readable_files"
     }
 }
 
@@ -428,15 +455,15 @@ pub static DEFAULT_GROUPS: &[MenuGroupSpec] = &[
                 GroupCommand::ToggleAutostart,
             ],
             &[
-                GroupCommand::Heading("menu_index"),
-                GroupCommand::IndexSource,
-                GroupCommand::ContentIndexStatus,
-                GroupCommand::ContentIndexNotice,
-                GroupCommand::ToggleContentIndex,
-                GroupCommand::CancelContentIndex,
-                GroupCommand::RetryContentIndex,
-                GroupCommand::RefreshContentIndexStatus,
-                GroupCommand::ClearContentIndex,
+                GroupCommand::Submenu(
+                    "menu_search_scope",
+                    &[
+                        GroupCommand::SetSearchScope(SEARCH_SCOPE_ALL_FILES),
+                        GroupCommand::SetSearchScope(SEARCH_SCOPE_READABLE_FILES),
+                    ],
+                ),
+                GroupCommand::ToggleContentSearch,
+                GroupCommand::ContentSearchDetailsMenu,
             ],
         ],
     },
@@ -485,10 +512,14 @@ pub fn all_commands() -> Vec<GroupCommand> {
 mod tests {
     use core::prelude::rust_2021::test;
 
-    use super::{all_commands, group_spec, menu_groups, GroupCommand, MenuGroup, ZoomPreset};
+    use super::{
+        all_commands, group_spec, menu_groups, GroupCommand, MenuGroup, ZoomPreset,
+        CONTENT_SEARCH_DETAILS_CHILDREN,
+    };
+    use crate::service::search_scope::{SEARCH_SCOPE_ALL_FILES, SEARCH_SCOPE_READABLE_FILES};
     use crate::shell::i18n::I18nManager;
-    use crate::shell::theme::{MAX_ZOOM, MIN_ZOOM};
     use crate::table::model::SortColumn;
+    use cairn_ui::theme::{MAX_ZOOM, MIN_ZOOM};
 
     #[test]
     fn every_group_label_is_a_localized_message() {
@@ -509,6 +540,76 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// UI-10: the Tools menu offers exactly two index concepts — the search scope and the
+    /// content-search switch — with no index status or maintenance rows beside them. A row that
+    /// names the index source, the backfill state or a maintenance action is a diagnostic the
+    /// user cannot act on.
+    #[test]
+    fn the_tools_menu_offers_only_the_scope_and_the_content_search() {
+        let tools = group_spec(MenuGroup::Tools);
+
+        // The scope choices live in the "搜索范围" submenu, so the walk has to descend into it.
+        let mut scope_choices: Vec<&'static str> = Vec::new();
+        let mut content_switches = 0usize;
+        let mut detail_menus = 0usize;
+        for section in tools.sections {
+            for command in *section {
+                match command {
+                    GroupCommand::SetSearchScope(scope) => scope_choices.push(scope),
+                    GroupCommand::ToggleContentSearch => content_switches += 1,
+                    GroupCommand::ContentSearchDetailsMenu => detail_menus += 1,
+                    _ => {}
+                }
+                for child in command.submenu_children() {
+                    if let GroupCommand::SetSearchScope(scope) = child {
+                        scope_choices.push(scope);
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            scope_choices,
+            vec![SEARCH_SCOPE_ALL_FILES, SEARCH_SCOPE_READABLE_FILES],
+            "the search scope offers exactly the two documented scopes"
+        );
+
+        // The content search is one switch, plus one popup that carries its details.
+        assert_eq!(content_switches, 1, "content search is a single switch");
+        assert_eq!(detail_menus, 1, "the content details live in one popup");
+    }
+
+    /// ui.md §1.9: the popup beside the content-search switch carries how much is indexed, when
+    /// it was last updated, and the two recovery actions. Each of them is named exactly once, so
+    /// the popup cannot grow a second row that means the same thing.
+    #[test]
+    fn the_content_search_details_popup_carries_the_documented_rows() {
+        let children = GroupCommand::ContentSearchDetailsMenu.submenu_children();
+        assert_eq!(
+            children, CONTENT_SEARCH_DETAILS_CHILDREN,
+            "the popup and its row list are the same list"
+        );
+
+        let mut facts = 0usize;
+        let mut actions = 0usize;
+        for child in children {
+            match child {
+                GroupCommand::ContentSearchDetails
+                | GroupCommand::ContentSearchUsage
+                | GroupCommand::ContentSearchUpdated => facts += 1,
+                GroupCommand::RetryContentSearch | GroupCommand::ClearContentSearch => actions += 1,
+                other => panic!("{other:?} does not belong in the content-search details popup"),
+            }
+        }
+        assert_eq!(
+            facts, 3,
+            "the popup states the state, the size and the last update"
+        );
+        assert_eq!(
+            actions, 2,
+            "the popup offers exactly the two recovery actions"
+        );
     }
 
     /// An item that resolves to no text is a silent failure, and a command the user cannot name is a
@@ -571,14 +672,14 @@ mod tests {
                 | GroupCommand::Submenu(_, _)
                 | GroupCommand::SetLanguage(_)
                 | GroupCommand::ToggleAutostart
-                | GroupCommand::IndexSource
-                | GroupCommand::ContentIndexStatus
-                | GroupCommand::ContentIndexNotice
-                | GroupCommand::ToggleContentIndex
-                | GroupCommand::CancelContentIndex
-                | GroupCommand::RetryContentIndex
-                | GroupCommand::RefreshContentIndexStatus
-                | GroupCommand::ClearContentIndex
+                | GroupCommand::SetSearchScope(_)
+                | GroupCommand::ToggleContentSearch
+                | GroupCommand::ContentSearchDetailsMenu
+                | GroupCommand::ContentSearchDetails
+                | GroupCommand::ContentSearchUsage
+                | GroupCommand::ContentSearchUpdated
+                | GroupCommand::RetryContentSearch
+                | GroupCommand::ClearContentSearch
                 | GroupCommand::EmptyRecycleBin
                 | GroupCommand::About => {
                     assert!(
@@ -604,9 +705,8 @@ mod tests {
         }
     }
 
-    /// The Edit menu's 清空搜索 row used to dispatch EscapeQuery: that action closed the menu and
-    /// returned before touching the query, so the click looked dead. The row must run the command
-    /// itself and only borrow Escape for the hint beside its label.
+    /// The Edit menu's 清空搜索 row dispatches the command itself; Escape is only the hint beside
+    /// its label. Dispatching EscapeQuery would close the menu and return before touching the query.
     #[test]
     fn clear_query_runs_as_a_command_and_borrows_escape_only_as_a_hint() {
         use crate::shell::commands::EscapeQuery;

@@ -73,5 +73,23 @@ async fn a_user_mode_indexer_answers_queries_on_its_own_pipe() {
         other => panic!("unexpected answer: {other:?}"),
     }
 
+    let folder_response = client
+        .query(2, "folder:", QueryDefaults::default(), "name", true, 50)
+        .await
+        .expect("folder query");
+    match folder_response.payload {
+        ResponsePayload::QueryResult {
+            total_matches,
+            total_bytes,
+            first_page,
+            ..
+        } => {
+            assert!(total_matches >= 1, "must match folder");
+            assert!(first_page.iter().any(|row| row.name == "docs"));
+            assert_eq!(total_bytes, 6, "folder total_bytes must not be 0!");
+        }
+        other => panic!("unexpected answer: {other:?}"),
+    }
+
     serving.abort();
 }

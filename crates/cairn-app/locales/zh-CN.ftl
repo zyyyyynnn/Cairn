@@ -4,7 +4,7 @@
 # 短控件标签不加句末标点；完整说明与错误句子加句末标点。`…` 只用于"会打开对话框或需要
 # 更多输入"的命令。快捷键写在键表与 AccessKit 的 keyshortcuts 里，不写进标签文字。
 
-# 顶栏只写品牌名：产品是什么由窗口本身说明，"本地文件即时搜索"是重复的注解。
+# 顶栏只写品牌名，产品职责由窗口本身说明。
 app_title = Cairn
 
 # 侧边导航：目的地是名词，不带"管理/面板"这类外壳词。
@@ -14,7 +14,7 @@ sidebar_no_drives = 尚未发现驱动器
 sidebar_recycle_bin = 回收站
 drive_label = 驱动器 { $drive }
 
-# 顶栏菜单：与品牌同行的六个顶层菜单，对齐 Everything 1.5 的菜单栏。
+# 顶栏菜单：与品牌同行的六个顶层菜单。
 menu_file = 文件
 menu_edit = 编辑
 menu_view = 查看
@@ -22,7 +22,6 @@ menu_search = 搜索
 menu_tools = 工具
 menu_help = 帮助
 
-breadcrumb_label = 当前位置
 
 result_list_label = 搜索结果列表
 table_header_label = 结果表列标题
@@ -61,6 +60,7 @@ query_clear = 清空搜索
 sort_reverse = 反向排序
 
 status_objects_count = { $count } 个项目
+status_objects_summary = { $count } 个项目 { $size }
 
 volume_capsule = { $drive }: { $state }
 volume_state_synced = 已同步
@@ -84,7 +84,7 @@ ctx_copy_name = 复制文件名
 ctx_delete = 删除…
 ctx_restore = 还原
 ctx_delete_permanently = 永久删除…
-ctx_empty_recycle_bin = 清空回收站
+ctx_empty_recycle_bin = 清空回收站…
 ctx_properties = 属性
 delete_confirm_title = 删除“{ $name }”？
 delete_confirm_title_many = 删除 { $count } 个项目？
@@ -105,7 +105,7 @@ delete_failed_title = 无法删除所选项目
 service_not_running_title = 索引暂不可用
 service_not_running_desc = Cairn 未能连接后台服务。若服务组件缺失，请重新安装 Cairn 后重试。
 service_not_installed_title = 本地索引组件缺失
-service_not_installed_desc = 应用所在目录中找不到 cairnd.exe。请重新安装 Cairn，然后重试。
+service_not_installed_desc = 应用所在目录中找不到 CairnService.exe。请重新安装 Cairn，然后重试。
 service_incompatible_title = 协议版本不兼容
 service_incompatible_desc = 请升级客户端与服务端组件到同一版本后重试。
 service_unauthorized_title = 当前账户没有访问该服务的权限
@@ -116,11 +116,8 @@ service_retry_button = 重试连接
 service_start_button = 启动后台服务
 service_start_hint = 启动后即可恢复文件搜索。
 
-# 内容索引配置通过管道直接提交给服务，主窗口不申请提权。
-config_submit_in_progress = 正在应用内容索引设置
-
-# 设置项现在住在顶栏的“查看”和“工具”菜单里（SET-01）。
-# 选择即时生效；菜单项的勾选状态就是当前值，不再有独立的设置弹窗。
+# 设置项位于顶栏的“查看”和“工具”菜单里（SET-01）。
+# 选择即时生效；菜单项的勾选状态就是当前值，不另设设置弹窗。
 settings_theme = 主题
 settings_theme_system = 系统
 settings_theme_light = 浅色
@@ -128,46 +125,21 @@ settings_theme_dark = 深色
 settings_section_language = 语言
 # 语言选项写该语言自己的名字：读不懂当前界面语言的人，只能靠母语拼法认出要换到哪一种。
 settings_language_system = 系统
-settings_language_zh = 简中
-settings_language_en = EN
+settings_language_zh = 简体中文
+settings_language_en = English
 settings_section_zoom = 缩放
 settings_zoom_compact = 紧凑
 settings_zoom_standard = 标准
 settings_zoom_relaxed = 宽松
 settings_autostart = 开机自启
-settings_section_index_source = 索引来源
-settings_content_index = 内容索引
 menu_sort = 排序
 menu_startup = 启动
-menu_index = 索引
 menu_about = 关于 Cairn
 menu_about_body = 高性能 Windows 文件搜索
-menu_index_source_service = 索引来源：后台服务运行中
-menu_index_source_local = 索引来源：本地索引（后台服务未运行）
-menu_index_source_local_only = 索引来源：本地索引（未安装后台服务）
-menu_index_source_unavailable = 索引来源：后台服务不可用
-menu_content_index_service_unavailable = 内容索引（后台服务不可用）
-menu_content_index_loading = 内容索引（正在读取配置…）
-menu_content_index_unavailable = 内容索引（无法读取状态）
-menu_content_index_unavailable_reason = 内容索引（无法读取状态：{ $reason }）
-menu_content_index_disabled = 内容索引（已关闭）
-menu_content_index_backfilling = 内容索引（回填中 { $processed } / { $total }）
-menu_content_index_ready = 内容索引（已就绪）
-menu_content_index_error = 内容索引（失败）
-menu_content_index_error_reason = 内容索引（失败：{ $reason }）
-menu_content_index_enable = 启用内容索引
-menu_content_index_disable = 关闭内容索引
-menu_content_index_action_failed = 内容索引设置未生效
-menu_content_index_action_failed_reason = 内容索引设置未生效：{ $reason }
-menu_content_index_cancel = 取消回填
-menu_content_index_retry = 重试内容索引
-menu_content_index_reload = 重新读取状态
-menu_content_index_clear = 清空内容索引…
 index_clear = 清空内容索引？
 index_clear_description = 已建立的正文索引会被删除，需要重新回填才能再次检索。
 index_clear_confirm_action = 清空
 index_clear_cancel = 取消
-menu_content_index_local = 内容索引（本地索引不支持）
 
 sidebar_toggle = 折叠或展开侧边栏
 nav_back = 后退
@@ -191,6 +163,7 @@ recycle_bin_unavailable_hint = 回收站列表暂时不可用，请重试。
 recycle_bin_retry = 重试
 status_recycle_bin_unavailable = 回收站不可用
 status_loading = 正在加载
+status_refresh = 刷新
 toast_status = 通知
 toast_dismiss = 关闭通知
 bin_error_access_denied = 拒绝访问
@@ -229,6 +202,7 @@ tray_exit = 退出
 
 view_in_table = 在表格中查看
 treemap_empty_directory = 此文件夹为空
+treemap_unreadable = 无法读取此文件夹
 treemap_aggregate = { $count } 项
 treemap_status_selected = { $name } · { $path } · { $size } ({ $percent }%) · { $date }
 treemap_status_summary = { $count } 个项目 { $size }
@@ -247,3 +221,32 @@ treemap_category_video = 视频
 treemap_category_other = 其他
 treemap_filter_hide = 隐藏“{ $category }”类别
 treemap_filter_show = 显示“{ $category }”类别
+menu_search_scope = 搜索范围
+menu_search_scope_all_files = 所有文件
+menu_search_scope_readable_files = 可读文件
+menu_search_scope_cancelled = 已取消切换，搜索范围保持不变。
+menu_search_scope_not_installed = 未安装后台服务，无法切换到“所有文件”。
+menu_search_scope_unreadable = 无法读取后台服务的注册信息，搜索范围保持不变。
+menu_search_scope_change_failed = 切换搜索范围失败，搜索范围保持不变。
+menu_search_scope_not_in_effect = 切换后未检测到服务变化，搜索范围保持不变。
+menu_search_scope_restricted = 管理员限制了搜索范围，请联系管理员或改用授权账户。
+menu_search_scope_all_files_unavailable = 所有文件（后台服务未安装，无法选择）
+menu_content_search = 搜索文件内容
+menu_content_search_enable = 搜索文件内容
+menu_content_search_disable = 停止搜索文件内容
+menu_content_search_details = 内容搜索详情
+menu_content_search_off = 未开启内容搜索
+menu_content_search_loading = 正在读取内容索引状态…
+menu_content_search_unavailable = 无法读取内容索引状态
+menu_content_search_unavailable_reason = 无法读取内容索引状态：{ $reason }
+menu_content_search_backfilling = 正在建立内容索引 { $processed } / { $total }
+menu_content_search_ready = 内容索引已就绪
+menu_content_search_failed = 内容索引失败
+menu_content_search_failed_reason = 内容索引失败：{ $reason }
+menu_content_search_retry = 重建内容索引
+menu_content_search_clear = 清空内容索引…
+menu_content_search_state = 内容搜索状态
+menu_content_search_usage = 占用：{ $size }
+menu_content_search_updated = 最近更新：{ $time }
+menu_content_search_usage_unknown = 占用：未知
+menu_content_search_never_updated = 最近更新：尚无记录

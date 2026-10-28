@@ -12,10 +12,12 @@
 pub mod arena;
 pub mod engine;
 pub mod filter;
+pub mod format;
 pub mod model;
 pub mod path_cache;
 pub mod sort;
 pub mod syntax;
+pub mod time;
 pub mod treemap;
 
 pub use arena::NamePool;
@@ -23,6 +25,7 @@ pub use engine::{
     execute_query, execute_query_ordered, find_highlights, glob_match, CancellationToken,
 };
 pub use filter::{DateFilter, DateOp, SizeFilter, SizeOp};
+pub use format::format_size_bytes;
 pub use model::{
     FileRecord, FLAG_ARCHIVE, FLAG_COMPRESSED, FLAG_DIRECTORY, FLAG_HIDDEN, FLAG_READONLY,
     FLAG_REPARSE_POINT, FLAG_SPARSE, FLAG_SYSTEM, FLAG_TOMBSTONE,

@@ -4,15 +4,16 @@
 
 #![forbid(unsafe_code)]
 
-//! `cairn-cli.exe`: Command-line interface for Cairn search engine.
+//! `CairnCli.exe`: Command-line interface for Cairn search engine.
 
 use cairn_client::client::CairnClient;
+use cairn_core::format_size_bytes;
 use cairn_protocol::message::ResponsePayload;
 use clap::Parser;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
-#[command(name = "cairn-cli", about = "Cairn CLI")]
+#[command(name = "CairnCli", about = "Cairn CLI")]
 struct CliArgs {
     /// Search query string
     #[arg(default_value = "")]
@@ -51,7 +52,9 @@ async fn main() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Error: Cannot connect to Cairn Service: {e}");
-            eprintln!("Please ensure cairnd service is running (or start via `cairnd --console`).");
+            eprintln!(
+                "Please ensure Cairn Service is running (or start via `CairnService --console`)."
+            );
             std::process::exit(2);
         }
     };
@@ -105,6 +108,7 @@ async fn main() {
             match env.payload {
                 ResponsePayload::QueryResult {
                     total_matches,
+                    total_bytes,
                     first_page,
                     ..
                 } => {
@@ -127,9 +131,10 @@ async fn main() {
                     }
 
                     println!(
-                        "Showing {} of {} matching objects:\n",
+                        "Showing {} of {} matching objects ({}):\n",
                         first_page.len(),
-                        total_matches
+                        total_matches,
+                        format_size_bytes(total_bytes)
                     );
                     println!("{:<40} {:<60} {:>12}", "Name", "Path", "Size");
                     println!("{}", "-".repeat(116));
@@ -138,7 +143,7 @@ async fn main() {
                         let size_str = if row.is_dir {
                             "<DIR>".to_string()
                         } else {
-                            format_file_size(row.size)
+                            format_size_bytes(row.size)
                         };
 
                         println!(
@@ -163,18 +168,6 @@ async fn main() {
             eprintln!("Query failed: {e}");
             std::process::exit(1);
         }
-    }
-}
-
-fn format_file_size(bytes: u64) -> String {
-    if bytes < 1024 {
-        format!("{} B", bytes)
-    } else if bytes < 1024 * 1024 {
-        format!("{:.1} KB", bytes as f64 / 1024.0)
-    } else if bytes < 1024 * 1024 * 1024 {
-        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
-    } else {
-        format!("{:.2} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
     }
 }
 
@@ -216,7 +209,7 @@ mod tests {
 
     #[test]
     fn test_cli_args_defaults() {
-        let args = CliArgs::try_parse_from(["cairn-cli"]).expect("parse default args");
+        let args = CliArgs::try_parse_from(["CairnCli"]).expect("parse default args");
         assert_eq!(args.query, "");
         assert!(!args.status);
         assert!(!args.json);
@@ -229,7 +222,7 @@ mod tests {
     #[test]
     fn test_cli_args_custom_options() {
         let args = CliArgs::try_parse_from([
-            "cairn-cli",
+            "CairnCli",
             "my_query",
             "--status",
             "--json",
@@ -250,16 +243,6 @@ mod tests {
         assert_eq!(args.sort, "size");
         assert!(!args.asc);
         assert_eq!(args.export_csv, Some(PathBuf::from("results.csv")));
-    }
-
-    #[test]
-    fn test_format_file_size() {
-        assert_eq!(format_file_size(0), "0 B");
-        assert_eq!(format_file_size(512), "512 B");
-        assert_eq!(format_file_size(1024), "1.0 KB");
-        assert_eq!(format_file_size(1536), "1.5 KB");
-        assert_eq!(format_file_size(1024 * 1024), "1.0 MB");
-        assert_eq!(format_file_size(1024 * 1024 * 1024), "1.00 GB");
     }
 
     #[test]

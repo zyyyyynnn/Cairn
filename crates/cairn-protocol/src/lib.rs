@@ -23,5 +23,4 @@ pub use message::{
 };
 pub use status::{
     ContentIndexState, ContentIndexStatus, ContentIndexTask, VolumeState, VolumeStatusSummary,
-    WorkerStatus,
 };

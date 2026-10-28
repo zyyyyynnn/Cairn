@@ -152,11 +152,8 @@ pub struct DateFilter {
 }
 
 impl DateFilter {
-    pub fn matches(&self, mut ts: i64) -> bool {
-        if ts > 10_000_000_000 {
-            // Convert Windows FILETIME (100-ns intervals since Jan 1, 1601) to Unix timestamp (seconds)
-            ts = (ts - 116444736000000000) / 10_000_000;
-        }
+    pub fn matches(&self, ts: i64) -> bool {
+        let ts = crate::time::timestamp_to_unix_seconds(ts);
         match self.op {
             DateOp::Lt(v) => ts < v,
             DateOp::Lte(v) => ts < v,

@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Startup sequence shared by the Windows service host and `cairnd --console`.
+//! Startup sequence shared by the Windows service host and `CairnService --console`.
 //!
 //! Ordering matters for security: the data locations are created and their access control enforced
 //! *before* `service.toml` is read, so a configuration planted by an unprivileged account is never

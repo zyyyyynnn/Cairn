@@ -11,8 +11,8 @@ fn main() {
 
     if env::var("CARGO_CFG_TARGET_OS").unwrap_or_default() == "windows" {
         let out_dir = env::var("OUT_DIR").unwrap_or_default();
-        let rc_path = Path::new(&out_dir).join("cairnd.rc");
-        let res_path = Path::new(&out_dir).join("cairnd.res");
+        let rc_path = Path::new(&out_dir).join("CairnService.rc");
+        let res_path = Path::new(&out_dir).join("CairnService.res");
 
         let mut res = winres::WindowsResource::new();
         if icon_path.exists() {
@@ -21,7 +21,7 @@ fn main() {
         res.set("FileDescription", "Cairn Service");
         res.set("ProductName", "Cairn");
         res.set("CompanyName", "Cairn Contributors");
-        res.set("OriginalFilename", "cairnd.exe");
+        res.set("OriginalFilename", "CairnService.exe");
         res.set("LegalCopyright", "Copyright (c) 2026 Cairn Contributors");
 
         if let Err(e) = res.write_resource_file(&rc_path) {
@@ -37,8 +37,11 @@ fn main() {
 
         match status {
             Ok(s) if s.success() => {
-                // Link resource ONLY into the cairnd binary, NEVER into the library (which would pollute downstream crates like xtask)
-                println!("cargo:rustc-link-arg-bin=cairnd={}", res_path.display());
+                // Link resource ONLY into the CairnService binary, NEVER into the library (which would pollute downstream crates like xtask)
+                println!(
+                    "cargo:rustc-link-arg-bin=CairnService={}",
+                    res_path.display()
+                );
             }
             Ok(s) => {
                 eprintln!("cargo:warning=rc.exe failed with exit code: {:?}", s.code());

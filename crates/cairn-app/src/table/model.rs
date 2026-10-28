@@ -619,18 +619,6 @@ impl TableState {
     }
 }
 
-pub fn format_row_size(size: u64) -> String {
-    if size < 1024 {
-        format!("{} B", size)
-    } else if size < 1024 * 1024 {
-        format!("{:.1} KB", size as f64 / 1024.0)
-    } else if size < 1024 * 1024 * 1024 {
-        format!("{:.1} MB", size as f64 / (1024.0 * 1024.0))
-    } else {
-        format!("{:.2} GB", size as f64 / (1024.0 * 1024.0 * 1024.0))
-    }
-}
-
 /// Civil year, month and day for a count of days since the Unix epoch.
 ///
 /// Howard Hinnant's `civil_from_days`: it moves across the 400-year Gregorian cycle with integer
@@ -654,16 +642,6 @@ fn civil_from_days(days_since_epoch: i64) -> (i64, i64, i64) {
     (if month <= 2 { year + 1 } else { year }, month, day)
 }
 
-/// Converts a stored timestamp to Unix seconds. Rows can carry either Unix seconds or a Windows
-/// FILETIME (100-ns intervals since Jan 1, 1601).
-fn timestamp_seconds(ts: i64) -> i64 {
-    if ts > 10_000_000_000 {
-        (ts - 116444736000000000) / 10_000_000
-    } else {
-        ts
-    }
-}
-
 fn format_utc_seconds(sec: i64) -> String {
     let (year, month, day) = civil_from_days(sec.div_euclid(86400));
     let rem_sec = sec.rem_euclid(86400);
@@ -683,7 +661,7 @@ pub fn format_timestamp_utc(ts: i64) -> String {
     if ts == 0 {
         return String::new();
     }
-    format_utc_seconds(timestamp_seconds(ts))
+    format_utc_seconds(cairn_core::time::timestamp_to_unix_seconds(ts))
 }
 
 /// Renders a row's timestamp as `YYYY.MM.DD HH:mm` in the user's local time. The index and the
@@ -693,7 +671,7 @@ pub fn format_timestamp(ts: i64) -> String {
     if ts == 0 {
         return String::new();
     }
-    let sec = timestamp_seconds(ts);
+    let sec = cairn_core::time::timestamp_to_unix_seconds(ts);
     #[cfg(windows)]
     if let Some(local) = format_local_seconds(sec) {
         return local;
@@ -733,8 +711,8 @@ mod tests {
     use core::prelude::rust_2021::test;
 
     use super::{
-        format_row_size, format_timestamp, format_timestamp_utc, visible_range, ColumnBoundary,
-        ColumnWidths, SortColumn, TableState, OVERSCAN_ROWS,
+        format_timestamp, format_timestamp_utc, visible_range, ColumnBoundary, ColumnWidths,
+        SortColumn, TableState, OVERSCAN_ROWS,
     };
     use cairn_protocol::message::FileRowData;
 
@@ -748,14 +726,6 @@ mod tests {
             path: "C:\\".to_string(),
             ..Default::default()
         }
-    }
-
-    #[test]
-    fn a_zero_sized_directory_still_renders_a_size() {
-        assert_eq!(format_row_size(0), "0 B");
-        assert_eq!(format_row_size(1024), "1.0 KB");
-        assert_eq!(format_row_size(5 * 1024 * 1024), "5.0 MB");
-        assert_eq!(format_row_size(3 * 1024 * 1024 * 1024), "3.00 GB");
     }
 
     /// A table whose server-reported total is `total` but whose fetched window is `loaded` rows.

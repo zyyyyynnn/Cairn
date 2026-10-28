@@ -5,18 +5,18 @@
 //! The bottom status band: the number of objects the current query matched,
 //! or selected node information in drive visualization mode.
 
-use crate::app::{element_id, layout, CairnApp};
+use crate::app::{layout, CairnApp};
 use crate::shell::accessibility::{self, ControlElement};
 use crate::shell::theme::{self, ShellTokens};
 use crate::treemap::palette::TreemapPalette;
-use cairn_core::treemap::{format_size_bytes, TreemapCategory};
+use cairn_core::format_size_bytes;
+use cairn_core::treemap::TreemapCategory;
 use fluent_bundle::FluentArgs;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::status_bar::StatusBar;
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{h_flex, Icon, Sizable as _};
+use gpui_kit::component::{h_flex, Sizable as _};
 use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::*;
 
@@ -39,134 +39,254 @@ impl CairnApp {
     pub(crate) fn render_status_line(
         &self,
         tokens: &ShellTokens,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> ControlElement {
         let bar = accessibility::control("status-bar");
         let mut zoom_percent = None;
-        let mut aria_summary = if self.recycle_bin_error.is_some() {
-            self.i18n.get_text("status_recycle_bin_unavailable")
-        } else if let Some(items) = &self.recycle_bin {
-            let mut args = FluentArgs::new();
-            args.set("count", items.len() as i64);
-            self.i18n.get_text_with_args("status_objects_count", &args)
-        } else {
-            self.service.status.objects_count_text(&self.i18n)
-        };
-        let mut visible_summary = div()
-            .min_w_0()
-            .truncate()
-            .child(aria_summary.clone())
-            .into_any_element();
+        let mut summary: Option<AnyElement> = None;
+        let mut summary_aria: Option<String> = None;
+        let mut summary_danger = false;
+        let mut summary_loading = false;
+        let mut icon_loading = false;
+        let mut view_name = "table";
 
-        // The table uses the same live marker as the Treemap: a spinner
-        // prefixes the count while the first page or a page fetch is running,
-        // so the two data surfaces read as one system.
-        let table_loading = self.drive_view.is_none()
-            && (self.recycle_bin_loading
-                || (self.recycle_bin.is_none()
-                    && (self.query.is_searching
-                        || self.query.is_fetching_more
-                        || (self.results.table.total_rows() == 0
-                            && self.service.status.is_any_loading()))));
-        if table_loading {
-            visible_summary = h_flex()
-                .min_w_0()
-                .items_center()
-                .gap(rems(layout::SPACE_4))
-                .child(
-                    Spinner::new()
-                        .icon(Icon::new(IconName::LoaderCircle))
-                        .xsmall(),
-                )
-                .child(div().min_w_0().truncate().child(aria_summary.clone()))
-                .into_any_element();
-            // The visual count is the useful progressive feedback; the accessible name says the
-            // result set is still loading instead of repeating a stale count.
-            aria_summary = self.i18n.get_text("status_loading");
-        }
-
-        if self.drive_view.is_some() {
-            if let Some(ref st) = self.treemap_state {
-                zoom_percent = st.zoom_percent();
-                // One summary format for every state, the table side's
-                // `N 个项目` convention carried over with the byte total:
-                // loading only adds the animated icon that marks the count
-                // as still growing.
-                let mut args = FluentArgs::new();
-                args.set("count", st.total_items() as i64);
-                args.set("size", format_size_bytes(st.total_size()));
-                aria_summary = self
-                    .i18n
-                    .get_text_with_args("treemap_status_summary", &args);
-                visible_summary = if st.is_scanning() {
-                    h_flex()
-                        .min_w_0()
-                        .items_center()
-                        .gap(rems(layout::SPACE_4))
-                        .child(
-                            Spinner::new()
-                                .icon(Icon::new(IconName::LoaderCircle))
-                                .xsmall(),
-                        )
-                        .child(div().min_w_0().truncate().child(aria_summary.clone()))
-                        .into_any_element()
-                } else if let Some(node) = st.selected_node() {
-                    let is_aggregate = node.is_aggregate();
-                    let name = if is_aggregate {
-                        let mut args = FluentArgs::new();
-                        args.set("count", node.aggregate_count as i64);
-                        self.i18n.get_text_with_args("treemap_aggregate", &args)
-                    } else {
-                        node.item.name.clone()
-                    };
-                    let size = format_size_bytes(node.item.size);
-                    if is_aggregate {
-                        // A summary has no concrete path; naming one would
-                        // point at an invented location.
-                        aria_summary = format!("{name} {size}");
-                    } else {
-                        let mut args = FluentArgs::new();
-                        args.set("name", name.clone());
-                        args.set("path", node.path.clone());
-                        args.set("size", size.clone());
-                        let pct = if st.total_size() > 0 {
-                            (node.item.size as f64 / st.total_size() as f64) * 100.0
-                        } else {
-                            0.0
-                        };
-                        args.set("percent", format!("{:.1}", pct));
-                        args.set(
-                            "date",
-                            crate::table::model::format_timestamp(node.item.modified_ts),
-                        );
-                        // The full path/date stay available to assistive technology;
-                        // the visible bar only carries the two values the tile shows.
-                        aria_summary = self
-                            .i18n
-                            .get_text_with_args("treemap_status_selected", &args);
-                    }
-                    h_flex()
-                        .min_w_0()
-                        .items_center()
-                        .gap(rems(layout::SPACE_4))
-                        .child(div().min_w_0().truncate().child(name))
-                        .child(div().flex_shrink_0().child(size))
-                        .into_any_element()
-                } else {
+        if self.recycle_bin.error().is_some() {
+            view_name = "recycle-bin";
+            let text = self.i18n.get_text("status_recycle_bin_unavailable");
+            summary_aria = Some(text.clone());
+            summary = Some(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .font_features(theme::tabular_figures())
+                    .child(text)
+                    .into_any_element(),
+            );
+        } else if let Some(items) = self.recycle_bin.rows() {
+            view_name = "recycle-bin";
+            if self.recycle_bin.is_loading() {
+                summary_loading = true;
+                icon_loading = true;
+            } else {
+                let count_text = {
+                    let mut args = FluentArgs::new();
+                    args.set("count", items.len() as i64);
+                    self.i18n.get_text_with_args("status_objects_count", &args)
+                };
+                summary_aria = Some(count_text.clone());
+                summary = Some(
                     div()
                         .min_w_0()
                         .truncate()
-                        .child(aria_summary.clone())
-                        .into_any_element()
+                        .font_features(theme::tabular_figures())
+                        .child(count_text)
+                        .into_any_element(),
+                );
+            }
+        } else if self.drive_view.is_some() {
+            view_name = "treemap";
+            if let Some(ref st) = self.treemap_state {
+                if st.is_scanning() {
+                    // No counts or bytes are published until the scan has a complete tree.
+                    summary_loading = true;
+                    icon_loading = true;
+                } else if st.is_unreadable() {
+                    let text = self.i18n.get_text("treemap_unreadable");
+                    summary_aria = Some(text.clone());
+                    summary = Some(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(tokens.danger)
+                            .child(text)
+                            .into_any_element(),
+                    );
+                    summary_danger = true;
+                } else {
+                    zoom_percent = st.zoom_percent();
+                    let mut args = FluentArgs::new();
+                    args.set("count", st.total_items() as i64);
+                    args.set("size", format_size_bytes(st.total_size()));
+                    let totals_text = self
+                        .i18n
+                        .get_text_with_args("treemap_status_summary", &args);
+                    summary_aria = Some(totals_text.clone());
+                    summary = if let Some(node) = st.selected_node() {
+                        let is_aggregate = node.is_aggregate();
+                        let name = if is_aggregate {
+                            let mut args = FluentArgs::new();
+                            args.set("count", node.aggregate_count as i64);
+                            self.i18n.get_text_with_args("treemap_aggregate", &args)
+                        } else {
+                            node.item.name.clone()
+                        };
+                        let size = format_size_bytes(node.item.size);
+                        if is_aggregate {
+                            // A summary has no concrete path; naming one would
+                            // point at an invented location.
+                            summary_aria = Some(format!("{name} {size}"));
+                        } else {
+                            let mut args = FluentArgs::new();
+                            args.set("name", name.clone());
+                            args.set("path", node.path.clone());
+                            args.set("size", size.clone());
+                            let pct = if st.total_size() > 0 {
+                                (node.item.size as f64 / st.total_size() as f64) * 100.0
+                            } else {
+                                0.0
+                            };
+                            args.set("percent", format!("{:.1}", pct));
+                            args.set(
+                                "date",
+                                crate::table::model::format_timestamp(node.item.modified_ts),
+                            );
+                            // The full path/date stay available to assistive technology;
+                            // the visible bar only carries the two values the tile shows.
+                            summary_aria = Some(
+                                self.i18n
+                                    .get_text_with_args("treemap_status_selected", &args),
+                            );
+                        }
+                        Some(
+                            h_flex()
+                                .min_w_0()
+                                .items_center()
+                                .gap(rems(layout::SPACE_4))
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .truncate()
+                                        .font_features(theme::tabular_figures())
+                                        .child(name),
+                                )
+                                .child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .font_features(theme::tabular_figures())
+                                        .child(size),
+                                )
+                                .into_any_element(),
+                        )
+                    } else {
+                        Some(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .font_features(theme::tabular_figures())
+                                .child(totals_text)
+                                .into_any_element(),
+                        )
+                    };
                 }
+            } else {
+                summary_loading = true;
+                icon_loading = true;
+            }
+        } else {
+            let index_loading = self.service.status.is_any_loading();
+            let awaiting_results = self.results.table.total_rows() == 0;
+            // A total can only be final once the index has settled. While volumes are still
+            // building, a completed query describes a partial index, so its number would climb in
+            // steps as batches land. The band shows the loading indicator alone until the status
+            // poll asks for the result set of the completed index.
+            summary_loading = index_loading
+                || (awaiting_results
+                    && (self.query.is_searching || self.service.is_probing_service));
+            // Paging lazy rows during scrollbar dragging must not flicker the status refresh control.
+            // Only genuine searches, index builds, or connection probes show the loading indicator.
+            icon_loading = summary_loading;
+            if !summary_loading
+                && self.service.is_service_connected
+                && self.service.status.has_objects_summary()
+            {
+                let text = self.service.status.objects_summary_text(&self.i18n);
+                summary_aria = Some(text.clone());
+                summary = Some(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .font_features(theme::tabular_figures())
+                        .child(text)
+                        .into_any_element(),
+                );
             }
         }
+
+        // Keep the native xsmall button body (20px). A forced 24px minimum made the hover
+        // surface extend a row above/below the status line.
+        //
+        // While the window waits, the control is replaced by the single loading indicator: a
+        // second circular mark beside the refresh arrow reads as two loaders. The indicator turns
+        // at 30 FPS, and it is not interactive; refreshing is the idle control's job.
+        let refresh_control: AnyElement = if icon_loading {
+            div()
+                .flex()
+                .items_center()
+                .justify_center()
+                // The slot is the xsmall icon-only button's own footprint (size_5 = 1.25rem),
+                // so swapping the refresh glyph for the loader cannot move or resize the band.
+                .w(rems(1.25))
+                .h(rems(1.25))
+                .child(crate::shell::loading_indicator::loading_indicator(
+                    !cx.reduce_motion(),
+                ))
+                .into_any_element()
+        } else {
+            let refresh_label = self.i18n.get_text("status_refresh");
+            Button::new("status-refresh")
+                .ghost()
+                .xsmall()
+                .icon(IconName::RefreshCw)
+                .tooltip(refresh_label.clone())
+                .accessibility_label(refresh_label)
+                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                    this.refresh_current_view(cx);
+                }))
+                .into_any_element()
+        };
+        let refresh_slot = div()
+            .flex_shrink_0()
+            // The window root clears selection on every left press; the idle refresh is a control,
+            // not a click on the canvas.
+            .on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, _, cx| {
+                cx.stop_propagation()
+            })
+            .child(refresh_control);
+
+        // Opt-in acceptance trace (`CAIRN_PERF_LOG`): the visible summary and the loading state,
+        // never a hidden animated value.
+        crate::shell::perf::mark(&format!(
+            "status frame summary={summary_aria:?} bytes={} summary_loading={summary_loading} icon_loading={icon_loading} view={view_name} qid={}",
+            self.service.status.objects_bytes(),
+            self.query.query_id,
+        ));
+
+        let aria_summary = summary_aria.unwrap_or_else(|| {
+            if summary_loading {
+                self.i18n.get_text("status_loading")
+            } else {
+                self.i18n.get_text("status_refresh")
+            }
+        });
 
         let mut left = h_flex()
             .min_w_0()
             .items_center()
             .gap(rems(layout::SPACE_4))
-            .child(div().min_w_0().flex_1().truncate().child(visible_summary));
+            .child(refresh_slot);
+        // The summary is only rendered once there is a completed result set, so the band does not
+        // shift when it appears.
+        if let Some(summary) = summary {
+            left = left.child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .truncate()
+                    .when(summary_danger, |this| this.text_color(tokens.danger))
+                    .child(summary),
+            );
+        }
         if let Some(percent) = zoom_percent {
             let reset = accessibility::control("treemap-zoom-reset");
             let reset_name = accessibility::name(reset, &self.i18n);
@@ -178,6 +298,7 @@ impl CairnApp {
             left = left.child(
                 div()
                     .flex_shrink_0()
+                    .font_features(theme::tabular_figures())
                     // The window root clears Treemap selection on every left
                     // press; the reset is a control, not a click on the canvas.
                     .on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, _, cx| {
@@ -212,7 +333,7 @@ impl CairnApp {
             // pushes the category legend out of the bar.
             .left(left);
         let right = self
-            .render_treemap_legend(tokens, cx)
+            .render_treemap_legend(tokens, window, cx)
             .or_else(|| self.render_empty_bin_action(cx));
         if let Some(right) = right {
             status_bar = status_bar.right(right);
@@ -235,10 +356,10 @@ impl CairnApp {
     /// because the bin has no toolbar, and it is absent while the listing is
     /// loading, unreadable or genuinely empty.
     fn render_empty_bin_action(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.recycle_bin.is_none()
-            || self.recycle_bin_loading
-            || self.recycle_bin_error.is_some()
-            || self.recycle_bin_all.is_empty()
+        if !self.recycle_bin.is_open()
+            || self.recycle_bin.is_loading()
+            || self.recycle_bin.error().is_some()
+            || self.recycle_bin.all().is_empty()
         {
             return None;
         }
@@ -261,6 +382,7 @@ impl CairnApp {
     fn render_treemap_legend(
         &self,
         tokens: &ShellTokens,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let state = self.treemap_state.as_ref()?;
@@ -284,26 +406,45 @@ impl CairnApp {
                     &args,
                 ))
             };
+            let cat_ix = category as usize;
+            let focus = window
+                .use_keyed_state(("treemap-legend", cat_ix), cx, |_, cx| {
+                    cx.focus_handle().tab_stop(true)
+                })
+                .read(cx)
+                .clone();
+            let click_focus = focus.clone();
+
             row = row.child(
                 h_flex()
-                    .id(element_id(
-                        "treemap-legend",
-                        &format!("{}", category as usize),
-                    ))
+                    .id(("treemap-legend", cat_ix))
+                    .tab_stop(true)
+                    .track_focus(&focus)
+                    .aria_toggled(if visible {
+                        gpui_kit::gpui::accesskit::Toggled::True
+                    } else {
+                        gpui_kit::gpui::accesskit::Toggled::False
+                    })
                     .flex_shrink_0()
                     .items_center()
                     .gap(rems(layout::SPACE_4))
                     .h(rems(layout::LEGEND_ROW))
                     .px(rems(layout::LEGEND_INSET))
                     .rounded(tokens.radius)
-                    .cursor_pointer()
+                    // Reserve the ring's geometry so a keyboard focus never moves the legend,
+                    // and paint it only for keyboard focus: a mouse click may focus the row for
+                    // activation, but it must not draw a control frame.
+                    .border_1()
+                    .border_color(tokens.border.opacity(0.0))
+                    .focus_visible(move |style| style.border_color(tokens.ring))
                     .text_color(tokens.muted_foreground)
                     .hover(move |this| this.bg(tokens.row_hover).text_color(tokens.foreground))
                     .when(!visible, |this| this.opacity(0.35))
                     .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(move |this, _, _, cx| {
+                        cx.listener(move |this, _, window, cx| {
+                            click_focus.focus(window, cx);
                             if let Some(state) = this.treemap_state.as_mut() {
                                 state.toggle_category(category);
                             }
@@ -311,6 +452,15 @@ impl CairnApp {
                             cx.notify();
                         }),
                     )
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            if let Some(state) = this.treemap_state.as_mut() {
+                                state.toggle_category(category);
+                            }
+                            cx.stop_propagation();
+                            cx.notify();
+                        }
+                    }))
                     .child(
                         div()
                             .w(rems(layout::LEGEND_SWATCH))
@@ -324,34 +474,49 @@ impl CairnApp {
                     .child(div().whitespace_nowrap().child(label)),
             );
         }
-        let reset = SharedString::from(self.i18n.get_text("treemap_filter_all"));
-        let reset_tooltip = reset.clone();
+        // The reset is permanent at the end of the legend, whether or not a category is
+        // currently hidden: the legend's trailing control must not appear and disappear with
+        // the filter state.
+        let reset = self.i18n.get_text("treemap_filter_all");
         row = row.child(
-            div()
-                .id("treemap-legend-all")
-                .flex_shrink_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .w(rems(layout::LEGEND_ROW))
-                .h(rems(layout::LEGEND_ROW))
-                .rounded(tokens.radius)
-                .cursor_pointer()
-                .text_color(tokens.muted_foreground)
-                .hover(move |this| this.bg(tokens.row_hover).text_color(tokens.foreground))
-                .tooltip(move |window, cx| Tooltip::new(reset_tooltip.clone()).build(window, cx))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _, _, cx| {
-                        if let Some(state) = this.treemap_state.as_mut() {
-                            state.show_all_categories();
-                        }
-                        cx.stop_propagation();
-                        cx.notify();
-                    }),
-                )
-                .child(Icon::new(IconName::RotateCcw).xsmall()),
+            Button::new("treemap-filter-reset")
+                .ghost()
+                .xsmall()
+                .icon(IconName::ListFilter)
+                .tooltip(reset.clone())
+                .accessibility_label(reset)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if let Some(state) = this.treemap_state.as_mut() {
+                        state.show_all_categories();
+                    }
+                    cx.notify();
+                })),
         );
         Some(row.into_any_element())
+    }
+
+    /// Refreshes whichever data surface the status band is describing. The loading/refresh
+    /// control is the same in the table and Treemap; it starts a new query, a new Treemap scan,
+    /// a new bin listing, or a service probe instead of animating a value.
+    pub(crate) fn refresh_current_view(&mut self, cx: &mut Context<Self>) {
+        if self.recycle_bin.is_open() {
+            self.begin_recycle_bin_load(cx);
+            return;
+        }
+        if self.drive_view.is_some() {
+            if let Some(path) = self
+                .treemap_state
+                .as_ref()
+                .map(|state| state.current_dir().to_string())
+            {
+                self.start_treemap_scan(std::path::PathBuf::from(path), cx);
+            }
+            return;
+        }
+        if !self.service.is_service_connected {
+            self.check_service_connection(cx);
+            return;
+        }
+        self.trigger_search(cx);
     }
 }

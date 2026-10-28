@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! `cairn.exe`: Non-elevated GPU-accelerated desktop GUI for Cairn.
+//! `Cairn.exe`: Non-elevated GPU-accelerated desktop GUI for Cairn.
 #![recursion_limit = "512"]
 #![windows_subsystem = "windows"]
 
@@ -13,6 +13,7 @@ mod shell;
 mod table;
 mod treemap;
 mod view;
+mod win32;
 
 use app::CairnApp;
 use gpui_kit::gpui::*;
@@ -169,6 +170,7 @@ fn main() {
             // keymap before any window or menu reads it, then open the window through
             // `gpui_kit::open_window` so `Root` owns the first level of the window.
             gpui_kit::init(cx);
+            cairn_ui::brand::init_fonts(cx);
             shell::commands::init_keymap(cx);
 
             // The persisted appearance is installed before the first frame, so the window opens at

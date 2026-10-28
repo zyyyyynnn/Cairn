@@ -25,7 +25,6 @@ use crate::shell::theme::{self, ShellTokens};
 use gpui_kit::base::Disableable;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
-use gpui_kit::component::sidebar::SidebarToggleButton;
 use gpui_kit::component::{
     h_flex, v_flex, Icon, IconName, InteractiveElementExt as _, Sizable as _,
 };
@@ -33,24 +32,6 @@ use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::*;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
-
-/// The app mark at 32px, rendered from the workspace's single icon master
-/// under `assets/icons/` (the same source every exe icon and the installer
-/// embed). The title bar draws it at 22px: enough pixels for the six petals
-/// to read, without the dark plate dominating the 14px wordmark beside it.
-const APP_ICON_PNG: &[u8] = include_bytes!("../../../assets/icons/cairn-32.png");
-
-/// The decoded app mark, built once at first paint. `img()` would otherwise copy the PNG bytes and
-/// re-hash them on every frame, because `Image::from_bytes` owns its buffer.
-static APP_ICON: std::sync::OnceLock<std::sync::Arc<Image>> = std::sync::OnceLock::new();
-
-fn app_icon() -> std::sync::Arc<Image> {
-    APP_ICON
-        .get_or_init(|| {
-            std::sync::Arc::new(Image::from_bytes(ImageFormat::Png, APP_ICON_PNG.to_vec()))
-        })
-        .clone()
-}
 
 /// One platform caption button. It keeps the square, full-height hit target and the
 /// `window_control_area` that snap layouts and the native caption expect, while adding the
@@ -102,10 +83,9 @@ fn render_window_control(
                 key_action(window);
             }
         })
-        // Same 34 px control width, full-height center and 16 px glyph as the
-        // GPUI Kit caption controls; the glyph set is the framework's standard
-        // window-control icon family, not custom-drawn art.
-        .child(Icon::new(icon).small())
+        // Same 34 px control width and full-height center as the GPUI Kit caption controls;
+        // the glyph reads the shared 1rem control-icon token.
+        .child(Icon::new(icon).size(rems(theme::UI_ICON_SIZE)))
 }
 
 static FIRST_SKELETON_FRAME: AtomicBool = AtomicBool::new(false);
@@ -305,7 +285,7 @@ impl Render for CairnApp {
             window,
             cx,
         );
-        let status_line = self.render_status_line(&tokens, cx);
+        let status_line = self.render_status_line(&tokens, window, cx);
 
         accessibility::surface("cairn-window")
             .key_context(WINDOW_CONTEXT)
@@ -616,17 +596,16 @@ impl CairnApp {
                             .items_center()
                             .gap(rems(layout::INNER_SPACING))
                             .child(
-                                img(app_icon())
+                                img(cairn_ui::brand::app_icon())
                                     .w(layout::TITLE_BAR_ICON)
                                     .h(layout::TITLE_BAR_ICON)
                                     .flex_shrink_0(),
                             )
                             .child(
                                 div()
-                                    .text_sm()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .font_family(theme::WORDMARK_FONT_FAMILY)
-                                    .italic()
+                                    .text_size(rems(theme::BRAND_TITLE_SIZE))
+                                    .line_height(relative(theme::SERIF_LINE_HEIGHT))
+                                    .font(theme::serif_font(FontWeight::SEMIBOLD))
                                     .text_color(tokens.foreground)
                                     .child(self.i18n.get_text("app_title")),
                             ),
@@ -639,7 +618,10 @@ impl CairnApp {
                                 Button::new("nav-back")
                                     .ghost()
                                     .small()
-                                    .icon(IconName::ArrowLeft)
+                                    .icon(
+                                        Icon::new(IconName::ArrowLeft)
+                                            .size(rems(theme::UI_ICON_SIZE)),
+                                    )
                                     .disabled(!can_back)
                                     .accessibility_label(accessibility::name(
                                         accessibility::control("nav-back"),
@@ -653,7 +635,10 @@ impl CairnApp {
                                 Button::new("nav-forward")
                                     .ghost()
                                     .small()
-                                    .icon(IconName::ArrowRight)
+                                    .icon(
+                                        Icon::new(IconName::ArrowRight)
+                                            .size(rems(theme::UI_ICON_SIZE)),
+                                    )
                                     .disabled(!can_forward)
                                     .accessibility_label(accessibility::name(
                                         accessibility::control("nav-forward"),
@@ -665,8 +650,19 @@ impl CairnApp {
                                     }),
                             )
                             .child(
-                                SidebarToggleButton::new()
-                                    .collapsed(is_collapsed)
+                                // The toggle keeps the small control's own body, so its hover
+                                // fill cannot extend past the icon row.
+                                Button::new("sidebar-toggle")
+                                    .ghost()
+                                    .small()
+                                    .icon(
+                                        Icon::new(if is_collapsed {
+                                            IconName::PanelLeftOpen
+                                        } else {
+                                            IconName::PanelLeftClose
+                                        })
+                                        .size(rems(theme::UI_ICON_SIZE)),
+                                    )
                                     .accessibility_label(accessibility::name(
                                         accessibility::control("sidebar-toggle"),
                                         &self.i18n,

@@ -4,15 +4,16 @@
 
 //! Results table view: headers, rows, placeholders, skeletons, and empty / offline states.
 
-use crate::app::{
-    element_id, join_row_path, layout, split_name_highlights, CairnApp, ServiceIssue,
-};
+use crate::app::{element_id, join_row_path, layout, split_name_highlights, CairnApp};
+use crate::service::service_issue::ServiceIssue;
 use crate::shell::accessibility::{self, ControlElement};
 use crate::shell::command_groups::GroupCommand;
 use crate::shell::commands::RESULTS_CONTEXT;
+use crate::shell::menu_rules::IndexMenuState;
 use crate::shell::theme::{self, ShellTokens};
-use crate::table::model::{format_row_size, format_timestamp, ColumnBoundary, SortColumn};
+use crate::table::model::{format_timestamp, ColumnBoundary, SortColumn};
 use crate::view::announce_shortcut;
+use cairn_core::format_size_bytes;
 use cairn_core::treemap::TreemapCategory;
 use cairn_protocol::message::FileRowData;
 use cairn_protocol::status::ContentIndexState;
@@ -96,28 +97,23 @@ impl ContentQueryNotice {
 }
 
 /// A disconnected service shows its own offline band, so this only explains states where a query
-/// actually reached an indexer. Local fallback is checked first: it never carries a content index,
-/// even though it is "connected" to the user-mode indexer.
-fn content_query_notice(
-    local_mode: bool,
-    connected: bool,
-    status_loading: bool,
-    status_error: bool,
-    state: &ContentIndexState,
-) -> Option<ContentQueryNotice> {
-    if local_mode {
+/// actually reached an indexer. Local fallback is checked first: the user-privilege indexer
+/// carries file names only, even though it is "connected", so a content query can never be
+/// answered there.
+fn content_query_notice(state: &IndexMenuState<'_>) -> Option<ContentQueryNotice> {
+    if state.local_mode {
         return Some(ContentQueryNotice::Local);
     }
-    if !connected {
+    if !state.service_connected {
         return None;
     }
-    if status_loading {
+    if state.content_loading {
         return Some(ContentQueryNotice::Loading);
     }
-    if status_error {
+    if state.content_failed {
         return Some(ContentQueryNotice::Unreadable);
     }
-    match state {
+    match state.content_state {
         ContentIndexState::Ready => None,
         ContentIndexState::Disabled => Some(ContentQueryNotice::Disabled),
         ContentIndexState::Backfilling { .. } => Some(ContentQueryNotice::Backfilling),
@@ -321,7 +317,7 @@ fn render_state_band(
         .child(
             div()
                 .text_sm()
-                .font_medium()
+                .font(theme::serif_font(FontWeight::SEMIBOLD))
                 .text_color(tokens.foreground)
                 .child(title),
         )
@@ -402,33 +398,37 @@ impl CairnApp {
         // The skeleton is the first page only. A background refresh of an index that already
         // shows rows must leave those rows in place: replacing them with the skeleton makes a
         // slow refresh look like a search that never finishes.
-        let bin_loading = self.recycle_bin.is_some() && self.recycle_bin_loading;
-        let first_page_loading = (self.recycle_bin.is_none()
+        let bin_loading = self.recycle_bin.is_open() && self.recycle_bin.is_loading();
+        let first_page_loading = (!self.recycle_bin.is_open()
             && self.results.table.total_rows() == 0
             && (self.query.is_searching
                 || (self.service.is_probing_service && self.service.is_service_connected)))
             || (bin_loading && self.results.table.total_rows() == 0);
-        let index_loading = self.recycle_bin.is_none()
+        let index_loading = !self.recycle_bin.is_open()
             && !self.has_query()
             && self.service.status.is_any_loading()
             && self.results.table.total_rows() == 0;
         // The bin is shell data, not index data: a stopped service must not replace it
         // with the offline band, and an empty bin is its own state, not an offline one.
-        let local_location = self.recycle_bin.is_some() || self.service.is_service_connected;
-        let rows = if self.recycle_bin_error.is_some() {
+        let local_location = self.recycle_bin.is_open() || self.service.is_service_connected;
+        let rows = if self.recycle_bin.error().is_some() {
             // An unreadable bin is authoritative over any rows still in the table. The state band
             // below owns the retry path; stale rows must never become actionable again.
             None
         } else if first_page_loading || index_loading {
             // A known-long state (rebuild, local scan) shows the skeleton at once; an ordinary
-            // first page waits out the measured fast path before adding the loader.
+            // first page waits out the measured fast path before adding the skeleton.
             let delay = if index_loading || bin_loading {
                 Duration::ZERO
             } else {
                 SKELETON_DELAY
             };
+            // A long wait renders a still skeleton: a pulse that repaints the window for minutes
+            // costs a core without telling the reader anything the skeleton does not already say.
+            // The ordinary first page keeps the pulse for its brief wait.
+            let still = cx.reduce_motion() || delay.is_zero();
             Some(
-                self.render_skeleton_band(tokens, row_height, delay, cx.reduce_motion())
+                self.render_skeleton_band(tokens, row_height, delay, still)
                     .into_any_element(),
             )
         } else if local_location && self.results.table.total_rows() > 0 {
@@ -444,7 +444,7 @@ impl CairnApp {
         // the row viewport and the vertical scrollbar gutter so the bottom edge is continuous
         // instead of leaving a bright strip beside the rows. The skeleton and state bands own their
         // own surfaces and must not take it.
-        let showing_result_rows = self.recycle_bin_error.is_none()
+        let showing_result_rows = self.recycle_bin.error().is_none()
             && !(first_page_loading || index_loading)
             && local_location
             && self.results.table.total_rows() > 0;
@@ -629,7 +629,7 @@ impl CairnApp {
         tokens: &ShellTokens,
         row_height: Pixels,
         delay: Duration,
-        reduce_motion: bool,
+        still: bool,
     ) -> impl IntoElement {
         let vh = self.results.table.viewport_height;
         let count = if f32::from(row_height) > 0.0 && vh > 0.0 {
@@ -639,7 +639,7 @@ impl CairnApp {
         };
         let decay_step = 0.65 / (count as f32).max(1.0);
         let skeleton_rows = (0..count).map(move |ix| {
-            self.render_skeleton_row(ix, tokens, row_height, decay_step, delay, reduce_motion)
+            self.render_skeleton_row(ix, tokens, row_height, decay_step, delay, still)
         });
 
         v_flex()
@@ -656,7 +656,7 @@ impl CairnApp {
         row_height: Pixels,
         decay_step: f32,
         delay: Duration,
-        reduce_motion: bool,
+        still: bool,
     ) -> AnyElement {
         const SKELETON_NAME_WIDTHS: [f32; 8] = [8.0, 11.0, 6.5, 9.5, 12.0, 7.5, 10.0, 8.5];
         const SKELETON_PATH_WIDTHS: [f32; 8] = [14.0, 18.0, 12.0, 16.5, 20.0, 13.5, 17.0, 15.0];
@@ -744,28 +744,31 @@ impl CairnApp {
                     ),
             );
 
+        // A still skeleton renders as a single static image. Building the animation and then
+        // painting a constant opacity would keep requesting frames for a value that can never
+        // change, which costs the same as the moving skeleton without showing anything.
+        if still {
+            return row.opacity(1.0).into_any_element();
+        }
+
         let pulse = Animation::new(SKELETON_PULSE)
             .repeat_synced()
             .with_max_fps(SKELETON_MAX_FPS);
         // The list length must not change between frames: GPUI persists the active animation index
-        // in the element state, and a shorter list makes that index out of bounds. A zero-duration
-        // delay keeps the fast path while preserving the two-phase shape.
+        // in the element state, and a shorter list makes that index out of bounds. The ordinary
+        // first page has a non-zero wait phase; a known-long state never reaches this path.
         let animations = vec![Animation::new(delay), pulse];
 
         row.with_animations(
             element_id("skeleton-row", &ix.to_string()),
             animations,
             move |row, phase, delta| {
-                if phase == 0 && !delay.is_zero() {
+                if phase == 0 {
                     // The delay phase: the skeleton exists in the layout but has not become
                     // visible. A fast answer unmounts it before this timer ever elapses.
                     row.opacity(0.0)
                 } else {
-                    if reduce_motion {
-                        row.opacity(1.0)
-                    } else {
-                        row.opacity(pulse_opacity(ix, delta))
-                    }
+                    row.opacity(pulse_opacity(ix, delta))
                 }
             },
         )
@@ -777,7 +780,7 @@ impl CairnApp {
     /// query keeps the ordinary no-match message. Clearing is owned by the search box's own clear
     /// control, so the band never repeats that command as a second button.
     fn render_empty_state(&self, tokens: &ShellTokens, cx: &mut Context<Self>) -> ControlElement {
-        if let Some(_reason) = &self.recycle_bin_error {
+        if self.recycle_bin.error().is_some() {
             let control = accessibility::control("recycle-bin-error");
             let title = self.i18n.get_text("recycle_bin_unavailable_title");
             let hint = self.i18n.get_text("recycle_bin_unavailable_hint");
@@ -806,8 +809,8 @@ impl CairnApp {
         }
 
         let control = accessibility::control("result-state");
-        if self.recycle_bin.is_some() {
-            let bin_empty = self.recycle_bin_all.is_empty();
+        if self.recycle_bin.is_open() {
+            let bin_empty = self.recycle_bin.all().is_empty();
             let (title_index, hint_index) = if bin_empty { (2, 3) } else { (4, 5) };
             let title = accessibility::name_at(control, title_index, &self.i18n);
             let hint = accessibility::name_at(control, hint_index, &self.i18n);
@@ -832,13 +835,7 @@ impl CairnApp {
 
         let has_query = self.has_query();
         let notice = if self.has_content_query() {
-            content_query_notice(
-                self.service.local_mode,
-                self.service.is_service_connected,
-                self.service.content_status_loading,
-                self.service.content_status_error.is_some(),
-                &self.service.content_status.state,
-            )
+            content_query_notice(&self.index_menu_state())
         } else {
             None
         };
@@ -1215,7 +1212,7 @@ impl CairnApp {
         if !band.interactive {
             return row_el.into_any_element();
         }
-        let in_bin = self.recycle_bin.is_some();
+        let in_bin = self.recycle_bin.is_open();
         let commands = if in_bin {
             BIN_COMMANDS
         } else {
@@ -1321,16 +1318,15 @@ impl CairnApp {
         is_selected: bool,
     ) -> Stateful<Div> {
         let tooltip = SharedString::from(row.name.as_str());
-        let extension = if self.recycle_bin.is_some() {
-            self.recycle_bin_icon_extensions
-                .get(&crate::shell::recycle_bin::bin_icon_key(
+        let extension = if self.recycle_bin.is_open() {
+            self.recycle_bin
+                .icon_extension(crate::shell::recycle_bin::bin_icon_key(
                     &row.name,
                     &row.path,
                     row.modified_ts,
                     row.size,
                     row.is_dir,
                 ))
-                .map(String::as_str)
                 .unwrap_or("")
         } else {
             ""
@@ -1426,7 +1422,7 @@ impl CairnApp {
             } else {
                 tokens.muted_foreground
             })
-            .child(format_row_size(row.size))
+            .child(format_size_bytes(row.size))
     }
 
     fn render_date_cell(&self, row: &FileRowData, tokens: &ShellTokens, is_selected: bool) -> Div {
@@ -1654,7 +1650,7 @@ impl CairnApp {
         tokens: &ShellTokens,
         cx: &mut Context<Self>,
     ) -> ControlElement {
-        let label_key = column_label_key(column, self.recycle_bin.is_some());
+        let label_key = column_label_key(column, self.recycle_bin.is_open());
         let control = accessibility::control_at(&element_id("column-header", label_key));
         let label = accessibility::name(control, &self.i18n);
         let is_active = self.results.table.sort_column == column;
@@ -1683,7 +1679,7 @@ impl CairnApp {
                 // Sorting the index reorders rows under the selection, so the stale selection is
                 // dropped. The bin tracks selection by item identity instead, and sorting there
                 // must keep that selection.
-                if this.recycle_bin.is_none() {
+                if !this.recycle_bin.is_open() {
                     this.dismiss_result_selection(cx);
                 }
                 this.toggle_table_sort(column, cx);
@@ -1812,7 +1808,7 @@ mod tests {
             AssetIconName::FileImage
         );
         assert_eq!(
-            CairnApp::result_file_icon("cairn.exe", "", false),
+            CairnApp::result_file_icon("Cairn.exe", "", false),
             AssetIconName::AppWindow
         );
         assert_eq!(
@@ -1886,54 +1882,75 @@ mod tests {
 
     #[test]
     fn a_content_query_explains_an_index_that_cannot_answer() {
+        let mut state = crate::shell::menu_rules::IndexMenuState {
+            scope: crate::service::search_scope::SearchScope::AllFiles,
+            service_installed: true,
+            service_connected: true,
+            switching_scope: false,
+            content_loading: false,
+            content_failed: false,
+            content_action_pending: false,
+            local_mode: false,
+            content_state: &ContentIndexState::Ready,
+        };
+
+        state.local_mode = true;
         assert_eq!(
-            content_query_notice(true, true, false, false, &ContentIndexState::Ready),
+            content_query_notice(&state),
             Some(ContentQueryNotice::Local),
-            "local fallback never carries a content index, even when connected"
+            "the user indexer carries file names only, even when connected"
         );
+
+        state.local_mode = false;
+        state.service_connected = false;
         assert_eq!(
-            content_query_notice(false, false, false, false, &ContentIndexState::Ready),
+            content_query_notice(&state),
             None,
             "the offline band owns the disconnected state"
         );
+
+        state.service_connected = true;
+        state.content_loading = true;
         assert_eq!(
-            content_query_notice(false, true, true, false, &ContentIndexState::Ready),
+            content_query_notice(&state),
             Some(ContentQueryNotice::Loading)
         );
+
+        state.content_loading = false;
+        state.content_failed = true;
         assert_eq!(
-            content_query_notice(false, true, false, true, &ContentIndexState::Ready),
+            content_query_notice(&state),
             Some(ContentQueryNotice::Unreadable),
             "a status read failure must not look like a disabled index"
         );
+
+        state.content_failed = false;
+        state.content_state = &ContentIndexState::Disabled;
         assert_eq!(
-            content_query_notice(false, true, false, false, &ContentIndexState::Disabled),
+            content_query_notice(&state),
             Some(ContentQueryNotice::Disabled)
         );
+
+        let backfilling = ContentIndexState::Backfilling {
+            processed: 3,
+            total: 10,
+        };
+        state.content_state = &backfilling;
         assert_eq!(
-            content_query_notice(
-                false,
-                true,
-                false,
-                false,
-                &ContentIndexState::Backfilling {
-                    processed: 3,
-                    total: 10,
-                }
-            ),
+            content_query_notice(&state),
             Some(ContentQueryNotice::Backfilling)
         );
+
+        let failed = ContentIndexState::Error("worker failed".into());
+        state.content_state = &failed;
         assert_eq!(
-            content_query_notice(
-                false,
-                true,
-                false,
-                false,
-                &ContentIndexState::Error("worker failed".into())
-            ),
+            content_query_notice(&state),
             Some(ContentQueryNotice::Error)
         );
+
+        state.content_state = &ContentIndexState::Ready;
         assert_eq!(
-            content_query_notice(false, true, false, false, &ContentIndexState::Ready),
+            content_query_notice(&state),
             None,
             "a ready index makes zero rows a genuine no-match"
         );

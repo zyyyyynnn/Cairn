@@ -9,86 +9,76 @@ use crate::app::CairnApp;
 use crate::service::config_submission::{
     self, IndexScopeChange, SubmissionOutcome, SubmissionState,
 };
+use crate::service::scope_switch::{ScopeSwitchFailure, ScopeSwitchResult};
+use crate::service::search_scope::SearchScope;
+use crate::service::service_issue::{should_try_silent_start, ServiceIssue};
+use cairn_protocol::status::VolumeStatusSummary;
 use gpui_kit::gpui::{AsyncApp, Context};
 use std::sync::OnceLock;
-
-/// Why the window cannot show results, so the copy can name the condition and the recovery (SVC-03,
-/// SVC-04). Derived from the client error type, never from a string match on a message.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ServiceIssue {
-    /// The service is installed but not running (or its pipe is not answering yet).
-    NotRunning,
-    /// The service is not registered; the user has to run the installer.
-    NotInstalled,
-    /// The service answered, but the protocol versions do not match.
-    ProtocolIncompatible,
-    /// The service refused this Windows account.
-    Unauthorized,
-}
+use std::time::Duration;
 
 #[derive(Clone, Copy)]
 enum ContentAction {
     Set(bool),
-    Cancel,
     Clear,
 }
 
-impl ServiceIssue {
-    pub fn from_client_error(error: &cairn_client::client::ClientError) -> Self {
-        if error.is_protocol_incompatible() {
-            ServiceIssue::ProtocolIncompatible
-        } else if error.is_unauthorized() {
-            ServiceIssue::Unauthorized
-        } else {
-            ServiceIssue::NotRunning
-        }
-    }
+/// Volume status is sampled every 100ms so the sidebar and loading state stay fresh. Result rows
+/// are not: a query is a full index scan, so a growing index is queried once when it settles, not
+/// on every batch.
+const STATUS_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const STATUS_RETRY_INTERVAL: Duration = Duration::from_millis(250);
+const STATUS_MAX_CONSECUTIVE_FAILURES: u32 = 3;
 
-    /// Registry entry naming the announcement this issue makes in the result region (NFR-11). Each
-    /// issue gets its own entry because each names a different condition.
-    pub const fn accessibility_key(self) -> &'static str {
-        match self {
-            ServiceIssue::NotRunning => "service-issue-not-running",
-            ServiceIssue::NotInstalled => "service-issue-not-installed",
-            ServiceIssue::ProtocolIncompatible => "service-issue-incompatible",
-            ServiceIssue::Unauthorized => "service-issue-unauthorized",
-        }
-    }
-}
-
-/// One silent SCM start per connection-loss episode, and only when the service exists and is
-/// merely stopped. A missing service must show install guidance, not request elevation.
-fn should_try_silent_start(issue: ServiceIssue, already_attempted: bool) -> bool {
-    issue == ServiceIssue::NotRunning && !already_attempted
+fn status_failure_is_terminal(consecutive_failures: u32) -> bool {
+    consecutive_failures >= STATUS_MAX_CONSECUTIVE_FAILURES
 }
 
 /// What the status poll does after one answer, and whether it keeps polling.
 ///
-/// The growing index and the final page are two different jobs. While volumes are still loading,
-/// only a count that grew is worth another query, and a query already in flight is newer than the
-/// one this tick would start. Once loading ends the table must be asked one last time even though
-/// nothing will load afterwards, or the final batch stays missing; if an answer is still on its
-/// way, wait for it instead of stopping with stale rows.
+/// A query over a growing index is a full scan of a partial index: its total is not final, and
+/// repeating it for every batch spends the indexer's CPU to publish a number that will change
+/// again. The poll therefore only waits while volumes load, then asks a visible table once for
+/// the result set of the completed index. If an answer is still on its way, wait for it. A hidden
+/// table (Treemap/Recycle Bin) never receives a background query.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum StatusFollowUp {
-    Refresh,
+enum StatusRefreshDecision {
     RefreshAndStop,
     Wait,
+    Stop,
 }
 
-fn status_follow_up(now_loading: bool, searching: bool, grew: bool) -> StatusFollowUp {
-    if searching {
-        return StatusFollowUp::Wait;
-    }
-    if now_loading {
-        if grew {
-            StatusFollowUp::Refresh
-        } else {
-            StatusFollowUp::Wait
-        }
+fn status_refresh_decision(
+    now_loading: bool,
+    searching: bool,
+    table_visible: bool,
+) -> StatusRefreshDecision {
+    if searching || now_loading {
+        StatusRefreshDecision::Wait
+    } else if table_visible {
+        StatusRefreshDecision::RefreshAndStop
     } else {
-        StatusFollowUp::RefreshAndStop
+        StatusRefreshDecision::Stop
     }
+}
+
+/// Whether two status samples differ in anything the window actually shows.
+///
+/// The indexed count drives no visible label: the band publishes only a completed query's total,
+/// and the sidebar shows the volume's state. A growing count therefore must not repaint the
+/// window, or a long build repaints at the poll rate for a number nobody can see. The state,
+/// identity and presence of a volume are visible and do repaint.
+fn volume_status_visibility_changed(
+    previous: &[VolumeStatusSummary],
+    next: &[VolumeStatusSummary],
+) -> bool {
+    previous.len() != next.len()
+        || previous.iter().zip(next).any(|(old, new)| {
+            old.drive_letter != new.drive_letter
+                || old.volume_guid != new.volume_guid
+                || old.status != new.status
+                || old.usn_enabled != new.usn_enabled
+        })
 }
 
 /// Bounded multi-threaded Tokio runtime for desktop IPC operations.
@@ -111,6 +101,13 @@ impl CairnApp {
     /// service-issue band both go through here, so a retry cannot speak a different protocol from the
     /// startup check.
     pub fn check_service_connection(&mut self, cx: &mut Context<Self>) {
+        // The scope the user chose decides which indexer answers, not only which registration the
+        // service carries: a window that remembers "readable files" must read from the user
+        // indexer even when the service is running (UI-10).
+        if self.service.search_scope.needs_local_only() {
+            self.start_local_indexer(cx);
+            return;
+        }
         let runtime = get_tokio_runtime();
         self.service.is_probing_service = true;
         cx.spawn(async move |this, cx: &mut AsyncApp| {
@@ -142,11 +139,11 @@ impl CairnApp {
                             this.service.is_service_connected = true;
                             this.service.service_issue = None;
                             this.service.has_attempted_silent_start = false;
-                            this.service.status.volumes = envelope.volumes;
+                            this.service.status.update_volumes(envelope.volumes);
                             this.start_status_refresh(cx);
                             // A connection probe must not replace the location the
                             // person is reading; the bin does not need the index.
-                            if this.recycle_bin.is_none() {
+                            if !this.recycle_bin.is_open() {
                                 this.trigger_search(cx);
                             }
                             this.refresh_content_status(cx);
@@ -179,63 +176,109 @@ impl CairnApp {
             return;
         }
         self.service.is_refreshing_status = true;
+        // The poll belongs to the indexer that is answering now. When the scope changes, the
+        // generation changes with it and this poll ends rather than reporting the old scope's
+        // state into the new one.
+        let generation = self.service.status_generation;
         let runtime = get_tokio_runtime();
-        cx.spawn(async move |this, cx: &mut AsyncApp| {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let status_task = runtime.spawn(async move {
+            let mut client: Option<cairn_client::client::CairnClient> = None;
+            let mut consecutive_failures = 0u32;
             loop {
-                // GPUI's executor owns this task; `tokio::time::sleep` here runs with no reactor.
-                cx.background_executor()
-                    .timer(std::time::Duration::from_secs(1))
-                    .await;
-                let (tx, rx) = tokio::sync::oneshot::channel();
-                runtime.spawn(async move {
-                    let result = match crate::service::ipc_channel::connect().await {
-                        Ok(mut client) => client.get_status().await,
-                        Err(error) => Err(error),
-                    };
-                    let _ = tx.send(result);
-                });
+                if client.is_none() {
+                    match crate::service::ipc_channel::connect().await {
+                        Ok(connected) => {
+                            client = Some(connected);
+                            consecutive_failures = 0;
+                        }
+                        Err(error) => {
+                            consecutive_failures += 1;
+                            if status_failure_is_terminal(consecutive_failures) {
+                                let _ = tx.send(Err(error));
+                                break;
+                            }
+                            tokio::time::sleep(STATUS_RETRY_INTERVAL).await;
+                            continue;
+                        }
+                    }
+                }
 
-                let outcome = rx.await;
+                let outcome = client
+                    .as_mut()
+                    .expect("client was just connected")
+                    .get_status()
+                    .await;
+                match outcome {
+                    Ok(envelope) => {
+                        consecutive_failures = 0;
+                        if tx.send(Ok(envelope)).is_err() {
+                            break;
+                        }
+                        tokio::time::sleep(STATUS_POLL_INTERVAL).await;
+                    }
+                    Err(error) => {
+                        client = None;
+                        consecutive_failures += 1;
+                        if status_failure_is_terminal(consecutive_failures) {
+                            let _ = tx.send(Err(error));
+                            break;
+                        }
+                        tokio::time::sleep(STATUS_RETRY_INTERVAL).await;
+                    }
+                }
+            }
+        });
+
+        cx.spawn(async move |this, cx: &mut AsyncApp| {
+            while let Some(outcome) = rx.recv().await {
                 let keep_going = this
                     .update(cx, |this: &mut CairnApp, cx| {
                         if !this.service.is_service_connected {
                             return false;
                         }
+                        if this.service.status_generation != generation {
+                            return false;
+                        }
                         match outcome {
-                            Ok(Ok(envelope)) => {
-                                let previous: Vec<(char, u64)> = this
-                                    .service
-                                    .status
-                                    .volumes
-                                    .iter()
-                                    .map(|volume| (volume.drive_letter, volume.indexed_count))
-                                    .collect();
-                                this.service.status.volumes = envelope.volumes;
+                            Ok(envelope) => {
+                                // Only a sample that changes what the window shows is worth a
+                                // frame. A growing indexed count is not visible anywhere in the
+                                // loading state, so repainting for it would cost a full frame ten
+                                // times a second while the index builds.
+                                let visible_change = volume_status_visibility_changed(
+                                    &this.service.status.volumes,
+                                    &envelope.volumes,
+                                );
+                                this.service.status.update_volumes(envelope.volumes);
                                 let now_loading = this.service.status.is_any_loading();
-                                let grew = this.service.status.volumes.iter().any(|volume| {
-                                    previous.iter().any(|(drive, count)| {
-                                        *drive == volume.drive_letter
-                                            && volume.indexed_count > *count
-                                    })
-                                });
-                                // A local scan appends rows while it walks. Refresh the table
-                                // without clearing it when the count grows; once the walk ends,
-                                // wait for any in-flight answer, then take one last fresh page so
-                                // the final rows are included.
-                                cx.notify();
-                                match status_follow_up(now_loading, this.query.is_searching, grew) {
-                                    StatusFollowUp::Refresh => {
-                                        this.refresh_results(cx);
-                                        true
-                                    }
-                                    StatusFollowUp::Wait => true,
-                                    StatusFollowUp::RefreshAndStop => {
+                                let table_visible =
+                                    !this.recycle_bin.is_open() && this.drive_view.is_none();
+                                // The count is owned by the query result set, not by the raw
+                                // volume total. Status polling only refreshes rows and state.
+                                if visible_change {
+                                    cx.notify();
+                                }
+                                match status_refresh_decision(
+                                    now_loading,
+                                    this.query.is_searching,
+                                    table_visible,
+                                ) {
+                                    StatusRefreshDecision::RefreshAndStop => {
                                         this.refresh_results(cx);
                                         false
                                     }
+                                    StatusRefreshDecision::Wait => true,
+                                    StatusRefreshDecision::Stop => false,
                                 }
                             }
-                            _ => false,
+                            Err(error) => {
+                                this.service.is_service_connected = false;
+                                this.service.service_issue =
+                                    Some(ServiceIssue::from_client_error(&error));
+                                cx.notify();
+                                false
+                            }
                         }
                     })
                     .unwrap_or(false);
@@ -243,6 +286,7 @@ impl CairnApp {
                     break;
                 }
             }
+            status_task.abort();
             let _ = this.update(cx, |this: &mut CairnApp, _| {
                 this.service.is_refreshing_status = false;
             });
@@ -251,7 +295,7 @@ impl CairnApp {
     }
 
     fn service_issue_after_probe(&mut self) -> ServiceIssue {
-        self.service.service_installed = crate::shell::os::service_is_installed();
+        self.service.service_installed = crate::service::service_control::service_is_installed();
         if self.service.service_installed {
             ServiceIssue::NotRunning
         } else {
@@ -272,7 +316,7 @@ impl CairnApp {
         };
         if should_try_silent_start(issue, self.service.has_attempted_silent_start) {
             self.service.has_attempted_silent_start = true;
-            if crate::shell::os::try_start_installed_service().is_ok() {
+            if crate::service::service_control::try_start_installed_service().is_ok() {
                 self.poll_service_after_start(cx, false);
                 return;
             }
@@ -356,9 +400,9 @@ impl CairnApp {
                         this.service.local_mode = true;
                         this.service.is_service_connected = true;
                         this.service.service_issue = None;
-                        this.service.status.volumes = envelope.volumes;
+                        this.service.status.update_volumes(envelope.volumes);
                         this.start_status_refresh(cx);
-                        if this.recycle_bin.is_none() {
+                        if !this.recycle_bin.is_open() {
                             this.trigger_search(cx);
                         }
                     }
@@ -393,7 +437,7 @@ impl CairnApp {
         if self.service.is_probing_service {
             return;
         }
-        self.service.service_installed = crate::shell::os::service_is_installed();
+        self.service.service_installed = crate::service::service_control::service_is_installed();
         if !self.service.service_installed {
             self.service.service_issue = Some(ServiceIssue::NotInstalled);
             cx.notify();
@@ -415,8 +459,10 @@ impl CairnApp {
             runtime.spawn(async move {
                 if elevate {
                     // UAC and sc.exe are blocking; keep them off the IPC runtime's worker threads.
-                    let launched =
-                        tokio::task::spawn_blocking(crate::shell::os::start_service_elevated).await;
+                    let launched = tokio::task::spawn_blocking(
+                        crate::service::service_control::start_service_elevated,
+                    )
+                    .await;
                     if !matches!(launched, Ok(Ok(()))) {
                         let _ = tx.send(Err(cairn_client::client::ClientError::ConnectFailed(
                             std::io::Error::new(
@@ -461,9 +507,9 @@ impl CairnApp {
                     this.service.service_issue = None;
                     this.service.service_installed = true;
                     this.service.has_attempted_silent_start = false;
-                    this.service.status.volumes = envelope.volumes;
+                    this.service.status.update_volumes(envelope.volumes);
                     this.start_status_refresh(cx);
-                    if this.recycle_bin.is_none() {
+                    if !this.recycle_bin.is_open() {
                         this.trigger_search(cx);
                     }
                     this.refresh_content_status(cx);
@@ -473,7 +519,8 @@ impl CairnApp {
                     let _ = child.try_wait();
                 } else {
                     this.service.is_service_connected = false;
-                    this.service.service_installed = crate::shell::os::service_is_installed();
+                    this.service.service_installed =
+                        crate::service::service_control::service_is_installed();
                     let issue = if this.service.service_installed {
                         ServiceIssue::NotRunning
                     } else {
@@ -486,6 +533,122 @@ impl CairnApp {
             });
         })
         .detach();
+    }
+
+    /// Switches the window between the two search scopes (UI-10).
+    ///
+    /// The scope that needs the service may have to change the service's start type, which needs
+    /// an administrator. The elevation runs on a worker thread because UAC and `sc.exe` block.
+    /// A refused elevation keeps the previous scope: the window does not claim the new scope
+    /// before it is actually in force, and it does not half-apply one.
+    pub fn switch_search_scope(&mut self, target: SearchScope, cx: &mut Context<Self>) {
+        if self.service.is_switching_scope || target == self.service.search_scope {
+            return;
+        }
+        let previous = self.service.search_scope;
+        self.service.is_switching_scope = true;
+        cx.notify();
+
+        let runtime = get_tokio_runtime();
+        cx.spawn(async move |this, cx: &mut AsyncApp| {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            runtime.spawn(async move {
+                let result = tokio::task::spawn_blocking(move || {
+                    crate::service::scope_switch::switch_to(target, previous)
+                })
+                .await;
+                let _ = tx.send(result);
+            });
+
+            let outcome = rx.await;
+            let _ = this.update(cx, |this: &mut CairnApp, cx| {
+                this.service.is_switching_scope = false;
+                match outcome {
+                    Ok(Ok(result)) => {
+                        // The result carries the scope that is in force. Only an applied switch
+                        // moves the window; every other outcome leaves it where it was, which is
+                        // what keeps a refused switch from half-applying.
+                        this.service.search_scope = result.scope_in_force();
+                        match result {
+                            ScopeSwitchResult::Applied { scope } => {
+                                this.apply_search_scope(scope, cx);
+                            }
+                            ScopeSwitchResult::Cancelled { .. } => {
+                                // The user dismissed the prompt. The window stays usable and
+                                // nothing on the machine changed, so this is a note rather than an
+                                // error.
+                                let message = this.i18n.get_text("menu_search_scope_cancelled");
+                                this.show_info_toast(
+                                    this.i18n.get_text("menu_search_scope"),
+                                    message,
+                                    cx,
+                                );
+                            }
+                            ScopeSwitchResult::Failed { reason, detail, .. } => {
+                                // The technical detail belongs in the log. The page gets one
+                                // sentence in the user's language.
+                                tracing::warn!("the scope switch failed: {reason:?} ({detail})");
+                                let title = this.i18n.get_text("menu_search_scope");
+                                let message = this.i18n.get_text(scope_switch_failure_key(reason));
+                                this.show_error_toast(title, message, cx);
+                            }
+                            ScopeSwitchResult::NotInstalled { .. } => {
+                                let message = this.i18n.get_text("menu_search_scope_not_installed");
+                                this.show_error_toast(
+                                    this.i18n.get_text("menu_search_scope"),
+                                    message,
+                                    cx,
+                                );
+                            }
+                        }
+                    }
+                    // The worker thread panicked or the channel closed: the switch did not happen,
+                    // so the previous scope stays in force.
+                    Ok(Err(join_error)) => {
+                        tracing::warn!("the scope switch task stopped: {join_error}");
+                        let title = this.i18n.get_text("menu_search_scope");
+                        let message = this.i18n.get_text("menu_search_scope_change_failed");
+                        this.show_error_toast(title, message, cx);
+                    }
+                    Err(_) => {
+                        let title = this.i18n.get_text("menu_search_scope");
+                        let message = this.i18n.get_text("menu_search_scope_cancelled");
+                        this.show_info_toast(title, message, cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Puts the window on `scope`: it routes every later IPC call to the matching indexer and
+    /// re-reads what that indexer knows.
+    fn apply_search_scope(&mut self, scope: SearchScope, cx: &mut Context<Self>) {
+        self.service.search_scope = scope;
+        self.settings.search_scope = Some(scope);
+        let _ = self.settings.save();
+        // A different indexer answers from now on, so the status poll of the previous one ends.
+        self.service.status_generation = self.service.status_generation.wrapping_add(1);
+        self.service.is_refreshing_status = false;
+
+        match scope {
+            SearchScope::AllFiles => {
+                // The service is the source of truth for the whole machine; the local indexer is
+                // ended so two indexers never walk the same volumes.
+                if let Some(mut child) = self.service.user_indexer.take() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                crate::service::ipc_channel::use_service();
+                self.service.local_mode = false;
+                self.check_service_connection(cx);
+            }
+            SearchScope::ReadableFiles => {
+                crate::service::ipc_channel::use_local_indexer();
+                self.start_local_indexer(cx);
+            }
+        }
     }
 
     /// Reads the service's content-index lifecycle. While a backfill is running, one delayed
@@ -559,10 +722,6 @@ impl CairnApp {
         self.run_content_action(ContentAction::Set(enabled), cx);
     }
 
-    pub fn cancel_content_index(&mut self, cx: &mut Context<Self>) {
-        self.run_content_action(ContentAction::Cancel, cx);
-    }
-
     pub fn clear_content_index(&mut self, cx: &mut Context<Self>) {
         self.run_content_action(ContentAction::Clear, cx);
     }
@@ -591,21 +750,9 @@ impl CairnApp {
                                     ..
                                 } => Ok(()),
                                 SubmissionState::Finished { detail, .. } => Err(detail
-                                    .unwrap_or_else(|| "the service rejected the change".to_string())),
-                            }
-                        }
-                        ContentAction::Cancel => {
-                            let mut client = cairn_client::client::CairnClient::connect()
-                                .await
-                                .map_err(|err| err.to_string())?;
-                            match client.cancel_content_index().await {
-                                Ok(envelope) => match envelope.payload {
-                                    cairn_protocol::message::ResponsePayload::CancelContentIndexAck {
-                                        success: true,
-                                    } => Ok(()),
-                                    _ => Err("the service did not cancel the content index".to_string()),
-                                },
-                                Err(err) => Err(err.to_string()),
+                                    .unwrap_or_else(|| {
+                                        "the service rejected the change".to_string()
+                                    })),
                             }
                         }
                         ContentAction::Clear => {
@@ -650,63 +797,109 @@ impl CairnApp {
     }
 }
 
+/// The i18n key that explains a scope switch failure in the user's language.
+///
+/// The switch reports *what* went wrong; the window decides how to say it. The technical detail
+/// behind the failure belongs in the log, not on the page.
+fn scope_switch_failure_key(reason: ScopeSwitchFailure) -> &'static str {
+    match reason {
+        ScopeSwitchFailure::RegistrationUnreadable => "menu_search_scope_unreadable",
+        ScopeSwitchFailure::ChangeFailed => "menu_search_scope_change_failed",
+        ScopeSwitchFailure::NotInEffect => "menu_search_scope_not_in_effect",
+        ScopeSwitchFailure::Restricted => "menu_search_scope_restricted",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use core::prelude::rust_2021::test;
 
-    use super::{should_try_silent_start, status_follow_up, ServiceIssue, StatusFollowUp};
+    use super::{
+        status_failure_is_terminal, status_refresh_decision, volume_status_visibility_changed,
+        StatusRefreshDecision,
+    };
     use crate::shell::i18n::I18nManager;
+    use cairn_protocol::status::{VolumeState, VolumeStatusSummary};
 
     #[test]
-    fn a_stopped_installed_service_gets_one_silent_start_attempt() {
-        assert!(should_try_silent_start(ServiceIssue::NotRunning, false));
-        assert!(
-            !should_try_silent_start(ServiceIssue::NotRunning, true),
-            "a second silent attempt would loop without a user action"
-        );
+    fn a_status_poll_reports_a_failure_only_after_consecutive_failures() {
+        assert!(!status_failure_is_terminal(1));
+        assert!(!status_failure_is_terminal(2));
+        assert!(status_failure_is_terminal(3));
+        assert!(status_failure_is_terminal(4));
     }
 
-    #[test]
-    fn a_missing_or_incompatible_service_is_not_started_silently() {
-        for issue in [
-            ServiceIssue::NotInstalled,
-            ServiceIssue::ProtocolIncompatible,
-            ServiceIssue::Unauthorized,
-        ] {
-            assert!(!should_try_silent_start(issue, false), "{issue:?}");
+    fn volume(status: VolumeState, indexed_count: u64) -> VolumeStatusSummary {
+        VolumeStatusSummary {
+            drive_letter: 'C',
+            volume_guid: "guid-c".to_string(),
+            status,
+            indexed_count,
+            usn_enabled: true,
         }
     }
 
     #[test]
-    fn a_growing_index_refreshes_only_when_no_query_is_in_flight() {
-        assert_eq!(
-            status_follow_up(true, false, true),
-            StatusFollowUp::Refresh,
-            "rows appended during the scan must reach the table"
+    fn a_growing_count_alone_does_not_repaint_the_window() {
+        let previous = volume(VolumeState::CatchingUp(0), 8_192);
+        let next = volume(VolumeState::CatchingUp(0), 16_384);
+        assert!(
+            !volume_status_visibility_changed(
+                std::slice::from_ref(&previous),
+                std::slice::from_ref(&next)
+            ),
+            "an indexed count that nothing renders must not schedule a frame"
         );
-        assert_eq!(
-            status_follow_up(true, true, true),
-            StatusFollowUp::Wait,
-            "a second query would cancel the answer already coming"
+
+        let synced = volume(VolumeState::Synced, 16_384);
+        assert!(
+            volume_status_visibility_changed(
+                std::slice::from_ref(&previous),
+                std::slice::from_ref(&synced)
+            ),
+            "the visible volume state changing must repaint"
         );
-        assert_eq!(
-            status_follow_up(true, false, false),
-            StatusFollowUp::Wait,
-            "no new rows means no reason to sort the whole index again"
+        assert!(
+            volume_status_visibility_changed(&[], std::slice::from_ref(&synced)),
+            "a volume appearing must repaint"
         );
     }
 
     #[test]
-    fn the_last_page_is_taken_after_the_scan_ends() {
+    fn a_growing_index_is_never_queried_for_a_partial_result_set() {
         assert_eq!(
-            status_follow_up(false, false, false),
-            StatusFollowUp::RefreshAndStop,
+            status_refresh_decision(true, false, true),
+            StatusRefreshDecision::Wait,
+            "a growing index has no final total; querying it only burns the indexer's CPU"
+        );
+        assert_eq!(
+            status_refresh_decision(true, false, false),
+            StatusRefreshDecision::Wait,
+            "a hidden table waits without querying, exactly like a visible one"
+        );
+        assert_eq!(
+            status_refresh_decision(true, true, true),
+            StatusRefreshDecision::Wait,
+            "a second query would cancel the answer already coming"
+        );
+    }
+
+    #[test]
+    fn the_result_set_is_taken_once_after_the_index_settles() {
+        assert_eq!(
+            status_refresh_decision(false, false, true),
+            StatusRefreshDecision::RefreshAndStop,
             "the final batch is only in the index, not in the table"
         );
         assert_eq!(
-            status_follow_up(false, true, false),
-            StatusFollowUp::Wait,
+            status_refresh_decision(false, true, true),
+            StatusRefreshDecision::Wait,
             "stopping while a query is in flight would leave its answer unapplied"
+        );
+        assert_eq!(
+            status_refresh_decision(false, false, false),
+            StatusRefreshDecision::Stop,
+            "a hidden table has nothing to refresh when loading ends"
         );
     }
 
@@ -731,10 +924,6 @@ mod tests {
                     );
                 }
             }
-            assert!(
-                !i18n.get_text("menu_index_source_local").trim().is_empty(),
-                "the local mode has no name in {locale}"
-            );
         }
     }
 }

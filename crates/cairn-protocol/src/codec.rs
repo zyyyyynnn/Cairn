@@ -262,7 +262,7 @@ mod tests {
 
     #[test]
     fn frame_header_reports_the_declared_version() {
-        let req = ClientRequest::SubscribeStatus;
+        let req = ClientRequest::GetStatus;
 
         let current = encode_frame(&req).expect("encode failed");
         assert_eq!(
