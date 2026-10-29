@@ -93,7 +93,7 @@ flowchart TD
 
 ### 1.6 命名管道 IPC 协议与帧封装
 - 管道地址：服务 `\.\pipe\Cairn.Service`；标准用户降级索引器 `\.\pipe\Cairn.User`。
-- 协议版本号为 `6`；连接必须先完成 `Hello` 握手，版本不匹配时拒绝请求。`QueryResult` 携带匹配文件总字节数，表格底栏据此显示 `N 个项目 X`。
+- 协议帧携带显式协议版本；连接必须先完成 `Hello` 握手，版本不匹配时拒绝请求。`QueryResult` 携带可见匹配文件的自身字节合计，表格底栏据此显示 `N 个项目 X`。
 - 帧格式：`[u32: 负载长度][u16: 协议版本][postcard 序列化二进制内容]`。
 - 响应封套：所有服务端响应必须包裹 `Envelope<T>` 并携带各卷状态列表（`VolumeStatusSummary`）。普通响应使用最近一次完整摘要缓存，避免查询持锁期间新连接的握手等待数秒；查询结果使用查询释放索引后的新鲜摘要，使客户端的加载/过渡决策基于本次结果之后的卷状态。
 - 请求包含：`Hello`、`Query`、`Cancel`、`GetRows`、`GetStatus`、`Rescan`、`GetConfig`、`SetConfig`、`ReloadConfig`、`GetContentIndexStatus`、`CancelContentIndex`、`ClearContentIndex`、`GetTree`。
