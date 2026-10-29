@@ -69,7 +69,9 @@ pub fn start_type_change_command(change: ServiceChange) -> String {
 /// The command is passed without surrounding quotes on purpose: `cmd.exe` treats `&&` inside a
 /// quoted string as literal text, so a quoted chain would run as one unknown command.
 pub fn elevated_parameters(command: &str) -> String {
-    format!("/c {command}")
+    // `/d` keeps the elevated shell from executing the user's AutoRun script with the
+    // administrator token.
+    format!("/d /c {command}")
 }
 
 /// Whether an elevated command's exit code means the service ended up where it was asked to.
@@ -234,12 +236,17 @@ fn service_handle_is_running(service: windows::Win32::System::Services::SC_HANDL
     queried.is_ok() && status.dwCurrentState == SERVICE_RUNNING
 }
 
+/// The arguments `sc.exe` receives for the explicit start action.
+fn service_start_parameters() -> String {
+    format!("start {SERVICE_NAME}")
+}
+
 /// Starts the service through one UAC elevation and waits for `sc.exe` to finish.
 ///
 /// The GUI itself stays unprivileged. This is only called from the offline band's explicit button;
 /// opening the window never requests elevation.
 pub fn start_service_elevated() -> Result<(), ElevationError> {
-    let command = format!("sc start {SERVICE_NAME}");
+    let command = service_start_parameters();
     let code = run_elevated("sc.exe", &command)?;
     if exit_code_is_success(code) {
         Ok(())
@@ -359,10 +366,15 @@ mod tests {
     /// `cmd.exe` treats `&&` inside a quoted string as literal text, so the chain must not be
     /// quoted or the whole thing runs as one unknown command.
     #[test]
-    fn the_elevated_chain_is_not_quoted() {
+    fn the_elevated_chain_is_not_quoted_and_skips_autorun() {
         let parameters = elevated_parameters("sc config CairnService start= auto");
-        assert_eq!(parameters, "/c sc config CairnService start= auto");
+        assert_eq!(parameters, "/d /c sc config CairnService start= auto");
         assert!(!parameters.contains('"'));
+    }
+
+    #[test]
+    fn the_elevated_start_passes_only_the_sc_command() {
+        assert_eq!(service_start_parameters(), "start CairnService");
     }
 
     /// The steps that answer "it was already like that" are successes, not failures.

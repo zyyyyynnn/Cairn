@@ -967,119 +967,17 @@ impl VolumeIndex {
         }
     }
 
-    /// Sums the logical sizes of matched records without double-counting nested containers.
+    /// Sums the own sizes of matched files.
     ///
-    /// If an item's ancestor directory is also in the matched set, the ancestor's recursive
-    /// size already covers it, so the descendant is skipped.
-    /// - For pure file queries, this sums all matched file sizes.
-    /// - For folder queries (e.g. `folder:`), this sums the disjoint root folders (e.g. drive roots),
-    ///   giving the true disk space of the matched folders rather than 0 B.
-    /// - For all-files queries, this returns the total indexed disk space without double-counting.
-    pub(crate) fn calculate_disjoint_total_bytes(&self, matched_indices: &[u32]) -> u64 {
-        if matched_indices.is_empty() {
-            return 0;
-        }
-
-        let mut has_dirs = false;
-        for &idx in matched_indices {
-            if let Some(r) = self.records.get(idx as usize) {
-                if r.is_dir() {
-                    has_dirs = true;
-                    break;
-                }
-            }
-        }
-
-        // Fast path: if no directories were matched, no item can have an ancestor in the matched set.
-        if !has_dirs {
-            return matched_indices.iter().fold(0u64, |acc, &idx| {
-                if let Some(r) = self.records.get(idx as usize) {
-                    acc.saturating_add(r.size)
-                } else {
-                    acc
-                }
-            });
-        }
-
-        let records_len = self.records.len();
-        let mut matched_dirs = vec![false; records_len];
-        for &idx in matched_indices {
-            if let Some(r) = self.records.get(idx as usize) {
-                if r.is_dir() {
-                    matched_dirs[idx as usize] = true;
-                }
-            }
-        }
-
-        // Memoize ancestor resolution: 0 = unvisited, 1 = has matched ancestor, 2 = no matched ancestor.
-        let mut memo = vec![0u8; records_len];
-        let mut total_bytes = 0u64;
-
-        for &idx in matched_indices {
-            let Some(rec) = self.records.get(idx as usize) else {
-                continue;
-            };
-
-            // If an item has no parent, or points to itself as volume root, it has no ancestors.
-            if rec.parent_idx == FileRecord::ROOT_PARENT || rec.parent_idx == idx {
-                total_bytes = total_bytes.saturating_add(rec.size);
-                continue;
-            }
-
-            let mut curr = rec.parent_idx;
-            let mut has_ancestor = false;
-            let mut path_stack = Vec::new();
-
-            while curr != FileRecord::ROOT_PARENT && curr != idx {
-                let u_curr = curr as usize;
-                if u_curr >= records_len {
-                    break;
-                }
-
-                if matched_dirs[u_curr] {
-                    has_ancestor = true;
-                    break;
-                }
-
-                match memo[u_curr] {
-                    1 => {
-                        has_ancestor = true;
-                        break;
-                    }
-                    2 => {
-                        has_ancestor = false;
-                        break;
-                    }
-                    _ => {
-                        let parent = self.records[u_curr].parent_idx;
-                        path_stack.push(u_curr);
-                        if parent == curr
-                            || parent == FileRecord::ROOT_PARENT
-                            || path_stack.len() >= 256
-                        {
-                            break;
-                        }
-                        curr = parent;
-                    }
-                }
-            }
-
-            if has_ancestor {
-                for p in path_stack {
-                    memo[p] = 1;
-                }
-            } else if path_stack.len() < 256 {
-                for p in path_stack {
-                    memo[p] = 2;
-                }
-            }
-
-            if !has_ancestor {
-                total_bytes = total_bytes.saturating_add(rec.size);
-            }
-        }
-
-        total_bytes
+    /// Directories are containers: they contribute zero here, so the total always describes the
+    /// visible result set and never counts an excluded descendant through an ancestor's aggregate.
+    pub(crate) fn calculate_matched_file_bytes(&self, matched_indices: &[u32]) -> u64 {
+        matched_indices.iter().fold(0u64, |acc, &idx| {
+            self.records
+                .get(idx as usize)
+                .filter(|record| record.is_file())
+                .map_or(acc, |record| acc.saturating_add(record.size))
+        })
     }
 }
 
@@ -2225,7 +2123,7 @@ impl MultiVolumeEngine {
             for (drive, matches) in tantivy_vol_matches {
                 if let Some(vol) = lock.get(&drive) {
                     total_bytes =
-                        total_bytes.saturating_add(vol.calculate_disjoint_total_bytes(&matches));
+                        total_bytes.saturating_add(vol.calculate_matched_file_bytes(&matches));
                 }
             }
         } else {
@@ -2313,7 +2211,7 @@ impl MultiVolumeEngine {
                     });
                 }
 
-                total_bytes = vol.calculate_disjoint_total_bytes(&vol_matches);
+                total_bytes = vol.calculate_matched_file_bytes(&vol_matches);
 
                 if single_vol_presorted && !sort_asc {
                     all_results.reverse();
@@ -2363,8 +2261,8 @@ impl MultiVolumeEngine {
                             generation: vol.generation,
                         });
                     }
-                    total_bytes = total_bytes
-                        .saturating_add(vol.calculate_disjoint_total_bytes(&vol_matches));
+                    total_bytes =
+                        total_bytes.saturating_add(vol.calculate_matched_file_bytes(&vol_matches));
                 }
             }
 
@@ -3339,7 +3237,8 @@ mod tests {
         assert_eq!(total, 1);
         assert_eq!(bytes, 100);
 
-        // A folder query must compute the disjoint folder sizes, never returning 0 B.
+        // Directory rows carry no own file bytes. A folder-only result therefore reports zero
+        // rather than borrowing an aggregate that may include excluded descendants.
         let (_, total, _, _, bytes) = engine.execute_search_multi(
             "folder:",
             &QueryDefaults::default(),
@@ -3348,10 +3247,7 @@ mod tests {
             &cancel,
         );
         assert_eq!(total, 2, "matches C: and folder");
-        assert_eq!(
-            bytes, 600,
-            "disjoint root folder C: contains all 600 bytes; not 0 B"
-        );
+        assert_eq!(bytes, 0, "directory rows do not contribute bytes");
 
         let (_, total, _, _, bytes) = engine.execute_search_multi(
             "folder",
@@ -3361,10 +3257,7 @@ mod tests {
             &cancel,
         );
         assert_eq!(total, 1, "matches only the folder named 'folder'");
-        assert_eq!(
-            bytes, 300,
-            "the folder's recursive size of 300 bytes is preserved; not 0 B"
-        );
+        assert_eq!(bytes, 0, "directory rows do not contribute bytes");
     }
 
     #[test]
@@ -4307,7 +4200,7 @@ mod tests {
     }
 
     #[test]
-    fn calculate_disjoint_total_bytes_handles_ntfs_root_and_nested_folders() {
+    fn calculate_matched_file_bytes_counts_only_files() {
         let mut vol = VolumeIndex::new('C');
         // Simulate NTFS hierarchy:
         // FRN 5 (root, parent 5), aggregate size 1000
@@ -4398,23 +4291,20 @@ mod tests {
         let note_idx = vol.frn_to_idx[&30][0];
         let out_idx = vol.frn_to_idx[&50][0];
 
-        // 1. All folders matched (e.g. folder: query)
-        // Disjoint sum must be root's total (150), NOT 0 B!
+        // 1. Folder-only results carry no file bytes; directories are containers.
         let all_folders = vec![root_idx, win_idx, sys_idx, users_idx];
-        assert_eq!(vol.calculate_disjoint_total_bytes(&all_folders), 150);
+        assert_eq!(vol.calculate_matched_file_bytes(&all_folders), 0);
 
-        // 2. Subfolders matched without root: Windows + System32 + Users
-        // Windows covers System32 (50), Users is 0 -> total 50
+        // 2. A nested folder still contributes no aggregate size of its own.
         let subfolders = vec![win_idx, sys_idx, users_idx];
-        assert_eq!(vol.calculate_disjoint_total_bytes(&subfolders), 50);
+        assert_eq!(vol.calculate_matched_file_bytes(&subfolders), 0);
 
-        // 3. Pure file query: notepad + outside -> 50 + 100 = 150
+        // 3. Pure file query: notepad + outside -> 50 + 100 = 150.
         let files = vec![note_idx, out_idx];
-        assert_eq!(vol.calculate_disjoint_total_bytes(&files), 150);
+        assert_eq!(vol.calculate_matched_file_bytes(&files), 150);
 
-        // 4. Mixed query: Windows (folder) + notepad (descendant file) + outside (disjoint file)
-        // Windows already includes notepad -> Windows (50) + outside (100) = 150
+        // 4. Mixed query: the directory contributes zero; only its matched files count.
         let mixed = vec![win_idx, note_idx, out_idx];
-        assert_eq!(vol.calculate_disjoint_total_bytes(&mixed), 150);
+        assert_eq!(vol.calculate_matched_file_bytes(&mixed), 150);
     }
 }

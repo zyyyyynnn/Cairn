@@ -86,7 +86,10 @@ async fn a_user_mode_indexer_answers_queries_on_its_own_pipe() {
         } => {
             assert!(total_matches >= 1, "must match folder");
             assert!(first_page.iter().any(|row| row.name == "docs"));
-            assert_eq!(total_bytes, 6, "folder total_bytes must not be 0!");
+            assert_eq!(
+                total_bytes, 0,
+                "directory rows do not contribute file bytes"
+            );
         }
         other => panic!("unexpected answer: {other:?}"),
     }
