@@ -73,8 +73,8 @@ fn sc_executable() -> String {
 
 /// The `cmd.exe` parameters that run `command` as one elevated command.
 ///
-/// The command is passed without surrounding quotes on purpose: `cmd.exe` treats `&&` inside a
-/// quoted string as literal text, so a quoted chain would run as one unknown command.
+/// The whole chain is passed without surrounding quotes on purpose: `cmd.exe` treats `&&` inside
+/// a quoted string as literal text, so a quoted chain would run as one unknown command.
 pub fn elevated_parameters(command: &str) -> String {
     // `/d` keeps the elevated shell from executing the user's AutoRun script with the
     // administrator token.

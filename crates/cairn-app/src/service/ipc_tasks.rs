@@ -306,10 +306,9 @@ impl CairnApp {
     }
 
     /// Records a failed probe. When the service is installed but stopped, one silent SCM start is
-    /// attempted first so a normal non-administrator launch recovers without a UAC prompt. When
-    /// the pipe still does not answer, the window starts its own user-privilege indexer: the app
-    /// must be usable without elevation, so "the service did not start" is a smaller index, not a
-    /// dead window.
+    /// attempted first so a normal non-administrator launch recovers without a UAC prompt. If the
+    /// pipe still does not answer, AllFiles shows the service issue and the user indexer is offered
+    /// through the ReadableFiles scope; ReadableFiles starts that indexer directly.
     fn handle_probe_failure(&mut self, issue: ServiceIssue, cx: &mut Context<Self>) {
         let issue = if issue == ServiceIssue::NotRunning {
             self.service_issue_after_probe()
