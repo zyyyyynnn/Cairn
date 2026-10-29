@@ -736,7 +736,8 @@ impl CairnApp {
             service_connected: self.service.is_service_connected,
             switching_scope: self.service.is_switching_scope,
             content_loading: self.service.content_status_loading,
-            content_failed: self.service.content_status_error.is_some(),
+            content_failed: self.service.content_status_error.is_some()
+                || self.service.content_action_error.is_some(),
             content_action_pending: self.service.content_action_pending,
             local_mode: self.service.local_mode,
             content_state: &self.service.content_status.state,
