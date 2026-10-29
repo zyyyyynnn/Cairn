@@ -64,9 +64,9 @@ pub fn init_fonts(cx: &App) {
     });
 }
 
-/// The 32 px mark used at its existing 22 px optical size in every title bar. Assets are frozen:
-/// the mark is not redrawn or expanded into a size ladder, so the title bar keeps the mark's
-/// known-clear optical size and lets the 16 px wordmark sit beside it.
+/// The 32 px mark drawn at the 20 px title-bar token in every title bar. Assets are frozen:
+/// the mark is not redrawn or expanded into a size ladder; the title bar keeps a clear mark and
+/// lets the 16 px wordmark sit beside it.
 pub const APP_ICON_PNG: &[u8] = include_bytes!("../../../assets/icons/cairn-32.png");
 
 /// The decoded app mark, built once at first paint.

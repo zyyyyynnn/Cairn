@@ -1486,6 +1486,10 @@ impl MultiVolumeEngine {
         self.config.read().unwrap().clone()
     }
 
+    /// Upper bound on entries in one tree answer. Keeps a pathological directory from allocating
+    /// an unbounded tree; the frame encoder still enforces the byte ceiling.
+    const MAX_TREE_ENTRIES: usize = 100_000;
+
     /// Reads the directory tree below `path` from the owning volume's index,
     /// flattened pre-order for the wire. `None` when no loaded volume covers
     /// the drive in `path` (the caller then answers with empty entries).
@@ -1493,10 +1497,6 @@ impl MultiVolumeEngine {
     /// The size index is built per request: it is an O(records) pass the
     /// Treemap only asks for when it opens a drive, and keeping it resident
     /// for one view would tax every query in between.
-    /// Upper bound on entries in one tree answer. Keeps a single response inside the protocol's
-    /// frame budget and keeps a pathological directory from allocating an unbounded tree.
-    const MAX_TREE_ENTRIES: usize = 100_000;
-
     pub fn treemap_tree(&self, path: &str, max_depth: usize) -> Option<Vec<TreeEntryData>> {
         let drive = path.chars().next()?.to_ascii_uppercase();
         let volumes = self.volumes.read().unwrap();
@@ -1531,9 +1531,9 @@ impl MultiVolumeEngine {
         );
         let mut entries = Vec::new();
         flatten_tree(&tree, 0, &mut entries);
-        // The wire frame is capped at 16 MiB. A path with more direct children than this
-        // budget cannot be answered in one response; returning None makes the caller report
-        // "not indexed here" and the window use its own scan instead of dropping the pipe.
+        // The tree is capped by entry count. A path above this budget cannot be answered in one
+        // response; returning None makes the caller report "not indexed here" and use its own
+        // scan instead of dropping the pipe.
         if entries.len() > Self::MAX_TREE_ENTRIES {
             return None;
         }
