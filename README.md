@@ -149,7 +149,7 @@ docs/              产品规格、工程架构与外部调研文档
 | [性能](docs/engineering/performance.md) | NFR 目标、流式/内存与 Treemap 性能约束 |
 | [质量门禁](docs/engineering/quality.md) | 测试分层与 CI 质量门禁 |
 | [打包与发布](docs/engineering/release.md) | GPUI 安装器、WiX MSI 与发布校验 |
-| [安装与卸载](docs/engineering/installer.md) | 安装流程、唯一 ARP、卸载清理与旧 Burn 迁移 |
+| [安装与卸载](docs/engineering/installer.md) | 安装流程、唯一 ARP、卸载清理与 Burn 注册迁移 |
 | [外部调研](docs/research/README.md) | 竞品档案与一手资料索引 |
 
 ## 许可证

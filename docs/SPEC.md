@@ -268,7 +268,7 @@
 
 | 编号 | 优先级 | 需求描述 | 交付产物与验证标准 |
 |:---|:---|:---|:---|
-| **REL-01** | P1 | 基于 GPUI Setup + 静默 MSI 的单文件安装包（`CairnSetup.exe`）：GPUI 安装/卸载界面复用产品 token，MSI 作为内部事务引擎注册 `CairnService`、配置 SYSTEM/Administrators 权限、创建快捷方式、写入机器 PATH，并维护唯一可见的 GPUI 卸载入口；旧 Burn 条目在安装前迁移；同步输出 `cairn.wxs` | 产出 `CairnSetup.exe`、`cairn.msi`、`cairn.wxs` 与 SHA256 校验；Apps & features 只显示一个 Cairn 条目；严禁输出无系统服务权限的便携版 ZIP |
+| **REL-01** | P1 | 基于 GPUI Setup + 静默 MSI 的单文件安装包（`CairnSetup.exe`）：GPUI 安装/卸载界面复用产品 token，MSI 作为内部事务引擎注册 `CairnService`、配置 SYSTEM/Administrators 权限、创建快捷方式、写入机器 PATH，并维护唯一可见的 GPUI 卸载入口；安装前移除已有 Burn 注册并接管；同步输出 `cairn.wxs` | 产出 `CairnSetup.exe`、`cairn.msi`、`cairn.wxs` 与 SHA256 校验；Apps & features 只显示一个 Cairn 条目；严禁输出无系统服务权限的便携版 ZIP |
 | **REL-02** | P1 | 官方发布产物均经过 Authenticode 代码签名（或本地测试证书签名） | 签名证书链合规有效 |
 | **REL-04** | P1 | 构建流水线自动产出全部二进制产物的 `SHA256SUMS.txt` 校验和文件，并附带与 Everything 1.4 对标的自动化基准评测报告 | 校验和精确匹配，报告包含中位延迟与常驻内存对比 |
 
