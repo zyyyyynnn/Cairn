@@ -764,6 +764,13 @@ impl CairnApp {
         if self.service.content_status_loading {
             return self.i18n.get_text("menu_content_search_loading");
         }
+        if let Some(reason) = &self.service.content_action_error {
+            return self.reason_label(
+                "menu_content_search_failed",
+                "menu_content_search_failed_reason",
+                reason,
+            );
+        }
         if let Some(reason) = &self.service.content_status_error {
             return self.reason_label(
                 "menu_content_search_unavailable",
