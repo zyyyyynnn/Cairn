@@ -49,10 +49,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: "Layer 1: Core Domain & Protocol Models"
-        run: cargo test -p cairn-protocol -p cairn-ntfs -p cairn-content -p cairn-client -p cairn-core
+        run: cargo test -p cairn-protocol -p cairn-ntfs -p cairn-content -p cairn-client -p cairn-core -p cairn-ui
 
       - name: "Layer 2: Service Engine & System IPC"
-        run: cargo test -p cairn-service --test user_mode_pipe
+        run: cargo test -p cairn-service
 
       - name: "Layer 3: Desktop UI & State Reconciliation"
         run: cargo test -p cairn-app

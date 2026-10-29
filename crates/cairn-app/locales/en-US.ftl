@@ -167,7 +167,10 @@ recycle_bin_unavailable_hint = The Recycle Bin list is unavailable. Try again.
 recycle_bin_retry = Try again
 status_recycle_bin_unavailable = Recycle Bin unavailable
 status_loading = Loading
-status_objects_summary = { $count } items { $size }
+status_objects_summary = { $count ->
+    [one] { $count } item { $size }
+   *[other] { $count } items { $size }
+}
 status_refresh = Refresh
 toast_status = Notification
 toast_dismiss = Dismiss notification

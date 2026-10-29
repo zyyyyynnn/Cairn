@@ -900,7 +900,9 @@ impl CairnApp {
         let start_label = accessibility::name(start, &self.i18n);
         // Starting the service is a UAC action, so it is offered only when SCM says the service
         // exists. A missing service gets install guidance instead of an elevation prompt.
-        let can_start = self.service.service_installed && issue == ServiceIssue::NotRunning;
+        let can_start = self.service.service_installed
+            && issue == ServiceIssue::NotRunning
+            && !self.service.search_scope.needs_local_only();
         // The small line states the outcome or the issue-specific recovery; the button carries
         // the action. Start and retry states keep the same title + hint + action rhythm.
         let hint = if can_start {

@@ -134,9 +134,25 @@ pub fn run_elevated(_program: &str, _parameters: &str) -> Result<u32, ElevationE
 }
 
 /// Resolves an executable in the system directory.
+///
+/// The system directory comes from the OS, not from `SystemRoot`: a user-writable environment
+/// variable must not be able to redirect an elevated command to another executable.
 pub fn system32(executable: &str) -> PathBuf {
-    let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
-    PathBuf::from(root).join("System32").join(executable)
+    #[cfg(windows)]
+    {
+        use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
+
+        let mut buffer = [0u16; 260];
+        let length = unsafe { GetSystemDirectoryW(Some(&mut buffer)) } as usize;
+        if length > 0 && length < buffer.len() {
+            return PathBuf::from(String::from_utf16_lossy(&buffer[..length])).join(executable);
+        }
+        PathBuf::from(r"C:\Windows\System32").join(executable)
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from(r"C:\Windows\System32").join(executable)
+    }
 }
 
 #[cfg(test)]
@@ -146,7 +162,13 @@ mod tests {
     #[test]
     fn an_executable_is_resolved_inside_the_system_directory() {
         let path = system32("cmd.exe");
-        assert!(path.ends_with("System32\\cmd.exe"));
+        assert!(
+            path.to_string_lossy()
+                .to_ascii_lowercase()
+                .ends_with("system32\\cmd.exe"),
+            "{path:?}"
+        );
         assert!(path.is_absolute());
+        assert!(path.is_file(), "{path:?}");
     }
 }

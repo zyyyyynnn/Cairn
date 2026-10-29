@@ -307,17 +307,12 @@ impl TreemapViewState {
         }
 
         let current_dir = self.navigation.current_dir().to_string();
-        // Only a finished scan is a complete tree. Caching a partial snapshot
-        // would make returning to the drive root show stale, incomplete sizes.
-        // The Arc shares the finished tree with the root view; no copy.
-        if event.is_finished && is_drive_root(&current_dir) {
-            self.stored_drive_tree = self.root_tree.clone();
-        }
-
         if event.is_finished {
             self.is_scanning = false;
-            self.scanned_item_totals
-                .insert(current_dir, event.scanned_files + event.scanned_dirs);
+            self.scanned_item_totals.insert(
+                current_dir.clone(),
+                event.scanned_files + event.scanned_dirs,
+            );
             // The skeleton stays until the scan has the complete tree; the
             // finished event is the only thing that reveals the canvas and
             // computes its layout.
@@ -325,6 +320,12 @@ impl TreemapViewState {
                 let tree = Arc::make_mut(tree);
                 tree.compute_aggregated_sizes();
                 tree.sort_recursive();
+            }
+            // Cache only after the final mutation, so the drive-root view and
+            // the cache share one finished allocation instead of forcing a
+            // copy-on-write clone of the largest tree on the UI thread.
+            if is_drive_root(&current_dir) {
+                self.stored_drive_tree = self.root_tree.clone();
             }
             self.recompute_layout();
             self.reveal_content();
@@ -1191,6 +1192,38 @@ mod tests {
         state.apply_scan_event(finished);
         assert!(!state.is_scanning());
         assert_eq!(state.total_items(), 84_000);
+    }
+
+    #[test]
+    fn a_finished_drive_scan_shares_the_cached_tree_without_copying() {
+        let mut state = TreemapViewState::new_for_test('C');
+        state.is_scanning = true;
+        state.apply_scan_event(cairn_core::treemap::TreemapScanEvent {
+            update: cairn_core::treemap::TreemapScanUpdate::Listing(
+                cairn_core::treemap::TreemapTreeNode::new_dir(1, "C:".into(), 0),
+            ),
+            scanned_files: 0,
+            scanned_dirs: 0,
+            is_finished: false,
+            root_unreadable: false,
+        });
+        state.apply_scan_event(cairn_core::treemap::TreemapScanEvent {
+            update: cairn_core::treemap::TreemapScanUpdate::Progress {
+                completed: Vec::new(),
+                partial_sizes: Vec::new(),
+            },
+            scanned_files: 0,
+            scanned_dirs: 0,
+            is_finished: true,
+            root_unreadable: false,
+        });
+
+        let root = state.root_tree.as_ref().expect("root tree");
+        let cached = state.stored_drive_tree.as_ref().expect("drive cache");
+        assert!(
+            Arc::ptr_eq(root, cached),
+            "the finished drive tree must be shared with its cache, not cloned"
+        );
     }
 
     #[test]

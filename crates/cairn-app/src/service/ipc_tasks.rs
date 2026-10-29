@@ -288,7 +288,9 @@ impl CairnApp {
             }
             status_task.abort();
             let _ = this.update(cx, |this: &mut CairnApp, _| {
-                this.service.is_refreshing_status = false;
+                if this.service.status_generation == generation {
+                    this.service.is_refreshing_status = false;
+                }
             });
         })
         .detach();
@@ -324,6 +326,12 @@ impl CairnApp {
         // A service that answered and refused this account is a policy decision. Falling back to a
         // local index would quietly bypass it, so that issue stays visible instead.
         if issue == ServiceIssue::Unauthorized {
+            self.service.service_issue = Some(issue);
+            return;
+        }
+        // The all-files scope promises the machine-wide index. A user index is a different source,
+        // so show the service issue and its recovery instead of silently claiming the same scope.
+        if self.service.search_scope.needs_service() {
             self.service.service_issue = Some(issue);
             return;
         }
@@ -625,6 +633,12 @@ impl CairnApp {
     /// Puts the window on `scope`: it routes every later IPC call to the matching indexer and
     /// re-reads what that indexer knows.
     fn apply_search_scope(&mut self, scope: SearchScope, cx: &mut Context<Self>) {
+        // A response from the previous indexer must not install rows or counts under the new one.
+        self.query.query_id = self.query.query_id.wrapping_add(1);
+        self.query.is_searching = false;
+        self.query.active_session_id = None;
+        self.results.table.set_rows(Vec::new(), 0);
+        self.service.status.clear_objects_count();
         self.service.search_scope = scope;
         self.settings.search_scope = Some(scope);
         let _ = self.settings.save();
@@ -674,6 +688,7 @@ impl CairnApp {
                 match result {
                     Ok(Ok(envelope)) => {
                         this.service.content_status_error = None;
+                        this.service.content_action_error = None;
                         if let cairn_protocol::message::ResponsePayload::ContentIndexStatus {
                             status,
                         } = envelope.payload

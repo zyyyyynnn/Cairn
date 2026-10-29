@@ -9,7 +9,7 @@
 //! Reading is a plain SCM query a standard user may run; changing needs an administrator and goes
 //! through one elevation.
 
-use crate::service::elevation::{run_elevated, ElevationError};
+use crate::service::elevation::{run_elevated, system32, ElevationError};
 use crate::service::search_scope::{ServiceStartType, ServiceState};
 
 /// The name the service is registered under. This is the one place the name is written down.
@@ -48,20 +48,27 @@ pub struct ServiceChange {
 /// the chain stops at the first failure, so a step that did not happen cannot leave the next one
 /// running against a state the previous one did not establish.
 pub fn start_type_change_command(change: ServiceChange) -> String {
+    let sc = sc_executable();
     let mut steps = Vec::new();
     if change.reconfigure {
         steps.push(format!(
-            "sc config {SERVICE_NAME} start= {}",
+            "{sc} config {SERVICE_NAME} start= {}",
             change.start_type.as_sc_argument()
         ));
     }
     if change.stop {
-        steps.push(format!("sc stop {SERVICE_NAME}"));
+        steps.push(format!("{sc} stop {SERVICE_NAME}"));
     }
     if change.start {
-        steps.push(format!("sc start {SERVICE_NAME}"));
+        steps.push(format!("{sc} start {SERVICE_NAME}"));
     }
     steps.join(" && ")
+}
+
+/// The quoted absolute path `cmd.exe` must use for every step of the elevated chain. Resolving
+/// `sc` through the caller's PATH would let a user-writable directory shadow System32.
+fn sc_executable() -> String {
+    format!("\"{}\"", system32("sc.exe").display())
 }
 
 /// The `cmd.exe` parameters that run `command` as one elevated command.
@@ -74,7 +81,12 @@ pub fn elevated_parameters(command: &str) -> String {
     format!("/d /c {command}")
 }
 
-/// Whether an elevated command's exit code means the service ended up where it was asked to.
+/// Whether a start command's exit code means the service ended up running.
+fn start_exit_code_is_success(code: u32) -> bool {
+    code == 0 || code == ERROR_SERVICE_ALREADY_RUNNING
+}
+
+/// Whether an elevated state-change chain's exit code means every requested step succeeded.
 ///
 /// `sc.exe` answers 1056 when the service was already running and 1062 when it was already
 /// stopped. Both are the state the caller asked for.
@@ -248,7 +260,7 @@ fn service_start_parameters() -> String {
 pub fn start_service_elevated() -> Result<(), ElevationError> {
     let command = service_start_parameters();
     let code = run_elevated("sc.exe", &command)?;
-    if exit_code_is_success(code) {
+    if start_exit_code_is_success(code) {
         Ok(())
     } else {
         Err(ElevationError::Failed {
@@ -330,9 +342,10 @@ mod tests {
             stop: true,
             start: false,
         });
+        let sc = sc_executable();
         assert_eq!(
             command,
-            "sc config CairnService start= auto && sc stop CairnService"
+            format!("{sc} config CairnService start= auto && {sc} stop CairnService")
         );
     }
 
@@ -347,10 +360,11 @@ mod tests {
             stop: true,
             start: false,
         });
-        assert!(command.contains("sc config CairnService start= demand"));
-        assert!(command.contains("sc stop CairnService"));
+        let sc = sc_executable();
+        assert!(command.contains(&format!("{sc} config CairnService start= demand")));
+        assert!(command.contains(&format!("{sc} stop CairnService")));
         assert!(
-            !command.contains("sc start CairnService"),
+            !command.contains(&format!("{sc} start CairnService")),
             "the service must not be started for a scope that does not read from it"
         );
     }
@@ -366,10 +380,23 @@ mod tests {
     /// `cmd.exe` treats `&&` inside a quoted string as literal text, so the chain must not be
     /// quoted or the whole thing runs as one unknown command.
     #[test]
-    fn the_elevated_chain_is_not_quoted_and_skips_autorun() {
-        let parameters = elevated_parameters("sc config CairnService start= auto");
-        assert_eq!(parameters, "/d /c sc config CairnService start= auto");
-        assert!(!parameters.contains('"'));
+    fn the_elevated_chain_is_one_autorun_free_command() {
+        let parameters = elevated_parameters("echo ok && echo done");
+        assert_eq!(parameters, "/d /c echo ok && echo done");
+    }
+
+    #[test]
+    fn the_elevated_chain_uses_the_absolute_sc_path() {
+        let command = start_type_change_command(ServiceChange {
+            start_type: ServiceStartType::Auto,
+            reconfigure: true,
+            stop: true,
+            start: true,
+        });
+        let sc = sc_executable();
+        assert!(command.starts_with(&sc));
+        assert_eq!(command.matches(&sc).count(), 3);
+        assert!(!command.starts_with("sc "));
     }
 
     #[test]
@@ -385,6 +412,14 @@ mod tests {
         assert!(exit_code_is_success(ERROR_SERVICE_NOT_ACTIVE));
         assert!(!exit_code_is_success(1060));
         assert!(!exit_code_is_success(1639));
+    }
+
+    /// A start that reports "not active" did not reach the requested state.
+    #[test]
+    fn a_start_that_is_not_active_is_a_failure() {
+        assert!(start_exit_code_is_success(0));
+        assert!(start_exit_code_is_success(ERROR_SERVICE_ALREADY_RUNNING));
+        assert!(!start_exit_code_is_success(ERROR_SERVICE_NOT_ACTIVE));
     }
 
     /// The service name is written down once.
