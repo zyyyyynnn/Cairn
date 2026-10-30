@@ -173,6 +173,20 @@ impl DirectorySizeIndex {
         }
     }
 
+    /// Number of entries a tree rooted at `dir_idx` would contain at `max_depth`, including the
+    /// root itself. This walks the child lists without allocating, so the service can reject an
+    /// oversized tree before building it.
+    pub fn subtree_entry_count(&self, dir_idx: Option<u32>, max_depth: usize) -> usize {
+        let mut count = 1;
+        if max_depth == 0 {
+            return count;
+        }
+        for &child in self.children_of(dir_idx) {
+            count = count.saturating_add(self.subtree_entry_count(Some(child), max_depth - 1));
+        }
+        count
+    }
+
     /// Resolves an absolute path (e.g. `C:\Windows\System32`) to a record index.
     /// Returns `Some(None)` for the volume root (e.g. `C:\`), `Some(Some(idx))`
     /// for a subdirectory, or `None` if any segment could not be resolved.
@@ -371,6 +385,12 @@ mod tests {
         assert_eq!(index.descendant_count(Some(windows)), 3);
         assert_eq!(index.descendant_count(Some(system32)), 1);
         assert_eq!(index.descendant_count(Some(notepad)), 0);
+
+        assert_eq!(index.subtree_entry_count(None, 0), 1);
+        assert_eq!(index.subtree_entry_count(None, 1), 3);
+        assert_eq!(index.subtree_entry_count(None, 2), 5);
+        assert_eq!(index.subtree_entry_count(None, 6), 6);
+        assert_eq!(index.subtree_entry_count(Some(windows), 1), 3);
 
         let tree = index.build_tree_node(&records, &pool, None, "C:\\", 6);
         assert_eq!(tree.size, 14_000);

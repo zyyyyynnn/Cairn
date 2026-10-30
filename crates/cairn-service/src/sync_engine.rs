@@ -42,7 +42,7 @@ use cairn_protocol::status::{
 };
 use rayon::slice::ParallelSliceMut;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 /// A journal backlog beyond this size is cheaper to recover with a fresh `$MFT` scan than by
@@ -1002,6 +1002,9 @@ pub struct MultiVolumeEngine {
     /// Service data is owned by SYSTEM, so its configuration is written with the restricted
     /// descriptor. A user-mode indexer owns its own settings and writes them as the user.
     secure_config: bool,
+    /// Whether the configuration on disk was authenticated at startup. A rejected file must not
+    /// become trusted merely because a later reload reads it again.
+    config_trusted: AtomicBool,
 }
 
 impl Default for MultiVolumeEngine {
@@ -1061,14 +1064,18 @@ impl MultiVolumeEngine {
         layout: &crate::security::ServiceDataLayout,
         config: ServiceConfig,
     ) -> Self {
-        Self::with_paths(
+        let engine = Self::with_paths(
             &layout.index_dir,
             &layout.content_dir,
             &layout.config_path,
             enumerate_fixed_drives(),
             config,
         )
-        .with_service_data_root(&layout.root)
+        .with_service_data_root(&layout.root);
+        engine
+            .config_trusted
+            .store(!layout.config_untrusted, Ordering::SeqCst);
+        engine
     }
 
     pub fn with_index_dir_and_drives(index_dir: &Path, drives: Vec<char>) -> Self {
@@ -1384,6 +1391,7 @@ impl MultiVolumeEngine {
             content_commands: Mutex::new(None),
             summary_cache: Mutex::new(Vec::new()),
             secure_config: true,
+            config_trusted: AtomicBool::new(true),
         }
     }
 
@@ -1489,6 +1497,11 @@ impl MultiVolumeEngine {
     /// Upper bound on entries in one tree answer. Keeps a pathological directory from allocating
     /// an unbounded tree; the frame encoder still enforces the byte ceiling.
     const MAX_TREE_ENTRIES: usize = 100_000;
+    /// Conservative serialized-size budget for one tree payload. The protocol frame is capped at
+    /// 16 MiB; this leaves room for the envelope and the volume list.
+    const MAX_TREE_PAYLOAD_BYTES: usize = 15 * 1024 * 1024;
+    /// Estimated fixed bytes per entry in the postcard payload.
+    const TREE_ENTRY_OVERHEAD: usize = 64;
 
     /// Reads the directory tree below `path` from the owning volume's index,
     /// flattened pre-order for the wire. `None` when no loaded volume covers
@@ -1522,6 +1535,10 @@ impl MultiVolumeEngine {
             )
         };
 
+        let entry_count = dir_index.subtree_entry_count(dir_idx, max_depth);
+        if entry_count > Self::MAX_TREE_ENTRIES {
+            return None;
+        }
         let tree = dir_index.build_tree_node(
             &volume.records,
             &volume.arena,
@@ -1529,12 +1546,17 @@ impl MultiVolumeEngine {
             &root_name,
             max_depth,
         );
-        let mut entries = Vec::new();
+        let mut entries = Vec::with_capacity(entry_count);
         flatten_tree(&tree, 0, &mut entries);
-        // The tree is capped by entry count. A path above this budget cannot be answered in one
-        // response; returning None makes the caller report "not indexed here" and use its own
-        // scan instead of dropping the pipe.
+        // A path above either budget cannot be answered in one response; returning None makes the
+        // caller report "not indexed here" and use its own scan instead of dropping the pipe.
         if entries.len() > Self::MAX_TREE_ENTRIES {
+            return None;
+        }
+        let estimated_bytes = entries.iter().fold(0usize, |total, entry| {
+            total.saturating_add(entry.name.len().saturating_add(Self::TREE_ENTRY_OVERHEAD))
+        });
+        if estimated_bytes > Self::MAX_TREE_PAYLOAD_BYTES {
             return None;
         }
         Some(entries)
@@ -1607,6 +1629,12 @@ impl MultiVolumeEngine {
     /// Reloads configuration from an explicit path (IDX-09). A missing file resets the engine to the
     /// shipped defaults instead of keeping a configuration nobody can account for.
     pub fn reload_config_from(&self, path: &std::path::Path) -> Result<(), String> {
+        if !self.config_trusted.load(Ordering::SeqCst) {
+            return Err(
+                "the service configuration was not trusted at startup; submit a new configuration"
+                    .to_string(),
+            );
+        }
         if path.exists() {
             let new_cfg = ServiceConfig::load(path)
                 .map_err(|e| format!("Failed to load config from {}: {}", path.display(), e))?;
@@ -1635,6 +1663,7 @@ impl MultiVolumeEngine {
                 .save_atomic(&path)
                 .map_err(|e| format!("could not persist {}: {e}", path.display()))?;
         }
+        self.config_trusted.store(true, Ordering::SeqCst);
         self.update_config(parsed);
         Ok(())
     }
@@ -1661,6 +1690,42 @@ impl MultiVolumeEngine {
             .count()
     }
 
+    /// Marks a volume as rebuilding before its long scan starts. The summary cache is updated
+    /// under its own lock so a handshake during the scan cannot report the previous state.
+    #[cfg(windows)]
+    fn mark_volume_rebuilding(&self, drive: char) -> Option<VolumeState> {
+        let previous = {
+            let mut volumes = self.volumes.write().unwrap();
+            let volume = volumes.get_mut(&drive)?;
+            let previous = volume.status;
+            volume.status = VolumeState::Rebuilding;
+            previous
+        };
+        self.set_cached_summary_status(drive, VolumeState::Rebuilding);
+        Some(previous)
+    }
+
+    #[cfg(windows)]
+    fn restore_volume_status(&self, drive: char, status: VolumeState) {
+        if let Some(volume) = self.volumes.write().unwrap().get_mut(&drive) {
+            volume.status = status;
+        }
+        self.set_cached_summary_status(drive, status);
+    }
+
+    #[cfg(windows)]
+    fn set_cached_summary_status(&self, drive: char, status: VolumeState) {
+        if let Some(summary) = self
+            .summary_cache
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|summary| summary.drive_letter == drive)
+        {
+            summary.status = status;
+        }
+    }
+
     /// Rebuilds one volume from a full `$MFT` scan (IDX-08). Errors whenever the volume is not
     /// tracked, the scan yields nothing, or its result cannot be reconciled with the change journal,
     /// so a rescan is never reported as a silent success.
@@ -1671,6 +1736,9 @@ impl MultiVolumeEngine {
                 return Err(format!("volume {drive}: is not indexed"));
             }
 
+            let previous_status = self
+                .mark_volume_rebuilding(drive)
+                .ok_or_else(|| format!("volume {drive}: is not indexed"))?;
             // T0 must be read before the scan and the scan must stay outside the volume lock, so the
             // journal is bracketed here and only reconciled once the records are in hand (IDX-07).
             let scan_start = open_journal_at_scan_start(drive);
@@ -1691,8 +1759,14 @@ impl MultiVolumeEngine {
                     );
                     Ok(count)
                 }
-                Ok(_) => Err(format!("live MFT scan for {drive}: returned no records")),
-                Err(e) => Err(format!("live MFT scan for {drive}: failed: {e}")),
+                Ok(_) => {
+                    self.restore_volume_status(drive, previous_status);
+                    Err(format!("live MFT scan for {drive}: returned no records"))
+                }
+                Err(e) => {
+                    self.restore_volume_status(drive, previous_status);
+                    Err(format!("live MFT scan for {drive}: failed: {e}"))
+                }
             }
         }
         #[cfg(not(windows))]
@@ -4306,5 +4380,50 @@ mod tests {
         // 4. Mixed query: the directory contributes zero; only its matched files count.
         let mixed = vec![win_idx, note_idx, out_idx];
         assert_eq!(vol.calculate_matched_file_bytes(&mixed), 150);
+    }
+
+    #[test]
+    fn an_untrusted_configuration_cannot_be_reloaded() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let index = temp.path().join("index");
+        let content = temp.path().join("content");
+        let config = temp.path().join("service.toml");
+        let engine = MultiVolumeEngine::with_paths(
+            &index,
+            &content,
+            &config,
+            Vec::new(),
+            ServiceConfig::default(),
+        );
+        engine.config_trusted.store(false, Ordering::SeqCst);
+        std::fs::write(&config, "admin_only_query = true\n").expect("write config");
+
+        assert!(
+            engine.reload_config_from(&config).is_err(),
+            "a configuration rejected at startup must not become trusted on reload"
+        );
+        assert!(!engine.get_config().admin_only_query);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_rebuild_is_visible_in_the_cached_summary() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let engine = MultiVolumeEngine::with_index_dir_and_drives(temp.path(), Vec::new());
+        let mut volume = VolumeIndex::new('C');
+        volume.status = VolumeState::Synced;
+        engine.add_volume(volume);
+        let _ = engine.get_volume_summaries();
+
+        let previous = engine
+            .mark_volume_rebuilding('C')
+            .expect("the tracked volume is marked rebuilding");
+        assert_eq!(
+            engine.get_volume_summaries()[0].status,
+            VolumeState::Rebuilding
+        );
+
+        engine.restore_volume_status('C', previous);
+        assert_eq!(engine.get_volume_summaries()[0].status, VolumeState::Synced);
     }
 }
