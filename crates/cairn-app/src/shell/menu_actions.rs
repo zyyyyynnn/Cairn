@@ -7,8 +7,10 @@
 
 use crate::app::{join_row_path, layout, CairnApp};
 use crate::search::filters::FilterCategory;
+use crate::service::search_scope::SearchScope;
 use crate::shell::command_groups::{group_spec, GroupCommand, MenuGroup, ZoomPreset};
 use crate::shell::commands::*;
+use crate::shell::menu_rules::IndexMenuState;
 use crate::shell::os::{
     delete_permanently_from_recycle_bin, delete_to_recycle_bin, empty_recycle_bin, open_file,
     open_folder_and_select, restore_from_recycle_bin, set_clipboard_text, show_properties_dialog,
@@ -16,8 +18,9 @@ use crate::shell::os::{
 };
 use crate::shell::settings::THEME_SYSTEM;
 use crate::shell::theme;
-use crate::table::model::{ColumnBoundary, ColumnWidths, SortColumn};
+use crate::table::model::{format_timestamp, ColumnBoundary, ColumnWidths, SortColumn};
 use crate::view;
+use cairn_core::format_size_bytes;
 use cairn_protocol::status::ContentIndexState;
 use fluent_bundle::FluentArgs;
 use gpui_kit::component::button::ButtonVariant;
@@ -254,7 +257,7 @@ impl CairnApp {
         self.settings.columns.sort_column = sort_column_key(col).to_string();
         self.settings.columns.sort_asc = self.results.table.sort_asc;
         self.save_settings();
-        if self.recycle_bin.is_some() {
+        if self.recycle_bin.is_open() {
             // The bin is an in-memory listing, so its order is applied here instead
             // of asking the service for a new page sorted by the same column.
             self.sort_recycle_bin(cx);
@@ -306,7 +309,7 @@ impl CairnApp {
         self.results.table.sort_asc = !self.results.table.sort_asc;
         self.settings.columns.sort_asc = self.results.table.sort_asc;
         self.save_settings();
-        if self.recycle_bin.is_some() {
+        if self.recycle_bin.is_open() {
             self.sort_recycle_bin(cx);
         } else {
             self.trigger_search(cx);
@@ -322,7 +325,7 @@ impl CairnApp {
         cx: &mut Context<Self>,
     ) {
         // Arrow keys are the table's keyboard path; moving through rows is what makes the focus
-        // ring meaningful, so a pointer's earlier press no longer suppresses it.
+        // ring meaningful, and a pointer press must not suppress keyboard navigation.
         self.results.keyboard_navigation = true;
         let before = self.results.table.focused_idx;
         if forwards {
@@ -465,7 +468,7 @@ impl CairnApp {
     /// merges the row indices into those keys. Clearing the indices on a press that is not a
     /// row would therefore delete the keys and drop the selection instead of preserving it.
     pub(crate) fn dismiss_result_selection_on_chrome_press(&mut self, cx: &mut Context<Self>) {
-        if self.recycle_bin.is_none() {
+        if !self.recycle_bin.is_open() {
             self.dismiss_result_selection(cx);
         }
     }
@@ -474,7 +477,7 @@ impl CairnApp {
     /// search box. Both the clear affordance and Escape land here, so focus never stays on the
     /// clear button as it unmounts.
     pub(crate) fn clear_query_and_scope(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.recycle_bin.is_some() {
+        if self.recycle_bin.is_open() {
             self.clear_bin_filter(window, cx);
             return;
         }
@@ -526,7 +529,7 @@ impl CairnApp {
         }
         // The bin is a location, not an empty query: Escape first clears an
         // in-place bin search, then leaves for the query active before the bin.
-        if self.recycle_bin.is_some() {
+        if self.recycle_bin.is_open() {
             if !self.query.search_input.text.trim().is_empty() {
                 self.clear_bin_filter(window, cx);
                 return;
@@ -694,107 +697,106 @@ impl CairnApp {
     }
 
     fn command_label(&self, command: GroupCommand) -> String {
+        let index = self.index_menu_state();
         match command {
-            // The index rows name the current state; a fixed label would make a status row read
-            // like a command and hide which indexer is answering.
-            GroupCommand::IndexSource => {
-                if self.service.local_mode {
-                    self.i18n.get_text(if self.service.service_installed {
-                        "menu_index_source_local"
-                    } else {
-                        "menu_index_source_local_only"
-                    })
-                } else if self.service.is_service_connected {
-                    self.i18n.get_text("menu_index_source_service")
-                } else {
-                    self.i18n.get_text("menu_index_source_unavailable")
-                }
-            }
-            GroupCommand::ContentIndexStatus => self.content_index_status_label(),
-            GroupCommand::ContentIndexNotice => self.content_index_action_label(),
-            GroupCommand::ToggleContentIndex => self.content_index_toggle_label(),
-            GroupCommand::DeleteSelected if self.recycle_bin.is_some() => {
+            // The content-search row names the action it will perform, so the row never reads as
+            // a status line the user cannot act on.
+            GroupCommand::ToggleContentSearch => self.content_search_toggle_label(),
+            // The details row reports what the content index holds, in the user's language.
+            GroupCommand::ContentSearchDetails => self.content_search_details_label(),
+            // The two facts the popup carries beside that state.
+            GroupCommand::ContentSearchUsage => self.content_search_usage_label(),
+            GroupCommand::ContentSearchUpdated => self.content_search_updated_label(),
+            // "所有文件" needs the background service. Where the service is missing the row is
+            // disabled, and it says why here: the menu has no tooltip channel, so the visible
+            // label is the only place the reason can reach the reader.
+            GroupCommand::SetSearchScope(scope) if index.scope_choice_is_unavailable(scope) => self
+                .i18n
+                .get_text("menu_search_scope_all_files_unavailable"),
+            GroupCommand::DeleteSelected if self.recycle_bin.is_open() => {
                 self.i18n.get_text("ctx_delete_permanently")
             }
-            GroupCommand::SortBy(column) if self.recycle_bin.is_some() => {
+            GroupCommand::SortBy(column) if self.recycle_bin.is_open() => {
                 self.i18n.get_text(column.recycle_bin_label_key())
             }
-            GroupCommand::CopyPaths if self.recycle_bin.is_some() => {
+            GroupCommand::CopyPaths if self.recycle_bin.is_open() => {
                 self.i18n.get_text("ctx_copy_original_location")
             }
             _ => self.i18n.get_text(command.label_key()),
         }
     }
 
-    /// Read-only state of the content index. A status read that failed is reported as exactly that;
-    /// it must not fall back to the default `Disabled` snapshot, which would claim the feature is
-    /// switched off when nobody actually knows.
-    fn content_index_status_label(&self) -> String {
-        if self.service.local_mode {
-            return self.i18n.get_text("menu_content_index_local");
+    /// What the window knows about the service and the content index right now. The Tools menu
+    /// and the result band's empty state both read this one value, so the rows the menu offers and
+    /// the reason the band gives cannot drift apart.
+    pub(crate) fn index_menu_state(&self) -> IndexMenuState<'_> {
+        IndexMenuState {
+            scope: self.service.search_scope,
+            service_installed: self.service.service_installed,
+            service_connected: self.service.is_service_connected,
+            switching_scope: self.service.is_switching_scope,
+            content_loading: self.service.content_status_loading,
+            content_failed: content_failed(
+                self.service.content_status_error.as_deref(),
+                self.service.content_action_error.as_deref(),
+            ),
+            content_action_pending: self.service.content_action_pending,
+            local_mode: self.service.local_mode,
+            content_state: &self.service.content_status.state,
         }
+    }
+
+    /// The single content-search switch. Its label names what clicking it will do, so the row is
+    /// an action rather than a status line the user cannot act on (UI-10).
+    fn content_search_toggle_label(&self) -> String {
+        let enabled = self.index_menu_state().content_index_is_on();
+        self.i18n.get_text(if enabled {
+            "menu_content_search_disable"
+        } else {
+            "menu_content_search_enable"
+        })
+    }
+
+    /// What the content index currently holds, as one line the user can read. A state that could
+    /// not be read says exactly that; it never falls back to "off", which would claim a fact
+    /// nobody knows.
+    fn content_search_details_label(&self) -> String {
         if !self.service.is_service_connected {
-            return self.i18n.get_text("menu_content_index_service_unavailable");
+            return self.i18n.get_text("menu_content_search_unavailable");
+        }
+        if let Some(reason) = &self.service.content_action_error {
+            return self.reason_label(
+                "menu_content_search_failed",
+                "menu_content_search_failed_reason",
+                reason,
+            );
         }
         if self.service.content_status_loading {
-            return self.i18n.get_text("menu_content_index_loading");
+            return self.i18n.get_text("menu_content_search_loading");
         }
         if let Some(reason) = &self.service.content_status_error {
             return self.reason_label(
-                "menu_content_index_unavailable",
-                "menu_content_index_unavailable_reason",
+                "menu_content_search_unavailable",
+                "menu_content_search_unavailable_reason",
                 reason,
             );
         }
         match &self.service.content_status.state {
-            ContentIndexState::Disabled => self.i18n.get_text("menu_content_index_disabled"),
+            ContentIndexState::Disabled => self.i18n.get_text("menu_content_search_off"),
             ContentIndexState::Backfilling { processed, total } => {
                 let mut args = FluentArgs::new();
                 args.set("processed", *processed);
                 args.set("total", *total);
                 self.i18n
-                    .get_text_with_args("menu_content_index_backfilling", &args)
+                    .get_text_with_args("menu_content_search_backfilling", &args)
             }
-            ContentIndexState::Ready => self.i18n.get_text("menu_content_index_ready"),
+            ContentIndexState::Ready => self.i18n.get_text("menu_content_search_ready"),
             ContentIndexState::Error(reason) => self.reason_label(
-                "menu_content_index_error",
-                "menu_content_index_error_reason",
+                "menu_content_search_failed",
+                "menu_content_search_failed_reason",
                 reason,
             ),
         }
-    }
-
-    /// The explicit switch. Its label names what clicking it will do, while the state row above
-    /// stays read-only.
-    fn content_index_toggle_label(&self) -> String {
-        let enabled = matches!(
-            self.service.content_status.state,
-            ContentIndexState::Backfilling { .. } | ContentIndexState::Ready
-        );
-        self.i18n.get_text(if enabled {
-            "menu_content_index_disable"
-        } else {
-            "menu_content_index_enable"
-        })
-    }
-
-    /// Local action progress or a submission failure (pipe, permissions, worker stop). The
-    /// service's own error lives in the state row; this one explains why the last click did not
-    /// change anything yet.
-    fn content_index_action_label(&self) -> String {
-        if self.service.content_action_pending {
-            return self.i18n.get_text("config_submit_in_progress");
-        }
-        let reason = self
-            .service
-            .content_action_error
-            .as_deref()
-            .unwrap_or_default();
-        self.reason_label(
-            "menu_content_index_action_failed",
-            "menu_content_index_action_failed_reason",
-            reason,
-        )
     }
 
     /// Appends a localized reason to a status label, keeping the row short enough to stay one
@@ -810,31 +812,78 @@ impl CairnApp {
         self.i18n.get_text_with_args(key_with_reason, &args)
     }
 
+    /// How much space the content index takes, as one line the user can read. A size nobody has
+    /// reported says exactly that; it never claims an empty index.
+    fn content_search_usage_label(&self) -> String {
+        if !self.service.is_service_connected || self.service.content_status_error.is_some() {
+            return self.i18n.get_text("menu_content_search_usage_unknown");
+        }
+        let mut args = FluentArgs::new();
+        args.set(
+            "size",
+            format_size_bytes(self.service.content_status.index_bytes),
+        );
+        self.i18n
+            .get_text_with_args("menu_content_search_usage", &args)
+    }
+
+    /// When the content index was last committed. Before the first commit there is nothing to
+    /// report, and the row says that instead of showing a zero timestamp.
+    fn content_search_updated_label(&self) -> String {
+        let committed_at = self.service.content_status.last_updated_ts;
+        if !self.service.is_service_connected
+            || self.service.content_status_error.is_some()
+            || committed_at == 0
+        {
+            return self.i18n.get_text("menu_content_search_never_updated");
+        }
+        let mut args = FluentArgs::new();
+        args.set("time", format_timestamp(committed_at));
+        self.i18n
+            .get_text_with_args("menu_content_search_updated", &args)
+    }
+
     /// Rows that would describe an action the current state cannot take are omitted rather than
     /// shown disabled row after row. In particular a failed index offers one retry, not a second
     /// "enable" entry that would quietly mean the same request.
     pub fn command_is_hidden(&self, command: GroupCommand) -> bool {
-        // Without a content index to talk to, only the status row remains; local scan and an
-        // unreachable service both make every action row a false promise.
-        let content_action = matches!(
+        let index = self.index_menu_state();
+        // The content switch and its details only mean something where a content index exists.
+        // In the readable-files scope the user indexer has none, so those rows are absent rather
+        // than promises the window cannot keep (UI-10). The popup that holds them goes with
+        // them: a trigger left behind would open an empty window.
+        let content_row = matches!(
             command,
-            GroupCommand::ToggleContentIndex
-                | GroupCommand::CancelContentIndex
-                | GroupCommand::RetryContentIndex
-                | GroupCommand::RefreshContentIndexStatus
-                | GroupCommand::ClearContentIndex
+            GroupCommand::ToggleContentSearch
+                | GroupCommand::ContentSearchDetailsMenu
+                | GroupCommand::ContentSearchDetails
+                | GroupCommand::ContentSearchUsage
+                | GroupCommand::ContentSearchUpdated
+                | GroupCommand::RetryContentSearch
+                | GroupCommand::ClearContentSearch
         );
-        if content_action && (self.service.local_mode || !self.service.is_service_connected) {
+        if content_row && index.content_rows_are_hidden() {
             return true;
         }
         match command {
+            // A retry only exists for an index that failed, and a clear only for one that holds
+            // something. Both are shown when they apply and absent otherwise, so the popup never
+            // lists an action that would do nothing.
+            GroupCommand::RetryContentSearch => !matches!(
+                self.service.content_status.state,
+                ContentIndexState::Error(_)
+            ),
+            GroupCommand::ClearContentSearch => !matches!(
+                self.service.content_status.state,
+                ContentIndexState::Ready | ContentIndexState::Error(_)
+            ),
             // The bin's own commands exist only where the bin is open; the container's
             // read commands that assume a live filesystem path are hidden there.
             GroupCommand::RestoreSelected | GroupCommand::EmptyRecycleBin => {
-                self.recycle_bin.is_none()
+                !self.recycle_bin.is_open()
             }
             GroupCommand::RevealLocation | GroupCommand::ShowProperties => {
-                self.recycle_bin.is_some()
+                self.recycle_bin.is_open()
             }
             // The bin filter is name/original-location substring matching. Whole
             // word, path matching and regex have no effect there, so their rows
@@ -842,36 +891,14 @@ impl CairnApp {
             // honored by the filter and remains available.
             GroupCommand::ToggleWholeWord
             | GroupCommand::ToggleMatchPath
-            | GroupCommand::ToggleRegex => self.recycle_bin.is_some(),
-            GroupCommand::ContentIndexNotice => {
-                !self.service.content_action_pending && self.service.content_action_error.is_none()
-            }
-            GroupCommand::RefreshContentIndexStatus => self.service.content_status_error.is_none(),
-            GroupCommand::RetryContentIndex => !matches!(
-                self.service.content_status.state,
-                ContentIndexState::Error(_)
-            ),
-            GroupCommand::CancelContentIndex => !matches!(
-                self.service.content_status.state,
-                ContentIndexState::Backfilling { .. }
-            ),
-            GroupCommand::ToggleContentIndex => {
-                // A read failure leaves the real state unknown, and Error has its own recovery.
-                self.service.content_status_error.is_some()
-                    || matches!(
-                        self.service.content_status.state,
-                        ContentIndexState::Error(_)
-                    )
-            }
-            GroupCommand::ClearContentIndex => !matches!(
-                self.service.content_status.state,
-                ContentIndexState::Ready | ContentIndexState::Error(_)
-            ),
+            | GroupCommand::ToggleRegex => self.recycle_bin.is_open(),
+
             _ => false,
         }
     }
 
     pub fn command_is_checked(&self, command: GroupCommand) -> bool {
+        let index = self.index_menu_state();
         match command {
             GroupCommand::ToggleCase => self.query.case_sensitive,
             GroupCommand::ToggleWholeWord => self.query.whole_word,
@@ -883,80 +910,48 @@ impl CairnApp {
             GroupCommand::SetLanguage(code) => self.settings.language == code,
             GroupCommand::SetZoom(preset) => ZoomPreset::nearest(self.zoom_level) == preset,
             GroupCommand::ToggleAutostart => self.settings.autostart,
-            GroupCommand::ToggleContentIndex => matches!(
-                self.service.content_status.state,
-                ContentIndexState::Backfilling { .. } | ContentIndexState::Ready
-            ),
+            GroupCommand::SetSearchScope(scope) => self.service.search_scope.as_str() == scope,
+            // A backfill in progress has its own progress line; the checkmark appears only once
+            // the index is ready, so the mark never claims a finished index (UI-10).
+            GroupCommand::ToggleContentSearch => index.content_switch_is_checked(),
             _ => false,
         }
     }
 
     pub fn command_is_disabled(&self, command: GroupCommand) -> bool {
+        let index = self.index_menu_state();
         match command {
             GroupCommand::OpenSelected
             | GroupCommand::RevealLocation
             | GroupCommand::ShowProperties => self.target_row_ix().is_none(),
             GroupCommand::DeleteSelected | GroupCommand::RestoreSelected => {
-                if self.recycle_bin.is_some() {
-                    self.recycle_bin_loading || self.explicit_bin_selection_indices().is_empty()
+                if self.recycle_bin.is_open() {
+                    self.recycle_bin.is_loading()
+                        || self.explicit_bin_selection_indices().is_empty()
                 } else {
                     self.delete_in_flight || self.selection_indices().is_empty()
                 }
             }
             GroupCommand::EmptyRecycleBin => {
-                self.recycle_bin.is_none()
-                    || self.recycle_bin_loading
-                    || self.recycle_bin_all.is_empty()
+                !self.recycle_bin.is_open()
+                    || self.recycle_bin.is_loading()
+                    || self.recycle_bin.all().is_empty()
             }
             GroupCommand::CopyPaths | GroupCommand::CopyNames => {
                 self.selection_indices().is_empty()
             }
-            GroupCommand::IndexSource
-            | GroupCommand::ContentIndexStatus
-            | GroupCommand::ContentIndexNotice => true,
-            GroupCommand::ToggleContentIndex => {
-                self.service.local_mode
-                    || !self.service.is_service_connected
-                    || self.service.content_status_error.is_some()
-                    || self.service.content_action_pending
-                    || self.service.content_status_loading
-                    || matches!(
-                        self.service.content_status.state,
-                        ContentIndexState::Error(_)
-                    )
-            }
-            GroupCommand::CancelContentIndex => {
-                !self.service.is_service_connected
-                    || self.service.content_status_error.is_some()
-                    || self.service.content_action_pending
-                    || !matches!(
-                        self.service.content_status.state,
-                        ContentIndexState::Backfilling { .. }
-                    )
-            }
-            GroupCommand::RetryContentIndex => {
-                !self.service.is_service_connected
-                    || self.service.content_status_error.is_some()
-                    || self.service.content_action_pending
-                    || !matches!(
-                        self.service.content_status.state,
-                        ContentIndexState::Error(_)
-                    )
-            }
-            GroupCommand::RefreshContentIndexStatus => {
-                !self.service.is_service_connected
-                    || self.service.content_action_pending
-                    || self.service.content_status_loading
-            }
-            GroupCommand::ClearContentIndex => {
-                !self.service.is_service_connected
-                    || self.service.content_status_error.is_some()
-                    || self.service.content_action_pending
-                    || self.service.content_status_loading
-                    || !matches!(
-                        self.service.content_status.state,
-                        ContentIndexState::Ready | ContentIndexState::Error(_)
-                    )
+            // A scope that is already in force is not a choice the user can make again, and a
+            // switch that is running must not be started a second time. "所有文件" needs the
+            // background service, so it is out of reach where the service is not installed.
+            GroupCommand::SetSearchScope(scope) => index.scope_choice_is_disabled(scope),
+            // A scope switch moves the window between two indexers. The content rows belong to
+            // the one the window is leaving, so they wait until the switch has settled.
+            GroupCommand::ToggleContentSearch => index.content_switch_is_disabled(),
+            GroupCommand::ContentSearchDetails
+            | GroupCommand::ContentSearchUsage
+            | GroupCommand::ContentSearchUpdated => index.content_facts_are_disabled(),
+            GroupCommand::RetryContentSearch | GroupCommand::ClearContentSearch => {
+                index.content_switch_is_disabled()
             }
             GroupCommand::ClearQuery => !self.can_clear_query(),
             _ => false,
@@ -970,7 +965,7 @@ impl CairnApp {
         if self.drive_view.is_some() {
             return false;
         }
-        if self.recycle_bin.is_some() {
+        if self.recycle_bin.is_open() {
             return !self.query.search_input.text.trim().is_empty();
         }
         self.has_query()
@@ -1016,24 +1011,28 @@ impl CairnApp {
             GroupCommand::ReverseOrder => self.toggle_sort_direction(cx),
             GroupCommand::SetTheme(mode) => self.set_theme_mode(mode, cx),
             GroupCommand::SetZoom(preset) => self.set_zoom(preset.value(), cx),
-            GroupCommand::Heading(_) | GroupCommand::Submenu(_, _) | GroupCommand::IndexSource => {}
-            GroupCommand::ContentIndexStatus | GroupCommand::ContentIndexNotice => {}
+            GroupCommand::Heading(_) | GroupCommand::Submenu(_, _) => {}
             GroupCommand::SetLanguage(code) => self.set_language(code, cx),
             GroupCommand::ToggleAutostart => {
                 let enabled = !self.settings.autostart;
                 self.set_autostart(enabled, cx);
             }
-            GroupCommand::ToggleContentIndex => {
-                let enabled = !matches!(
-                    self.service.content_status.state,
-                    ContentIndexState::Backfilling { .. } | ContentIndexState::Ready
-                );
+            GroupCommand::SetSearchScope(scope) => {
+                self.close_group();
+                self.switch_search_scope(SearchScope::from_stored(scope), cx);
+            }
+            GroupCommand::ToggleContentSearch => {
+                // The label beside this row promises what the click does, so both read the same
+                // fact about the index.
+                let enabled = !self.index_menu_state().content_index_is_on();
                 self.set_content_index_enabled(enabled, cx);
             }
-            GroupCommand::CancelContentIndex => self.cancel_content_index(cx),
-            GroupCommand::RetryContentIndex => self.set_content_index_enabled(true, cx),
-            GroupCommand::RefreshContentIndexStatus => self.refresh_content_status(cx),
-            GroupCommand::ClearContentIndex => {
+            GroupCommand::ContentSearchDetailsMenu => {}
+            GroupCommand::ContentSearchDetails => {}
+            GroupCommand::ContentSearchUsage => {}
+            GroupCommand::ContentSearchUpdated => {}
+            GroupCommand::RetryContentSearch => self.set_content_index_enabled(true, cx),
+            GroupCommand::ClearContentSearch => {
                 self.close_group();
                 let title = self.i18n.get_text("index_clear");
                 let description = self.i18n.get_text("index_clear_description");
@@ -1042,7 +1041,11 @@ impl CairnApp {
                 let view = cx.entity();
                 window.open_alert_dialog(cx, move |alert, window, _| {
                     style_confirmation_alert(alert, window, ok.clone(), cancel.clone())
-                        .title(title.clone())
+                        .title(
+                            div()
+                                .font(theme::serif_font(FontWeight::SEMIBOLD))
+                                .child(title.clone()),
+                        )
                         .description(description.clone())
                         .confirm()
                         .on_ok({
@@ -1064,7 +1067,7 @@ impl CairnApp {
     }
 
     fn toggle_flag(&mut self, flag: ToggleFlag, cx: &mut Context<Self>) {
-        if self.recycle_bin.is_some() && flag != ToggleFlag::Case {
+        if self.recycle_bin.is_open() && flag != ToggleFlag::Case {
             return;
         }
         match flag {
@@ -1111,7 +1114,7 @@ impl CairnApp {
     pub fn set_filter(&mut self, category: FilterCategory, cx: &mut Context<Self>) {
         if self.query.active_filter == category
             && self.drive_view.is_none()
-            && self.recycle_bin.is_none()
+            && !self.recycle_bin.is_open()
         {
             return;
         }
@@ -1122,7 +1125,7 @@ impl CairnApp {
         }
         // The bin's current nav entry already holds the query that preceded it;
         // reading the search box here would overwrite it with the cleared label.
-        let leaving_bin = self.recycle_bin.is_some();
+        let leaving_bin = self.recycle_bin.is_open();
         if !leaving_bin {
             self.update_current_nav_state_text();
         } else {
@@ -1130,12 +1133,7 @@ impl CairnApp {
             // the category's index search or its navigation-history entry.
             self.query.search_input.clear();
         }
-        self.recycle_bin = None;
-        self.recycle_bin_loading = false;
-        self.recycle_bin_all = Vec::new();
-        self.recycle_bin_icon_extensions.clear();
-        self.recycle_bin_selected_keys = std::collections::HashSet::new();
-        self.recycle_bin_error = None;
+        self.recycle_bin.leave();
         self.query.active_filter = category;
         self.record_nav_state();
         self.results.rows_scroll.set_offset(Point::default());
@@ -1221,7 +1219,7 @@ impl CairnApp {
     pub fn open_selected(&mut self, _: &OpenSelected, _w: &mut Window, cx: &mut Context<Self>) {
         // Inside the Recycle Bin view Enter opens the deleted item straight
         // from the bin payload, exactly like opening it in Explorer.
-        if self.recycle_bin.is_some() {
+        if self.recycle_bin.is_open() {
             if let Some(item) = self.target_bin_item() {
                 let _ = open_file(&item.fs_path);
             }
@@ -1262,7 +1260,7 @@ impl CairnApp {
         // A binned item has no live original path to reveal; its row hides this
         // command. The guard keeps a direct key dispatch from opening the bin's
         // internal payload directory.
-        if self.recycle_bin.is_some() {
+        if self.recycle_bin.is_open() {
             return;
         }
         if self.drive_view.is_some() {
@@ -1316,20 +1314,17 @@ impl CairnApp {
         self.query.is_fetching_more = false;
         self.query.active_session_id = None;
         // The bin is a location, not a search scope. The search box starts
-        // empty and filters this listing in place; it no longer runs an index
+        // empty and filters this listing in place; it must not run an index
         // query that would replace the location.
         if !self.query.search_input.text.is_empty() {
             self.query.search_input.clear();
         }
         self.query.scope_drive = None;
         self.query.active_filter = FilterCategory::All;
-        self.recycle_bin_selected_keys.clear();
-        self.recycle_bin_error = None;
-        self.recycle_bin_all.clear();
-        self.recycle_bin_icon_extensions.clear();
-        self.recycle_bin = Some(Vec::new());
         self.results.rows_scroll.set_offset(Point::default());
         self.results.table.scroll_top = 0.0;
+        // `begin_recycle_bin_load` opens the view and resets every part of the bin's state, so
+        // the location starts from one clean listing instead of a half-cleared one.
         self.begin_recycle_bin_load(cx);
         cx.notify();
     }
@@ -1408,7 +1403,11 @@ impl CairnApp {
         let view = cx.entity();
         window.open_alert_dialog(cx, move |alert, window, _| {
             style_confirmation_alert(alert, window, ok.clone(), cancel.clone())
-                .title(title.clone())
+                .title(
+                    div()
+                        .font(theme::serif_font(FontWeight::SEMIBOLD))
+                        .child(title.clone()),
+                )
                 .description(description.clone())
                 .confirm()
                 .on_ok({
@@ -1488,7 +1487,11 @@ impl CairnApp {
         let view = cx.entity();
         window.open_alert_dialog(cx, move |alert, window, _| {
             style_confirmation_alert(alert, window, ok.clone(), cancel.clone())
-                .title(title.clone())
+                .title(
+                    div()
+                        .font(theme::serif_font(FontWeight::SEMIBOLD))
+                        .child(title.clone()),
+                )
                 .description(description.clone())
                 .confirm()
                 .on_ok({
@@ -1522,10 +1525,10 @@ impl CairnApp {
             + 'static,
     {
         let owner = crate::shell::os::active_window_handle();
-        let generation = self.recycle_bin_generation;
+        let generation = self.recycle_bin.generation();
         self.sync_bin_selection_keys();
         let anchor = self.explicit_bin_selection_indices().first().copied();
-        self.recycle_bin_loading = true;
+        self.recycle_bin.set_loading(true);
         cx.notify();
         let (tx, rx) = tokio::sync::oneshot::channel();
         std::thread::spawn(move || {
@@ -1534,7 +1537,7 @@ impl CairnApp {
         cx.spawn(async move |this, cx| {
             let Ok((outcome, listing)) = rx.await else {
                 let _ = this.update(cx, |this, cx| {
-                    this.recycle_bin_loading = false;
+                    this.recycle_bin.set_loading(false);
                     cx.notify();
                 });
                 return;
@@ -1589,7 +1592,9 @@ impl CairnApp {
     /// Confirms emptying the Recycle Bin through Cairn's unified dialog style before
     /// dispatching the operation to the shell.
     pub fn empty_bin(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.recycle_bin.is_none() || self.recycle_bin_loading || self.recycle_bin_all.is_empty()
+        if !self.recycle_bin.is_open()
+            || self.recycle_bin.is_loading()
+            || self.recycle_bin.all().is_empty()
         {
             return;
         }
@@ -1601,7 +1606,11 @@ impl CairnApp {
         let view = cx.entity();
         window.open_alert_dialog(cx, move |alert, window, _| {
             style_confirmation_alert(alert, window, ok.clone(), cancel.clone())
-                .title(title.clone())
+                .title(
+                    div()
+                        .font(theme::serif_font(FontWeight::SEMIBOLD))
+                        .child(title.clone()),
+                )
                 .description(description.clone())
                 .confirm()
                 .on_ok({
@@ -1618,7 +1627,7 @@ impl CairnApp {
     /// set before the background operation starts, so it is also the in-flight guard: a second
     /// invocation before the first listing lands must not start a second shell empty.
     pub fn execute_empty_bin(&mut self, cx: &mut Context<Self>) {
-        if self.recycle_bin.is_none() || self.recycle_bin_loading {
+        if !self.recycle_bin.is_open() || self.recycle_bin.is_loading() {
             return;
         }
         self.spawn_bin_write(
@@ -1894,7 +1903,7 @@ impl CairnApp {
         // The properties sheet of a bin payload describes the `$R` file, not
         // the item Explorer shows; the bin hides this command rather than
         // presenting a misleading name and location.
-        if self.recycle_bin.is_some() {
+        if self.recycle_bin.is_open() {
             return;
         }
         if self.drive_view.is_some() {
@@ -1951,7 +1960,7 @@ impl CairnApp {
             self.results.table.select_row(ix, false);
         }
         if is_double_click {
-            if self.recycle_bin.is_some() {
+            if self.recycle_bin.is_open() {
                 if let Some(item) = self.target_bin_item() {
                     let _ = open_file(&item.fs_path);
                 }
@@ -2051,9 +2060,18 @@ impl CairnApp {
     }
 }
 
+/// A content-index action failed or the last status read failed. Both make the menu row speak a
+/// failure instead of a healthy state.
+fn content_failed(status_error: Option<&str>, action_error: Option<&str>) -> bool {
+    status_error.is_some() || action_error.is_some()
+}
+
 #[cfg(test)]
 mod confirmation_tests {
-    use super::{confirmation_top_offset_for_height, reconcile_bin_items, reconcile_empty_bin};
+    use super::{
+        confirmation_top_offset_for_height, content_failed, reconcile_bin_items,
+        reconcile_empty_bin,
+    };
     use crate::app::layout;
     use crate::shell::i18n::I18nManager;
     use crate::shell::os::{BinOperationError, RecycleBinItem};
@@ -2158,6 +2176,14 @@ mod confirmation_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_content_action_failure_marks_the_menu_failed() {
+        assert!(!content_failed(None, None));
+        assert!(content_failed(Some("status"), None));
+        assert!(content_failed(None, Some("action")));
+        assert!(content_failed(Some("status"), Some("action")));
     }
 
     #[test]

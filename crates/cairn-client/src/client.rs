@@ -265,9 +265,10 @@ impl CairnClient {
             .await
     }
 
-    /// Subscribes to status updates.
+    /// Reads the current state of every volume the service indexes. The state rides in the
+    /// envelope's volume list; the payload only acknowledges the read.
     pub async fn get_status(&mut self) -> Result<Envelope<ResponsePayload>, ClientError> {
-        let mut envelope = self.send_request(&ClientRequest::SubscribeStatus).await?;
+        let mut envelope = self.send_request(&ClientRequest::GetStatus).await?;
         envelope.payload = Self::unwrap_service_error(envelope.payload)?;
         Ok(envelope)
     }
@@ -547,6 +548,7 @@ mod tests {
                 query_id: 4,
                 session_id: 1,
                 total_matches: 0,
+                total_bytes: 0,
                 first_page: Vec::new(),
             },
         })
@@ -668,9 +670,7 @@ mod tests {
 
         let frame = encode_frame(&Envelope {
             volumes: Vec::new(),
-            payload: ResponsePayload::StatusUpdate {
-                worker_status: cairn_protocol::status::WorkerStatus::Idle,
-            },
+            payload: ResponsePayload::CancelAck,
         })
         .expect("encode stub answer");
         server.write_all(&frame).await.expect("stub write");

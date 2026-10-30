@@ -86,7 +86,7 @@ fn access_class(req: &ClientRequest) -> AccessClass {
         ClientRequest::Hello { .. } | ClientRequest::Cancel { .. } => AccessClass::Handshake,
         ClientRequest::Query { .. }
         | ClientRequest::GetRows { .. }
-        | ClientRequest::SubscribeStatus
+        | ClientRequest::GetStatus
         | ClientRequest::GetConfig
         | ClientRequest::Rescan { .. }
         | ClientRequest::SetConfig { .. }
@@ -102,6 +102,23 @@ fn access_class(req: &ClientRequest) -> AccessClass {
 pub enum AccessClass {
     Handshake,
     Read,
+}
+
+/// Whether the caller may submit a configuration that changes the administrators-only query
+/// mode.
+///
+/// `admin_only_query` decides who may query at all, so a standard user must not be able to switch
+/// that mode on (locking everyone else out) or off (defeating it). Only an administrator may
+/// change it (SPEC SVC-05).
+///
+/// The rule lives here so every decision about what a caller may do is answered by the same
+/// module, and so it can be checked without standing up the whole engine.
+pub fn may_change_admin_only_query(
+    caller: CallerAuthorization,
+    currently_enabled: bool,
+    submitted_enabled: bool,
+) -> bool {
+    currently_enabled == submitted_enabled || caller.is_privileged()
 }
 
 /// Authorization decision for one request, evaluated per request so that configuration changes
@@ -459,6 +476,37 @@ mod tests {
         );
     }
 
+    /// Only an administrator may change the administrators-only query mode, and only when the
+    /// change actually turns it on or off. A standard user may submit a configuration that keeps
+    /// the mode as it is.
+    #[test]
+    fn only_an_administrator_may_change_the_admin_only_query_mode() {
+        assert!(
+            !may_change_admin_only_query(CallerAuthorization::StandardUser, false, true),
+            "a standard user must not switch administrators-only mode on"
+        );
+        assert!(
+            !may_change_admin_only_query(CallerAuthorization::StandardUser, true, false),
+            "a standard user must not switch administrators-only mode off"
+        );
+        assert!(
+            may_change_admin_only_query(CallerAuthorization::StandardUser, false, false),
+            "keeping the mode as it is is not a change to it"
+        );
+        assert!(
+            may_change_admin_only_query(CallerAuthorization::StandardUser, true, true),
+            "keeping the mode as it is not a change to it"
+        );
+        assert!(
+            may_change_admin_only_query(CallerAuthorization::Administrator, false, true),
+            "an administrator may switch the mode on"
+        );
+        assert!(
+            may_change_admin_only_query(CallerAuthorization::Administrator, true, false),
+            "an administrator may switch the mode off"
+        );
+    }
+
     #[test]
     fn a_standard_user_may_change_index_configuration_when_admin_mode_is_off() {
         for req in [
@@ -537,7 +585,7 @@ mod tests {
         )
         .is_err());
         assert!(authorize(
-            &ClientRequest::SubscribeStatus,
+            &ClientRequest::GetStatus,
             CallerAuthorization::StandardUser,
             true
         )

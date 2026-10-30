@@ -49,7 +49,7 @@ pub struct LoadedIndexData {
     pub directory_sizes_valid: bool,
 }
 
-/// Atomically saves volume index records and arena to `vol_<drive>.idx` (or `vol_<guid>.idx`).
+/// Atomically saves volume index records and arena to `vol_<drive>.idx`.
 #[allow(clippy::too_many_arguments)]
 pub fn save_volume_index_atomic(
     dir: &Path,

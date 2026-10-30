@@ -151,7 +151,7 @@ impl Drop for RestorePrivilege {
 /// `SeTakeOwnershipPrivilege` lets a holder set an owner only among the
 /// SIDs it may legitimately claim — an elevated administrator can claim itself, not `SY` — while
 /// `SeRestorePrivilege` is what Microsoft documents as permitting any valid SID as owner. With only
-/// the first one enabled, an elevated `cairnd --console` still fails the owner write with
+/// the first one enabled, an elevated `CairnService --console` still fails the owner write with
 /// `ERROR_INVALID_OWNER`.
 ///
 /// Neither adjustment changes any outcome. A process that still cannot restore ownership fails closed
@@ -196,7 +196,7 @@ fn apply_ownership_privileges() -> RestorePrivilege {
                 tracing::warn!(
                     "SeRestorePrivilege is unavailable ({reason}); a %ProgramData%\\Cairn owned by \
                      another account cannot be restored to SYSTEM from this process. Run \
-                     `cairnd --console` from an elevated prompt, or use the installed Windows \
+                     `CairnService --console` from an elevated prompt, or use the installed Windows \
                      service, which runs as LocalSystem and holds the privilege."
                 );
                 false
@@ -295,7 +295,7 @@ pub fn prepare_data_layout(
                 tracing::warn!(
                     "{path} is already present but this process cannot read it, so it is not \
                      created again; its access control is enforced as it stands. If the tree belongs \
-                     to another account, run `cairnd --console` from an elevated prompt or use the \
+                     to another account, run `CairnService --console` from an elevated prompt or use the \
                      installed service, which runs as LocalSystem.",
                     path = dir.display()
                 );
@@ -890,7 +890,7 @@ mod windows_acl {
 
     /// Enables `SeRestorePrivilege`, the one privilege that permits naming **any valid SID** as an
     /// object's owner. [`apply_owner`] needs it, and `SeTakeOwnershipPrivilege` alone does not
-    /// provide it: an elevated `cairnd --console` taking ownership may set its own SID, not `SY`.
+    /// provide it: an elevated `CairnService --console` taking ownership may set its own SID, not `SY`.
     pub fn enable_restore_privilege() -> Result<bool, String> {
         adjust_privilege("SeRestorePrivilege", SE_RESTORE_NAME, true)
     }

@@ -9,7 +9,9 @@
 //! the engine currently holds, so `admin_only_query` takes effect on the next request rather than on
 //! the next pipe instance.
 
-use crate::caller_auth::{authenticate_pipe_client, authorize, CallerAuthorization};
+use crate::caller_auth::{
+    authenticate_pipe_client, authorize, may_change_admin_only_query, CallerAuthorization,
+};
 use crate::security::SafeSecurityDescriptor;
 use crate::session::{RowsError, SessionManager};
 use crate::sync_engine::MultiVolumeEngine;
@@ -20,11 +22,15 @@ use cairn_protocol::message::{
     ClientRequest, Envelope, ResponsePayload, ERROR_CODE_HANDSHAKE_REQUIRED,
     ERROR_CODE_PROTOCOL_VERSION_MISMATCH, ERROR_CODE_SESSION_EXPIRED, PIPE_NAME, PROTOCOL_VERSION,
 };
-use cairn_protocol::status::WorkerStatus;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 use tracing::{error, info, warn};
+
+/// The deepest tree a single response may carry. A six-level tree over a million-record volume
+/// overflows the protocol frame budget and drops the connection; the window then falls back to a
+/// full filesystem scan. Deeper levels are requested per directory as the reader drills in.
+const MAX_TREE_DEPTH: usize = 2;
 
 pub struct PipeServer {
     engine: Arc<MultiVolumeEngine>,
@@ -249,12 +255,18 @@ async fn handle_client(
                         ..
                     }
                 );
+                // A query answer decides whether the table is still loading, so its envelope
+                // reads the volume state after the query released the index. Every other
+                // envelope may use the cache and keep its connection responsive.
+                let volumes = if omit_volumes {
+                    Vec::new()
+                } else if matches!(&resp_payload, ResponsePayload::QueryResult { .. }) {
+                    engine.get_volume_summaries_fresh()
+                } else {
+                    engine.get_volume_summaries()
+                };
                 let envelope = Envelope {
-                    volumes: if omit_volumes {
-                        Vec::new()
-                    } else {
-                        engine.get_volume_summaries()
-                    },
+                    volumes,
                     payload: resp_payload,
                 };
 
@@ -355,7 +367,7 @@ fn process_request(
             };
 
             let query_cancel = sessions.begin_query(query_id, cancel);
-            let (matched_items, total_matches, highlight_terms, snippets) = engine
+            let (matched_items, total_matches, highlight_terms, snippets, total_bytes) = engine
                 .execute_search_multi(&raw_query, &defaults, sort_col, sort_asc, &query_cancel);
             sessions.finish_query(query_id);
 
@@ -381,6 +393,7 @@ fn process_request(
                 query_id,
                 session_id,
                 total_matches,
+                total_bytes,
                 first_page,
             }
         }
@@ -417,13 +430,9 @@ fn process_request(
         ClientRequest::Cancel { query_id } => {
             cancel.cancel();
             sessions.cancel_query(query_id);
-            ResponsePayload::StatusUpdate {
-                worker_status: WorkerStatus::Idle,
-            }
+            ResponsePayload::CancelAck
         }
-        ClientRequest::SubscribeStatus => ResponsePayload::StatusUpdate {
-            worker_status: WorkerStatus::Idle,
-        },
+        ClientRequest::GetStatus => ResponsePayload::StatusAck,
         ClientRequest::Rescan { volume_id } => {
             let outcome = match volume_id {
                 Some(id) => match drive_from_volume_id(id) {
@@ -472,9 +481,11 @@ fn process_request(
                     }
                 }
             };
-            if parsed.admin_only_query != engine.get_config().admin_only_query
-                && !caller.is_privileged()
-            {
+            if !may_change_admin_only_query(
+                caller,
+                engine.get_config().admin_only_query,
+                parsed.admin_only_query,
+            ) {
                 return ResponsePayload::SetConfigAck {
                     success: false,
                     message: "admin_only_query can only be changed by an administrator".to_string(),
@@ -505,7 +516,9 @@ fn process_request(
             status: engine.content_index_status(),
         },
         ClientRequest::GetTree { path, max_depth } => {
-            let entries = engine.treemap_tree(&path, max_depth).unwrap_or_default();
+            let entries = engine
+                .treemap_tree(&path, tree_depth(max_depth))
+                .unwrap_or_default();
             ResponsePayload::TreeResult { path, entries }
         }
         ClientRequest::CancelContentIndex => ResponsePayload::CancelContentIndexAck {
@@ -522,6 +535,11 @@ fn process_request(
             }
         }
     }
+}
+
+/// Clamps a client's requested tree depth to the frame budget.
+fn tree_depth(requested: usize) -> usize {
+    requested.min(MAX_TREE_DEPTH)
 }
 
 #[cfg(test)]
@@ -574,6 +592,13 @@ mod tests {
             ResponsePayload::Error { code, message } => (code, message),
             other => panic!("expected a denial, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_tree_request_cannot_outgrow_the_frame_budget() {
+        assert_eq!(tree_depth(0), 0);
+        assert_eq!(tree_depth(2), 2);
+        assert_eq!(tree_depth(6), MAX_TREE_DEPTH);
     }
 
     #[test]
@@ -677,7 +702,7 @@ mod tests {
                 limit: 10,
             },
             ClientRequest::GetConfig,
-            ClientRequest::SubscribeStatus,
+            ClientRequest::GetStatus,
         ] {
             let (code, _) = denial(harness.handle(req, CallerAuthorization::StandardUser));
             assert_eq!(code, ERROR_CODE_ADMIN_ONLY_QUERY);
@@ -703,7 +728,7 @@ mod tests {
                 ClientRequest::Cancel { query_id: 1 },
                 CallerAuthorization::StandardUser
             ),
-            ResponsePayload::StatusUpdate { .. }
+            ResponsePayload::CancelAck
         ));
     }
 

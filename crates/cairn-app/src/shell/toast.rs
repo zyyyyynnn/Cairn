@@ -194,9 +194,9 @@ impl CairnApp {
             .border_1()
             .border_color(tokens.border)
             .child(
-                // Icon, title and close share one centre line. The earlier
-                // start-aligned row put a 16px icon, a 20px title line and a
-                // 24px close target on three different vertical centres.
+                // Icon, title and close share one centre line: a start-aligned
+                // row would put the 16px icon, 20px title line and 24px close
+                // target on three different vertical centres.
                 h_flex()
                     .w_full()
                     .items_center()

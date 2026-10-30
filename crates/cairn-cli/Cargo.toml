@@ -7,11 +7,12 @@ license.workspace = true
 publish.workspace = true
 
 [[bin]]
-name = "cairn-cli"
+name = "CairnCli"
 path = "src/main.rs"
 
 [dependencies]
 cairn-client.workspace = true
+cairn-core.workspace = true
 cairn-protocol.workspace = true
 clap.workspace = true
 serde_json.workspace = true

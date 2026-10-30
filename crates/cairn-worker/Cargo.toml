@@ -7,7 +7,7 @@ license.workspace = true
 publish.workspace = true
 
 [[bin]]
-name = "cairn-worker"
+name = "CairnWorker"
 path = "src/main.rs"
 
 [dependencies]

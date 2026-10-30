@@ -14,9 +14,7 @@ use windows::core::PCWSTR;
 #[cfg(windows)]
 use windows::core::{Interface as _, PWSTR};
 #[cfg(windows)]
-use windows::Win32::Foundation::{
-    CloseHandle, GetLastError, ERROR_CANCELLED, FILETIME, HWND, PROPERTYKEY, WAIT_OBJECT_0,
-};
+use windows::Win32::Foundation::{FILETIME, HWND, PROPERTYKEY};
 #[cfg(windows)]
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL,
@@ -25,7 +23,6 @@ use windows::Win32::System::Com::{
 #[cfg(windows)]
 use windows::Win32::System::SystemServices::{SFGAO_FLAGS, SFGAO_FOLDER};
 #[cfg(windows)]
-use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject, INFINITE};
 #[cfg(windows)]
 use windows::Win32::UI::Shell::PropertiesSystem::PSGetPropertyKeyFromName;
 #[cfg(windows)]
@@ -33,13 +30,14 @@ use windows::Win32::UI::Shell::{
     BHID_EnumItems, FOLDERID_RecycleBinFolder, FileOperation, IEnumShellItems, IFileOperation,
     IShellItem, IShellItem2, SHCreateItemFromIDList, SHEmptyRecycleBinW, SHGetKnownFolderIDList,
     SHParseDisplayName, ShellExecuteExW, FOFX_RECYCLEONDELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION,
-    FOF_WANTNUKEWARNING, SEE_MASK_INVOKEIDLIST, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
-    SIGDN_FILESYSPATH, SIGDN_NORMALDISPLAY,
+    FOF_WANTNUKEWARNING, SEE_MASK_INVOKEIDLIST, SHELLEXECUTEINFOW, SIGDN_FILESYSPATH,
+    SIGDN_NORMALDISPLAY,
 };
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SW_SHOWNORMAL};
 
-use std::path::PathBuf;
+#[cfg(windows)]
+use crate::win32::{win32_code_from_hresult, WIN32_ERROR_USER_CANCELLED};
 
 /// The app's active top-level window, used as the owner of native Shell dialogs. Returned as a
 /// plain integer so a worker thread can carry it to its own STA without sharing a GPUI handle.
@@ -289,15 +287,6 @@ fn operation_was_aborted(operation: &IFileOperation) -> bool {
         .unwrap_or(false)
 }
 
-/// The 100 ns ticks between the FILETIME epoch (1601) and the Unix epoch.
-const FILETIME_UNIX_EPOCH_TICKS: u64 = 116_444_736_000_000_000;
-
-/// Converts FILETIME ticks to the Unix seconds the result table formats.
-fn filetime_ticks_to_unix_seconds(ticks: u64) -> i64 {
-    let delta = ticks.saturating_sub(FILETIME_UNIX_EPOCH_TICKS);
-    i64::try_from(delta / 10_000_000).unwrap_or(i64::MAX)
-}
-
 /// Resolves a canonical property name (`System.Recycle.DeletedFrom`) to its
 /// key, so no GUID needs hard-coding.
 #[cfg(windows)]
@@ -449,7 +438,7 @@ fn enumerate_recycle_bin() -> Result<Vec<BinEntry>, String> {
                 .map(|filetime: FILETIME| {
                     let ticks =
                         ((filetime.dwHighDateTime as u64) << 32) | filetime.dwLowDateTime as u64;
-                    filetime_ticks_to_unix_seconds(ticks)
+                    cairn_core::time::filetime_ticks_to_unix_seconds(ticks)
                 })
                 .unwrap_or(0);
             let size = unsafe { item2.GetUInt64(&size_key) }.unwrap_or(0);
@@ -1127,118 +1116,7 @@ fn shell_item_from_path(path: &str) -> Result<IShellItem, String> {
     item
 }
 
-/// Null-terminated UTF-16 without the `\\?\` prefix `to_wide_path` adds. The command line of a
-/// child process is *not* a path, so the prefix would be handed to the argument parser verbatim.
-#[cfg(windows)]
-fn to_wide_literal(value: &str) -> Vec<u16> {
-    value.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
-// ---- installed Windows service control -------------------------------------------------
-
-/// `ERROR_CANCELLED`: the user pressed "No" on the UAC consent dialog. It is not a failure, so it
-/// must not be reported as one.
-const WIN32_ERROR_USER_CANCELLED: u32 = ERROR_CANCELLED.0;
-
-/// Recovers the Win32 error from an `HRESULT_FROM_WIN32` value (facility 7).
-pub const fn win32_code_from_hresult(code: i32) -> Option<u32> {
-    let bits = code as u32;
-    let is_failure = bits & 0x8000_0000 != 0;
-    let facility = (bits >> 16) & 0x1FFF;
-    if is_failure && facility == 7 {
-        Some(bits & 0xFFFF)
-    } else {
-        None
-    }
-}
-
-/// The service name the MSI registers. The GUI only asks SCM to start it; it never launches a
-/// second console indexer, because that process would sit outside SCM's lifecycle and ACL model.
-pub const SERVICE_NAME: &str = "CairnService";
-
-/// `sc.exe start CairnService` is the explicit user action behind the offline band's button. The
-/// command is pure data so the parameter string can be tested without SCM.
-fn service_start_parameters() -> String {
-    format!("start {SERVICE_NAME}")
-}
-
-/// Whether the per-machine service is registered. This is a read-only SCM query available to a
-/// standard user; it decides whether the offline band offers "Start service" or install guidance.
-#[cfg(windows)]
-pub fn service_is_installed() -> bool {
-    use windows::core::w;
-    use windows::Win32::System::Services::{
-        CloseServiceHandle, OpenSCManagerW, OpenServiceW, SC_MANAGER_CONNECT, SERVICE_QUERY_STATUS,
-    };
-
-    // SAFETY: both queries only read SCM state; every handle is closed before returning.
-    unsafe {
-        let Ok(scm) = OpenSCManagerW(None, None, SC_MANAGER_CONNECT) else {
-            return false;
-        };
-        let service = OpenServiceW(scm, w!("CairnService"), SERVICE_QUERY_STATUS);
-        let _ = CloseServiceHandle(scm);
-        match service {
-            Ok(handle) => {
-                let _ = CloseServiceHandle(handle);
-                true
-            }
-            Err(_) => false,
-        }
-    }
-}
-
-#[cfg(not(windows))]
-pub fn service_is_installed() -> bool {
-    false
-}
-
-/// Best-effort start with the caller's own token, without a UAC prompt. The installed service's
-/// default DACL usually lets only administrators start it, so an access-denied answer is expected
-/// for a standard user and simply hands the decision to the explicit button.
-pub fn try_start_installed_service() -> Result<(), String> {
-    #[cfg(windows)]
-    {
-        use windows::core::w;
-        use windows::Win32::System::Services::{
-            CloseServiceHandle, OpenSCManagerW, OpenServiceW, StartServiceW, SC_MANAGER_CONNECT,
-            SERVICE_QUERY_STATUS, SERVICE_START,
-        };
-
-        // SAFETY: every SCM handle is closed before returning; StartServiceW only asks SCM to
-        // transition the already-registered service.
-        unsafe {
-            let scm = OpenSCManagerW(None, None, SC_MANAGER_CONNECT)
-                .map_err(|err| format!("OpenSCManager: {err}"))?;
-            let service = OpenServiceW(
-                scm,
-                w!("CairnService"),
-                SERVICE_START | SERVICE_QUERY_STATUS,
-            );
-            let _ = CloseServiceHandle(scm);
-            let service = service.map_err(|err| format!("OpenService: {err}"))?;
-            let result = StartServiceW(service, None);
-            let _ = CloseServiceHandle(service);
-            match result {
-                Ok(()) => Ok(()),
-                Err(err)
-                    if win32_code_from_hresult(err.code().0)
-                        == Some(ERROR_SERVICE_ALREADY_RUNNING) =>
-                {
-                    Ok(())
-                }
-                Err(err) => Err(format!("StartService: {err}")),
-            }
-        }
-    }
-
-    #[cfg(not(windows))]
-    {
-        Err("starting the Windows service is only available on Windows".to_string())
-    }
-}
-
-/// Starts the sibling `cairnd.exe` as this account on the user pipe.
+/// Starts the sibling `CairnService.exe` as this account on the user pipe.
 ///
 /// This is not an elevation path: the process runs with the app's own token, indexes only what
 /// that token can read, and exits with the window that started it. It is how a machine without
@@ -1253,7 +1131,7 @@ pub fn spawn_user_indexer(parent_pid: u32) -> Result<std::process::Child, String
 
     let executable = std::env::current_exe()
         .map_err(|error| format!("this program's location could not be read: {error}"))?
-        .with_file_name("cairnd.exe");
+        .with_file_name("CairnService.exe");
     if !executable.is_file() {
         return Err(format!("{} was not found", executable.display()));
     }
@@ -1275,160 +1153,11 @@ pub fn spawn_user_indexer(_parent_pid: u32) -> Result<std::process::Child, Strin
     Err("the user-mode indexer is only available on Windows".to_string())
 }
 
-/// Why an explicit elevation request did not complete.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum ElevationError {
-    /// The user dismissed the UAC consent dialog. Nothing was started.
-    #[error("the elevation request was cancelled at the UAC prompt")]
-    Cancelled,
-    /// The elevated process could not be started, or its result could not be read.
-    #[error("could not start {SERVICE_NAME}: {message}")]
-    Failed {
-        /// Win32 last-error code behind the failure, when the failure is one.
-        os_error: Option<u32>,
-        /// Technical reason for logs and for the status band's detail line.
-        message: String,
-    },
-}
-
-/// `ERROR_SERVICE_ALREADY_RUNNING`: the explicit action raced a service that was already up. That
-/// is the outcome the user asked for, not a failure.
-const ERROR_SERVICE_ALREADY_RUNNING: u32 = 1056;
-
-/// Starts the installed service through one UAC elevation and waits for `sc.exe` to finish.
-///
-/// The GUI itself stays unprivileged. This is only called from the offline band's explicit button;
-/// opening the window never requests elevation, and a service that is not installed is reported as
-/// such instead of trying to launch a second console indexer.
-pub fn start_service_elevated() -> Result<(), ElevationError> {
-    #[cfg(windows)]
-    {
-        use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
-
-        let helper_failed =
-            |os_error: Option<u32>, message: String| ElevationError::Failed { os_error, message };
-
-        let system_root = std::env::var_os("SystemRoot")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
-        let sc = system_root.join("System32").join("sc.exe");
-        if !sc.is_file() {
-            return Err(helper_failed(
-                None,
-                format!("sc.exe was not found at {}", sc.display()),
-            ));
-        }
-
-        let wide_file = to_wide_literal(&sc.to_string_lossy());
-        let wide_parameters = to_wide_literal(&service_start_parameters());
-        let wide_verb = to_wide_literal("runas");
-
-        let mut exec_info = SHELLEXECUTEINFOW {
-            cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
-            // Without the process handle the wait below would be the optimistic "started, therefore
-            // running" answer instead of the observed one.
-            fMask: SEE_MASK_NOCLOSEPROCESS,
-            hwnd: HWND(std::ptr::null_mut()),
-            lpVerb: PCWSTR(wide_verb.as_ptr()),
-            lpFile: PCWSTR(wide_file.as_ptr()),
-            lpParameters: PCWSTR(wide_parameters.as_ptr()),
-            lpDirectory: PCWSTR(std::ptr::null()),
-            nShow: SW_HIDE.0,
-            ..Default::default()
-        };
-
-        // SAFETY: the three PCWSTR buffers are live until ShellExecuteExW returns, cbSize is the
-        // size of the struct, and every other field is either null or a plain value.
-        if let Err(err) = unsafe { ShellExecuteExW(&mut exec_info) } {
-            let os_error = win32_code_from_hresult(err.code().0);
-            if os_error == Some(WIN32_ERROR_USER_CANCELLED) {
-                return Err(ElevationError::Cancelled);
-            }
-            return Err(helper_failed(os_error, err.message()));
-        }
-
-        let process = exec_info.hProcess;
-        if process.is_invalid() {
-            return Err(helper_failed(
-                None,
-                "the elevated sc.exe returned no process handle".to_string(),
-            ));
-        }
-
-        // SAFETY: process is the handle ShellExecuteExW returned and is closed after the wait and
-        // the exit-code read below.
-        let wait = unsafe { WaitForSingleObject(process, INFINITE) };
-        if wait != WAIT_OBJECT_0 {
-            // SAFETY: GetLastError reads the calling thread's last error set by the wait, and the
-            // process handle is paired with the successful ShellExecuteExW above.
-            let last_error = unsafe { GetLastError().0 };
-            unsafe {
-                let _ = CloseHandle(process);
-            }
-            return Err(helper_failed(
-                Some(last_error),
-                format!("waiting for the elevated sc.exe did not complete (wait code {wait:?})"),
-            ));
-        }
-
-        let mut exit_code = 0u32;
-        // SAFETY: process is an exited process handle and exit_code is a valid out pointer.
-        let read = unsafe { GetExitCodeProcess(process, &mut exit_code) };
-        // SAFETY: paired with the successful ShellExecuteExW that produced this handle.
-        unsafe {
-            let _ = CloseHandle(process);
-        }
-        read.map_err(|err| {
-            helper_failed(
-                win32_code_from_hresult(err.code().0),
-                format!("sc.exe exited, but its exit code could not be read: {err}"),
-            )
-        })?;
-
-        if exit_code == 0 || exit_code == ERROR_SERVICE_ALREADY_RUNNING {
-            Ok(())
-        } else {
-            Err(helper_failed(
-                Some(exit_code),
-                format!("sc.exe exited with code {exit_code}"),
-            ))
-        }
-    }
-
-    #[cfg(not(windows))]
-    {
-        Err(ElevationError::Failed {
-            os_error: None,
-            message: "starting the Windows service is only available on Windows".to_string(),
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use core::prelude::rust_2021::test;
 
     use super::*;
-
-    #[test]
-    fn the_explicit_start_targets_the_installed_service_by_name() {
-        assert_eq!(SERVICE_NAME, "CairnService");
-        assert_eq!(service_start_parameters(), "start CairnService");
-    }
-
-    #[test]
-    fn recycle_bin_timestamps_use_the_unix_seconds_the_table_formats() {
-        assert_eq!(filetime_ticks_to_unix_seconds(FILETIME_UNIX_EPOCH_TICKS), 0);
-        assert_eq!(
-            filetime_ticks_to_unix_seconds(FILETIME_UNIX_EPOCH_TICKS + 10_000_000),
-            1
-        );
-        assert_eq!(
-            filetime_ticks_to_unix_seconds(FILETIME_UNIX_EPOCH_TICKS + 1_000_000_000),
-            100
-        );
-        assert_eq!(filetime_ticks_to_unix_seconds(0), 0);
-    }
 
     #[test]
     fn a_cancelled_bin_operation_is_not_a_failure() {

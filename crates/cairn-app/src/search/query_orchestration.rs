@@ -5,7 +5,8 @@
 //! Query orchestration: search triggering, query lifecycle, paging requests, and highlight slicing.
 
 use crate::app::{layout, CairnApp, HighlightSpan};
-use crate::service::ipc_tasks::{get_tokio_runtime, ServiceIssue};
+use crate::service::ipc_tasks::get_tokio_runtime;
+use crate::service::service_issue::ServiceIssue;
 use crate::shell::menu_actions::sort_column_key;
 use gpui_kit::gpui::{AsyncApp, Context, Pixels, Point};
 use std::ops::Range;
@@ -160,6 +161,16 @@ fn page_response_is_current(
     requested_query == current_query && current_session == Some(requested_session)
 }
 
+fn rows_error_requires_refresh(code: u32) -> bool {
+    code == cairn_protocol::message::ERROR_CODE_SESSION_EXPIRED
+}
+
+/// A slow query is not a missing service. Only failures that close the channel or prevent the
+/// connection from being established should move the window into its offline recovery band.
+fn query_error_marks_service_down(error: &cairn_client::client::ClientError) -> bool {
+    !matches!(error, cairn_client::client::ClientError::Timeout)
+}
+
 impl CairnApp {
     /// `true` when there is something the service can answer: typed text, or a drive the sidebar
     /// scoped. A bare flag with no query is not a search, and running one would show an empty table
@@ -193,7 +204,7 @@ impl CairnApp {
     pub fn ensure_visible_rows_loaded(&mut self, row_height: Pixels, cx: &mut Context<Self>) {
         // The Recycle Bin holds its whole listing in memory; a page comes from that
         // listing, never from the service, so even a stopped service can show it.
-        if self.recycle_bin.is_some() {
+        if self.recycle_bin.is_open() {
             self.fill_recycle_bin_page(row_height, cx);
             return;
         }
@@ -227,7 +238,7 @@ impl CairnApp {
     /// post-frame ensure, so every scroll source — pointer drag, wheel, keyboard, first page — is
     /// covered without fetching from `render` itself.
     pub fn needs_visible_rows_page(&self, visible: Range<usize>) -> bool {
-        if self.recycle_bin.is_some() {
+        if self.recycle_bin.is_open() {
             return self.needs_recycle_bin_page(visible);
         }
         self.service.is_service_connected
@@ -243,6 +254,18 @@ impl CairnApp {
     }
 
     pub fn trigger_search(&mut self, cx: &mut Context<Self>) {
+        // The all-files view can only be final once the index has settled. Querying a growing
+        // index would publish a partial total that climbs in steps as batches land, and each query
+        // is a full index scan; the status poll asks for the one result set of the completed index
+        // instead. A query the user typed still runs immediately against what is indexed so far.
+        if !self.has_query()
+            && self.results.table.total_rows() == 0
+            && self.service.status.is_any_loading()
+        {
+            self.start_status_refresh(cx);
+            cx.notify();
+            return;
+        }
         self.run_query(cx, true);
     }
 
@@ -251,10 +274,9 @@ impl CairnApp {
     /// would replace live rows with the skeleton once the query takes longer than the poll
     /// interval, which is how a progressive index turns into a loading animation that never ends.
     /// Skipped while a query is already in flight; that answer is newer than the request would be.
+    /// A hidden table (Treemap or Recycle Bin) is never refreshed in the background.
     pub fn refresh_results(&mut self, cx: &mut Context<Self>) {
-        // A background index refresh never replaces the location the person is
-        // reading; only an explicit query leaves the Recycle Bin view.
-        if self.query.is_searching || self.recycle_bin.is_some() {
+        if self.query.is_searching || self.recycle_bin.is_open() || self.drive_view.is_some() {
             return;
         }
         self.run_query(cx, false);
@@ -265,7 +287,7 @@ impl CairnApp {
         // shell listing, not a request for an index page. Typing, paste, undo
         // and IME commit all arrive here, so this one branch keeps the location
         // stable for every text path.
-        if self.recycle_bin.is_some() {
+        if self.recycle_bin.is_open() {
             self.query.query_id += 1;
             self.query.is_searching = false;
             self.filter_recycle_bin(cx);
@@ -283,6 +305,9 @@ impl CairnApp {
             self.results.table.scroll_top = 0.0;
             self.results.table.set_rows(Vec::new(), 0);
             self.query.active_session_id = None;
+            // The new result set has no completed count yet; the band shows only its loading
+            // control until the query and any index build settle.
+            self.service.status.clear_objects_count();
         }
 
         // An empty query is not an idle state: it is the "所有文件" view. The service answers it
@@ -291,15 +316,10 @@ impl CairnApp {
         self.query.is_searching = true;
         // Any index query leaves the Recycle Bin view: the bin is a location,
         // not a search scope. Its filtered listing is released with the view.
-        self.recycle_bin = None;
-        self.recycle_bin_loading = false;
-        self.recycle_bin_all = Vec::new();
-        self.recycle_bin_icon_extensions.clear();
-        self.recycle_bin_selected_keys = std::collections::HashSet::new();
-        self.recycle_bin_error = None;
+        self.recycle_bin.leave();
         cx.notify();
 
-        let raw_text = self.query.search_input.text.trim();
+        let raw_text = self.query.search_input.text.trim().to_string();
         let query_defaults = cairn_protocol::message::QueryDefaults {
             case_sensitive: self.query.case_sensitive,
             whole_words: self.query.whole_word,
@@ -311,7 +331,7 @@ impl CairnApp {
             exclude_hidden: false,
             exclude_system: false,
         };
-        let mut q = raw_text.to_string();
+        let mut q = raw_text;
         if let Some(mac) = self.query.active_filter.query_macro() {
             q = format!("{mac} {q}");
         }
@@ -353,11 +373,12 @@ impl CairnApp {
                         Ok(envelope) => {
                             this.service.is_service_connected = true;
                             this.service.service_issue = None;
-                            this.service.status.volumes = envelope.volumes;
+                            this.service.status.update_volumes(envelope.volumes);
                             this.start_status_refresh(cx);
                             if let cairn_protocol::message::ResponsePayload::QueryResult {
                                 session_id,
                                 total_matches,
+                                total_bytes,
                                 first_page,
                                 ..
                             } = envelope.payload
@@ -371,13 +392,20 @@ impl CairnApp {
                                 crate::shell::perf::mark(&format!(
                                     "query applied id={qid} total={total_matches}"
                                 ));
-                                this.service.status.total_objects = total_matches;
+                                // The band shows the exact total only after the result set has
+                                // settled; there is no animated or partial number.
+                                this.service
+                                    .status
+                                    .set_objects_summary(total_matches, total_bytes);
                             }
                         }
                         Err(e) => {
                             tracing::warn!("Cairn IPC query error: {}", e);
-                            this.service.is_service_connected = false;
-                            this.service.service_issue = Some(ServiceIssue::from_client_error(&e));
+                            if query_error_marks_service_down(&e) {
+                                this.service.is_service_connected = false;
+                                this.service.service_issue =
+                                    Some(ServiceIssue::from_client_error(&e));
+                            }
                         }
                     }
                     cx.notify();
@@ -428,7 +456,7 @@ impl CairnApp {
                             this.results.table.apply_page(offset, rows);
                         }
                         cairn_protocol::message::ResponsePayload::Error { code, .. }
-                            if code == cairn_protocol::message::ERROR_CODE_SESSION_EXPIRED =>
+                            if rows_error_requires_refresh(code) =>
                         {
                             this.results.table.clear_empty_pages();
                             this.refresh_results(cx);
@@ -438,7 +466,7 @@ impl CairnApp {
                     },
                     Ok(Err(e)) => {
                         tracing::warn!("Cairn page fetch error: {e}");
-                        if !matches!(e, cairn_client::ClientError::Timeout) {
+                        if query_error_marks_service_down(&e) {
                             this.service.is_service_connected = false;
                             this.service.service_issue = Some(ServiceIssue::from_client_error(&e));
                         }
@@ -585,44 +613,24 @@ mod tests {
         assert!(!page_response_is_current(7, 7, 11, None));
     }
 
-    /// A new query resets the result scroll position: `set_rows` zeroes
-    /// `table.scroll_top`, but the next render republishes the scroll handle's offset into it, so
-    /// both owners have to return to the top before the new query is spawned.
     #[test]
-    fn a_new_query_resets_the_result_band() {
-        let source = include_str!("query_orchestration.rs");
-        let trigger = source
-            .split("pub fn trigger_search")
-            .nth(1)
-            .expect("trigger_search must exist");
-        let body = trigger
-            .split("cx.spawn")
-            .next()
-            .expect("the synchronous part precedes the spawn");
-        assert!(
-            body.contains("rows_scroll.set_offset(Point::default())"),
-            "a new query must reset the scroll handle the render pass reads"
-        );
-        assert!(
-            body.contains("table.scroll_top = 0.0"),
-            "a new query must reset the table's published scroll position"
-        );
-        assert!(
-            body.contains("active_session_id = None"),
-            "a new query must clear the old session id before the response lands"
-        );
+    fn a_slow_query_does_not_report_the_service_as_down() {
+        assert!(!query_error_marks_service_down(
+            &cairn_client::client::ClientError::Timeout
+        ));
+        assert!(query_error_marks_service_down(
+            &cairn_client::client::ClientError::ConnectionClosed
+        ));
     }
 
     #[test]
-    fn page_fetch_error_handling_covers_session_expired() {
-        let source = include_str!("query_orchestration.rs");
-        assert!(
-            source.contains("ERROR_CODE_SESSION_EXPIRED"),
-            "query orchestration must handle session expiration"
-        );
-        assert!(
-            source.contains("this.results.table.clear_empty_pages()"),
-            "session expiration must clear empty pages"
-        );
+    fn only_a_session_expiration_error_reasks_the_query() {
+        assert!(rows_error_requires_refresh(
+            cairn_protocol::message::ERROR_CODE_SESSION_EXPIRED
+        ));
+        assert!(!rows_error_requires_refresh(
+            cairn_protocol::message::ERROR_CODE_UNAUTHORIZED
+        ));
+        assert!(!rows_error_requires_refresh(0));
     }
 }

@@ -108,77 +108,118 @@ actions!(
     ]
 );
 
-/// Binds every SPEC UI-03 key to its action. Call once during bootstrap, before any window or menu
-/// is built: `Keymap` reads the bindings when they are installed.
-pub fn init_keymap(cx: &mut App) {
-    let context = Some(WINDOW_CONTEXT);
-    cx.bind_keys([
-        KeyBinding::new("up", SelectPreviousRow, context),
-        KeyBinding::new("down", SelectNextRow, context),
-        KeyBinding::new("enter", OpenSelected, context),
-        KeyBinding::new("ctrl-enter", RevealSelectedLocation, context),
-        KeyBinding::new("ctrl-shift-c", CopyFullPaths, context),
-        KeyBinding::new("ctrl-shift-n", CopyFileNames, context),
-        KeyBinding::new("ctrl-c", CopyTextOrPaths, context),
-        KeyBinding::new("ctrl-insert", CopyTextOrPaths, context),
-        KeyBinding::new("ctrl-v", PasteQueryText, context),
-        KeyBinding::new("shift-insert", PasteQueryText, context),
-        KeyBinding::new("ctrl-x", CutQueryText, context),
-        KeyBinding::new("shift-delete", CutQueryText, context),
-        KeyBinding::new("ctrl-z", UndoQueryText, context),
-        KeyBinding::new("ctrl-y", RedoQueryText, context),
-        KeyBinding::new("ctrl-shift-z", RedoQueryText, context),
-        KeyBinding::new("ctrl-a", SelectAllQueryText, context),
-        KeyBinding::new("escape", EscapeQuery, context),
-        KeyBinding::new("ctrl-f", FocusSearchBox, context),
-        KeyBinding::new("f3", FocusSearchBox, context),
-        KeyBinding::new("alt-d", FocusSearchBox, context),
-        KeyBinding::new("ctrl-i", ToggleCaseSensitive, context),
-        KeyBinding::new("ctrl-b", ToggleWholeWord, context),
-        KeyBinding::new("ctrl-u", ToggleMatchPath, context),
-        KeyBinding::new("ctrl-r", ToggleRegex, context),
+/// One key the window binds.
+///
+/// The table is data rather than a sequence of calls, so the announcement a control makes and the
+/// dispatch the key performs can be read without a running application: the shortcut, the action
+/// it reaches and the context it is scoped to are all in one place.
+pub struct KeyBindingEntry {
+    /// The keystroke, spelled the way the accesskit announcement spells it.
+    pub shortcut: &'static str,
+    /// The action the key dispatches.
+    pub action: &'static str,
+    /// The key context the binding is scoped to.
+    pub context: &'static str,
+    /// The binding itself, installed into the keymap.
+    binding: KeyBinding,
+}
+
+/// Builds one entry. The action's name is taken from the action itself, so the table cannot claim
+/// that a key reaches an action it does not.
+fn bind<A: Action>(shortcut: &'static str, action: A, context: &'static str) -> KeyBindingEntry {
+    KeyBindingEntry {
+        shortcut,
+        action: A::name_for_type(),
+        context,
+        binding: KeyBinding::new(shortcut, action, Some(context)),
+    }
+}
+
+/// Every key the window binds, with the action and the context each one is scoped to.
+///
+/// This table is the one place a key is defined. A control that advertises a shortcut and the
+/// keymap that dispatches it are compared through it, so neither side has to be read as source
+/// text to be checked.
+pub fn key_bindings() -> Vec<KeyBindingEntry> {
+    vec![
+        bind("up", SelectPreviousRow, WINDOW_CONTEXT),
+        bind("down", SelectNextRow, WINDOW_CONTEXT),
+        bind("enter", OpenSelected, WINDOW_CONTEXT),
+        bind("ctrl-enter", RevealSelectedLocation, WINDOW_CONTEXT),
+        bind("ctrl-shift-c", CopyFullPaths, WINDOW_CONTEXT),
+        bind("ctrl-shift-n", CopyFileNames, WINDOW_CONTEXT),
+        bind("ctrl-c", CopyTextOrPaths, WINDOW_CONTEXT),
+        bind("ctrl-insert", CopyTextOrPaths, WINDOW_CONTEXT),
+        bind("ctrl-v", PasteQueryText, WINDOW_CONTEXT),
+        bind("shift-insert", PasteQueryText, WINDOW_CONTEXT),
+        bind("ctrl-x", CutQueryText, WINDOW_CONTEXT),
+        bind("shift-delete", CutQueryText, WINDOW_CONTEXT),
+        bind("ctrl-z", UndoQueryText, WINDOW_CONTEXT),
+        bind("ctrl-y", RedoQueryText, WINDOW_CONTEXT),
+        bind("ctrl-shift-z", RedoQueryText, WINDOW_CONTEXT),
+        bind("ctrl-a", SelectAllQueryText, WINDOW_CONTEXT),
+        bind("escape", EscapeQuery, WINDOW_CONTEXT),
+        bind("ctrl-f", FocusSearchBox, WINDOW_CONTEXT),
+        bind("f3", FocusSearchBox, WINDOW_CONTEXT),
+        bind("alt-d", FocusSearchBox, WINDOW_CONTEXT),
+        bind("ctrl-i", ToggleCaseSensitive, WINDOW_CONTEXT),
+        bind("ctrl-b", ToggleWholeWord, WINDOW_CONTEXT),
+        bind("ctrl-u", ToggleMatchPath, WINDOW_CONTEXT),
+        bind("ctrl-r", ToggleRegex, WINDOW_CONTEXT),
         // The filter row advertises this shortcut through AccessKit, so the key has to reach the
         // action: an announced shortcut that dispatches nothing is a false promise to a screen reader.
-        KeyBinding::new("alt-p", CycleFilterCategory, context),
+        bind("alt-p", CycleFilterCategory, WINDOW_CONTEXT),
         // One key per top-level menu in the title bar. Every mnemonic opens the menu whose name it
         // abbreviates, so a keyboard user reaches the same commands a pointer does.
-        KeyBinding::new("alt-f", OpenFileMenu, context),
-        KeyBinding::new("alt-e", OpenEditMenu, context),
-        KeyBinding::new("alt-t", OpenToolsMenu, context),
-        KeyBinding::new("alt-s", OpenSearchMenu, context),
-        KeyBinding::new("alt-v", OpenViewMenu, context),
-        KeyBinding::new("alt-h", OpenHelpMenu, context),
+        bind("alt-f", OpenFileMenu, WINDOW_CONTEXT),
+        bind("alt-e", OpenEditMenu, WINDOW_CONTEXT),
+        bind("alt-t", OpenToolsMenu, WINDOW_CONTEXT),
+        bind("alt-s", OpenSearchMenu, WINDOW_CONTEXT),
+        bind("alt-v", OpenViewMenu, WINDOW_CONTEXT),
+        bind("alt-h", OpenHelpMenu, WINDOW_CONTEXT),
         // The properties sheet was only ever in the result context menu; Windows also reaches it
         // with Alt+Enter, so the command keeps a keyboard path outside the popup.
-        KeyBinding::new("alt-enter", ShowProperties, context),
+        bind("alt-enter", ShowProperties, WINDOW_CONTEXT),
         // Desktop back/forward navigation shortcuts
-        KeyBinding::new("alt-left", NavigateBack, context),
-        KeyBinding::new("alt-right", NavigateForward, context),
-    ]);
-
-    // The four keys the result table answers with, and only while it holds focus. Tab moves it there
-    // from the query box (`gpui-base`'s `Root` owns Tab/Shift+Tab and walks the window's tab stops),
-    // and the same four keys keep moving the caret while the query box holds focus.
-    let results_context = Some(RESULTS_CONTEXT);
-    cx.bind_keys([
-        KeyBinding::new("left", ScrollTableLeft, results_context),
-        KeyBinding::new("right", ScrollTableRight, results_context),
-        KeyBinding::new("home", ScrollTableStart, results_context),
-        KeyBinding::new("end", ScrollTableEnd, results_context),
+        bind("alt-left", NavigateBack, WINDOW_CONTEXT),
+        bind("alt-right", NavigateForward, WINDOW_CONTEXT),
+        // The four keys the result table answers with, and only while it holds focus. Tab moves it there
+        // from the query box (`gpui-base`'s `Root` owns Tab/Shift+Tab and walks the window's tab stops),
+        // and the same four keys keep moving the caret while the query box holds focus.
+        bind("left", ScrollTableLeft, RESULTS_CONTEXT),
+        bind("right", ScrollTableRight, RESULTS_CONTEXT),
+        bind("home", ScrollTableStart, RESULTS_CONTEXT),
+        bind("end", ScrollTableEnd, RESULTS_CONTEXT),
         // Delete belongs to the table region, not the window: the search box
         // uses the same key for forward-deleting text, and a window-wide
         // binding would swallow that edit.
-        KeyBinding::new("delete", DeleteSelected, results_context),
-    ]);
+        bind("delete", DeleteSelected, RESULTS_CONTEXT),
+        // A focused caption button is still inside the window key context, so `enter` there would
+        // out-rank nothing and open the selected row. Consume the activation keys in the control's own
+        // context; the button's click handler runs on key-up, like every native button.
+        bind("enter", NoAction {}, WINDOW_CONTROL_CONTEXT),
+        bind("space", NoAction {}, WINDOW_CONTROL_CONTEXT),
+    ]
+}
 
-    // A focused caption button is still inside the window key context, so `enter` there would
-    // out-rank nothing and open the selected row. Consume the activation keys in the control's own
-    // context; the button's click handler runs on key-up, like every native button.
-    let control_context = Some(WINDOW_CONTROL_CONTEXT);
-    cx.bind_keys([
-        KeyBinding::new("enter", NoAction {}, control_context),
-        KeyBinding::new("space", NoAction {}, control_context),
-    ]);
+/// Binds every SPEC UI-03 key to its action. Call once during bootstrap, before any window or menu
+/// is built: `Keymap` reads the bindings when they are installed.
+pub fn init_keymap(cx: &mut App) {
+    let entries = key_bindings();
+    // Two bindings for the same key in the same context would leave the dispatch order as the only
+    // thing deciding which action runs. The table has to stay unambiguous, so a duplicate fails at
+    // bootstrap rather than silently at the keystroke.
+    let mut claimed: std::collections::HashMap<(&'static str, &'static str), &'static str> =
+        std::collections::HashMap::new();
+    for entry in &entries {
+        if let Some(previous) = claimed.insert((entry.shortcut, entry.context), entry.action) {
+            panic!(
+                "{} is bound twice in {}: {} and {}",
+                entry.shortcut, entry.context, previous, entry.action
+            );
+        }
+    }
+    cx.bind_keys(entries.into_iter().map(|entry| entry.binding));
 }
 
 /// The keys that belong to the result table region alone, with the action each must resolve to. Used
@@ -195,7 +236,7 @@ pub fn results_region_bindings() -> Vec<(&'static str, &'static str)> {
 }
 
 #[cfg(test)]
-mod keymap_source {
+mod keymap_table {
     // The same shadow the headless module above documents: `super::*` reaches GPUI's `test` attribute
     // macro through this crate's prelude, and expanding a built-in `#[test]` with it recurses until
     // rustc overflows its own stack. Re-importing the built-in wins over the glob.
@@ -203,48 +244,25 @@ mod keymap_source {
 
     use super::*;
 
-    /// The third argument of a `KeyBinding::new` call, read off the source line that builds it — the
-    /// context that binding is scoped to. The call site ends with `),` so the last comma-separated
-    /// field is empty and the context is the last non-empty one.
-    fn scoped_to(line: &str) -> String {
-        let (_, call) = line
-            .split_once("KeyBinding::new(")
-            .unwrap_or_else(|| panic!("not a binding line: {line}"));
-        call.split(',')
-            .map(|argument| argument.trim().trim_end_matches(')').trim())
-            .rfind(|argument| !argument.is_empty())
-            .unwrap_or_else(|| panic!("no context argument on: {line}"))
-            .to_string()
-    }
-
     /// `left`, `right`, `home` and `end` move the columns, and the query box is where the window's
     /// focus normally sits. Bound to the window context they resolve before the box ever sees them, so
     /// typing would steer the table instead of the caret.
     #[test]
     fn the_table_keys_are_bound_only_to_the_results_region() {
-        let source = include_str!("commands.rs");
+        let bindings = key_bindings();
         for (keystroke, action_name) in results_region_bindings() {
-            // An Action's registered name is `<namespace>::<Type>` (the `actions!` macro builds it from
-            // the module path), while the binding line spells the bare type. The last segment is the
-            // one the source uses.
-            let action = action_name
-                .rsplit("::")
-                .next()
-                .expect("an action has a name");
-            let prefix = format!("KeyBinding::new(\"{keystroke}\",{action}");
-            let lines: Vec<&str> = source
-                .lines()
-                .filter(|line| line.replace(' ', "").starts_with(&prefix))
+            let matching: Vec<&KeyBindingEntry> = bindings
+                .iter()
+                .filter(|entry| entry.shortcut == keystroke && entry.action == action_name)
                 .collect();
             assert_eq!(
-                lines.len(),
+                matching.len(),
                 1,
                 "{keystroke} must reach {action_name} from exactly one binding, found {}",
-                lines.len()
+                matching.len()
             );
             assert_eq!(
-                scoped_to(lines[0]),
-                "results_context",
+                matching[0].context, RESULTS_CONTEXT,
                 "{keystroke} is scoped to something other than {RESULTS_CONTEXT}, which takes it \
                  away from the query box"
             );
@@ -256,48 +274,28 @@ mod keymap_source {
     /// this file names; a binding added to the window block for the same action would pass it.
     #[test]
     fn the_window_context_does_not_rebind_the_table_keys() {
-        let source = include_str!("commands.rs");
-        let window_block = source
-            .split("let results_context")
-            .next()
-            .expect("init_keymap defines the window block before the results block");
+        let bindings = key_bindings();
         for (keystroke, _) in results_region_bindings() {
-            let bound = format!("KeyBinding::new(\"{keystroke}\"");
+            let in_window = bindings
+                .iter()
+                .any(|entry| entry.shortcut == keystroke && entry.context == WINDOW_CONTEXT);
             assert!(
-                !window_block.contains(&bound),
-                "{keystroke} is bound in the window block, so it answers wherever focus sits"
+                !in_window,
+                "{keystroke} is bound in the window context, so it answers wherever focus sits"
             );
         }
     }
 
-    /// Each binding names a *variable* for its context, so checking that name alone proves nothing:
-    /// repointing `let results_context` at `WINDOW_CONTEXT` keeps every binding line intact and takes
-    /// the caret away from the query box all the same. The two definitions are therefore pinned to the
-    /// constants they must carry, which closes the chain the per-binding check leaves open.
+    /// Every key the window binds must be a keystroke the platform can parse: a binding the keymap
+    /// cannot read is a key that silently does nothing.
     #[test]
-    fn each_context_variable_still_names_the_context_it_claims() {
-        let source = include_str!("commands.rs");
-        for (definition, constant) in [
-            ("let context = Some(", "WINDOW_CONTEXT"),
-            ("let results_context = Some(", "RESULTS_CONTEXT"),
-        ] {
-            let line = source
-                .lines()
-                .find(|line| line.trim_start().starts_with(definition))
-                .unwrap_or_else(|| panic!("init_keymap no longer defines {definition}"));
+    fn every_bound_shortcut_is_a_keystroke_the_platform_can_read() {
+        for entry in key_bindings() {
             assert!(
-                line.contains(constant),
-                "{definition}.. resolves to something other than {constant}, which silently moves \
-                 every binding that names this variable into another context"
+                gpui_kit::gpui::Keystroke::parse(entry.shortcut).is_ok(),
+                "{shortcut} is not a keystroke the platform can read",
+                shortcut = entry.shortcut
             );
-        }
-    }
-
-    #[test]
-    fn test_bindings_are_valid_keystrokes() {
-        for key in ["ctrl-v", "shift-insert"] {
-            let res = gpui_kit::gpui::Keystroke::parse(key);
-            assert!(res.is_ok(), "Key {key} failed to parse: {:?}", res.err());
         }
     }
 }

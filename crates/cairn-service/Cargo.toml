@@ -11,7 +11,7 @@ name = "cairn_service"
 path = "src/lib.rs"
 
 [[bin]]
-name = "cairnd"
+name = "CairnService"
 path = "src/main.rs"
 
 [dependencies]

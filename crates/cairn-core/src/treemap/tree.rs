@@ -38,26 +38,6 @@ impl From<&TreemapTreeNode> for TreemapItem {
     }
 }
 
-/// Formats a raw byte count into a human-readable string with units (B, KB, MB, GB, TB).
-pub fn format_size_bytes(bytes: u64) -> String {
-    const KB: f64 = 1024.0;
-    const MB: f64 = KB * 1024.0;
-    const GB: f64 = MB * 1024.0;
-    const TB: f64 = GB * 1024.0;
-    let value = bytes as f64;
-    if bytes < 1024 {
-        format!("{bytes} B")
-    } else if value < MB {
-        format!("{:.1} KB", value / KB)
-    } else if value < GB {
-        format!("{:.1} MB", value / MB)
-    } else if value < TB {
-        format!("{:.2} GB", value / GB)
-    } else {
-        format!("{:.2} TB", value / TB)
-    }
-}
-
 /// A directory or file in the hierarchical size tree.
 ///
 /// Nodes carry only their own name: storing the full path on every node would
@@ -455,15 +435,5 @@ mod tests {
         assert_eq!(parent.compute_aggregated_sizes(), 5_120);
         assert_eq!(parent.children[0].size, 4_096);
         assert_eq!(parent.children[1].size, 1_024);
-    }
-
-    #[test]
-    fn sizes_format_with_binary_units() {
-        assert_eq!(format_size_bytes(0), "0 B");
-        assert_eq!(format_size_bytes(1023), "1023 B");
-        assert_eq!(format_size_bytes(1536), "1.5 KB");
-        assert_eq!(format_size_bytes(5 * 1024 * 1024), "5.0 MB");
-        assert_eq!(format_size_bytes(3 * 1024 * 1024 * 1024), "3.00 GB");
-        assert_eq!(format_size_bytes(2 * 1024 * 1024 * 1024 * 1024), "2.00 TB");
     }
 }

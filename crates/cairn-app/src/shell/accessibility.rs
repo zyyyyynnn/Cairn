@@ -249,8 +249,7 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         requirement: "UI-01, DSV-08",
     },
     // ---- search band: the query box (UI-03) ----------------------------------------
-    // The match flags left the search band for the 匹配 dropdown, so they are no longer controls of
-    // their own: their keys are promised by the command model
+    // The match flags live in the 匹配 dropdown, not in the search band: their keys are promised by the command model
     // ([`crate::shell::command_groups::GroupCommand::shortcut`]) and their hints are drawn by the popup from
     // the binding, which is what keeps a menu label and a keystroke on one definition.
     KeyControl {
@@ -327,16 +326,6 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         indexed: false,
         role: Role::Button,
         messages: &["menu_help"],
-        named_by: "",
-        requirement: "UI-01",
-    },
-    // ---- breadcrumb: where the results come from (UI-01) ---------------------------
-    KeyControl {
-        key: "breadcrumb",
-        element: "breadcrumb",
-        indexed: false,
-        role: Role::Navigation,
-        messages: &["breadcrumb_label"],
         named_by: "",
         requirement: "UI-01",
     },
@@ -586,6 +575,15 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         named_by: "",
         requirement: "DSV-08",
     },
+    KeyControl {
+        key: "treemap-legend",
+        element: "treemap-legend",
+        indexed: true,
+        role: Role::CheckBox,
+        messages: EMPTY,
+        named_by: "legend_accessible_label",
+        requirement: "DSV-07",
+    },
     // The location-wide action in the status band while the Recycle Bin holds items.
     KeyControl {
         key: "empty-recycle-bin",
@@ -729,14 +727,19 @@ mod tests {
     use core::prelude::rust_2021::test;
 
     use super::*;
-    use crate::app::ServiceIssue;
     use crate::search::filters::FilterCategory;
+    use crate::service::service_issue::ServiceIssue;
     use crate::shell::command_groups::{all_commands, menu_groups};
     use gpui_kit::gpui::Keystroke;
     use std::collections::HashSet;
 
     /// The sources that build the window. `accessibility.rs` is deliberately excluded: its table holds
     /// every registered id, so reading it back would prove nothing about the render path.
+    ///
+    /// These are a static proxy for a render-time invariant: the app has no headless window yet, so
+    /// "the view asks for this control" is answered by reading the view's text rather than by
+    /// rendering it. `gpui-kit`'s `test-support` feature carries the headless harness that would
+    /// replace these scans with real assertions on the accessibility tree.
     const VIEW_SOURCES: &[&str] = &[
         include_str!("../view.rs"),
         include_str!("../search/bar_view.rs"),
@@ -843,7 +846,6 @@ mod tests {
             ("toolbar-menu-search", Role::Button),
             ("toolbar-menu-tools", Role::Button),
             ("toolbar-menu-help", Role::Button),
-            ("breadcrumb", Role::Navigation),
             ("table-header", Role::Row),
             ("column-name", Role::ColumnHeader),
             ("column-path", Role::ColumnHeader),
@@ -876,7 +878,6 @@ mod tests {
     fn the_registry_covers_the_controls_the_spec_names() {
         let required = [
             "search-input",
-            "breadcrumb",
             "sidebar-locations",
             "sidebar-location-all",
             "sidebar-location-folder",
@@ -1239,10 +1240,12 @@ mod tests {
             );
         }
 
-        let keymap = include_str!("commands.rs");
+        // The keymap table is the one place a key can be kept, so an announced shortcut that no
+        // entry binds is a promise the window cannot keep.
+        let bindings = crate::shell::commands::key_bindings();
         for shortcut in advertised {
             assert!(
-                keymap.contains(&format!("KeyBinding::new(\"{shortcut}\"")),
+                bindings.iter().any(|entry| entry.shortcut == shortcut),
                 "the window advertises {shortcut} on a control, but init_keymap never binds it"
             );
         }

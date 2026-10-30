@@ -23,7 +23,7 @@ impl CairnApp {
     pub fn can_go_back(&self) -> bool {
         // The bin is one location step; Back leaves it for the query that was
         // active before it, even when that query is the first history entry.
-        if self.recycle_bin.is_some() {
+        if self.recycle_bin.is_open() {
             return true;
         }
         if self.drive_view.is_some() {
@@ -39,7 +39,7 @@ impl CairnApp {
         // A location step has no forward meaning until it is left. Keeping the
         // toolbar Forward disabled prevents an action that would advance the
         // query history while the bin stays on screen.
-        if self.recycle_bin.is_some() {
+        if self.recycle_bin.is_open() {
             return false;
         }
         if self.drive_view.is_some() {
@@ -79,7 +79,7 @@ impl CairnApp {
         // While the bin is open the search box is a location label, not the
         // query that entry describes; writing it back would erase the text the
         // person left before opening the bin.
-        if self.recycle_bin.is_some() {
+        if self.recycle_bin.is_open() {
             return;
         }
         if let Some(state) = self.nav_history.get_mut(self.nav_history_index) {
@@ -91,12 +91,7 @@ impl CairnApp {
     /// entry itself is untouched, so repeated Back/Forward does not create a
     /// second history step for the bin.
     pub(crate) fn return_from_recycle_bin(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.recycle_bin = None;
-        self.recycle_bin_loading = false;
-        self.recycle_bin_all = Vec::new();
-        self.recycle_bin_icon_extensions.clear();
-        self.recycle_bin_selected_keys = std::collections::HashSet::new();
-        self.recycle_bin_error = None;
+        self.recycle_bin.leave();
         let index = self.nav_history_index;
         self.restore_nav_state(index, cx);
         // The bin owned the results focus; after leaving it the query box is
@@ -105,7 +100,7 @@ impl CairnApp {
     }
 
     pub fn go_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.recycle_bin.is_some() {
+        if self.recycle_bin.is_open() {
             self.return_from_recycle_bin(window, cx);
             return;
         }
@@ -124,7 +119,7 @@ impl CairnApp {
     }
 
     pub fn go_forward(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.recycle_bin.is_some() {
+        if self.recycle_bin.is_open() {
             // Forward is disabled in the bin; the guard keeps a stale key or
             // programmatic dispatch from advancing history behind the location.
             return;

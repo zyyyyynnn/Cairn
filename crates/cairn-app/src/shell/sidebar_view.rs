@@ -251,7 +251,7 @@ impl CairnApp {
                 let category = *category;
                 let is_active = self.query.active_filter == category
                     && self.drive_view.is_none()
-                    && self.recycle_bin.is_none();
+                    && !self.recycle_bin.is_open();
                 let control =
                     accessibility::control_at(&element_id("sidebar-location", category.key()));
                 let name = accessibility::name(control, &self.i18n);
@@ -289,7 +289,7 @@ impl CairnApp {
 
         // 回收站 is a location, not a search category: it lists what the shell
         // has binned and restores from there, so it closes the 位置 section.
-        let bin_active = self.recycle_bin.is_some() && self.drive_view.is_none();
+        let bin_active = self.recycle_bin.is_open() && self.drive_view.is_none();
         let bin_control = accessibility::control("sidebar-recycle-bin");
         let bin_name = accessibility::name(bin_control, &self.i18n);
         let bin_focus = window

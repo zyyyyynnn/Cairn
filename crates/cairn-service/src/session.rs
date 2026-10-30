@@ -4,7 +4,7 @@
 
 //! Query session cache and pagination manager with multi-volume support.
 
-use crate::sync_engine::VolumeIndex;
+use crate::sync_engine::{SearchResultItem, VolumeIndex};
 use cairn_core::engine::CancellationToken;
 use cairn_protocol::message::FileRowData;
 use std::collections::HashMap;
@@ -17,16 +17,6 @@ const SESSION_TTL: Duration = Duration::from_secs(300);
 
 /// Maximum total `SearchResultItem` entries retained across all cached sessions (~256 MiB ceiling).
 const MAX_TOTAL_CACHED_ITEMS: usize = 16 * 1024 * 1024;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SearchResultItem {
-    pub drive_letter: char,
-    pub record_idx: u32,
-    /// [`VolumeIndex`] generation observed when the match was produced. A later rebuild,
-    /// compaction or reload replaces the record table, so these indices no longer describe the
-    /// same rows.
-    pub generation: u64,
-}
 
 /// Why a row page cannot be served from the cached match list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

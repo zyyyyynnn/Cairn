@@ -259,7 +259,7 @@ pub(super) fn block_fill_states(base: Hsla, is_dark: bool) -> (Hsla, Hsla) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shell::theme::contrast_ratio;
+    use cairn_ui::theme::contrast_ratio;
 
     const CATEGORIES: [TreemapCategory; 10] = [
         TreemapCategory::Folder,

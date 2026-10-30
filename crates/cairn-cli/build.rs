@@ -15,7 +15,7 @@ fn main() {
         res.set("FileDescription", "Cairn CLI");
         res.set("ProductName", "Cairn");
         res.set("CompanyName", "Cairn Contributors");
-        res.set("OriginalFilename", "cairn-cli.exe");
+        res.set("OriginalFilename", "CairnCli.exe");
         res.set("LegalCopyright", "Copyright (c) 2026 Cairn Contributors");
         if let Err(e) = res.compile() {
             eprintln!("cargo:warning=Failed to compile Windows resource: {}", e);

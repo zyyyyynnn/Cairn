@@ -69,8 +69,10 @@ pub struct TreemapViewState {
     cached_index: Option<Arc<VolumeTreemapIndex>>,
     /// Whether background filesystem scan is active
     pub(super) is_scanning: bool,
-    /// Whether a meaningful tree has been shown at least once. Stays true for
-    /// the lifetime of this view state so drilling does not replay the reveal.
+    /// The current root could not be read; this is not a legitimate empty directory.
+    pub(super) scan_unreadable: bool,
+    /// Whether a complete tree has been computed and revealed on the canvas.
+    /// Reset on each new scan or refresh until the tree is ready.
     pub(super) content_revealed: bool,
     /// Active scan cancellation handle
     pub(super) scan_cancel: Option<Arc<AtomicBool>>,
@@ -113,6 +115,7 @@ impl TreemapViewState {
             last_scale_factor: 1.0,
             cached_index,
             is_scanning: false,
+            scan_unreadable: false,
             content_revealed: false,
             scan_cancel: None,
             scan_generation: 0,
@@ -143,6 +146,7 @@ impl TreemapViewState {
             last_scale_factor: 1.0,
             cached_index: None,
             is_scanning: false,
+            scan_unreadable: false,
             content_revealed: false,
             scan_cancel: None,
             scan_generation: 0,
@@ -191,6 +195,7 @@ impl TreemapViewState {
         }
         self.scan_generation = next_scan_epoch();
         self.is_scanning = false;
+        self.scan_unreadable = false;
         self.selected_path = None;
 
         let current_dir = self.navigation.current_dir().to_string();
@@ -258,19 +263,26 @@ impl TreemapViewState {
         // shallow listing first and then streams incremental subtree deltas.
         self.root_tree = None;
         self.layout_nodes.clear();
+        self.content_revealed = false;
         self.current_dir_total_size = 0;
         self.current_dir_total_items = 0;
+        self.scan_unreadable = false;
         self.is_scanning = true;
 
         Some(PathBuf::from(current_dir))
     }
 
     pub(super) fn apply_scan_event(&mut self, event: TreemapScanEvent) {
+        self.scan_unreadable = event.root_unreadable;
         self.current_dir_total_items = event.scanned_files + event.scanned_dirs;
 
         match event.update {
             TreemapScanUpdate::Listing(root) => {
-                self.set_prepared_tree(root);
+                // The shallow root listing is kept in memory while the scan runs.
+                // Intermediate states stay in memory tree only and do not enter layout (SPEC UI-11).
+                self.current_dir_total_size = root.size;
+                self.current_dir_total_items = root.descendant_count();
+                self.root_tree = Some(Arc::new(root));
             }
             update @ TreemapScanUpdate::Progress { .. } => {
                 // The first screen has no intermediate state: progress events
@@ -294,23 +306,27 @@ impl TreemapViewState {
             Arc::make_mut(tree).descendant_items = event.scanned_files + event.scanned_dirs;
         }
 
-        let current_dir = self.navigation.current_dir();
-        // Only a finished scan is a complete tree. Caching a partial snapshot
-        // would make returning to the drive root show stale, incomplete sizes.
-        // The Arc shares the finished tree with the root view; no copy.
-        if event.is_finished && is_drive_root(current_dir) {
-            self.stored_drive_tree = self.root_tree.clone();
-        }
-
+        let current_dir = self.navigation.current_dir().to_string();
         if event.is_finished {
             self.is_scanning = false;
             self.scanned_item_totals.insert(
-                current_dir.to_string(),
+                current_dir.clone(),
                 event.scanned_files + event.scanned_dirs,
             );
             // The skeleton stays until the scan has the complete tree; the
             // finished event is the only thing that reveals the canvas and
             // computes its layout.
+            if let Some(tree) = self.root_tree.as_mut() {
+                let tree = Arc::make_mut(tree);
+                tree.compute_aggregated_sizes();
+                tree.sort_recursive();
+            }
+            // Cache only after the final mutation, so the drive-root view and
+            // the cache share one finished allocation instead of forcing a
+            // copy-on-write clone of the largest tree on the UI thread.
+            if is_drive_root(&current_dir) {
+                self.stored_drive_tree = self.root_tree.clone();
+            }
             self.recompute_layout();
             self.reveal_content();
         }
@@ -348,9 +364,10 @@ impl TreemapViewState {
     /// sorting and categories were already applied by the producer
     /// (`DirectorySizeIndex::build_tree_node` runs the same finish pipeline as
     /// a scan), so no second pass runs here.
-    pub(super) fn adopt_service_tree(&mut self, entries: Vec<TreeEntryData>) {
+    pub(super) fn adopt_service_tree(&mut self, entries: Vec<TreeEntryData>) -> bool {
+        self.scan_unreadable = false;
         let Some(tree) = reassemble_tree(entries) else {
-            return;
+            return false;
         };
         let descendant_count = tree.descendant_count();
         self.current_dir_total_items = descendant_count;
@@ -363,6 +380,7 @@ impl TreemapViewState {
             .insert(current_dir, descendant_count);
         self.is_scanning = false;
         self.reveal_content();
+        true
     }
 
     /// Recomputes Treemap nested layout nodes according to current bounds and detail level.
@@ -475,6 +493,11 @@ impl TreemapViewState {
     /// Whether a background scan of the current directory is still running.
     pub fn is_scanning(&self) -> bool {
         self.is_scanning
+    }
+
+    /// The current root could not be read; the empty canvas is an error, not an empty folder.
+    pub fn is_unreadable(&self) -> bool {
+        self.scan_unreadable
     }
 
     /// Removes one item from the in-memory tree after the shell deleted it on
@@ -1131,5 +1154,105 @@ mod tests {
         // Must update scanned_item_totals
         assert_eq!(state.scanned_item_totals.get(r"C:\"), Some(&5));
         assert_eq!(state.scanned_item_totals.get(r"C:\Users"), Some(&0));
+    }
+
+    #[test]
+    fn a_finished_scan_publishes_its_exact_totals() {
+        let mut state = TreemapViewState::new_for_test('C');
+        state.is_scanning = true;
+
+        let progress = cairn_core::treemap::TreemapScanEvent {
+            update: cairn_core::treemap::TreemapScanUpdate::Progress {
+                completed: Vec::new(),
+                partial_sizes: Vec::new(),
+            },
+            scanned_files: 80_000,
+            scanned_dirs: 4_000,
+            is_finished: false,
+            root_unreadable: false,
+        };
+        state.apply_scan_event(progress);
+        assert!(state.is_scanning());
+        assert_eq!(
+            state.total_items(),
+            84_000,
+            "the state keeps the exact scan counter, but the footer hides it until the scan finishes"
+        );
+
+        let finished = cairn_core::treemap::TreemapScanEvent {
+            update: cairn_core::treemap::TreemapScanUpdate::Progress {
+                completed: Vec::new(),
+                partial_sizes: Vec::new(),
+            },
+            scanned_files: 80_000,
+            scanned_dirs: 4_000,
+            is_finished: true,
+            root_unreadable: false,
+        };
+        state.apply_scan_event(finished);
+        assert!(!state.is_scanning());
+        assert_eq!(state.total_items(), 84_000);
+    }
+
+    #[test]
+    fn a_finished_drive_scan_shares_the_cached_tree_without_copying() {
+        let mut state = TreemapViewState::new_for_test('C');
+        state.is_scanning = true;
+        state.apply_scan_event(cairn_core::treemap::TreemapScanEvent {
+            update: cairn_core::treemap::TreemapScanUpdate::Listing(
+                cairn_core::treemap::TreemapTreeNode::new_dir(1, "C:".into(), 0),
+            ),
+            scanned_files: 0,
+            scanned_dirs: 0,
+            is_finished: false,
+            root_unreadable: false,
+        });
+        state.apply_scan_event(cairn_core::treemap::TreemapScanEvent {
+            update: cairn_core::treemap::TreemapScanUpdate::Progress {
+                completed: Vec::new(),
+                partial_sizes: Vec::new(),
+            },
+            scanned_files: 0,
+            scanned_dirs: 0,
+            is_finished: true,
+            root_unreadable: false,
+        });
+
+        let root = state.root_tree.as_ref().expect("root tree");
+        let cached = state.stored_drive_tree.as_ref().expect("drive cache");
+        assert!(
+            Arc::ptr_eq(root, cached),
+            "the finished drive tree must be shared with its cache, not cloned"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_scan_is_not_rendered_as_an_empty_directory() {
+        let mut state = TreemapViewState::new_for_test('C');
+        state.apply_scan_event(cairn_core::treemap::TreemapScanEvent {
+            update: cairn_core::treemap::TreemapScanUpdate::Listing(TreemapTreeNode::new_dir(
+                1,
+                "C:".into(),
+                0,
+            )),
+            scanned_files: 0,
+            scanned_dirs: 0,
+            is_finished: true,
+            root_unreadable: true,
+        });
+
+        assert!(state.is_unreadable());
+        assert!(!state.is_scanning());
+    }
+
+    #[test]
+    fn navigation_cancels_the_old_scan_generation() {
+        let mut state = TreemapViewState::new_for_test('C');
+        let gen1 = state.scan_generation;
+        state.is_scanning = true;
+
+        let _ = state.load_current_dir();
+        assert_ne!(state.scan_generation, gen1);
+        assert_eq!(state.total_items(), 0);
     }
 }

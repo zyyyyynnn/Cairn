@@ -5,7 +5,7 @@
 //! Recycle Bin view state: shell listing to table rows, local paging, sorting and selection.
 //!
 //! The bin is a location, not a search result set. Its rows come from the Windows shell and
-//! live in [`CairnApp::recycle_bin`]; the result table renders a window of them exactly like it
+//! live in [`RecycleBinView`]; the result table renders a window of them exactly like it
 //! renders service pages, so a large bin stays virtualized without asking the service for rows
 //! the index does not hold.
 
@@ -14,8 +14,171 @@ use crate::shell::os::RecycleBinItem;
 use crate::table::model::SortColumn;
 use cairn_protocol::message::FileRowData;
 use gpui_kit::gpui::{px, Context, Pixels, Point, Window};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+
+/// The Recycle Bin view's own state.
+///
+/// The bin is a location, not a search scope, so every path that leaves it has to release the
+/// whole view at once: the rendered rows, the unfiltered listing behind them, the icon side
+/// table, the identity-keyed selection and the error band belong to one another. One owner
+/// makes "leaving the bin" a single decision instead of a six-field sequence that each caller
+/// could half-clear.
+pub(crate) struct RecycleBinView {
+    /// The rows the table renders, in table order. `None` means the bin is not the current
+    /// location; `Some` with an empty vector means the bin is open but holds no rows yet.
+    rows: Option<Vec<Arc<RecycleBinItem>>>,
+    /// The full shell listing behind [`Self::rows`]. The search box filters this location in
+    /// place, so the unfiltered rows stay available until the bin is left. Items are shared by
+    /// `Arc`, so the filtered view never duplicates the name/path strings.
+    all: Vec<Arc<RecycleBinItem>>,
+    /// Lowercase extension for each bin row, keyed by the row's display identity. The Shell
+    /// hides `.lnk` from a shortcut's display name, so the table icon reads the payload
+    /// extension kept by [`Self::all`].
+    icon_extensions: HashMap<u64, String>,
+    /// Selection is kept by item identity, not row index, so a filter or sort can hide a row
+    /// without silently dropping it from the selection.
+    selected_keys: HashSet<String>,
+    /// Some when the bin listing itself could not be read. The view then shows an inline
+    /// recovery band instead of rows that may be stale.
+    error: Option<String>,
+    /// True while a background shell read is in flight for the bin.
+    loading: bool,
+    /// Invalidates a background bin read when the location is left or reloaded again.
+    generation: u64,
+}
+
+impl RecycleBinView {
+    /// A bin view that is not the window's current location.
+    pub(crate) fn closed() -> Self {
+        Self {
+            rows: None,
+            all: Vec::new(),
+            icon_extensions: HashMap::new(),
+            selected_keys: HashSet::new(),
+            error: None,
+            loading: false,
+            generation: 0,
+        }
+    }
+
+    /// Whether the bin is the window's current location.
+    pub(crate) fn is_open(&self) -> bool {
+        self.rows.is_some()
+    }
+
+    /// The rows the table renders, or `None` when the bin is not the current location.
+    pub(crate) fn rows(&self) -> Option<&[Arc<RecycleBinItem>]> {
+        self.rows.as_deref()
+    }
+
+    /// The unfiltered shell listing behind the rendered rows.
+    pub(crate) fn all(&self) -> &[Arc<RecycleBinItem>] {
+        &self.all
+    }
+
+    /// The payload extension of a row, keyed by its display identity.
+    pub(crate) fn icon_extension(&self, key: u64) -> Option<&str> {
+        self.icon_extensions.get(&key).map(String::as_str)
+    }
+
+    /// The identity keys of the rows the person selected.
+    pub(crate) fn selected_keys(&self) -> &HashSet<String> {
+        &self.selected_keys
+    }
+
+    /// The reason the listing could not be read.
+    pub(crate) fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    /// True while a background shell read is in flight.
+    pub(crate) fn is_loading(&self) -> bool {
+        self.loading
+    }
+
+    /// Marks whether a background shell read is in flight.
+    pub(crate) fn set_loading(&mut self, loading: bool) {
+        self.loading = loading;
+    }
+
+    /// The token a background read must still match to be accepted.
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Releases the view. Returns whether the bin was open.
+    pub(crate) fn leave(&mut self) -> bool {
+        let was_open = self.rows.take().is_some();
+        self.loading = false;
+        self.all.clear();
+        self.icon_extensions.clear();
+        self.selected_keys.clear();
+        self.error = None;
+        was_open
+    }
+
+    /// Starts a background shell read. Returns the token the read must match to be accepted.
+    pub(crate) fn begin_load(&mut self) -> u64 {
+        self.generation = self.generation.wrapping_add(1);
+        self.loading = true;
+        self.error = None;
+        self.all.clear();
+        self.icon_extensions.clear();
+        self.selected_keys.clear();
+        self.rows = Some(Vec::new());
+        self.generation
+    }
+
+    /// Installs the listing a shell read returned, dropping the selection it no longer covers.
+    pub(crate) fn install_listing(&mut self, items: Vec<Arc<RecycleBinItem>>) {
+        self.icon_extensions = bin_icon_extensions(&items);
+        self.all = items;
+        self.error = None;
+        let live: HashSet<String> = self.all.iter().map(|item| item.identity_key()).collect();
+        self.selected_keys.retain(|key| live.contains(key));
+    }
+
+    /// Records that the listing could not be read.
+    pub(crate) fn fail(&mut self, reason: String) {
+        self.error = Some(reason);
+        self.all.clear();
+        self.icon_extensions.clear();
+        self.selected_keys.clear();
+        self.rows = Some(Vec::new());
+    }
+
+    /// Shows the filtered rows of the current listing.
+    pub(crate) fn set_rows(&mut self, rows: Vec<Arc<RecycleBinItem>>) {
+        self.rows = Some(rows);
+    }
+
+    /// Merges the visible table selection into the identity-keyed selection before the visible
+    /// set changes. A key that is temporarily hidden by a filter stays in the set; a visible row
+    /// the person deselected is removed. A wholly absent table selection is not a decision to
+    /// deselect anything: a chrome press clears the indices, focus and anchor together, and the
+    /// keys are then the only record of what the person selected.
+    pub(crate) fn merge_visible_selection(
+        &mut self,
+        selected_indices: &HashSet<usize>,
+        selection_cleared: bool,
+    ) {
+        let Some(items) = self.rows.as_deref() else {
+            return;
+        };
+        merge_bin_selection_keys(
+            items,
+            selected_indices,
+            selection_cleared,
+            &mut self.selected_keys,
+        );
+    }
+
+    /// Reorders the full listing to the table's current sort.
+    pub(crate) fn sort(&mut self, column: SortColumn, ascending: bool) {
+        sort_items(&mut self.all, column, ascending);
+    }
+}
 
 /// Stable key for the icon-extension side table. It mirrors the fields a bin row exposes to the
 /// table, so the name-hidden `.lnk` suffix can be recovered without changing the IPC row format.
@@ -190,12 +353,12 @@ impl CairnApp {
     /// Rebuilds the visible bin rows from the full listing and the current search text. The
     /// search box filters this location in place instead of launching an index query.
     pub(crate) fn apply_recycle_bin_filter(&mut self, reset_scroll: bool) {
-        if self.recycle_bin_error.is_some() {
+        if self.recycle_bin.error().is_some() {
             return;
         }
         let needle = self.query.search_input.text.trim().to_string();
-        let filtered = filter_items(&self.recycle_bin_all, &needle, self.query.case_sensitive);
-        self.recycle_bin = Some(filtered);
+        let filtered = filter_items(self.recycle_bin.all(), &needle, self.query.case_sensitive);
+        self.recycle_bin.set_rows(filtered);
         self.install_recycle_bin_rows(reset_scroll);
         self.restore_bin_selection();
     }
@@ -206,31 +369,22 @@ impl CairnApp {
     /// to deselect anything: a chrome press clears the indices, focus and anchor together, and
     /// the keys are then the only record of what the person selected.
     pub(crate) fn sync_bin_selection_keys(&mut self) {
-        let Some(items) = self.recycle_bin.as_ref() else {
-            return;
-        };
         let selection_cleared = self.results.table.selected_indices.is_empty()
             && self.results.table.focused_idx.is_none()
             && self.results.table.selection_anchor.is_none();
-        merge_bin_selection_keys(
-            items,
-            &self.results.table.selected_indices,
-            selection_cleared,
-            &mut self.recycle_bin_selected_keys,
-        );
+        self.recycle_bin
+            .merge_visible_selection(&self.results.table.selected_indices, selection_cleared);
     }
 
     fn restore_bin_selection(&mut self) {
-        let Some(items) = self.recycle_bin.as_ref() else {
+        let Some(items) = self.recycle_bin.rows() else {
             return;
         };
+        let selected_keys = self.recycle_bin.selected_keys();
         let indices: Vec<usize> = items
             .iter()
             .enumerate()
-            .filter(|(_, item)| {
-                self.recycle_bin_selected_keys
-                    .contains(&item.identity_key())
-            })
+            .filter(|(_, item)| selected_keys.contains(&item.identity_key()))
             .map(|(index, _)| index)
             .collect();
         self.results.table.selected_indices = indices.iter().copied().collect();
@@ -245,7 +399,7 @@ impl CairnApp {
     /// Re-filters after a text edit while the bin is open. This is the search band's path in the
     /// bin, so typing never replaces the location with an index query.
     pub(crate) fn filter_recycle_bin(&mut self, cx: &mut Context<Self>) {
-        if self.recycle_bin.is_none() || self.recycle_bin_error.is_some() {
+        if !self.recycle_bin.is_open() || self.recycle_bin.error().is_some() {
             return;
         }
         self.sync_bin_selection_keys();
@@ -255,11 +409,11 @@ impl CairnApp {
 
     /// Clears the bin's in-place search and keeps the location open.
     pub(crate) fn clear_bin_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.recycle_bin.is_none() {
+        if !self.recycle_bin.is_open() {
             return;
         }
         self.query.search_input.clear();
-        if self.recycle_bin_error.is_some() {
+        if self.recycle_bin.error().is_some() {
             cx.notify();
             return;
         }
@@ -272,7 +426,7 @@ impl CairnApp {
     /// Rebuilds the table's fetched window from the first bin page. `reset_scroll` is false when
     /// an operation removed or restored a row and the person should stay where they were reading.
     pub(crate) fn install_recycle_bin_rows(&mut self, reset_scroll: bool) {
-        let Some(items) = self.recycle_bin.as_ref() else {
+        let Some(items) = self.recycle_bin.rows() else {
             return;
         };
         let total = items.len();
@@ -296,7 +450,7 @@ impl CairnApp {
 
     /// Installs the page the viewport needs from the in-memory bin, with no IPC request.
     pub(crate) fn fill_recycle_bin_page(&mut self, row_height: Pixels, cx: &mut Context<Self>) {
-        if self.recycle_bin.is_none() {
+        if !self.recycle_bin.is_open() {
             return;
         }
         self.results
@@ -309,7 +463,7 @@ impl CairnApp {
         else {
             return;
         };
-        let Some(items) = self.recycle_bin.as_ref() else {
+        let Some(items) = self.recycle_bin.rows() else {
             return;
         };
         if offset >= items.len() {
@@ -326,7 +480,7 @@ impl CairnApp {
 
     /// `true` when the bin is showing rows the fetched table window does not hold.
     pub(crate) fn needs_recycle_bin_page(&self, visible: std::ops::Range<usize>) -> bool {
-        self.recycle_bin.is_some()
+        self.recycle_bin.is_open()
             && self
                 .results
                 .table
@@ -337,13 +491,13 @@ impl CairnApp {
     /// Reorders the full in-memory listing to the table's current sort and re-applies the
     /// in-place search from the top.
     pub(crate) fn sort_recycle_bin(&mut self, cx: &mut Context<Self>) {
-        if self.recycle_bin_error.is_some() || self.recycle_bin_loading {
+        if self.recycle_bin.error().is_some() || self.recycle_bin.is_loading() {
             return;
         }
         let column = self.results.table.sort_column;
         let ascending = self.results.table.sort_asc;
         self.sync_bin_selection_keys();
-        sort_items(&mut self.recycle_bin_all, column, ascending);
+        self.recycle_bin.sort(column, ascending);
         self.apply_recycle_bin_filter(true);
         cx.notify();
     }
@@ -352,14 +506,7 @@ impl CairnApp {
     /// the skeleton while a dedicated COM apartment walks the shell; the generation token discards
     /// a result that arrives after the person has left or reloaded the location.
     pub(crate) fn begin_recycle_bin_load(&mut self, cx: &mut Context<Self>) {
-        self.recycle_bin_generation = self.recycle_bin_generation.wrapping_add(1);
-        let generation = self.recycle_bin_generation;
-        self.recycle_bin_loading = true;
-        self.recycle_bin_error = None;
-        self.recycle_bin_all = Vec::new();
-        self.recycle_bin_icon_extensions.clear();
-        self.recycle_bin_selected_keys = std::collections::HashSet::new();
-        self.recycle_bin = Some(Vec::new());
+        let generation = self.recycle_bin.begin_load();
         self.install_recycle_bin_rows(true);
         cx.notify();
 
@@ -388,10 +535,10 @@ impl CairnApp {
         anchor: Option<usize>,
         cx: &mut Context<Self>,
     ) {
-        if self.recycle_bin.is_none() || self.recycle_bin_generation != generation {
+        if !self.recycle_bin.is_open() || self.recycle_bin.generation() != generation {
             return;
         }
-        self.recycle_bin_loading = false;
+        self.recycle_bin.set_loading(false);
         match result {
             Ok(items) => {
                 let mut items: Vec<std::sync::Arc<RecycleBinItem>> =
@@ -401,25 +548,16 @@ impl CairnApp {
                     self.results.table.sort_column,
                     self.results.table.sort_asc,
                 );
-                self.recycle_bin_icon_extensions = bin_icon_extensions(&items);
-                self.recycle_bin_all = items;
-                self.recycle_bin_error = None;
-                let live: std::collections::HashSet<String> = self
-                    .recycle_bin_all
-                    .iter()
-                    .map(|item| item.identity_key())
-                    .collect();
-                self.recycle_bin_selected_keys
-                    .retain(|key| live.contains(key));
-                if self.recycle_bin_all.is_empty() && !self.query.search_input.text.is_empty() {
+                self.recycle_bin.install_listing(items);
+                if self.recycle_bin.all().is_empty() && !self.query.search_input.text.is_empty() {
                     self.query.search_input.clear();
                 }
                 self.apply_recycle_bin_filter(reset_scroll);
                 if let Some(anchor) = anchor {
-                    if self.recycle_bin_selected_keys.is_empty()
+                    if self.recycle_bin.selected_keys().is_empty()
                         && self.results.table.selected_indices.is_empty()
                     {
-                        let total = self.recycle_bin.as_ref().map_or(0, Vec::len);
+                        let total = self.recycle_bin.rows().map_or(0, |items| items.len());
                         if total > 0 {
                             let index = anchor.min(total - 1);
                             if self.results.table.is_loaded(index) {
@@ -431,11 +569,7 @@ impl CairnApp {
             }
             Err(reason) => {
                 tracing::warn!("recycle bin load failed: {reason}");
-                self.recycle_bin_error = Some(reason);
-                self.recycle_bin_all = Vec::new();
-                self.recycle_bin_icon_extensions.clear();
-                self.recycle_bin_selected_keys = std::collections::HashSet::new();
-                self.recycle_bin = Some(Vec::new());
+                self.recycle_bin.fail(reason);
                 self.install_recycle_bin_rows(true);
             }
         }
@@ -447,7 +581,7 @@ impl CairnApp {
     /// permanent delete must never act on a row the person just removed from the
     /// selection.
     pub(crate) fn selected_bin_items(&self) -> Option<Vec<std::sync::Arc<RecycleBinItem>>> {
-        let items = self.recycle_bin.as_ref()?;
+        let items = self.recycle_bin.rows()?;
         Some(
             self.explicit_bin_selection_indices()
                 .iter()
@@ -473,7 +607,7 @@ impl CairnApp {
     }
 
     pub(crate) fn target_bin_item(&self) -> Option<std::sync::Arc<RecycleBinItem>> {
-        let items = self.recycle_bin.as_ref()?;
+        let items = self.recycle_bin.rows()?;
         items.get(self.target_row_ix()?).cloned()
     }
 
@@ -589,7 +723,7 @@ mod tests {
 
     use super::{
         bin_icon_extensions, bin_icon_key, filter_items, item_names_summary,
-        merge_bin_selection_keys, row_for, shell_reason_key, sort_items,
+        merge_bin_selection_keys, row_for, shell_reason_key, sort_items, RecycleBinView,
     };
     use crate::shell::i18n::I18nManager;
     use crate::shell::os::RecycleBinItem;
@@ -837,5 +971,92 @@ mod tests {
         let row = row_for(&shortcut);
         let key = bin_icon_key(&row.name, &row.path, row.modified_ts, row.size, row.is_dir);
         assert_eq!(map.get(&key).map(String::as_str), Some("lnk"));
+    }
+
+    /// A bin that holds a listing, a filtered view, a selection and an icon side table.
+    fn open_view() -> RecycleBinView {
+        let mut view = RecycleBinView::closed();
+        view.begin_load();
+        view.install_listing(vec![
+            std::sync::Arc::new(item("alpha.txt", r"C:\work", 10, 1)),
+            std::sync::Arc::new(item("beta.txt", r"C:\work", 20, 2)),
+        ]);
+        // The search box filters this location in place, so the table shows one of the two rows.
+        view.set_rows(vec![std::sync::Arc::new(item(
+            "alpha.txt",
+            r"C:\work",
+            10,
+            1,
+        ))]);
+        view.merge_visible_selection(&std::collections::HashSet::from([0usize]), false);
+        view
+    }
+
+    #[test]
+    fn leaving_the_bin_releases_the_whole_view() {
+        let mut view = open_view();
+        assert!(view.is_open());
+        assert_eq!(view.all().len(), 2);
+        assert_eq!(view.rows().map_or(0, |rows| rows.len()), 1);
+        assert_eq!(view.selected_keys().len(), 1);
+
+        assert!(view.leave());
+
+        assert!(!view.is_open());
+        assert!(view.rows().is_none());
+        assert!(view.all().is_empty());
+        assert!(view.selected_keys().is_empty());
+        assert!(view.error().is_none());
+        assert!(!view.is_loading());
+        assert!(view
+            .icon_extension(bin_icon_key("alpha.txt", r"C:\work", 10, 1, false))
+            .is_none());
+    }
+
+    #[test]
+    fn leaving_a_bin_that_was_never_open_reports_nothing_to_release() {
+        let mut view = RecycleBinView::closed();
+        assert!(!view.leave());
+    }
+
+    #[test]
+    fn a_reload_starts_from_a_clean_listing_under_a_fresh_token() {
+        let mut view = open_view();
+        let first = view.generation();
+
+        let second = view.begin_load();
+
+        assert!(second > first);
+        assert!(view.is_open());
+        assert!(view.all().is_empty());
+        assert!(view.selected_keys().is_empty());
+        assert!(view.error().is_none());
+        assert!(view.is_loading());
+    }
+
+    #[test]
+    fn a_failed_listing_keeps_the_location_open_for_the_recovery_band() {
+        let mut view = open_view();
+
+        view.fail("access denied".to_string());
+
+        // The bin stays the current location so the error band can offer the retry path.
+        assert!(view.is_open());
+        assert_eq!(view.error(), Some("access denied"));
+        assert!(view.all().is_empty());
+        assert!(view.selected_keys().is_empty());
+        assert_eq!(view.rows().map_or(0, |rows| rows.len()), 0);
+    }
+
+    #[test]
+    fn the_selection_drops_the_keys_a_fresh_listing_no_longer_holds() {
+        let mut view = open_view();
+        assert_eq!(view.selected_keys().len(), 1);
+
+        view.install_listing(vec![std::sync::Arc::new(item(
+            "beta.txt", r"C:\work", 20, 2,
+        ))]);
+
+        assert!(view.selected_keys().is_empty());
     }
 }

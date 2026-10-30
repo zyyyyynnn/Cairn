@@ -17,12 +17,10 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, TryRecvError};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-/// How often partial sizes are refreshed before the first subtree finishes.
+/// How often partial sizes and progressive counters are refreshed while subtrees are scanning.
 const PARTIAL_INTERVAL: Duration = Duration::from_millis(100);
-/// The first partial update waits for a non-zero counter, but no longer than this.
-const FIRST_PARTIAL_DEADLINE: Duration = Duration::from_millis(250);
 /// Upper bound on concurrent subtree workers.
 const MAX_WORKERS: usize = 6;
 
@@ -105,6 +103,9 @@ pub struct TreemapScanEvent {
     pub scanned_dirs: usize,
     /// Set on the last event only. A cancelled scan never sends it.
     pub is_finished: bool,
+    /// The root itself could not be read. This is distinct from an empty directory and must not
+    /// be rendered as a legitimate "0 items" result.
+    pub root_unreadable: bool,
 }
 
 fn metadata_modified_ts(metadata: &Metadata) -> i64 {
@@ -138,14 +139,14 @@ fn metadata_is_reparse_point(metadata: &Metadata) -> bool {
 /// their size, directories are empty placeholders. One metadata lookup per
 /// entry (cached by the directory enumeration on Windows); reparse points are
 /// skipped and an unreadable root yields an empty listing.
-fn scan_listing(root_path: &Path) -> TreemapTreeNode {
+fn scan_listing(root_path: &Path) -> (TreemapTreeNode, bool) {
     let name = root_path
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| root_path.to_string_lossy().into_owned());
     let mut root = TreemapTreeNode::new_dir(1, name, 0);
     let Ok(entries) = std::fs::read_dir(root_path) else {
-        return root;
+        return (root, true);
     };
 
     let mut next_id = 100u64;
@@ -167,7 +168,7 @@ fn scan_listing(root_path: &Path) -> TreemapTreeNode {
     }
     root.compute_aggregated_sizes();
     root.sort_recursive();
-    root
+    (root, false)
 }
 
 /// One top-level directory tracked by the scan coordinator.
@@ -349,12 +350,6 @@ impl Coordinator<'_> {
         self.completed.push(tree);
     }
 
-    fn any_partial_bytes(&self) -> bool {
-        self.top_levels
-            .iter()
-            .any(|top_level| top_level.partial_bytes.load(Ordering::Relaxed) > 0)
-    }
-
     /// Sends everything finished since the last event plus the current
     /// partial size of every unfinished directory. Returns `false` once the
     /// scan is cancelled; a cancelled scan sends nothing more.
@@ -382,6 +377,7 @@ impl Coordinator<'_> {
             scanned_files: self.scanned_files.load(Ordering::Relaxed),
             scanned_dirs: self.scanned_dirs.load(Ordering::Relaxed),
             is_finished,
+            root_unreadable: false,
         };
         if self.cancelled() {
             return false;
@@ -401,8 +397,8 @@ impl Coordinator<'_> {
 ///
 /// Events:
 /// 1. The listing; with no top-level directory it is also the last event.
-/// 2. Partial updates every ~100ms before the first subtree finishes. The
-///    first one waits until a counter is non-zero, or ~250ms at the latest.
+/// 2. Live progress updates every ~100ms (`PARTIAL_INTERVAL`) during timeouts
+///    while subtree workers are scanning.
 /// 3. A progress update whenever subtrees finish (completions already queued
 ///    are coalesced), carrying them and the partial sizes of the rest.
 /// 4. One final update with `is_finished = true`.
@@ -416,7 +412,7 @@ pub fn scan_directory_tree_progressive(
     cancellation: Arc<AtomicBool>,
     mut on_event: impl FnMut(TreemapScanEvent),
 ) {
-    let listing = scan_listing(root_path);
+    let (listing, root_unreadable) = scan_listing(root_path);
     if cancellation.load(Ordering::Relaxed) {
         return;
     }
@@ -451,6 +447,7 @@ pub fn scan_directory_tree_progressive(
         scanned_files: direct_files,
         scanned_dirs: top_levels.len(),
         is_finished,
+        root_unreadable,
     });
     if is_finished || cancellation.load(Ordering::Relaxed) {
         return;
@@ -466,7 +463,6 @@ pub fn scan_directory_tree_progressive(
         .clamp(1, MAX_WORKERS)
         .min(top_levels.len());
     let (sender, receiver) = mpsc::channel::<(usize, Option<TreemapTreeNode>)>();
-    let started = Instant::now();
 
     std::thread::scope(|scope| {
         for _ in 0..worker_count {
@@ -518,8 +514,6 @@ pub fn scan_directory_tree_progressive(
             cancellation: &cancellation,
         };
         let mut pending = top_levels.len();
-        let mut saw_completion = false;
-        let mut emitted_partial = false;
 
         while pending > 0 {
             if coordinator.cancelled() {
@@ -529,7 +523,6 @@ pub fn scan_directory_tree_progressive(
                 Ok((index, Some(tree))) => {
                     coordinator.complete(index, tree);
                     pending -= 1;
-                    saw_completion = true;
                     // One event covers every completion already queued.
                     while pending > 0 {
                         match receiver.try_recv() {
@@ -552,18 +545,10 @@ pub fn scan_directory_tree_progressive(
                 // stop without a terminal event.
                 Ok((_, None)) => return,
                 Err(RecvTimeoutError::Timeout) => {
-                    if saw_completion {
-                        continue;
-                    }
-                    if !coordinator.any_partial_bytes()
-                        && (emitted_partial || started.elapsed() < FIRST_PARTIAL_DEADLINE)
-                    {
-                        continue;
-                    }
+                    // Emit live progress during timeouts while workers are scanning subtrees.
                     if !coordinator.emit(&mut on_event, false) {
                         return;
                     }
-                    emitted_partial = true;
                 }
                 Err(RecvTimeoutError::Disconnected) => {
                     // A worker died without reporting its directory. Finish
@@ -868,6 +853,23 @@ mod tests {
         assert!(snapshots[0].tree.children.is_empty());
         assert_eq!(snapshots[0].scanned_files, 0);
         assert_eq!(snapshots[0].scanned_dirs, 0);
+    }
+
+    #[test]
+    fn an_unreadable_root_is_distinct_from_an_empty_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("missing");
+        let mut events = Vec::new();
+        scan_directory_tree_progressive(&missing, 3, Arc::new(AtomicBool::new(false)), |event| {
+            events.push(event)
+        });
+
+        assert_eq!(events.len(), 1);
+        assert!(events[0].is_finished);
+        assert!(
+            events[0].root_unreadable,
+            "a missing root must not look like a legitimate empty directory"
+        );
     }
 
     #[test]

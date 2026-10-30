@@ -5,7 +5,7 @@
 //! Full-text content index pipeline (CNT-01, CNT-04, CNT-05, CNT-06, CNT-07).
 //!
 //! The service owns MFT discovery and decides which files are eligible. Extraction and Tantivy
-//! writes happen in `cairn-worker.exe`; this module only builds batches, drives the worker and
+//! writes happen in `CairnWorker.exe`; this module only builds batches, drives the worker and
 //! publishes a state machine the GUI can show. The worker is never handed the LocalSystem
 //! service's address space, so a malformed document cannot take the service down.
 
@@ -16,6 +16,8 @@ use cairn_protocol::status::{ContentIndexState, ContentIndexStatus, ContentIndex
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::Ordering;
@@ -31,6 +33,23 @@ const CONTENT_BATCH_SIZE: usize = 500;
 const CONTENT_SCAN_CHUNK: usize = 2_000;
 /// Upper bound for one worker batch. Cancellation is checked every 100 ms while waiting.
 const CONTENT_WORKER_TIMEOUT: Duration = Duration::from_secs(300);
+#[cfg(windows)]
+fn lower_worker_priority(child: &std::process::Child) {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        OpenProcess, SetPriorityClass, PROCESS_MODE_BACKGROUND_BEGIN, PROCESS_SET_INFORMATION,
+    };
+
+    // SAFETY: the handle is opened for the child this process just spawned and is closed below.
+    let Ok(handle) = (unsafe { OpenProcess(PROCESS_SET_INFORMATION, false, child.id()) }) else {
+        return;
+    };
+    // SAFETY: the handle is live; this only changes the child's scheduling/I/O priority.
+    let _ = unsafe { SetPriorityClass(handle, PROCESS_MODE_BACKGROUND_BEGIN) };
+    // SAFETY: paired with the successful OpenProcess above.
+    let _ = unsafe { CloseHandle(handle) };
+}
+
 /// Format version of the completed-backfill marker. Bump it when the content index layout
 /// changes; an old marker then forces a full rebuild instead of trusting an incompatible index.
 const CONTENT_BACKFILL_SCHEMA: u32 = 2;
@@ -356,7 +375,7 @@ impl MultiVolumeEngine {
         self.apply_config_toml(&config_toml)
     }
 
-    /// Signals any active `cairn-worker` subprocess to terminate on service shutdown without
+    /// Signals any active `CairnWorker` subprocess to terminate on service shutdown without
     /// mutating the persisted configuration or removing the completed backfill marker.
     pub fn stop_content_worker(&self) {
         self.content_cancel.store(true, Ordering::SeqCst);
@@ -441,8 +460,8 @@ impl MultiVolumeEngine {
         let rec = &volume.records[index];
         let path = Self::record_path(volume, index);
         if self.is_self_data_path(&path)
-            || super::is_path_excluded(&path, &cfg.excluded_paths)
-            || super::is_path_excluded(&path, &cfg.content_excluded_paths)
+            || crate::exclusion::is_path_excluded(&path, &cfg.excluded_paths)
+            || crate::exclusion::is_path_excluded(&path, &cfg.content_excluded_paths)
         {
             return None;
         }
@@ -865,7 +884,7 @@ impl MultiVolumeEngine {
     }
 
     /// The batch runner is a parameter so a test can exercise the failure policy without spawning
-    /// `cairn-worker`; production always passes [`Self::run_worker_batch`].
+    /// `CairnWorker`; production always passes [`Self::run_worker_batch`].
     fn run_incremental_with<F>(
         &self,
         tasks: Vec<ContentIndexTask>,
@@ -1009,13 +1028,13 @@ impl MultiVolumeEngine {
             .parent()
             .ok_or_else(|| "service executable has no parent directory".to_string())?;
         // Production keeps both binaries side by side. Unit tests run from target/debug/deps, so
-        // the parent directory is the cargo target directory that holds cairn-worker.exe.
+        // the parent directory is the cargo target directory that holds CairnWorker.exe.
         let mut search_dirs = vec![dir.to_path_buf()];
         if let Some(parent) = dir.parent() {
             search_dirs.push(parent.to_path_buf());
         }
         for base in search_dirs {
-            for name in ["cairn-worker.exe", "cairn-worker"] {
+            for name in ["CairnWorker.exe", "CairnWorker"] {
                 let candidate = base.join(name);
                 if candidate.exists() {
                     return Ok(candidate);
@@ -1023,7 +1042,7 @@ impl MultiVolumeEngine {
             }
         }
         Err(format!(
-            "cairn-worker executable not found beside {}",
+            "CairnWorker executable not found beside {}",
             exe.display()
         ))
     }
@@ -1044,7 +1063,7 @@ impl MultiVolumeEngine {
             _ => return first,
         };
         tracing::warn!(
-            "cairn-worker hit a transient sharing error; releasing the searcher and retrying once: {err}"
+            "CairnWorker hit a transient sharing error; releasing the searcher and retrying once: {err}"
         );
         self.drop_content_searcher();
         std::thread::sleep(Duration::from_millis(250));
@@ -1104,6 +1123,11 @@ impl MultiVolumeEngine {
             .arg(cfg.content_index_max_bytes.to_string())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        #[cfg(windows)]
+        {
+            use windows::Win32::System::Threading::BELOW_NORMAL_PRIORITY_CLASS;
+            command.creation_flags(BELOW_NORMAL_PRIORITY_CLASS.0);
+        }
         if let Some(path) = &delete_path {
             command.arg("--delete-batch").arg(path);
         }
@@ -1115,9 +1139,11 @@ impl MultiVolumeEngine {
             Ok(child) => child,
             Err(err) => {
                 remove_worker_files(&cleanup_paths);
-                return BatchOutcome::Failed(format!("could not start cairn-worker: {err}"));
+                return BatchOutcome::Failed(format!("could not start CairnWorker: {err}"));
             }
         };
+        #[cfg(windows)]
+        lower_worker_priority(&child);
         // Drain both stdout and stderr while the worker runs, capping kept bytes to 64 KiB and
         // discarding any excess so neither pipe can fill its OS buffer and deadlock the child or
         // exhaust service memory.
@@ -1162,7 +1188,7 @@ impl MultiVolumeEngine {
                     remove_worker_files(&cleanup_paths);
                     if !status.success() {
                         return BatchOutcome::Failed(format!(
-                            "cairn-worker exited with {status}: {output} {errors}"
+                            "CairnWorker exited with {status}: {output} {errors}"
                         ));
                     }
                     let summary: serde_json::Value =
@@ -1178,7 +1204,7 @@ impl MultiVolumeEngine {
                         tracing::warn!(
                             processed,
                             failed,
-                            "cairn-worker skipped content files: {}",
+                            "CairnWorker skipped content files: {}",
                             errors.trim()
                         );
                     }
@@ -1189,14 +1215,14 @@ impl MultiVolumeEngine {
                     let _ = child.kill();
                     let _ = child.wait();
                     remove_worker_files(&cleanup_paths);
-                    return BatchOutcome::Failed(format!("could not wait for cairn-worker: {err}"));
+                    return BatchOutcome::Failed(format!("could not wait for CairnWorker: {err}"));
                 }
             }
             if Instant::now() >= deadline {
                 let _ = child.kill();
                 let _ = child.wait();
                 remove_worker_files(&cleanup_paths);
-                return BatchOutcome::Failed("cairn-worker timed out".to_string());
+                return BatchOutcome::Failed("CairnWorker timed out".to_string());
             }
             std::thread::sleep(Duration::from_millis(100));
         }
@@ -2060,7 +2086,7 @@ mod tests {
         let cancel = CancellationToken::new();
 
         // Query 1: Pure content query "content:架构" -> should match architecture.md (frn 101 on C:)
-        let (results, total, _, snippets) = engine.execute_search_multi(
+        let (results, total, _, snippets, _) = engine.execute_search_multi(
             "content:架构",
             &QueryDefaults::default(),
             SortColumn::Name,
@@ -2284,7 +2310,7 @@ mod tests {
     #[test]
     fn only_file_handle_conflicts_count_as_transient_worker_failures() {
         for error in [
-            "cairn-worker exited with exit code: 1: PermissionDenied (os error 5)",
+            "CairnWorker exited with exit code: 1: PermissionDenied (os error 5)",
             "Access is denied. (os error 5)",
             "拒绝访问。 (os error 5)",
             "The process cannot access the file because it is being used by another process. \
@@ -2296,10 +2322,10 @@ mod tests {
             );
         }
         for error in [
-            "cairn-worker timed out",
+            "CairnWorker timed out",
             "invalid content batch payload",
             "os error 2: the system cannot find the file specified",
-            "cairn-worker exited with 0xc0000409",
+            "CairnWorker exited with 0xc0000409",
         ] {
             assert!(
                 !worker_error_is_transient(error),
@@ -2333,7 +2359,7 @@ mod tests {
         engine.run_incremental_with(tasks, Vec::new(), |_, _, _| {
             // A crashed worker (WER 0xc0000409) is a permanent failure for this batch, but still
             // not a reason to disable content search for every other file.
-            BatchOutcome::Failed("cairn-worker exited with 0xc0000409".to_string())
+            BatchOutcome::Failed("CairnWorker exited with 0xc0000409".to_string())
         });
 
         let after = engine.content_index_status();
@@ -2587,9 +2613,9 @@ mod tests {
 
     /// End-to-end backfill: enables the switch, waits for the controller, and verifies that a file
     /// which existed before enabling becomes searchable. Ignored by default because it needs the
-    /// real `cairn-worker` binary beside the test executable.
+    /// real `CairnWorker` binary beside the test executable.
     #[test]
-    #[ignore = "requires target/debug/cairn-worker.exe"]
+    #[ignore = "requires target/debug/CairnWorker.exe"]
     fn a_full_backfill_reaches_ready_and_indexes_existing_files() {
         use std::path::Component;
 

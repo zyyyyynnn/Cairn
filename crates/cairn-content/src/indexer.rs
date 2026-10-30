@@ -8,6 +8,7 @@ use crate::tokenizer::{CjkBigramLatinTokenizer, CJK_BIGRAM_LATIN_TOKENIZER};
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::thread::available_parallelism;
 use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, Occur, QueryParser, TermQuery};
 use tantivy::schema::IndexRecordOption;
@@ -205,6 +206,20 @@ pub struct ContentIndex {
     writer: Arc<Mutex<IndexWriter>>,
 }
 
+/// Content indexing is a background job; never let it take more than a quarter of the machine's
+/// workers. Tantivy itself caps its default writer at eight threads, so the quota is bounded there
+/// as well.
+fn content_writer_threads(available_parallelism: usize) -> usize {
+    (available_parallelism / 4).clamp(1, 8)
+}
+
+/// Tantivy requires a minimum arena per writer thread. Keep the total budget above that floor
+/// instead of failing on a many-core machine.
+fn content_writer_memory_budget(threads: usize) -> usize {
+    const MIN_PER_THREAD: usize = 16 * 1024 * 1024;
+    50_000_000usize.max(threads.saturating_mul(MIN_PER_THREAD))
+}
+
 impl ContentIndex {
     /// Opens or creates a Tantivy index in `index_dir`.
     pub fn open_or_create<P: AsRef<Path>>(index_dir: P) -> Result<Self, ContentIndexError> {
@@ -234,7 +249,17 @@ impl ContentIndex {
         };
 
         let searcher = ContentSearcher::from_index(index.clone(), dir_path)?;
-        let writer = Arc::new(Mutex::new(index.writer(50_000_000)?));
+        let threads = content_writer_threads(
+            available_parallelism()
+                .map(|parallelism| parallelism.get())
+                .unwrap_or(1),
+        );
+        let writer = Arc::new(Mutex::new(
+            index.writer_with_num_threads::<TantivyDocument>(
+                threads,
+                content_writer_memory_budget(threads),
+            )?,
+        ));
 
         Ok(Self { searcher, writer })
     }
@@ -441,6 +466,24 @@ fn floor_char_boundary(s: &str, mut idx: usize) -> usize {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn content_writer_threads_follow_the_quarter_machine_quota() {
+        assert_eq!(content_writer_threads(1), 1);
+        assert_eq!(content_writer_threads(4), 1);
+        assert_eq!(content_writer_threads(16), 4);
+        assert_eq!(
+            content_writer_threads(128),
+            8,
+            "Tantivy's writer caps at eight threads"
+        );
+    }
+
+    #[test]
+    fn content_writer_budget_keeps_each_thread_above_the_tantivy_floor() {
+        assert_eq!(content_writer_memory_budget(1), 50_000_000);
+        assert!(content_writer_memory_budget(8) >= 8 * 16 * 1024 * 1024);
+    }
 
     #[test]
     fn test_content_index_roundtrip() {

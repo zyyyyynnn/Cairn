@@ -42,7 +42,7 @@ use cairn_protocol::status::{
 };
 use rayon::slice::ParallelSliceMut;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 /// A journal backlog beyond this size is cheaper to recover with a fresh `$MFT` scan than by
@@ -107,6 +107,8 @@ pub struct VolumeIndex {
     /// table (`clear`, `ingest_items`, compaction) increments it, so a query session can refuse
     /// record indices that no longer describe the same rows.
     pub(crate) generation: u64,
+    /// Live records (tombstones excluded), maintained incrementally so status summaries stay O(1).
+    live_count: u64,
     /// Whether `FileRecord.size` on directory rows is the recursive aggregate of their indexed
     /// descendants. A cache written before folder sizes existed cannot prove this, so a load
     /// aggregates once and rewrites the flag; every later update maintains the totals in place.
@@ -134,6 +136,7 @@ impl VolumeIndex {
             volume_serial: 0,
             usn_enabled: true,
             generation: 0,
+            live_count: 0,
             // An empty table has no totals to be wrong about; the invariant holds trivially.
             directory_sizes_valid: true,
         }
@@ -144,6 +147,7 @@ impl VolumeIndex {
     /// filtering the same subtree.
     pub fn clear(&mut self) {
         self.records.clear();
+        self.live_count = 0;
         self.arena.clear();
         self.path_cache.clear();
         self.presorted = PresortedIndices::default();
@@ -355,6 +359,7 @@ impl VolumeIndex {
                 modified_ts: item.modified_ts,
                 created_ts: item.created_ts,
             });
+            self.live_count = self.live_count.saturating_add(1);
 
             self.frn_to_idx.entry(item.frn).or_default().push(idx);
             parent_frns.push(item.parent_frn);
@@ -424,6 +429,9 @@ impl VolumeIndex {
                 break;
             }
             record.size = apply_size_delta(record.size, delta);
+            if record.parent_idx == parent_idx {
+                break;
+            }
             parent_idx = record.parent_idx;
             steps += 1;
             if steps > self.records.len() {
@@ -438,6 +446,9 @@ impl VolumeIndex {
             let record = &self.records[parent_idx as usize];
             if record.is_tombstone() {
                 return true;
+            }
+            if record.parent_idx == parent_idx {
+                return false;
             }
             parent_idx = record.parent_idx;
             steps += 1;
@@ -557,6 +568,9 @@ impl VolumeIndex {
                         {
                             self.adjust_parent_sizes(parent_idx, -size);
                         }
+                        if !self.records[idx as usize].is_tombstone() {
+                            self.live_count = self.live_count.saturating_sub(1);
+                        }
                         self.records[idx as usize].mark_tombstone();
                     }
                 }
@@ -615,6 +629,7 @@ impl VolumeIndex {
                     modified_ts: ts,
                     created_ts: ts,
                 });
+                self.live_count = self.live_count.saturating_add(1);
                 self.frn_to_idx.entry(frn).or_default().push(new_idx);
                 // The journal record carries no size, and its timestamp is the event time rather
                 // than the file's. Read the file once on the next debounce pass, or every file
@@ -765,7 +780,7 @@ impl VolumeIndex {
     /// visited nodes, so a parent chain is resolved once per record instead of once per
     /// descendant. Tombstones are not part of this verdict; a cycle (or a self-parent) is kept and
     /// the walk stops there, because corrupt input must not hang startup.
-    fn excluded_subtree_states(&self) -> Vec<u8> {
+    fn subtree_states_by(&self, is_excluded_root: impl Fn(usize, &FileRecord) -> bool) -> Vec<u8> {
         let count = self.records.len();
         let mut states = vec![SUBTREE_UNKNOWN; count];
         let mut stack: Vec<u32> = Vec::new();
@@ -787,7 +802,7 @@ impl VolumeIndex {
                 }
 
                 let record = &self.records[idx];
-                if self.excluded_frns.contains(&record.frn) {
+                if is_excluded_root(idx, record) {
                     states[idx] = SUBTREE_EXCLUDED;
                     break SUBTREE_EXCLUDED;
                 }
@@ -814,6 +829,34 @@ impl VolumeIndex {
         }
 
         states
+    }
+
+    fn excluded_subtree_states(&self) -> Vec<u8> {
+        self.subtree_states_by(|_, record| self.excluded_frns.contains(&record.frn))
+    }
+
+    /// Precomputes which records the query's `excluded_paths` rules remove.
+    ///
+    /// Rebuilding and normalizing a full path for every match just to test a handful of segment
+    /// rules is O(records × path). For the common rule form — a bare directory/file segment such
+    /// as `$Recycle.Bin` or `System Volume Information` — the same verdict is a name comparison
+    /// along the parent chain, so one memoized pass produces an O(1) lookup table. Rules with globs, embedded separators,
+    /// or a drive-qualified path keep the reference full-path behavior: this returns `None` and
+    /// the caller applies `is_path_excluded` per match.
+    pub(crate) fn excluded_record_mask(&self, rules: &[String]) -> Option<Vec<bool>> {
+        let segments = crate::exclusion::ExclusionRules::parse(rules).single_segments()?;
+        let states = self.subtree_states_by(|_, record| {
+            let name = self.arena.get_name(record.name_offset, record.name_len);
+            segments
+                .iter()
+                .any(|segment| name.eq_ignore_ascii_case(segment))
+        });
+        Some(
+            states
+                .into_iter()
+                .map(|state| state == SUBTREE_EXCLUDED)
+                .collect(),
+        )
     }
 
     /// Rewrites the table without tombstones or excluded subtrees, returning how many records were
@@ -871,6 +914,7 @@ impl VolumeIndex {
         }
 
         self.records = records;
+        self.live_count = self.records.len() as u64;
         self.arena = arena;
         self.frn_to_idx = frn_to_idx;
         self.path_cache.clear();
@@ -918,9 +962,22 @@ impl VolumeIndex {
             drive_letter: self.drive_letter,
             volume_guid: self.volume_guid.clone(),
             status: self.status,
-            indexed_count: self.records.len() as u64,
+            indexed_count: self.live_count,
             usn_enabled: self.usn_enabled,
         }
+    }
+
+    /// Sums the own sizes of matched files.
+    ///
+    /// Directories are containers: they contribute zero here, so the total always describes the
+    /// visible result set and never counts an excluded descendant through an ancestor's aggregate.
+    pub(crate) fn calculate_matched_file_bytes(&self, matched_indices: &[u32]) -> u64 {
+        matched_indices.iter().fold(0u64, |acc, &idx| {
+            self.records
+                .get(idx as usize)
+                .filter(|record| record.is_file())
+                .map_or(acc, |record| acc.saturating_add(record.size))
+        })
     }
 }
 
@@ -938,9 +995,16 @@ pub struct MultiVolumeEngine {
     content_status: RwLock<ContentIndexStatus>,
     content_cancel: Arc<AtomicBool>,
     content_commands: Mutex<Option<std::sync::mpsc::Sender<content_pipeline::ContentCommand>>>,
+    /// Last complete set of volume summaries, outside the volume lock. A query holds the volume
+    /// read lock for seconds; serving the response envelope from this cache keeps new connections
+    /// (handshake, status probes) from waiting behind it. Refreshed on every uncontended read.
+    summary_cache: Mutex<Vec<VolumeStatusSummary>>,
     /// Service data is owned by SYSTEM, so its configuration is written with the restricted
     /// descriptor. A user-mode indexer owns its own settings and writes them as the user.
     secure_config: bool,
+    /// Whether the configuration on disk was authenticated at startup. A rejected file must not
+    /// become trusted merely because a later reload reads it again.
+    config_trusted: AtomicBool,
 }
 
 impl Default for MultiVolumeEngine {
@@ -951,14 +1015,30 @@ impl Default for MultiVolumeEngine {
 
 use crate::config::ServiceConfig;
 use crate::persistence;
-use crate::session::SearchResultItem;
 use std::path::Path;
+
+/// One match the engine found: a record of one volume, observed at that volume's table
+/// generation.
+///
+/// The type belongs to the engine because the engine produces it; the query session only caches
+/// it. Keeping it here also keeps the dependency one-way: the session pages through a volume,
+/// so it knows the volume, and the volume never has to know the session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SearchResultItem {
+    pub drive_letter: char,
+    pub record_idx: u32,
+    /// [`VolumeIndex`] generation observed when the match was produced. A later rebuild,
+    /// compaction or reload replaces the record table, so these indices no longer describe the
+    /// same rows.
+    pub generation: u64,
+}
 
 pub type MultiSearchResult = (
     Vec<SearchResultItem>,
     usize,
     Vec<String>,
     HashMap<(char, u64), String>,
+    u64,
 );
 
 impl MultiVolumeEngine {
@@ -984,14 +1064,18 @@ impl MultiVolumeEngine {
         layout: &crate::security::ServiceDataLayout,
         config: ServiceConfig,
     ) -> Self {
-        Self::with_paths(
+        let engine = Self::with_paths(
             &layout.index_dir,
             &layout.content_dir,
             &layout.config_path,
             enumerate_fixed_drives(),
             config,
         )
-        .with_service_data_root(&layout.root)
+        .with_service_data_root(&layout.root);
+        engine
+            .config_trusted
+            .store(!layout.config_untrusted, Ordering::SeqCst);
+        engine
     }
 
     pub fn with_index_dir_and_drives(index_dir: &Path, drives: Vec<char>) -> Self {
@@ -1057,6 +1141,11 @@ impl MultiVolumeEngine {
                     Ok(loaded) => {
                         let directory_sizes_valid = loaded.directory_sizes_valid;
                         vol.records = loaded.records;
+                        vol.live_count = vol
+                            .records
+                            .iter()
+                            .filter(|record| !record.is_tombstone())
+                            .count() as u64;
                         vol.arena = loaded.arena;
                         vol.last_usn = loaded.last_usn;
                         vol.journal_id = loaded.journal_id;
@@ -1300,7 +1389,9 @@ impl MultiVolumeEngine {
             }),
             content_cancel: Arc::new(AtomicBool::new(false)),
             content_commands: Mutex::new(None),
+            summary_cache: Mutex::new(Vec::new()),
             secure_config: true,
+            config_trusted: AtomicBool::new(true),
         }
     }
 
@@ -1403,6 +1494,15 @@ impl MultiVolumeEngine {
         self.config.read().unwrap().clone()
     }
 
+    /// Upper bound on entries in one tree answer. Keeps a pathological directory from allocating
+    /// an unbounded tree; the frame encoder still enforces the byte ceiling.
+    const MAX_TREE_ENTRIES: usize = 100_000;
+    /// Conservative serialized-size budget for one tree payload. The protocol frame is capped at
+    /// 16 MiB; this leaves room for the envelope and the volume list.
+    const MAX_TREE_PAYLOAD_BYTES: usize = 15 * 1024 * 1024;
+    /// Estimated fixed bytes per entry in the postcard payload.
+    const TREE_ENTRY_OVERHEAD: usize = 64;
+
     /// Reads the directory tree below `path` from the owning volume's index,
     /// flattened pre-order for the wire. `None` when no loaded volume covers
     /// the drive in `path` (the caller then answers with empty entries).
@@ -1435,6 +1535,10 @@ impl MultiVolumeEngine {
             )
         };
 
+        let entry_count = dir_index.subtree_entry_count(dir_idx, max_depth);
+        if entry_count > Self::MAX_TREE_ENTRIES {
+            return None;
+        }
         let tree = dir_index.build_tree_node(
             &volume.records,
             &volume.arena,
@@ -1442,8 +1546,19 @@ impl MultiVolumeEngine {
             &root_name,
             max_depth,
         );
-        let mut entries = Vec::new();
+        let mut entries = Vec::with_capacity(entry_count);
         flatten_tree(&tree, 0, &mut entries);
+        // A path above either budget cannot be answered in one response; returning None makes the
+        // caller report "not indexed here" and use its own scan instead of dropping the pipe.
+        if entries.len() > Self::MAX_TREE_ENTRIES {
+            return None;
+        }
+        let estimated_bytes = entries.iter().fold(0usize, |total, entry| {
+            total.saturating_add(entry.name.len().saturating_add(Self::TREE_ENTRY_OVERHEAD))
+        });
+        if estimated_bytes > Self::MAX_TREE_PAYLOAD_BYTES {
+            return None;
+        }
         Some(entries)
     }
 
@@ -1514,6 +1629,12 @@ impl MultiVolumeEngine {
     /// Reloads configuration from an explicit path (IDX-09). A missing file resets the engine to the
     /// shipped defaults instead of keeping a configuration nobody can account for.
     pub fn reload_config_from(&self, path: &std::path::Path) -> Result<(), String> {
+        if !self.config_trusted.load(Ordering::SeqCst) {
+            return Err(
+                "the service configuration was not trusted at startup; submit a new configuration"
+                    .to_string(),
+            );
+        }
         if path.exists() {
             let new_cfg = ServiceConfig::load(path)
                 .map_err(|e| format!("Failed to load config from {}: {}", path.display(), e))?;
@@ -1542,6 +1663,7 @@ impl MultiVolumeEngine {
                 .save_atomic(&path)
                 .map_err(|e| format!("could not persist {}: {e}", path.display()))?;
         }
+        self.config_trusted.store(true, Ordering::SeqCst);
         self.update_config(parsed);
         Ok(())
     }
@@ -1568,6 +1690,42 @@ impl MultiVolumeEngine {
             .count()
     }
 
+    /// Marks a volume as rebuilding before its long scan starts. The summary cache is updated
+    /// under its own lock so a handshake during the scan cannot report the previous state.
+    #[cfg(windows)]
+    fn mark_volume_rebuilding(&self, drive: char) -> Option<VolumeState> {
+        let previous = {
+            let mut volumes = self.volumes.write().unwrap();
+            let volume = volumes.get_mut(&drive)?;
+            let previous = volume.status;
+            volume.status = VolumeState::Rebuilding;
+            previous
+        };
+        self.set_cached_summary_status(drive, VolumeState::Rebuilding);
+        Some(previous)
+    }
+
+    #[cfg(windows)]
+    fn restore_volume_status(&self, drive: char, status: VolumeState) {
+        if let Some(volume) = self.volumes.write().unwrap().get_mut(&drive) {
+            volume.status = status;
+        }
+        self.set_cached_summary_status(drive, status);
+    }
+
+    #[cfg(windows)]
+    fn set_cached_summary_status(&self, drive: char, status: VolumeState) {
+        if let Some(summary) = self
+            .summary_cache
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|summary| summary.drive_letter == drive)
+        {
+            summary.status = status;
+        }
+    }
+
     /// Rebuilds one volume from a full `$MFT` scan (IDX-08). Errors whenever the volume is not
     /// tracked, the scan yields nothing, or its result cannot be reconciled with the change journal,
     /// so a rescan is never reported as a silent success.
@@ -1578,6 +1736,9 @@ impl MultiVolumeEngine {
                 return Err(format!("volume {drive}: is not indexed"));
             }
 
+            let previous_status = self
+                .mark_volume_rebuilding(drive)
+                .ok_or_else(|| format!("volume {drive}: is not indexed"))?;
             // T0 must be read before the scan and the scan must stay outside the volume lock, so the
             // journal is bracketed here and only reconciled once the records are in hand (IDX-07).
             let scan_start = open_journal_at_scan_start(drive);
@@ -1598,8 +1759,14 @@ impl MultiVolumeEngine {
                     );
                     Ok(count)
                 }
-                Ok(_) => Err(format!("live MFT scan for {drive}: returned no records")),
-                Err(e) => Err(format!("live MFT scan for {drive}: failed: {e}")),
+                Ok(_) => {
+                    self.restore_volume_status(drive, previous_status);
+                    Err(format!("live MFT scan for {drive}: returned no records"))
+                }
+                Err(e) => {
+                    self.restore_volume_status(drive, previous_status);
+                    Err(format!("live MFT scan for {drive}: failed: {e}"))
+                }
             }
         }
         #[cfg(not(windows))]
@@ -1836,20 +2003,62 @@ impl MultiVolumeEngine {
         self.process_pending_data_changes();
     }
 
-    pub fn get_volume_summaries(&self) -> Vec<VolumeStatusSummary> {
-        let lock = self.volumes.read().unwrap();
-        let cfg = self.config.read().unwrap();
-        let mut summaries: Vec<_> = lock
-            .values()
-            .filter(|v| {
-                !cfg.excluded_drives
-                    .iter()
-                    .any(|&ex| ex.eq_ignore_ascii_case(&v.drive_letter))
-            })
-            .map(|v| v.to_summary())
-            .collect();
+    fn collect_volume_summaries(volumes: &HashMap<char, VolumeIndex>) -> Vec<VolumeStatusSummary> {
+        let mut summaries: Vec<_> = volumes.values().map(|v| v.to_summary()).collect();
         summaries.sort_by_key(|s| s.drive_letter);
         summaries
+    }
+
+    fn filter_excluded_drives(
+        &self,
+        summaries: Vec<VolumeStatusSummary>,
+    ) -> Vec<VolumeStatusSummary> {
+        let cfg = self.config.read().unwrap();
+        summaries
+            .into_iter()
+            .filter(|s| {
+                !cfg.excluded_drives
+                    .iter()
+                    .any(|&ex| ex.eq_ignore_ascii_case(&s.drive_letter))
+            })
+            .collect()
+    }
+
+    /// Cached summaries for ordinary envelopes. A query holds the volume read lock for seconds;
+    /// a handshake must still complete, so a summary one query old is served instead of waiting.
+    pub fn get_volume_summaries(&self) -> Vec<VolumeStatusSummary> {
+        let summaries = match self.volumes.try_read() {
+            Ok(volumes) => {
+                let summaries = Self::collect_volume_summaries(&volumes);
+                *self.summary_cache.lock().unwrap() = summaries.clone();
+                summaries
+            }
+            Err(_) => {
+                let cached = self.summary_cache.lock().unwrap().clone();
+                if cached.is_empty() {
+                    let volumes = self.volumes.read().unwrap();
+                    let summaries = Self::collect_volume_summaries(&volumes);
+                    *self.summary_cache.lock().unwrap() = summaries.clone();
+                    summaries
+                } else {
+                    cached
+                }
+            }
+        };
+        self.filter_excluded_drives(summaries)
+    }
+
+    /// Fresh summaries for the answer to a query: its final volume state decides whether the
+    /// client shows an animating scan or a settled result. The query has already released the
+    /// index, so this read only waits for an unrelated short writer critical section.
+    pub fn get_volume_summaries_fresh(&self) -> Vec<VolumeStatusSummary> {
+        let summaries = {
+            let volumes = self.volumes.read().unwrap();
+            let summaries = Self::collect_volume_summaries(&volumes);
+            *self.summary_cache.lock().unwrap() = summaries.clone();
+            summaries
+        };
+        self.filter_excluded_drives(summaries)
     }
 
     /// Evaluates search across all volumes, filtering excluded paths, sorting by column,
@@ -1884,6 +2093,9 @@ impl MultiVolumeEngine {
 
         let mut all_results = Vec::new();
         let mut snippets = HashMap::new();
+        // Sum of matched files' own sizes. Directories are containers; adding their recursive
+        // size would double count files that are also matched (the all-files view contains both).
+        let mut total_bytes = 0u64;
 
         let lock;
 
@@ -1902,7 +2114,7 @@ impl MultiVolumeEngine {
             };
 
             if cancel.is_cancelled() || content_hits.is_empty() {
-                return (all_results, 0, highlight_terms, snippets);
+                return (all_results, 0, highlight_terms, snippets, 0);
             }
 
             // Precompile MFT filter outside the lock to keep lock duration minimal
@@ -1914,6 +2126,7 @@ impl MultiVolumeEngine {
 
             // Acquire read lock with minimal critical section to convert and merge results
             lock = self.volumes.read().unwrap();
+            let mut tantivy_vol_matches: HashMap<char, Vec<u32>> = HashMap::new();
 
             for hit in &content_hits {
                 if cancel.is_cancelled() {
@@ -1964,7 +2177,7 @@ impl MultiVolumeEngine {
                             vol.drive_letter,
                             idx,
                         );
-                        if is_path_excluded(&full_path, &excluded_paths) {
+                        if crate::exclusion::is_path_excluded(&full_path, &excluded_paths) {
                             continue;
                         }
                     }
@@ -1973,12 +2186,45 @@ impl MultiVolumeEngine {
                         record_idx: idx,
                         generation: vol.generation,
                     });
+                    tantivy_vol_matches
+                        .entry(vol.drive_letter)
+                        .or_default()
+                        .push(idx);
                     snippets.insert((vol.drive_letter, rec.frn), hit.snippet.clone());
+                }
+            }
+
+            for (drive, matches) in tantivy_vol_matches {
+                if let Some(vol) = lock.get(&drive) {
+                    total_bytes =
+                        total_bytes.saturating_add(vol.calculate_matched_file_bytes(&matches));
                 }
             }
         } else {
             lock = self.volumes.read().unwrap();
             let mut single_vol_presorted = false;
+            // Every match would otherwise pay a full-path reconstruction just to apply a few
+            // segment rules (a broad query could match most of the table). Compute the same
+            // verdict once per volume and use it as an O(1) lookup; unsupported rule forms keep
+            // the reference behavior.
+            let exclusion_masks: Option<HashMap<char, Vec<bool>>> = if !excluded_paths.is_empty() {
+                let mut masks = HashMap::new();
+                let mut complete = true;
+                for (drive, volume) in lock.iter() {
+                    match volume.excluded_record_mask(&excluded_paths) {
+                        Some(mask) => {
+                            masks.insert(*drive, mask);
+                        }
+                        None => {
+                            complete = false;
+                            break;
+                        }
+                    }
+                }
+                complete.then_some(masks)
+            } else {
+                None
+            };
             let active_vols: Vec<_> = lock
                 .values()
                 .filter(|v| {
@@ -2008,21 +2254,30 @@ impl MultiVolumeEngine {
                 );
 
                 all_results.reserve(matches.len());
+                let mut vol_matches = Vec::with_capacity(matches.len());
                 for (i, idx) in matches.into_iter().enumerate() {
                     if (i & 0xFFF) == 0 && cancel.is_cancelled() {
-                        return (Vec::new(), 0, highlight_terms, snippets);
+                        return (Vec::new(), 0, highlight_terms, snippets, 0);
                     }
-                    if !excluded_paths.is_empty() {
+                    if exclusion_masks.as_ref().is_some_and(|masks| {
+                        masks
+                            .get(&vol.drive_letter)
+                            .is_some_and(|mask| mask.get(idx as usize).copied().unwrap_or(false))
+                    }) {
+                        continue;
+                    }
+                    if exclusion_masks.is_none() && !excluded_paths.is_empty() {
                         let full_path = vol.path_cache.get_full_path(
                             &vol.records,
                             &vol.arena,
                             vol.drive_letter,
                             idx,
                         );
-                        if is_path_excluded(&full_path, &excluded_paths) {
+                        if crate::exclusion::is_path_excluded(&full_path, &excluded_paths) {
                             continue;
                         }
                     }
+                    vol_matches.push(idx);
                     all_results.push(SearchResultItem {
                         drive_letter: vol.drive_letter,
                         record_idx: idx,
@@ -2030,13 +2285,15 @@ impl MultiVolumeEngine {
                     });
                 }
 
+                total_bytes = vol.calculate_matched_file_bytes(&vol_matches);
+
                 if single_vol_presorted && !sort_asc {
                     all_results.reverse();
                 }
             } else {
                 for vol in active_vols {
                     if cancel.is_cancelled() {
-                        return (Vec::new(), 0, highlight_terms, snippets);
+                        return (Vec::new(), 0, highlight_terms, snippets, 0);
                     }
                     let presorted_col = presorted_order(vol, sort_by);
                     let matches = cairn_core::engine::execute_query_ordered(
@@ -2048,33 +2305,44 @@ impl MultiVolumeEngine {
                         presorted_col,
                         cancel,
                     );
+                    let mut vol_matches = Vec::with_capacity(matches.len());
                     for (i, idx) in matches.into_iter().enumerate() {
                         if (i & 0xFFF) == 0 && cancel.is_cancelled() {
-                            return (Vec::new(), 0, highlight_terms, snippets);
+                            return (Vec::new(), 0, highlight_terms, snippets, 0);
                         }
-                        if !excluded_paths.is_empty() {
+                        if exclusion_masks.as_ref().is_some_and(|masks| {
+                            masks.get(&vol.drive_letter).is_some_and(|mask| {
+                                mask.get(idx as usize).copied().unwrap_or(false)
+                            })
+                        }) {
+                            continue;
+                        }
+                        if exclusion_masks.is_none() && !excluded_paths.is_empty() {
                             let full_path = vol.path_cache.get_full_path(
                                 &vol.records,
                                 &vol.arena,
                                 vol.drive_letter,
                                 idx,
                             );
-                            if is_path_excluded(&full_path, &excluded_paths) {
+                            if crate::exclusion::is_path_excluded(&full_path, &excluded_paths) {
                                 continue;
                             }
                         }
+                        vol_matches.push(idx);
                         all_results.push(SearchResultItem {
                             drive_letter: vol.drive_letter,
                             record_idx: idx,
                             generation: vol.generation,
                         });
                     }
+                    total_bytes =
+                        total_bytes.saturating_add(vol.calculate_matched_file_bytes(&vol_matches));
                 }
             }
 
             if single_vol_presorted {
                 let total = all_results.len();
-                return (all_results, total, highlight_terms, snippets);
+                return (all_results, total, highlight_terms, snippets, total_bytes);
             }
         }
 
@@ -2149,7 +2417,7 @@ impl MultiVolumeEngine {
                 .collect();
 
             if cancel.is_cancelled() {
-                return (Vec::new(), 0, highlight_terms, snippets);
+                return (Vec::new(), 0, highlight_terms, snippets, 0);
             }
 
             decorated.par_sort_unstable_by(|(ka, a), (kb, b)| {
@@ -2189,7 +2457,7 @@ impl MultiVolumeEngine {
         }
 
         let total = all_results.len();
-        (all_results, total, highlight_terms, snippets)
+        (all_results, total, highlight_terms, snippets, total_bytes)
     }
 
     /// Single volume search compatibility method.
@@ -2259,78 +2527,6 @@ fn presorted_order(vol: &VolumeIndex, sort_by: SortColumn) -> Option<&[u32]> {
         SortColumn::DateCreated | SortColumn::Extension => return None,
     };
     (!order.is_empty()).then_some(order.as_slice())
-}
-
-/// Checks if a file path matches any exclusion rule (IDX-09).
-pub fn is_path_excluded(full_path: &str, rules: &[String]) -> bool {
-    if rules.is_empty() || full_path.is_empty() {
-        return false;
-    }
-
-    let full_path_normalized = full_path.replace('/', "\\");
-    let full_path_lower = full_path_normalized.to_ascii_lowercase();
-
-    for rule in rules {
-        let rule_trimmed = rule.trim();
-        if rule_trimmed.is_empty() {
-            continue;
-        }
-
-        let rule_normalized = rule_trimmed.replace('/', "\\");
-
-        // 1. Wildcard / glob matching
-        if rule_normalized.contains('*') || rule_normalized.contains('?') {
-            if cairn_core::engine::glob_match(&rule_normalized, &full_path_normalized, false) {
-                return true;
-            }
-            let prefixed = format!(r"**\{}", rule_normalized.trim_start_matches(r"**\"));
-            if cairn_core::engine::glob_match(&prefixed, &full_path_normalized, false) {
-                return true;
-            }
-            continue;
-        }
-
-        let rule_lower = rule_normalized.to_ascii_lowercase();
-        let rule_clean = rule_lower.trim_end_matches('\\');
-
-        if rule_clean.is_empty() {
-            continue;
-        }
-
-        // 2. Absolute path prefix match (e.g. "C:\Windows\Temp" or "C:\")
-        if rule_clean.len() >= 2 && rule_clean.as_bytes()[1] == b':' {
-            if full_path_lower == rule_clean {
-                return true;
-            }
-            if full_path_lower.starts_with(rule_clean)
-                && (rule_clean.ends_with('\\')
-                    || full_path_lower.as_bytes().get(rule_clean.len()) == Some(&b'\\'))
-            {
-                return true;
-            }
-            continue;
-        }
-
-        // 3. Exact match against normalized path
-        if full_path_lower == rule_clean {
-            return true;
-        }
-
-        // 4. Segment or directory fragment match (e.g. "$Recycle.Bin", "node_modules", "target\debug")
-        for segment in full_path_lower.split('\\') {
-            if segment == rule_clean {
-                return true;
-            }
-        }
-        if full_path_lower.contains(&format!(r"\{}\", rule_clean))
-            || full_path_lower.ends_with(&format!(r"\{}", rule_clean))
-            || full_path_lower.starts_with(&format!(r"{}\", rule_clean))
-        {
-            return true;
-        }
-    }
-
-    false
 }
 
 #[cfg(test)]
@@ -2970,7 +3166,7 @@ mod tests {
             MultiVolumeEngine::with_index_dir_and_drives(temp_dir.path(), vec!['X', 'Y']);
 
         let cancel = CancellationToken::new();
-        let (results, total, highlights, _) = loaded_engine.execute_search_multi(
+        let (results, total, highlights, _, _) = loaded_engine.execute_search_multi(
             "file.txt",
             &QueryDefaults::default(),
             SortColumn::Name,
@@ -2988,6 +3184,193 @@ mod tests {
         assert_eq!(summaries[0].indexed_count, 1);
         assert_eq!(summaries[1].drive_letter, 'Y');
         assert_eq!(summaries[1].indexed_count, 1);
+    }
+
+    #[test]
+    fn volume_summary_counts_live_records_not_tombstones() {
+        let mut vol = VolumeIndex::new('C');
+        vol.ingest_items(vec![
+            index_item(1, 0, "C:", true),
+            index_item(2, 1, "live.txt", false),
+            index_item(3, 1, "deleted.txt", false),
+        ]);
+        vol.apply_usn_change(UsnChange::Deleted { frn: 3 });
+
+        assert_eq!(
+            vol.to_summary().indexed_count,
+            2,
+            "deleted records must not inflate the count the status bar animates toward"
+        );
+    }
+
+    #[test]
+    fn the_exclusion_mask_matches_the_full_path_reference() {
+        let mut vol = VolumeIndex::new('C');
+        vol.ingest_items(vec![
+            index_item(1, 0, "C:", true),
+            index_item(2, 1, "Users", true),
+            index_item(3, 2, "alice.txt", false),
+            index_item(4, 1, "$Recycle.Bin", true),
+            index_item(5, 4, "deleted.txt", false),
+            index_item(6, 4, "nested", true),
+            index_item(7, 6, "deeper.txt", false),
+            index_item(8, 1, "System Volume Information", true),
+            index_item(9, 8, "tracking.log", false),
+            index_item(10, 2, "$recycle.bin", false),
+            // A directory whose name starts with a ruled name but is not it. The fast path
+            // compares whole segments while the full-path check matches a substring; both
+            // routes must agree on this file.
+            index_item(11, 1, "node_modules", true),
+            index_item(12, 11, "kept.txt", false),
+            index_item(13, 1, "node_modules_cache", true),
+            index_item(14, 13, "also-kept.txt", false),
+        ]);
+        let rules = vec![
+            "$Recycle.Bin".to_string(),
+            "System Volume Information".to_string(),
+            "node_modules".to_string(),
+        ];
+
+        let mask = vol
+            .excluded_record_mask(&rules)
+            .expect("bare segment rules must use the memoized mask");
+        for (idx, excluded) in mask.iter().enumerate() {
+            let path = vol
+                .path_cache
+                .get_full_path(&vol.records, &vol.arena, 'C', idx as u32);
+            assert_eq!(
+                *excluded,
+                crate::exclusion::is_path_excluded(&path, &rules),
+                "mask disagrees with the reference for {path}"
+            );
+        }
+        assert_eq!(
+            mask.iter().filter(|excluded| !**excluded).count(),
+            5,
+            "only the root, Users, alice.txt and the two files under a differently named \
+             directory survive; the lowercase file matches the rule"
+        );
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let engine = MultiVolumeEngine::with_index_dir_and_drives(temp_dir.path(), vec![]);
+        engine.add_volume(vol);
+        // The query has to run under the same rules the mask was built from, so the two routes
+        // are compared on one configuration rather than on two.
+        let mut config = engine.get_config();
+        config.excluded_paths = rules;
+        engine.update_config(config);
+        let cancel = CancellationToken::new();
+        let (_, total, _, _, _) = engine.execute_search_multi(
+            "",
+            &QueryDefaults::default(),
+            SortColumn::Name,
+            true,
+            &cancel,
+        );
+        assert_eq!(
+            total, 5,
+            "the all-files query must apply the same exclusions as the reference"
+        );
+    }
+
+    #[test]
+    fn the_query_total_bytes_sum_matched_files_without_double_counting_directories() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let engine = MultiVolumeEngine::with_index_dir_and_drives(temp_dir.path(), vec![]);
+        let mut vol = VolumeIndex::new('C');
+        vol.ingest_items(vec![
+            index_item(1, 0, "C:", true),
+            sized_item(2, 1, "a.txt", false, 100),
+            sized_item(3, 1, "b.bin", false, 200),
+            index_item(4, 1, "folder", true),
+            sized_item(5, 4, "c.txt", false, 300),
+        ]);
+        engine.add_volume(vol);
+        let cancel = CancellationToken::new();
+
+        let (_, total, _, _, bytes) = engine.execute_search_multi(
+            "",
+            &QueryDefaults::default(),
+            SortColumn::Name,
+            true,
+            &cancel,
+        );
+        assert_eq!(total, 5, "directories are results too");
+        assert_eq!(
+            bytes, 600,
+            "only file rows contribute bytes; the folder's recursive size is not added on top"
+        );
+
+        let (_, total, _, _, bytes) = engine.execute_search_multi(
+            "a.txt",
+            &QueryDefaults::default(),
+            SortColumn::Name,
+            true,
+            &cancel,
+        );
+        assert_eq!(total, 1);
+        assert_eq!(bytes, 100);
+
+        // Directory rows carry no own file bytes. A folder-only result therefore reports zero
+        // rather than borrowing an aggregate that may include excluded descendants.
+        let (_, total, _, _, bytes) = engine.execute_search_multi(
+            "folder:",
+            &QueryDefaults::default(),
+            SortColumn::Name,
+            true,
+            &cancel,
+        );
+        assert_eq!(total, 2, "matches C: and folder");
+        assert_eq!(bytes, 0, "directory rows do not contribute bytes");
+
+        let (_, total, _, _, bytes) = engine.execute_search_multi(
+            "folder",
+            &QueryDefaults::default(),
+            SortColumn::Name,
+            true,
+            &cancel,
+        );
+        assert_eq!(total, 1, "matches only the folder named 'folder'");
+        assert_eq!(bytes, 0, "directory rows do not contribute bytes");
+    }
+
+    #[test]
+    fn unsupported_exclusion_rule_forms_keep_the_reference_fallback() {
+        let mut vol = VolumeIndex::new('C');
+        vol.ingest_items(vec![index_item(1, 0, "C:", true)]);
+        for rule in ["*.tmp", "target\\debug", r"C:\Users"] {
+            assert!(
+                vol.excluded_record_mask(&[rule.to_string()]).is_none(),
+                "{rule} must fall back to the full-path reference"
+            );
+        }
+        assert_eq!(
+            vol.excluded_record_mask(&[]),
+            Some(vec![false]),
+            "no rules means nothing is excluded"
+        );
+    }
+
+    #[test]
+    fn a_contended_volume_lock_serves_the_cached_summary() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let engine = MultiVolumeEngine::with_index_dir_and_drives(temp_dir.path(), vec![]);
+        let mut vol = VolumeIndex::new('C');
+        vol.ingest_items(vec![index_item(1, 0, "C:", true)]);
+        engine.add_volume(vol);
+
+        let first = engine.get_volume_summaries();
+        assert_eq!(first.len(), 1);
+
+        // A query holds this write guard for its whole run. The envelope must answer from the
+        // cache instead of waiting for the read lock (which would deadlock this thread here).
+        let guard = engine.volumes.write().unwrap();
+        let cached = engine.get_volume_summaries();
+        drop(guard);
+        assert_eq!(
+            cached, first,
+            "a connection handshake must not wait behind an in-flight query"
+        );
     }
 
     #[test]
@@ -3888,5 +4271,159 @@ mod tests {
                 .collect()
         });
         assert_eq!(exts, ["bin", "txt", "txt", "txt", "txt", "txt", "zip"]);
+    }
+
+    #[test]
+    fn calculate_matched_file_bytes_counts_only_files() {
+        let mut vol = VolumeIndex::new('C');
+        // Simulate NTFS hierarchy:
+        // FRN 5 (root, parent 5), aggregate size 1000
+        // FRN 10 (dir Windows, parent 5), aggregate size 400
+        // FRN 20 (dir System32, parent 10), aggregate size 200
+        // FRN 30 (file notepad.exe, parent 20), size 50
+        // FRN 40 (dir Users, parent 5), aggregate size 500
+        // FRN 50 (file outside.txt, parent 5), size 100
+        vol.ingest_items(vec![
+            ExtractedItem {
+                frn: 5,
+                parent_frn: 5,
+                name: ".".to_string(),
+                is_dir: true,
+                size: 0,
+                created_ts: 0,
+                modified_ts: 0,
+                flags: cairn_core::FLAG_DIRECTORY,
+                is_reparse_point: false,
+            },
+            ExtractedItem {
+                frn: 10,
+                parent_frn: 5,
+                name: "Windows".to_string(),
+                is_dir: true,
+                size: 0,
+                created_ts: 0,
+                modified_ts: 0,
+                flags: cairn_core::FLAG_DIRECTORY,
+                is_reparse_point: false,
+            },
+            ExtractedItem {
+                frn: 20,
+                parent_frn: 10,
+                name: "System32".to_string(),
+                is_dir: true,
+                size: 0,
+                created_ts: 0,
+                modified_ts: 0,
+                flags: cairn_core::FLAG_DIRECTORY,
+                is_reparse_point: false,
+            },
+            ExtractedItem {
+                frn: 30,
+                parent_frn: 20,
+                name: "notepad.exe".to_string(),
+                is_dir: false,
+                size: 50,
+                created_ts: 0,
+                modified_ts: 0,
+                flags: 0,
+                is_reparse_point: false,
+            },
+            ExtractedItem {
+                frn: 40,
+                parent_frn: 5,
+                name: "Users".to_string(),
+                is_dir: true,
+                size: 0,
+                created_ts: 0,
+                modified_ts: 0,
+                flags: cairn_core::FLAG_DIRECTORY,
+                is_reparse_point: false,
+            },
+            ExtractedItem {
+                frn: 50,
+                parent_frn: 5,
+                name: "outside.txt".to_string(),
+                is_dir: false,
+                size: 100,
+                created_ts: 0,
+                modified_ts: 0,
+                flags: 0,
+                is_reparse_point: false,
+            },
+        ]);
+
+        // After ingest, directory sizes are aggregated:
+        // notepad: 50, outside: 100
+        // System32: 50
+        // Windows: 50
+        // Users: 0
+        // Root (FRN 5): 150
+        let root_idx = vol.frn_to_idx[&5][0];
+        let win_idx = vol.frn_to_idx[&10][0];
+        let sys_idx = vol.frn_to_idx[&20][0];
+        let users_idx = vol.frn_to_idx[&40][0];
+        let note_idx = vol.frn_to_idx[&30][0];
+        let out_idx = vol.frn_to_idx[&50][0];
+
+        // 1. Folder-only results carry no file bytes; directories are containers.
+        let all_folders = vec![root_idx, win_idx, sys_idx, users_idx];
+        assert_eq!(vol.calculate_matched_file_bytes(&all_folders), 0);
+
+        // 2. A nested folder still contributes no aggregate size of its own.
+        let subfolders = vec![win_idx, sys_idx, users_idx];
+        assert_eq!(vol.calculate_matched_file_bytes(&subfolders), 0);
+
+        // 3. Pure file query: notepad + outside -> 50 + 100 = 150.
+        let files = vec![note_idx, out_idx];
+        assert_eq!(vol.calculate_matched_file_bytes(&files), 150);
+
+        // 4. Mixed query: the directory contributes zero; only its matched files count.
+        let mixed = vec![win_idx, note_idx, out_idx];
+        assert_eq!(vol.calculate_matched_file_bytes(&mixed), 150);
+    }
+
+    #[test]
+    fn an_untrusted_configuration_cannot_be_reloaded() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let index = temp.path().join("index");
+        let content = temp.path().join("content");
+        let config = temp.path().join("service.toml");
+        let engine = MultiVolumeEngine::with_paths(
+            &index,
+            &content,
+            &config,
+            Vec::new(),
+            ServiceConfig::default(),
+        );
+        engine.config_trusted.store(false, Ordering::SeqCst);
+        std::fs::write(&config, "admin_only_query = true\n").expect("write config");
+
+        assert!(
+            engine.reload_config_from(&config).is_err(),
+            "a configuration rejected at startup must not become trusted on reload"
+        );
+        assert!(!engine.get_config().admin_only_query);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_rebuild_is_visible_in_the_cached_summary() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let engine = MultiVolumeEngine::with_index_dir_and_drives(temp.path(), Vec::new());
+        let mut volume = VolumeIndex::new('C');
+        volume.status = VolumeState::Synced;
+        engine.add_volume(volume);
+        let _ = engine.get_volume_summaries();
+
+        let previous = engine
+            .mark_volume_rebuilding('C')
+            .expect("the tracked volume is marked rebuilding");
+        assert_eq!(
+            engine.get_volume_summaries()[0].status,
+            VolumeState::Rebuilding
+        );
+
+        engine.restore_volume_status('C', previous);
+        assert_eq!(engine.get_volume_summaries()[0].status, VolumeState::Synced);
     }
 }

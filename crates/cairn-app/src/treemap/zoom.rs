@@ -19,9 +19,9 @@ const MAX_SCALE: f32 = 4.0;
 /// One normalized wheel line. Multiplication keeps repeated steps uniform.
 const ZOOM_STEP: f32 = 1.12;
 const MAX_STEPS_PER_EVENT: f32 = 3.0;
-/// The enter transition lasts at most 310ms. The cooldown is longer so a
-/// trackpad's inertia cannot cross a second directory while the first
-/// transition is still running.
+/// Automatic drill has no transition animation. The cooldown only prevents a
+/// trackpad's inertia from crossing a second directory immediately after the
+/// first automatic drill.
 const AUTO_ENTER_COOLDOWN: Duration = Duration::from_millis(400);
 
 /// The base-to-screen transform: `screen = (base - origin) * scale`.
