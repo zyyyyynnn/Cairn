@@ -129,17 +129,18 @@ pub fn service_state() -> ServiceState {
         let _ = CloseServiceHandle(service);
 
         match start_type {
-            Some(ServiceStartType::Auto) => ServiceState::Owned {
+            Ok(Some(ServiceStartType::Auto)) => ServiceState::Owned {
                 start_type: ServiceStartType::Auto,
                 running,
             },
-            Some(ServiceStartType::Manual) => ServiceState::Owned {
+            Ok(Some(ServiceStartType::Manual)) => ServiceState::Owned {
                 start_type: ServiceStartType::Manual,
                 running,
             },
             // The registration exists but the start type is one this product never sets
             // (disabled, boot, system). It can still be rewritten, so it is not a dead end.
-            None => ServiceState::Foreign { running },
+            Ok(None) => ServiceState::Foreign { running },
+            Err(()) => ServiceState::Unreadable,
         }
     }
 }
@@ -151,7 +152,10 @@ pub fn service_state() -> ServiceState {
 
 /// Whether the machine state says the service is registered on this machine.
 pub fn service_is_registered(state: ServiceState) -> bool {
-    !matches!(state, ServiceState::NotInstalled)
+    matches!(
+        state,
+        ServiceState::Owned { .. } | ServiceState::Foreign { .. }
+    )
 }
 
 /// Whether the machine state says the service is registered and running right now.
@@ -167,12 +171,12 @@ pub fn service_is_installed() -> bool {
     service_is_registered(service_state())
 }
 
-/// The start type the service is registered with, or `None` when it is registered with one this
-/// product does not own.
+/// The start type the service is registered with, `Ok(None)` for a start type this product does
+/// not own, or `Err(())` when the registration could not be read.
 #[cfg(windows)]
 fn read_start_type(
     service: windows::Win32::System::Services::SC_HANDLE,
-) -> Option<ServiceStartType> {
+) -> Result<Option<ServiceStartType>, ()> {
     use windows::Win32::System::Services::{QueryServiceConfigW, QUERY_SERVICE_CONFIGW};
 
     // The answer does not fit in the structure alone: the structure holds pointers to strings that
@@ -191,10 +195,10 @@ fn read_start_type(
         )
     };
     if first.is_ok() {
-        return start_type_of(&probe);
+        return Ok(start_type_of(&probe));
     }
     if needed <= std::mem::size_of::<QUERY_SERVICE_CONFIGW>() as u32 {
-        return None;
+        return Err(());
     }
 
     let mut buffer = vec![0u8; needed as usize];
@@ -209,12 +213,12 @@ fn read_start_type(
         )
     };
     if second.is_err() {
-        return None;
+        return Err(());
     }
     // SAFETY: the call above succeeded and filled the buffer with a structure of the requested
     // size, so the pointer is valid and aligned for the structure it now holds.
     let config = unsafe { &*(buffer.as_ptr() as *const QUERY_SERVICE_CONFIGW) };
-    start_type_of(config)
+    Ok(start_type_of(config))
 }
 
 #[cfg(windows)]
@@ -426,5 +430,18 @@ mod tests {
     #[test]
     fn the_service_name_has_one_source() {
         assert_eq!(SERVICE_NAME, "CairnService");
+    }
+
+    #[test]
+    fn an_unreadable_registration_is_not_installed() {
+        assert!(!service_is_registered(ServiceState::NotInstalled));
+        assert!(!service_is_registered(ServiceState::Unreadable));
+        assert!(service_is_registered(ServiceState::Foreign {
+            running: false
+        }));
+        assert!(service_is_registered(ServiceState::Owned {
+            start_type: ServiceStartType::Auto,
+            running: true,
+        }));
     }
 }

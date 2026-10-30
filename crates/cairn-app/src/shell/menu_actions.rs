@@ -736,8 +736,10 @@ impl CairnApp {
             service_connected: self.service.is_service_connected,
             switching_scope: self.service.is_switching_scope,
             content_loading: self.service.content_status_loading,
-            content_failed: self.service.content_status_error.is_some()
-                || self.service.content_action_error.is_some(),
+            content_failed: content_failed(
+                self.service.content_status_error.as_deref(),
+                self.service.content_action_error.as_deref(),
+            ),
             content_action_pending: self.service.content_action_pending,
             local_mode: self.service.local_mode,
             content_state: &self.service.content_status.state,
@@ -2058,9 +2060,18 @@ impl CairnApp {
     }
 }
 
+/// A content-index action failed or the last status read failed. Both make the menu row speak a
+/// failure instead of a healthy state.
+fn content_failed(status_error: Option<&str>, action_error: Option<&str>) -> bool {
+    status_error.is_some() || action_error.is_some()
+}
+
 #[cfg(test)]
 mod confirmation_tests {
-    use super::{confirmation_top_offset_for_height, reconcile_bin_items, reconcile_empty_bin};
+    use super::{
+        confirmation_top_offset_for_height, content_failed, reconcile_bin_items,
+        reconcile_empty_bin,
+    };
     use crate::app::layout;
     use crate::shell::i18n::I18nManager;
     use crate::shell::os::{BinOperationError, RecycleBinItem};
@@ -2165,6 +2176,14 @@ mod confirmation_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_content_action_failure_marks_the_menu_failed() {
+        assert!(!content_failed(None, None));
+        assert!(content_failed(Some("status"), None));
+        assert!(content_failed(None, Some("action")));
+        assert!(content_failed(Some("status"), Some("action")));
     }
 
     #[test]

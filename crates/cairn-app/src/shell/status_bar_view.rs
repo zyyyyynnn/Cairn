@@ -391,6 +391,7 @@ impl CairnApp {
             .flex_shrink_0()
             .items_center()
             .gap(rems(layout::SPACE_8));
+        let legend_control = accessibility::control("treemap-legend");
         for category in TreemapCategory::ALL {
             let visible = state.category_visible(category);
             let label = SharedString::from(self.i18n.get_text(treemap_category_key(category)));
@@ -406,6 +407,7 @@ impl CairnApp {
                     &args,
                 ))
             };
+            let legend_accessible_label = tooltip.clone();
             let cat_ix = category as usize;
             let focus = window
                 .use_keyed_state(("treemap-legend", cat_ix), cx, |_, cx| {
@@ -416,10 +418,12 @@ impl CairnApp {
             let click_focus = focus.clone();
 
             row = row.child(
-                h_flex()
-                    .id(("treemap-legend", cat_ix))
+                accessibility::element_at(legend_control, cat_ix)
+                    .flex()
+                    .flex_row()
                     .tab_stop(true)
                     .track_focus(&focus)
+                    .aria_label(legend_accessible_label)
                     .aria_toggled(if visible {
                         gpui_kit::gpui::accesskit::Toggled::True
                     } else {
