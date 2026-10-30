@@ -16,7 +16,7 @@
 
 ## 2. 安装流程
 
-1. `CairnSetup.exe` 通过 PE 清单请求管理员权限；UAC 由 Windows 在进程启动时完成，安装器自身不再二次提权。
+1. `CairnSetup.exe` 通过 PE 清单请求管理员权限；UAC 由 Windows 在进程启动时完成，安装器自身不再二次提权。MSI 载荷暂存在管理员拥有的 `%ProgramFiles%\CairnSetup`，不使用用户可写的 `%TEMP%`。
 2. 单实例互斥；已有窗口时置前并退出。界面语言跟随 Windows UI 语言（`zh-CN` / `en-US`），明暗配色跟随系统。
 3. **许可协议**：展示 Apache License 2.0 名称与“查看完整许可…”；完整 `LICENSE` 写入 `%TEMP%\Cairn-LICENSE.txt`，通过 `explorer.exe` 以标准用户令牌打开。必须勾选接受才能继续。
 4. **安装位置**：机器级安装，默认 `%ProgramFiles%\Cairn`；可输入或浏览选择 Program Files 下的子目录。校验空值、相对路径、UNC、根目录、Windows/Program Files 根、`..`、尾随点/空格、分号/百分号、非法字符和文件路径；服务与机器 PATH 只写入管理员拥有的 Program Files，`INSTALLFOLDER` 作为公开 MSI 属性传入。
@@ -30,7 +30,7 @@
 - Apps & features 只显示 `Cairn`，指向已安装的 `Cairn\CairnUninstall.exe`；MSI 自己的条目通过 `ARPSYSTEMCOMPONENT=1` 隐藏。
 - 确认页写明卸载会移除程序、CLI、服务、索引、设置与注册表项；清理失败会记录日志，不提供保留数据选项。
 - 卸载通过 `MsiConfigureProductW(..., INSTALLSTATE_ABSENT)` 执行；MSI 停止并移除服务、删除文件、PATH 条目、`HKLM\Software\Cairn` 与自定义 ARP 键。
-- MSI 完成后，worker 删除 `%ProgramData%\Cairn`、`%APPDATA%\Cairn`、`%LOCALAPPDATA%\Cairn` 与 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Cairn`；UI 退出后，预复制的临时 helper 只删除安装目录中的产品可执行文件，目录非空时保留用户文件，不递归删除共享目录。
+- MSI 完成后，worker 删除 `%ProgramData%\Cairn`、`%APPDATA%\Cairn`、`%LOCALAPPDATA%\Cairn` 与 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Cairn`；UI 退出后，预复制的临时 helper 只删除安装目录中的产品可执行文件，目录非空时保留用户文件，不递归删除共享目录。helper 本身也暂存在管理员拥有的 `%ProgramFiles%\CairnSetup`。
 - 卸载失败页用卸载口径措辞命名每个失败（已取消、另一个安装程序在运行、安装记录损坏、平台不支持、MSI 致命错误、找不到安装记录），不复用安装器文案，也不声称发生过安装动作。
 - 静默卸载为 `CairnUninstall.exe --quiet`；没有产品注册时视作已卸载并返回 `0`。
 
@@ -54,7 +54,7 @@ GPUI 安装器直接复用产品 token 与组件，窗口固定为紧凑的 **52
 
 ### 4.4 载荷与清单
 
-- `xtask` 在 MSI 构建完成后，把 MSI 追加到 `CairnSetup.exe` 尾部：`[MSI][length][crc32][reserved][CAIRNMSI]`；运行时校验长度与 CRC 后解包到私有临时目录，结束后删除。
+- `xtask` 在 MSI 构建完成后，把 MSI 追加到 `CairnSetup.exe` 尾部：`[MSI][length][crc32][reserved][CAIRNMSI]`；运行时校验长度与 CRC 后解包到管理员拥有的 `%ProgramFiles%\CairnSetup`，结束后删除。
 - GPUI 自身会链接一个 `asInvoker` 清单资源；直接再嵌一个清单会触发 `CVT1100`。`xtask` 在链接后用 Windows SDK `mt.exe -outputresource:...;#1` 替换为 `crates/cairn-setup-bin/installer.manifest`（`requireAdministrator`、PerMonitorV2、longPathAware、Common-Controls 6）。
 - 发布构建不读取任意 MSI 路径；调试构建允许 `CAIRN_SETUP_MSI_PATH` 便于 UI 联调。
 
