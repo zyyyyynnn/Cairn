@@ -28,7 +28,7 @@
 ## 3. 卸载流程
 
 - Apps & features 只显示 `Cairn`，指向已安装的 `Cairn\CairnUninstall.exe`；MSI 自己的条目通过 `ARPSYSTEMCOMPONENT=1` 隐藏。
-- 确认页写明卸载是彻底移除：程序、CLI、服务、索引、设置与注册表项全部删除，不提供保留数据选项。
+- 确认页写明卸载会移除程序、CLI、服务、索引、设置与注册表项；清理失败会记录日志，不提供保留数据选项。
 - 卸载通过 `MsiConfigureProductW(..., INSTALLSTATE_ABSENT)` 执行；MSI 停止并移除服务、删除文件、PATH 条目、`HKLM\Software\Cairn` 与自定义 ARP 键。
 - MSI 完成后，worker 删除 `%ProgramData%\Cairn`、`%APPDATA%\Cairn`、`%LOCALAPPDATA%\Cairn` 与 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Cairn`；UI 退出后，预复制的临时 helper 只删除安装目录中的产品可执行文件，目录非空时保留用户文件，不递归删除共享目录。
 - 卸载失败页用卸载口径措辞命名每个失败（已取消、另一个安装程序在运行、安装记录损坏、平台不支持、MSI 致命错误、找不到安装记录），不复用安装器文案，也不声称发生过安装动作。

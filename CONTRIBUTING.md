@@ -8,7 +8,7 @@ Cairn 采用 Rust 与 GPUI 构建 Windows NTFS 文件检索与磁盘分析工具
 
 - **操作系统**：Windows 10 / Windows 11 (x64)
 - **Rust 工具链**：Rust 1.82+（请参考项目根目录的 `rust-toolchain.toml`）
-- **打包依赖（可选）**：WiX 4.0 (`dotnet tool install --global wix`)
+- **打包依赖（可选）**：WiX 5 (`dotnet tool install --global wix`)
 - **环境检查**：
   ```powershell
   cargo check --workspace --all-targets
