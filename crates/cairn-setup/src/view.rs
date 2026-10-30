@@ -747,15 +747,17 @@ impl SetupApp {
                         .on_click(cx.listener(|this, _, window, cx| this.close_window(window, cx)))
                         .into_any_element(),
                 );
-                actions.push(
-                    Button::new("setup-launch-app")
-                        .primary()
-                        .label(self.i18n.get("action_open_app"))
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.open_installed(window, cx);
-                        }))
-                        .into_any_element(),
-                );
+                if !self.restart_required {
+                    actions.push(
+                        Button::new("setup-launch-app")
+                            .primary()
+                            .label(self.i18n.get("action_open_app"))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_installed(window, cx);
+                            }))
+                            .into_any_element(),
+                    );
+                }
             }
             Screen::Failed => {
                 if self.log.is_some() {
