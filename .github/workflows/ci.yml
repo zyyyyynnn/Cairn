@@ -39,6 +39,13 @@ jobs:
       - name: Internationalization check
         run: cargo run -p xtask -- check-i18n
 
+  deny:
+    name: Dependency Policy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
       - name: Dependency policy
         uses: EmbarkStudios/cargo-deny-action@v2
 
