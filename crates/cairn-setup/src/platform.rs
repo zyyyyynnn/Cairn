@@ -258,6 +258,9 @@ pub fn prepare_install_dir_cleanup() -> Option<PathBuf> {
 /// Starts the prepared helper whose only job is to delete the install folder after this process
 /// exits. The install folder contains the running uninstaller, so it cannot remove itself in place.
 pub fn spawn_install_dir_cleanup(install_dir: &Path, helper: Option<PathBuf>) {
+    if crate::model::validate_install_path(&install_dir.to_string_lossy()).is_err() {
+        return;
+    }
     let helper = helper.or_else(prepare_install_dir_cleanup);
     let Some(helper) = helper else {
         return;
@@ -274,6 +277,11 @@ pub fn spawn_install_dir_cleanup(install_dir: &Path, helper: Option<PathBuf>) {
 /// The helper side of [`spawn_install_dir_cleanup`]. It waits for the uninstaller to exit, removes
 /// the folder, then schedules its own temporary copy for deletion at reboot.
 pub fn run_install_dir_cleanup(install_dir: &Path, wait_pid: u32) {
+    let Ok(install_dir) = crate::model::validate_install_path(&install_dir.to_string_lossy())
+    else {
+        schedule_self_delete();
+        return;
+    };
     if let Ok(handle) = unsafe {
         OpenProcess(
             PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
@@ -286,18 +294,23 @@ pub fn run_install_dir_cleanup(install_dir: &Path, wait_pid: u32) {
             let _ = CloseHandle(handle);
         }
     }
-    for attempt in 0..10 {
-        if !install_dir.exists() {
-            break;
-        }
-        match std::fs::remove_dir_all(install_dir) {
-            Ok(()) => break,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => break,
-            Err(_) => std::thread::sleep(std::time::Duration::from_millis(200 * (attempt + 1))),
-        }
+    // The MSI owns its component tree; this helper only removes product executables that survived
+    // the transaction. User files in a shared folder are never deleted.
+    for name in PRODUCT_FILES {
+        let _ = std::fs::remove_file(install_dir.join(name));
     }
+    let _ = std::fs::remove_dir(&install_dir);
     schedule_self_delete();
 }
+
+const PRODUCT_FILES: [&str; 6] = [
+    "Cairn.exe",
+    "CairnService.exe",
+    "CairnCli.exe",
+    "CairnWorker.exe",
+    "CairnSetup.exe",
+    "CairnUninstall.exe",
+];
 
 fn schedule_self_delete() {
     use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_DELAY_UNTIL_REBOOT};

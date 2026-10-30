@@ -6,7 +6,7 @@
 //! tested without a window or an MSI.
 
 use std::cmp::Ordering;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use crate::PRODUCT_VERSION;
 
@@ -133,6 +133,7 @@ pub enum PathProblem {
     Network,
     Root,
     System,
+    OutsideProgramFiles,
     File,
     Invalid,
 }
@@ -145,6 +146,7 @@ impl PathProblem {
             PathProblem::Network => "path_network",
             PathProblem::Root => "path_root",
             PathProblem::System => "path_system",
+            PathProblem::OutsideProgramFiles => "path_outside_program_files",
             PathProblem::File => "path_file",
             PathProblem::Invalid => "path_invalid",
         }
@@ -200,30 +202,89 @@ pub fn validate_install_path(raw: &str) -> Result<PathBuf, PathProblem> {
         return Err(PathProblem::Root);
     }
 
-    let lower = trimmed.to_ascii_lowercase();
-    let normalized = lower.replace('/', "\\");
-    if normalized == r"c:\windows"
-        || normalized.starts_with(r"c:\windows\")
-        || normalized == r"c:\program files"
-        || normalized == r"c:\program files (x86)"
-        || normalized == r"c:\programdata"
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => return Err(PathProblem::Invalid),
+            Component::Normal(part) => {
+                let text = part.to_string_lossy();
+                if text.ends_with('.') || text.ends_with(' ') || text.contains([';', '%']) {
+                    return Err(PathProblem::Invalid);
+                }
+                normalized.push(part);
+            }
+        }
+    }
+    if normalized.parent().is_none() {
+        return Err(PathProblem::Root);
+    }
+
+    let lower = normalized.to_string_lossy().to_ascii_lowercase();
+    if lower == r"c:\windows"
+        || lower.starts_with(r"c:\windows\")
+        || lower == r"c:\program files"
+        || lower == r"c:\program files (x86)"
+        || lower == r"c:\programdata"
     {
         return Err(PathProblem::System);
     }
 
-    if path.is_file() {
+    // A machine-wide service and PATH entry must live under an administrator-owned root. Allowing
+    // a user-writable folder would let a standard user replace the service binary after elevation.
+    if !is_under_program_files(&normalized) {
+        return Err(PathProblem::OutsideProgramFiles);
+    }
+
+    if normalized.is_file() {
         return Err(PathProblem::File);
     }
-    Ok(path)
+    Ok(normalized)
 }
 
-/// The machine-wide default. The installer is a 64-bit process, so `ProgramFiles` is the 64-bit
-/// folder and the MSI's `ProgramFiles64Folder` resolves to the same place.
+/// The machine-wide Program Files root, from the OS rather than a user environment variable.
+pub fn program_files_root() -> PathBuf {
+    #[cfg(windows)]
+    {
+        use windows::Win32::UI::Shell::{SHGetFolderPathW, CSIDL_PROGRAM_FILES};
+
+        let mut buffer = [0u16; 260];
+        if unsafe { SHGetFolderPathW(None, CSIDL_PROGRAM_FILES as i32, None, 0, &mut buffer) }
+            .is_ok()
+        {
+            let length = buffer
+                .iter()
+                .position(|&unit| unit == 0)
+                .unwrap_or(buffer.len());
+            if length > 0 {
+                return PathBuf::from(String::from_utf16_lossy(&buffer[..length]));
+            }
+        }
+    }
+    PathBuf::from(r"C:\Program Files")
+}
+
+fn is_under_program_files(path: &Path) -> bool {
+    let root = program_files_root();
+    let root = root
+        .to_string_lossy()
+        .trim_end_matches(['\\', '/'])
+        .to_ascii_lowercase();
+    let path = path
+        .to_string_lossy()
+        .trim_end_matches(['\\', '/'])
+        .to_ascii_lowercase();
+    path.len() > root.len()
+        && path.starts_with(&root)
+        && path.as_bytes().get(root.len()) == Some(&b'\\')
+}
+
+/// The machine-wide default. The MSI's `ProgramFiles64Folder` and this value both come from the
+/// OS-known folder, not from an environment variable a standard user can set.
 pub fn default_install_dir() -> PathBuf {
-    std::env::var_os("ProgramFiles")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files"))
-        .join("Cairn")
+    program_files_root().join("Cairn")
 }
 
 /// Numeric version ordering for the `a.b.c` versions the MSI accepts. Missing components count as
@@ -347,6 +408,22 @@ mod tests {
             validate_install_path(r"C:\Cairn\bad?name"),
             Err(PathProblem::Invalid)
         );
+        assert_eq!(
+            validate_install_path(r"C:\Program Files\..\Windows"),
+            Err(PathProblem::Invalid)
+        );
+        assert_eq!(
+            validate_install_path(r"C:\Program Files\Cairn;C:\Tools"),
+            Err(PathProblem::Invalid)
+        );
+        assert_eq!(
+            validate_install_path(r"C:\Program Files\Cairn."),
+            Err(PathProblem::Invalid)
+        );
+        assert_eq!(
+            validate_install_path(r"C:\Users\Public\Cairn"),
+            Err(PathProblem::OutsideProgramFiles)
+        );
     }
 
     #[test]
@@ -356,8 +433,8 @@ mod tests {
             Ok(PathBuf::from(r"C:\Program Files\Cairn"))
         );
         assert_eq!(
-            validate_install_path(r"D:\Apps\Cairn"),
-            Ok(PathBuf::from(r"D:\Apps\Cairn"))
+            validate_install_path(r"C:\Program Files\Vendor\Cairn"),
+            Ok(PathBuf::from(r"C:\Program Files\Vendor\Cairn"))
         );
     }
 

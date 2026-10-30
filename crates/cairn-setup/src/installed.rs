@@ -59,10 +59,15 @@ pub fn installed_product() -> Option<InstalledProduct> {
     })
 }
 
+/// The upgrade code in the braced form `MsiEnumRelatedProductsW` requires.
+pub(crate) fn upgrade_code_guid() -> String {
+    format!("{{{}}}", crate::MSI_UPGRADE_CODE)
+}
+
 /// The ProductCode of the installed Cairn MSI, if any. This is what the uninstaller passes to
 /// `MsiConfigureProductW`; it is not guessed from a version string.
 pub fn find_product_code() -> Option<String> {
-    let upgrade = wide(std::ffi::OsStr::new(crate::MSI_UPGRADE_CODE));
+    let upgrade = wide(std::ffi::OsStr::new(&upgrade_code_guid()));
     let mut product = [0u16; 39];
     let result = unsafe {
         MsiEnumRelatedProductsW(
@@ -259,6 +264,15 @@ pub fn split_command_line(input: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::upgrade_code_guid;
+
+    #[test]
+    fn the_upgrade_code_is_braced_for_the_msi_api() {
+        let guid = upgrade_code_guid();
+        assert!(guid.starts_with('{') && guid.ends_with('}'), "{guid}");
+        assert_eq!(guid.len(), 38, "{guid}");
+    }
+
     use super::split_command_line;
 
     #[test]

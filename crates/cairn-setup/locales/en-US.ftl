@@ -61,6 +61,8 @@ maintenance_newer = A newer version, { $version }, is already installed.
 uninstall_title = Uninstall Cairn
 uninstall_body = Removes Cairn, its CLI, service, index, settings, and registry entries.
 uninstall_progress_title = Uninstalling Cairn
+uninstall_progress_working = Removing Cairn files and settings…
+uninstall_restart = Restart Windows to finish removing Cairn.
 uninstall_done_title = Cairn is uninstalled
 uninstall_done_body = Program files, CLI, service, index, and settings were removed.
 
@@ -68,6 +70,7 @@ path_empty = Enter an install folder.
 path_not_absolute = Enter a full local path, for example C:\Program Files\Cairn.
 path_network = Cairn cannot be installed on a network location.
 path_root = Choose a folder, not the root of a drive.
+path_outside_program_files = Install Cairn under Program Files.
 path_system = Cairn cannot be installed directly in Windows or the root of Program Files.
 path_file = That path is a file. Choose a folder.
 path_invalid = The path contains characters Windows does not allow.

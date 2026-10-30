@@ -61,6 +61,8 @@ maintenance_newer = 这台电脑上已有较新版本 { $version }。
 uninstall_title = 卸载 Cairn
 uninstall_body = 将移除 Cairn 程序、命令行工具、后台服务、索引、设置和注册表项。
 uninstall_progress_title = 正在卸载 Cairn
+uninstall_progress_working = 正在移除 Cairn 文件和设置…
+uninstall_restart = 请重启 Windows 以完成 Cairn 的移除。
 uninstall_done_title = 卸载完成
 uninstall_done_body = 程序文件、命令行工具、后台服务、索引和设置已移除。
 
@@ -68,6 +70,7 @@ path_empty = 请输入安装文件夹。
 path_not_absolute = 请输入完整的本地路径，例如 C:\Program Files\Cairn。
 path_network = 不能安装到网络位置。
 path_root = 请选择一个文件夹，而不是磁盘根目录。
+path_outside_program_files = 请将 Cairn 安装到 Program Files 下。
 path_system = 不能直接安装到 Windows 或 Program Files 根目录。
 path_file = 这个路径指向一个文件，请选择文件夹。
 path_invalid = 路径包含 Windows 不允许的字符。
