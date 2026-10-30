@@ -19,8 +19,8 @@
 1. `CairnSetup.exe` 通过 PE 清单请求管理员权限；UAC 由 Windows 在进程启动时完成，安装器自身不再二次提权。
 2. 单实例互斥；已有窗口时置前并退出。界面语言跟随 Windows UI 语言（`zh-CN` / `en-US`），明暗配色跟随系统。
 3. **许可协议**：展示 Apache License 2.0 名称与“查看完整许可…”；完整 `LICENSE` 写入 `%TEMP%\Cairn-LICENSE.txt`，通过 `explorer.exe` 以标准用户令牌打开。必须勾选接受才能继续。
-4. **安装位置**：机器级安装，默认 `%ProgramFiles%\Cairn`；可输入或浏览选择。校验空值、相对路径、UNC、根目录、Windows/Program Files 根、非法字符和文件路径；`INSTALLFOLDER` 作为公开 MSI 属性传入。
-5. **安装**：解包同目录下的 MSI，先移除检测到的全部 Burn 注册条目，再通过 `MsiInstallProductW` 在同进程内执行 MSI；进度来自 MSI 的 `INSTALLMESSAGE_PROGRESS` 记录，动作来自 `INSTALLMESSAGE_ACTIONSTART`，不使用计时器伪造。
+4. **安装位置**：机器级安装，默认 `%ProgramFiles%\Cairn`；可输入或浏览选择 Program Files 下的子目录。校验空值、相对路径、UNC、根目录、Windows/Program Files 根、`..`、尾随点/空格、分号/百分号、非法字符和文件路径；服务与机器 PATH 只写入管理员拥有的 Program Files，`INSTALLFOLDER` 作为公开 MSI 属性传入。
+5. **安装**：从自身载荷解包 MSI，先移除检测到的全部 Burn 注册条目，再通过 `MsiInstallProductW` 在同进程内执行 MSI；进度来自 MSI 的 `INSTALLMESSAGE_PROGRESS` 记录，动作来自 `INSTALLMESSAGE_ACTIONSTART`，不使用计时器伪造。
 6. **完成**：显示结果与日志入口；“启动 Cairn”通过 `explorer.exe` 以登录用户令牌启动，避免 GUI 继承管理员令牌。
 7. **静默安装**：`/quiet` 或 `/s`；默认安装到已安装位置或默认位置，不启动应用。退出码 `0` 成功、`3010` 需要重启、`1` 失败（具体日志保留在 `%TEMP%\CairnSetup-*.log`）。
 8. **更新**：已安装同版本或更新版本进入维护页；较旧版本按更新流程执行 MSI 主升级；已存在的 Burn 注册条目即使其版本高于当前包，也先由注册的卸载器移除，再由当前 MSI 接管。安装交易进行中禁止关闭窗口。
@@ -30,7 +30,7 @@
 - Apps & features 只显示 `Cairn`，指向已安装的 `Cairn\CairnUninstall.exe`；MSI 自己的条目通过 `ARPSYSTEMCOMPONENT=1` 隐藏。
 - 确认页写明卸载是彻底移除：程序、CLI、服务、索引、设置与注册表项全部删除，不提供保留数据选项。
 - 卸载通过 `MsiConfigureProductW(..., INSTALLSTATE_ABSENT)` 执行；MSI 停止并移除服务、删除文件、PATH 条目、`HKLM\Software\Cairn` 与自定义 ARP 键。
-- MSI 完成后，worker 删除 `%ProgramData%\Cairn`、`%APPDATA%\Cairn`、`%LOCALAPPDATA%\Cairn` 与 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Cairn`，并在 UI 退出后由预复制的临时 helper 删除安装目录与被占用的卸载器文件。
+- MSI 完成后，worker 删除 `%ProgramData%\Cairn`、`%APPDATA%\Cairn`、`%LOCALAPPDATA%\Cairn` 与 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Cairn`；UI 退出后，预复制的临时 helper 只删除安装目录中的产品可执行文件，目录非空时保留用户文件，不递归删除共享目录。
 - 卸载失败页用卸载口径措辞命名每个失败（已取消、另一个安装程序在运行、安装记录损坏、平台不支持、MSI 致命错误、找不到安装记录），不复用安装器文案，也不声称发生过安装动作。
 - 静默卸载为 `CairnUninstall.exe --quiet`；没有产品注册时视作已卸载并返回 `0`。
 
@@ -44,7 +44,7 @@
 
 ### 4.2 为什么是 GPUI Setup + 静默 MSI
 
-GPUI 安装器直接复用产品 token 与组件，窗口固定为紧凑的 **520×240**：许可确认、安装位置、进度、错误和维护页都在同一尺寸内完成，不靠大窗口留白。底栏只在左侧保留进度/状态文字；取消、返回、关闭等所有动作与主操作一起在右侧成组排列，主操作位于最右。安装完成页与维护页共用同一已安装界面：图标、标题和动作一致，只有辅助行区分首次安装说明与已安装版本；浏览按钮文案为“浏览… / Browse…”。表单输入与复选框边界使用 `control_stroke`（对页面背景与 muted 卡面均 ≥3:1），结构线仍使用 `border`。字体：西文衬线 Cormorant 已嵌入并用于字标、setup/uninstall 顶栏副标题（“安装程序/卸载程序”，按光学匹配取 `text_sm` 12.25 px）与页面标题（16 px），中文回退 Noto Serif SC；正文使用系统 UI 字体（Segoe UI / 微软雅黑 UI），不嵌入无衬线副本。页面标题行高取 `SERIF_LINE_HEIGHT`=1.25，避免圆字母底部过冲被行框裁切；顶栏词标与中英文副标题由 `WindowTextSystem::layout_line` 的实测 ascent/descent 计算基线，再按同一基线定位，不写死像素偏移。MSI 仍是唯一事务引擎，避免重写服务注册、回滚、升级与文件引用计数。
+GPUI 安装器直接复用产品 token 与组件，窗口固定为紧凑的 **520×240**：许可确认、安装位置、进度、错误和维护页都在同一尺寸内完成，不靠大窗口留白。底栏只在左侧保留进度/状态文字；取消、返回、关闭等所有动作与主操作一起在右侧成组排列，主操作位于最右。安装完成页与维护页共用同一已安装界面：图标、标题和动作一致，只有辅助行区分首次安装说明与已安装版本；浏览按钮文案为“浏览… / Browse…”。表单输入与复选框边界使用 `control_stroke`（对页面背景与 muted 卡面均 ≥3:1），结构线仍使用 `border`。字体：西文衬线 Cormorant 已嵌入并用于字标、setup/uninstall 顶栏副标题（“安装程序/卸载程序”，按光学匹配取 `text_sm` 12.25 px）与页面标题（16 px），中文在系统已安装 Noto Serif SC 时回退到该字体，否则使用系统衬线回退；正文使用系统 UI 字体（Segoe UI / 微软雅黑 UI），不嵌入无衬线副本。页面标题行高取 `SERIF_LINE_HEIGHT`=1.25，避免圆字母底部过冲被行框裁切；顶栏词标与中英文副标题由 `WindowTextSystem::layout_line` 的实测 ascent/descent 计算基线，再按同一基线定位，不写死像素偏移。MSI 仍是唯一事务引擎，避免重写服务注册、回滚、升级与文件引用计数。
 
 ### 4.3 MSI 调用
 
@@ -69,7 +69,7 @@ cargo build --workspace --release
 cargo run -p xtask -- package
 ```
 
-要求：WiX 5、Windows SDK（`mt.exe`，可通过 `CAIRN_MT` 覆盖）和 release 二进制。`xtask` 会：
+要求：WiX 5、Windows SDK（`mt.exe`，可通过 `CAIRN_MT` 覆盖）和 release 二进制。`xtask package` 与 CI 的 Installer Package job 会：
 
 - 生成并编译 `cairn.msi`，校验 `wix msi validate`；
 - 替换两个 GPUI exe 的管理员清单，验证清单包含 `requireAdministrator` 与 PerMonitorV2；

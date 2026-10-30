@@ -29,6 +29,7 @@ cargo run -p xtask -- package
 - 打包先在私有 staging 目录完成 MSI、清单注入、载荷追加与校验和；任一步失败都保留 `dist/` 中上一次成功产物。
 - 发布成功后清理 `bundle.wxs`、`theme.xml`、`zh-CN.wxl`、`cairn.yaml` 等退役文件；`dist/` 只保留当前安装器产物。
 - 安装包必须包含 GUI、服务、CLI、Worker 与 GPUI 卸载器；禁止用改名或伪造脚本冒充安装器。
+- CI 的 Installer Package job 构建 release 二进制并运行真实打包测试（WiX 5、`mt.exe`、MSI 校验、载荷回读与解包）。
 
 ## 3. 安装模式与服务
 
@@ -37,7 +38,7 @@ cargo run -p xtask -- package
 - 安装目录加入机器 PATH；卸载时由 MSI 移除 PATH 项。
 - 搜索范围切换通过 UAC 停止/启动服务并切换启动类型（Automatic/Manual）。
 - 服务名 `CairnService`，数据目录 ACL 只允许 SYSTEM/Administrators。
-- 卸载停止并移除服务、关闭 IPC 监听、删除程序目录、PATH 与注册表，并清理 `%ProgramData%\Cairn`、`%APPDATA%\Cairn`、`%LOCALAPPDATA%\Cairn` 和当前用户自启动项；卸载是彻底移除，不保留索引或设置。
+- 卸载停止并移除服务、关闭 IPC 监听、删除 MSI 组件树、PATH 与注册表，并清理 `%ProgramData%\Cairn`、`%APPDATA%\Cairn`、`%LOCALAPPDATA%\Cairn` 和当前用户自启动项；临时 helper 只清理产品可执行文件，共享目录中的用户文件保留。
 - 开发验证可用 `CairnService --console`；生产环境不得以 console 进程替代服务。
 
 技术选型与供应链约束见 [architecture.md](architecture.md)。
