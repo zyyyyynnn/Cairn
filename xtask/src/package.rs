@@ -147,18 +147,19 @@ fn run_package_with(
     let staging_dir = create_staging_dir(&out_dir)?;
     let outcome = build_package(&staging_dir, &bin_dir, wix, mt)
         .and_then(|()| publish_package(&staging_dir, &out_dir));
+    let succeeded = outcome.is_ok();
     let backup_remaining = staging_dir
         .join(".previous")
         .read_dir()
         .map(|mut entries| entries.next().is_some())
         .unwrap_or(false);
-    if backup_remaining {
+    if succeeded || !backup_remaining {
+        let _ = fs::remove_dir_all(&staging_dir);
+    } else {
         eprintln!(
             "warning: the previous release was not fully restored; kept {} for recovery",
             staging_dir.display()
         );
-    } else {
-        let _ = fs::remove_dir_all(&staging_dir);
     }
 
     match outcome {
