@@ -1,0 +1,23 @@
+[package]
+name = "cairn-setup-bin"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "CairnSetup"
+path = "src/bin/cairn-setup.rs"
+test = false
+
+[[bin]]
+name = "CairnUninstall"
+path = "src/bin/cairn-uninstall.rs"
+test = false
+
+[dependencies]
+cairn-setup.workspace = true
+
+[build-dependencies]
+winres.workspace = true

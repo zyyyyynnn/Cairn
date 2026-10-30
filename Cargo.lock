@@ -1020,6 +1020,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "cairn-setup"
+version = "0.1.0"
+dependencies = [
+ "cairn-ui",
+ "crc32fast",
+ "fluent-bundle",
+ "gpui-kit",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "unic-langid",
+ "windows 0.62.2",
+]
+
+[[package]]
+name = "cairn-setup-bin"
+version = "0.1.0"
+dependencies = [
+ "cairn-setup",
+ "winres",
+]
+
+[[package]]
 name = "cairn-ui"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,950 @@
+// Cairn - High-performance Windows file search engine
+// Copyright (c) 2026 Cairn Contributors
+// SPDX-License-Identifier: Apache-2.0
+
+//! The installer window. One column, one decision per page, a fixed footer, and the same chrome
+//! and grayscale palette as the product it installs.
+
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::input::Input;
+use gpui_kit::component::progress::Progress;
+use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Icon, IconName, Sizable as _};
+use gpui_kit::gpui::prelude::FluentBuilder as _;
+use gpui_kit::gpui::*;
+
+use cairn_ui::brand::{
+    app_icon, serif_font, tabular_figures, BRAND_DESCRIPTOR_SIZE, BRAND_TITLE_SIZE, RADIUS,
+    SERIF_LINE_HEIGHT, UI_ICON_SIZE,
+};
+
+use crate::app::SetupApp;
+use crate::model::Screen;
+
+/// One physical platform surface: the caption row is 34 px at every zoom, like the product shell.
+const TITLE_BAR_HEIGHT: Pixels = px(34.0);
+const CAPTION_WIDTH: Pixels = px(34.0);
+/// Chrome horizontal inset (12 px), matching the product shell's title bar and footer margins.
+const PAGE_INSET: Pixels = px(12.0);
+/// Single vertical spacing token (16 px) for the main body area between title, description,
+/// inputs, cards, and checkboxes.
+const MAIN_GAP: Pixels = px(16.0);
+/// Inline tight group spacing (8 px) for related controls on the same row.
+const GROUP_GAP: Pixels = px(8.0);
+const CARD_PAD: Pixels = px(12.0);
+/// Action bar height: 40 px, leaving 6 px around the 28 px medium buttons.
+const FOOTER_HEIGHT: Pixels = px(40.0);
+/// The title-bar app mark token, separate from the 16 px wordmark.
+const TITLE_BAR_ICON: Pixels = cairn_ui::brand::APP_ICON_SIZE;
+
+/// Page titles use the shared serif set at the body size plus one step; the status icon matches
+/// that 16 px measure so icon and title read as one unit.
+const PAGE_TITLE_SIZE: f32 = 16.0 / 14.0;
+const PAGE_ICON: Pixels = px(18.0);
+const CHECK_SVG: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 7.5 6 10l4.5-5.5"/></svg>"#;
+
+/// The line box and baseline offset the text system actually uses for one shaped line.
+/// The title-bar lockup positions both runs from these values, so their baselines coincide
+/// in layout coordinates instead of relying on centered line boxes or a hand-tuned offset.
+fn line_metrics(
+    window: &Window,
+    text: &str,
+    font: Font,
+    font_size: Pixels,
+    color: Hsla,
+) -> (Pixels, Pixels) {
+    let run = TextRun {
+        len: text.len(),
+        font,
+        color,
+        ..Default::default()
+    };
+    let layout = window
+        .text_system()
+        .layout_line(text, font_size, &[run], None);
+    let line_height = (layout.ascent + layout.descent).round();
+    let baseline = (line_height - layout.ascent - layout.descent) / 2.0 + layout.ascent;
+    (line_height, baseline)
+}
+
+#[derive(Clone, Copy)]
+struct Tokens {
+    background: Hsla,
+    foreground: Hsla,
+    muted_foreground: Hsla,
+    border: Hsla,
+    control_stroke: Hsla,
+    danger: Hsla,
+    danger_foreground: Hsla,
+    muted: Hsla,
+    row_hover: Hsla,
+    ring: Hsla,
+}
+
+impl Tokens {
+    fn new(cx: &App) -> Self {
+        let theme = cx.theme();
+        Self {
+            background: theme.background,
+            foreground: theme.foreground,
+            muted_foreground: theme.muted_foreground,
+            border: theme.border,
+            control_stroke: cairn_ui::theme::control_stroke(theme),
+            danger: theme.danger,
+            danger_foreground: theme.danger_foreground,
+            muted: theme.muted,
+            row_hover: theme.list_hover,
+            ring: theme.ring,
+        }
+    }
+}
+
+fn caption_button(
+    window: &mut Window,
+    id: &'static str,
+    label: String,
+    icon: IconName,
+    is_close: bool,
+    tokens: &Tokens,
+    cx: &mut Context<SetupApp>,
+) -> AnyElement {
+    // The caption buttons are the window's only minimize and close, so they are Tab stops like
+    // any other control: a handle passed to `track_focus` carries its own tab-stop flag.
+    let focus = window
+        .use_keyed_state(id, cx, |_, cx| cx.focus_handle().tab_stop(true))
+        .read(cx)
+        .clone();
+
+    div()
+        .id(id)
+        .role(Role::Button)
+        .aria_label(label)
+        .track_focus(&focus)
+        .flex()
+        .w(CAPTION_WIDTH)
+        .h_full()
+        .items_center()
+        .justify_center()
+        .text_color(tokens.foreground)
+        .focus_visible(|style| style.border_1().border_color(tokens.ring))
+        .when(is_close, |this| {
+            this.hover(|style| style.bg(tokens.danger).text_color(tokens.danger_foreground))
+                .active(|style| style.bg(tokens.danger))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.close_window(window, cx);
+                }))
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        this.close_window(window, cx);
+                    }
+                }))
+        })
+        .when(!is_close, |this| {
+            this.hover(|style| style.bg(tokens.row_hover))
+                .active(|style| style.bg(tokens.row_hover))
+                .on_click(|_, window, _| window.minimize_window())
+                .on_key_down(|event, window, _| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        window.minimize_window();
+                    }
+                })
+        })
+        .child(Icon::new(icon).size(rems(UI_ICON_SIZE)))
+        .into_any_element()
+}
+
+impl Render for SetupApp {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let tokens = Tokens::new(cx);
+        v_flex()
+            .id("setup-root")
+            .size_full()
+            .bg(tokens.background)
+            .text_color(tokens.foreground)
+            // The window's own key context carries the Escape gesture, so it answers wherever
+            // focus happens to be. It is separate from the title bar's control context, which
+            // belongs to the platform window buttons. The root tracks the window's focus handle:
+            // the keymap reads a binding's context from the dispatch path of the focused node,
+            // and a window with nothing focused resolves to the window chrome's own node, which
+            // does not carry this context. Holding the window's focus keeps it on the path.
+            .key_context(crate::app::WINDOW_CONTEXT)
+            .track_focus(&self.root_focus)
+            .on_action(
+                cx.listener(|this, _: &crate::app::CancelSetup, window, cx| {
+                    this.on_escape(window, cx)
+                }),
+            )
+            .child(self.render_titlebar(&tokens, window, cx))
+            .child(self.render_body(&tokens, window, cx))
+            .child(self.render_footer(&tokens, cx))
+    }
+}
+
+impl SetupApp {
+    fn render_titlebar(
+        &self,
+        tokens: &Tokens,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let subtitle = if self.is_uninstall() {
+            "uninstall_subtitle"
+        } else {
+            "setup_subtitle"
+        };
+        let subtitle_text = self.i18n.get(subtitle);
+        let title_text = self.i18n.get("app_title");
+        let wordmark_font = serif_font(FontWeight::SEMIBOLD);
+        let descriptor_font = serif_font(FontWeight::NORMAL);
+        let rem = window.rem_size();
+        let (wordmark_line, wordmark_baseline) = line_metrics(
+            window,
+            &title_text,
+            wordmark_font.clone(),
+            rem * BRAND_TITLE_SIZE,
+            tokens.foreground,
+        );
+        let (descriptor_line, descriptor_baseline) = line_metrics(
+            window,
+            &subtitle_text,
+            descriptor_font.clone(),
+            rem * BRAND_DESCRIPTOR_SIZE,
+            tokens.muted_foreground,
+        );
+        let descriptor_top = wordmark_baseline - descriptor_baseline;
+        let wordmark = div()
+            .text_size(rems(BRAND_TITLE_SIZE))
+            .line_height(wordmark_line)
+            .font(wordmark_font)
+            .child(title_text);
+        let descriptor = div()
+            .text_size(rems(BRAND_DESCRIPTOR_SIZE))
+            .line_height(descriptor_line)
+            .mt(descriptor_top)
+            .font(descriptor_font)
+            .text_color(tokens.muted_foreground)
+            .child(subtitle_text);
+        let lockup = h_flex()
+            .items_start()
+            .gap(GROUP_GAP)
+            .child(wordmark)
+            .child(descriptor);
+        h_flex()
+            .id("setup-titlebar")
+            .h(TITLE_BAR_HEIGHT)
+            .flex_shrink_0()
+            .items_center()
+            .border_b_1()
+            .border_color(tokens.border)
+            .bg(tokens.background)
+            .child(
+                h_flex()
+                    .h_full()
+                    .items_center()
+                    .gap(GROUP_GAP)
+                    .pl(PAGE_INSET)
+                    .child(
+                        img(app_icon())
+                            .w(TITLE_BAR_ICON)
+                            .h(TITLE_BAR_ICON)
+                            .flex_shrink_0(),
+                    )
+                    .child(lockup),
+            )
+            .child(
+                div()
+                    .id("setup-titlebar-drag")
+                    .flex_1()
+                    .h_full()
+                    .window_control_area(WindowControlArea::Drag),
+            )
+            .child(caption_button(
+                window,
+                "setup-minimize",
+                self.i18n.get("window_minimize"),
+                IconName::WindowMinimize,
+                false,
+                tokens,
+                cx,
+            ))
+            .child(caption_button(
+                window,
+                "setup-close",
+                self.i18n.get("window_close"),
+                IconName::WindowClose,
+                true,
+                tokens,
+                cx,
+            ))
+    }
+
+    fn render_body(
+        &self,
+        tokens: &Tokens,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let page = match self.screen {
+            Screen::License => self.render_license(tokens, window, cx),
+            Screen::Location => self.render_location(tokens, cx),
+            Screen::Installing => self.render_installing(tokens),
+            Screen::Finished => self.render_installed(tokens, true),
+            Screen::Failed => self.render_failed(tokens),
+            Screen::Maintenance => self.render_installed(tokens, false),
+            Screen::Uninstall => self.render_uninstall_confirm(tokens, cx),
+            Screen::Uninstalling => self.render_uninstalling(tokens),
+            Screen::Uninstalled => self.render_uninstalled(tokens),
+        };
+        div()
+            .id("setup-body")
+            .role(Role::Main)
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .child(v_flex().w_full().px(PAGE_INSET).py(MAIN_GAP).child(page))
+    }
+
+    fn render_license(
+        &self,
+        tokens: &Tokens,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let license_card = h_flex()
+            .w_full()
+            .items_center()
+            .justify_between()
+            .gap(GROUP_GAP)
+            .px(CARD_PAD)
+            .py(GROUP_GAP)
+            .border_1()
+            .border_color(tokens.border)
+            .rounded(RADIUS)
+            .bg(tokens.muted)
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(self.i18n.get("license_name")),
+            )
+            .child(
+                Button::new("setup-view-license")
+                    .small()
+                    .label(self.i18n.get("action_view_license"))
+                    .border_color(tokens.control_stroke)
+                    .on_click(cx.listener(|this, _, _, cx| this.view_license(cx))),
+            );
+
+        v_flex()
+            .gap(MAIN_GAP)
+            .child(self.heading("license_title"))
+            .child(license_card)
+            // The agreement and the sentence that explains it belong together: the error hangs
+            // under the row it belongs to instead of taking a block of its own, so the page keeps
+            // inside the window's body without scrolling.
+            .child(
+                v_flex()
+                    .child(Self::setup_checkbox(
+                        "setup-accept",
+                        self.accepted,
+                        self.i18n.get("license_accept"),
+                        tokens,
+                        window,
+                        cx,
+                        |this, checked, _, cx| {
+                            this.set_accepted(checked, cx);
+                        },
+                    ))
+                    .when_some(self.notice, |this, key| {
+                        this.child(
+                            div()
+                                .id("setup-license-notice")
+                                .role(Role::Alert)
+                                .text_sm()
+                                .line_height(relative(1.5))
+                                .text_color(tokens.danger)
+                                .child(self.i18n.get(key)),
+                        )
+                    }),
+            )
+            .into_any_element()
+    }
+
+    fn render_location(&self, tokens: &Tokens, cx: &mut Context<Self>) -> AnyElement {
+        let label = self.i18n.get("install_path_label");
+        v_flex()
+            .gap(MAIN_GAP)
+            .child(self.heading("location_title"))
+            .child(
+                div()
+                    .text_sm()
+                    .line_height(relative(1.0))
+                    .text_color(tokens.muted_foreground)
+                    .child(label.clone()),
+            )
+            // The path field and the sentence that explains it belong together: the error hangs
+            // under the field it belongs to instead of taking a block of its own, so a message
+            // that wraps to a second line still keeps the page inside the window's body.
+            .child(
+                v_flex()
+                    .child(
+                        h_flex()
+                            .gap(GROUP_GAP)
+                            .items_center()
+                            .child(
+                                div().flex_1().min_w_0().child(
+                                    Input::new(&self.path_input)
+                                        .aria_label(label)
+                                        .border_color(if self.path_error.is_some() {
+                                            tokens.danger
+                                        } else {
+                                            tokens.control_stroke
+                                        })
+                                        .w_full(),
+                                ),
+                            )
+                            .child(
+                                Button::new("setup-browse")
+                                    .label(self.i18n.get("action_browse"))
+                                    .border_color(tokens.control_stroke)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.browse(window, cx);
+                                    })),
+                            ),
+                    )
+                    .when_some(self.path_error, |this, problem| {
+                        this.child(
+                            div()
+                                .id("setup-path-error")
+                                .role(Role::Alert)
+                                .text_sm()
+                                .line_height(relative(1.5))
+                                .text_color(tokens.danger)
+                                .child(self.i18n.get(problem.message_key())),
+                        )
+                    }),
+            )
+            .when(self.path_error.is_none(), |this| {
+                this.child(
+                    h_flex()
+                        .gap(GROUP_GAP)
+                        .text_sm()
+                        .text_color(tokens.muted_foreground)
+                        .child(self.i18n.get("install_scope"))
+                        .child("·")
+                        .child(self.i18n.get("install_space")),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn render_installing(&self, tokens: &Tokens) -> AnyElement {
+        let progress = self.progress.unwrap_or(0.0);
+        v_flex()
+            .gap(MAIN_GAP)
+            .child(self.heading("progress_title"))
+            .child(
+                v_flex()
+                    .gap(GROUP_GAP)
+                    .child(
+                        h_flex()
+                            .justify_between()
+                            .text_sm()
+                            .text_color(tokens.muted_foreground)
+                            .child(self.i18n.get(self.stage.message_key()))
+                            .child(div().font_features(tabular_figures()).child(
+                                if self.progress.is_some() {
+                                    self.i18n.format(
+                                        "progress_percent",
+                                        &[("percent", &format!("{progress:.0}"))],
+                                    )
+                                } else {
+                                    String::new()
+                                },
+                            )),
+                    )
+                    .child(
+                        Progress::new("setup-progress")
+                            .value(progress)
+                            .loading(self.progress.is_none())
+                            .accessibility_label(self.i18n.get(self.stage.message_key())),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// One installed surface for both contexts: the success page after a fresh install and the
+    /// maintenance page shown when setup is launched on an installed machine. The header, icon and
+    /// actions are identical; only the supporting line changes.
+    fn render_installed(&self, tokens: &Tokens, fresh: bool) -> AnyElement {
+        let icon = Icon::new(IconName::CircleCheck)
+            .size(PAGE_ICON)
+            .text_color(tokens.foreground)
+            .into_any_element();
+        let mut page = v_flex()
+            .gap(MAIN_GAP)
+            .child(self.title_row(icon, "finish_title"));
+        if fresh {
+            page = page.child(self.paragraph("finish_body", tokens));
+            if self.restart_required {
+                page = page.child(
+                    div()
+                        .text_sm()
+                        .text_color(tokens.muted_foreground)
+                        .child(self.i18n.get("finish_restart")),
+                );
+            }
+        } else {
+            let version = self
+                .installed
+                .as_ref()
+                .map(|product| product.version.as_str())
+                .unwrap_or_default();
+            let version_line = if self
+                .installed
+                .as_ref()
+                .is_some_and(|product| product.is_newer_than_package())
+            {
+                self.i18n
+                    .format("maintenance_newer", &[("version", version)])
+            } else {
+                self.i18n
+                    .format("maintenance_installed", &[("version", version)])
+            };
+            page = page.child(
+                div()
+                    .text_sm()
+                    .text_color(tokens.foreground)
+                    .child(version_line),
+            );
+        }
+        if let Some(notice) = self.notice {
+            page = page.child(
+                div()
+                    .id("setup-installed-notice")
+                    .role(Role::Alert)
+                    .text_sm()
+                    .text_color(tokens.danger)
+                    .child(self.i18n.get(notice)),
+            );
+        }
+        page.into_any_element()
+    }
+
+    fn render_failed(&self, tokens: &Tokens) -> AnyElement {
+        let uninstall = self.is_uninstall() || self.uninstall_attempted;
+        let missing_install = uninstall
+            && self
+                .error
+                .as_ref()
+                .is_some_and(|error| error.key == "error_not_installed");
+        let title = if missing_install {
+            "uninstall_missing_title"
+        } else if uninstall {
+            "error_uninstall_title"
+        } else {
+            "error_title"
+        };
+        let detail = if missing_install {
+            None
+        } else {
+            self.error.as_ref().map(|error| {
+                // The uninstall flow names the same failures in uninstall terms: a person who
+                // came to remove Cairn must not read the installer's wording.
+                let key = if uninstall {
+                    crate::model::uninstall_error_key(error.key)
+                } else {
+                    error.key
+                };
+                // The raw MSI code is an internal token: it belongs in the log, not on the page.
+                // The page says what happened and points at the log entry.
+                self.i18n.get(key)
+            })
+        };
+
+        let icon = Icon::new(IconName::CircleAlert)
+            .size(PAGE_ICON)
+            .text_color(tokens.danger)
+            .into_any_element();
+        let mut page = v_flex().gap(MAIN_GAP).child(self.title_row(icon, title));
+
+        if let Some(detail) = detail {
+            page = page.child(
+                div()
+                    .id("setup-failed-detail")
+                    .role(Role::Alert)
+                    .text_sm()
+                    .line_height(relative(1.5))
+                    .text_color(tokens.foreground)
+                    .child(detail),
+            );
+        }
+        if let Some(notice) = self.notice {
+            page = page.child(
+                div()
+                    .id("setup-failed-notice")
+                    .role(Role::Alert)
+                    .text_sm()
+                    .text_color(tokens.danger)
+                    .child(self.i18n.get(notice)),
+            );
+        }
+        page.into_any_element()
+    }
+
+    fn render_uninstall_confirm(&self, tokens: &Tokens, _cx: &mut Context<Self>) -> AnyElement {
+        v_flex()
+            .gap(MAIN_GAP)
+            .child(self.heading("uninstall_title"))
+            .child(self.paragraph("uninstall_body", tokens))
+            .when_some(self.notice, |this, key| {
+                this.child(
+                    div()
+                        .id("setup-uninstall-notice")
+                        .role(Role::Alert)
+                        .text_sm()
+                        .text_color(tokens.danger)
+                        .child(self.i18n.get(key)),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn render_uninstalling(&self, tokens: &Tokens) -> AnyElement {
+        let progress = self.progress.unwrap_or(0.0);
+        v_flex()
+            .gap(MAIN_GAP)
+            .child(self.heading("uninstall_progress_title"))
+            .child(
+                v_flex()
+                    .gap(GROUP_GAP)
+                    .child(
+                        h_flex()
+                            .justify_between()
+                            .text_sm()
+                            .text_color(tokens.muted_foreground)
+                            .child(self.i18n.get(self.stage.message_key()))
+                            .child(div().font_features(tabular_figures()).child(
+                                if self.progress.is_some() {
+                                    self.i18n.format(
+                                        "progress_percent",
+                                        &[("percent", &format!("{progress:.0}"))],
+                                    )
+                                } else {
+                                    String::new()
+                                },
+                            )),
+                    )
+                    .child(
+                        Progress::new("setup-uninstall-progress")
+                            .value(progress)
+                            .loading(self.progress.is_none())
+                            .accessibility_label(self.i18n.get(self.stage.message_key())),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_uninstalled(&self, tokens: &Tokens) -> AnyElement {
+        let icon = Icon::new(IconName::CircleCheck)
+            .size(PAGE_ICON)
+            .text_color(tokens.foreground)
+            .into_any_element();
+        v_flex()
+            .gap(MAIN_GAP)
+            .child(self.title_row(icon, "uninstall_done_title"))
+            .child(self.paragraph("uninstall_done_body", tokens))
+            .when_some(self.notice, |this, key| {
+                this.child(
+                    div()
+                        .id("setup-uninstalled-notice")
+                        .role(Role::Alert)
+                        .text_sm()
+                        .text_color(tokens.danger)
+                        .child(self.i18n.get(key)),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn render_footer(&self, tokens: &Tokens, cx: &mut Context<Self>) -> impl IntoElement {
+        // Only progress/status text stays on the leading edge. Every action, including the way
+        // out, is grouped at the trailing edge in reading order.
+        let mut leading: Vec<AnyElement> = Vec::new();
+        let mut actions: Vec<AnyElement> = Vec::new();
+
+        match self.screen {
+            Screen::License => {
+                actions.push(self.cancel_button(tokens, cx));
+                actions.push(
+                    Button::new("setup-continue")
+                        .primary()
+                        .label(self.i18n.get("action_continue"))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.continue_from_license(cx);
+                        }))
+                        .into_any_element(),
+                );
+            }
+            Screen::Location => {
+                actions.push(
+                    Button::new("setup-back")
+                        .ghost()
+                        .label(self.i18n.get("action_back"))
+                        .on_click(cx.listener(|this, _, _, cx| this.back(cx)))
+                        .into_any_element(),
+                );
+                actions.push(self.cancel_button(tokens, cx));
+                let label = if self.installed.is_some() {
+                    "action_update"
+                } else {
+                    "action_install"
+                };
+                actions.push(
+                    Button::new("setup-install")
+                        .primary()
+                        .label(self.i18n.get(label))
+                        .on_click(cx.listener(|this, _, _, cx| this.start_install(cx)))
+                        .into_any_element(),
+                );
+            }
+            Screen::Installing | Screen::Uninstalling => {
+                leading.push(
+                    div()
+                        .text_sm()
+                        .text_color(tokens.muted_foreground)
+                        .child(self.i18n.get("progress_do_not_close"))
+                        .into_any_element(),
+                );
+            }
+            Screen::Finished | Screen::Maintenance => {
+                if self.log.is_some() {
+                    actions.push(self.log_button(cx));
+                }
+                actions.push(
+                    Button::new("setup-done")
+                        .ghost()
+                        .label(self.i18n.get("action_close"))
+                        .on_click(cx.listener(|this, _, window, cx| this.close_window(window, cx)))
+                        .into_any_element(),
+                );
+                actions.push(
+                    Button::new("setup-launch-app")
+                        .primary()
+                        .label(self.i18n.get("action_open_app"))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.open_installed(window, cx);
+                        }))
+                        .into_any_element(),
+                );
+            }
+            Screen::Failed => {
+                if self.log.is_some() {
+                    actions.push(self.log_button(cx));
+                }
+                actions.push(
+                    Button::new("setup-failed-close")
+                        .ghost()
+                        .label(self.i18n.get("action_close"))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.close_window(window, cx);
+                        }))
+                        .into_any_element(),
+                );
+                let no_retry = self.error.as_ref().is_some_and(|error| {
+                    matches!(
+                        error.key,
+                        "error_not_installed"
+                            | "error_no_payload"
+                            | "error_msi_invalid"
+                            | "error_msi_platform"
+                    )
+                });
+                if !no_retry {
+                    actions.push(
+                        Button::new("setup-retry")
+                            .primary()
+                            .label(self.i18n.get("action_retry"))
+                            .on_click(cx.listener(|this, _, _, cx| this.retry(cx)))
+                            .into_any_element(),
+                    );
+                }
+            }
+            Screen::Uninstall => {
+                actions.push(self.cancel_button(tokens, cx));
+                actions.push(
+                    Button::new("setup-uninstall-now")
+                        .danger()
+                        .label(self.i18n.get("action_uninstall"))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.start_uninstall(cx);
+                        }))
+                        .into_any_element(),
+                );
+            }
+            Screen::Uninstalled => {
+                actions.push(
+                    Button::new("setup-uninstalled-done")
+                        .primary()
+                        .label(self.i18n.get("action_finish"))
+                        .on_click(cx.listener(|this, _, window, cx| this.close_window(window, cx)))
+                        .into_any_element(),
+                );
+            }
+        }
+
+        h_flex()
+            .id("setup-footer")
+            .h(FOOTER_HEIGHT)
+            .flex_shrink_0()
+            .items_center()
+            .justify_between()
+            .border_t_1()
+            .border_color(tokens.border)
+            .px(PAGE_INSET)
+            .gap(GROUP_GAP)
+            .child(h_flex().gap(GROUP_GAP).items_center().children(leading))
+            .child(h_flex().gap(GROUP_GAP).items_center().children(actions))
+    }
+
+    fn cancel_button(&self, _tokens: &Tokens, cx: &mut Context<Self>) -> AnyElement {
+        Button::new("setup-cancel")
+            .ghost()
+            .label(self.i18n.get("action_cancel"))
+            .on_click(cx.listener(|this, _, window, cx| this.close_window(window, cx)))
+            .into_any_element()
+    }
+
+    fn log_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        Button::new("setup-log")
+            .ghost()
+            .label(self.i18n.get("action_view_log"))
+            .on_click(cx.listener(|this, _, _, cx| this.open_log(cx)))
+            .into_any_element()
+    }
+
+    fn title_row(&self, icon: AnyElement, key: &'static str) -> Div {
+        h_flex()
+            .items_center()
+            .gap(GROUP_GAP)
+            .child(div().relative().top(px(1.0)).child(icon))
+            .child(self.heading(key))
+    }
+
+    fn setup_checkbox(
+        id: &'static str,
+        checked: bool,
+        label: String,
+        tokens: &Tokens,
+        window: &mut Window,
+        cx: &mut Context<SetupApp>,
+        on_click: impl Fn(&mut SetupApp, bool, &mut Window, &mut Context<SetupApp>) + 'static,
+    ) -> AnyElement {
+        // A tracked focus handle joins the Tab order only when the handle itself is a tab stop.
+        // The element's own `tab_stop` does not apply to a handle passed to `track_focus`, so a
+        // handle built with `tab_stop(false)` would keep this checkbox out of the Tab order
+        // entirely, and a keyboard user could never reach the license agreement.
+        let focus = window
+            .use_keyed_state(id, cx, |_, cx| cx.focus_handle().tab_stop(true))
+            .read(cx)
+            .clone();
+        let is_focused = focus.is_focused(window);
+
+        let on_click = std::rc::Rc::new(on_click);
+        let on_click_mouse = on_click.clone();
+        let on_click_key = on_click.clone();
+
+        let indicator_size = px(14.0);
+
+        h_flex()
+            .id(id)
+            .role(Role::CheckBox)
+            .aria_label(label.clone())
+            .aria_toggled(if checked {
+                gpui_kit::gpui::accesskit::Toggled::True
+            } else {
+                gpui_kit::gpui::accesskit::Toggled::False
+            })
+            .track_focus(&focus)
+            .min_h(px(24.0))
+            .py(px(4.0))
+            .items_center()
+            .gap(GROUP_GAP)
+            .group("checkbox")
+            .on_click(cx.listener(move |this, _, window, cx| {
+                on_click_mouse(this, !checked, window, cx);
+            }))
+            // The agreement flips on the key release, not on the key press. A held key sends one
+            // press and one release, so the box cannot flip again and again while the key is
+            // down, and the mark appears exactly once per press.
+            .on_key_up(cx.listener(move |this, event: &KeyUpEvent, window, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    on_click_key(this, !checked, window, cx);
+                }
+            }))
+            .child(
+                div()
+                    .p(px(2.0))
+                    .rounded(RADIUS)
+                    .border_1()
+                    // Reserve the focus stroke so focusing the checkbox cannot move the row.
+                    .border_color(tokens.ring.opacity(if is_focused { 1.0 } else { 0.0 }))
+                    .child(
+                        div()
+                            .size(indicator_size)
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(RADIUS)
+                            .border_1()
+                            .when(!checked, |this| {
+                                this.border_color(tokens.control_stroke)
+                                    .bg(tokens.background)
+                                    .group_hover("checkbox", |style| {
+                                        style.border_color(tokens.foreground)
+                                    })
+                            })
+                            .when(checked, |this| {
+                                this.border_color(tokens.foreground)
+                                    .bg(tokens.foreground)
+                                    .group_hover("checkbox", |style| style.opacity(0.85))
+                                    .child(
+                                        Icon::default()
+                                            .data(CHECK_SVG)
+                                            .size(indicator_size)
+                                            .text_color(tokens.background),
+                                    )
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .line_height(relative(1.0))
+                    .text_color(tokens.foreground)
+                    .child(label),
+            )
+            .into_any_element()
+    }
+
+    /// The page title. It carries the heading role so a screen reader can name the page it is
+    /// on, and its own id so the role reaches the accessibility tree.
+    fn heading(&self, key: &'static str) -> Stateful<Div> {
+        div()
+            .id(key)
+            .role(Role::Heading)
+            .aria_level(1)
+            .text_size(rems(PAGE_TITLE_SIZE))
+            .line_height(relative(SERIF_LINE_HEIGHT))
+            .font(serif_font(FontWeight::SEMIBOLD))
+            .child(self.i18n.get(key))
+    }
+
+    fn paragraph(&self, key: &str, tokens: &Tokens) -> Div {
+        div()
+            .text_sm()
+            .line_height(relative(1.5))
+            .text_color(tokens.muted_foreground)
+            .child(self.i18n.get(key))
+    }
+}

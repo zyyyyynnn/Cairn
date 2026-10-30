@@ -33,6 +33,14 @@ jobs:
 
       - name: Documentation check
         run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+
+      - name: Internationalization check
+        run: cargo run -p xtask -- check-i18n
+
+      - name: Dependency policy
+        uses: EmbarkStudios/cargo-deny-action@v2
 
   test:
     name: Domain & System Test Suite
@@ -58,4 +66,4 @@ jobs:
         run: cargo test -p cairn-app
 
       - name: "Layer 4: Tooling & Release Verification"
-        run: cargo test -p cairn-cli -p cairn-worker -p xtask
+        run: cargo test -p cairn-cli -p cairn-worker -p cairn-setup -p xtask

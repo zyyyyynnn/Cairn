@@ -23,12 +23,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Check that zh-CN.ftl and en-US.ftl translation keys are 100% aligned
+    /// Check that every locale pair is aligned, and that the code reading them agrees
     CheckI18n {
-        #[arg(default_value = "crates/cairn-app/locales")]
-        locales_dir: PathBuf,
+        /// The workspace root that holds the crates.
+        #[arg(default_value = ".")]
+        workspace: PathBuf,
     },
-    /// Package WiX Burn installer (CairnSetup.exe), WiX templates, Winget manifest, and SHA256 checksums (REL-01 ~ REL-04)
+    /// Package the GPUI setup (CairnSetup.exe), WiX MSI, and SHA256 checksums (REL-01, REL-02, REL-04)
     Package {
         #[arg(short, long, default_value = "dist")]
         out_dir: PathBuf,
@@ -58,8 +59,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::CheckI18n { locales_dir } => {
-            i18n_check::check_i18n_parity(locales_dir)?;
+        Commands::CheckI18n { workspace } => {
+            i18n_check::check_i18n(&workspace)?;
         }
         Commands::Package { out_dir } => {
             package::run_package(out_dir)?;
