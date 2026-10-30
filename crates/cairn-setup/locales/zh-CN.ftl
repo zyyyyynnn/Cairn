@@ -13,8 +13,8 @@ error_open_license = 无法打开许可协议，请重试。
 license_accept = 我接受这些条款
 
 location_title = 安装位置
-install_path_label = 路径
-install_scope = 为这台电脑上的所有用户安装
+install_path_label = 安装文件夹
+install_scope = 为这台电脑上的所有用户安装到 Program Files
 install_space = 约需 100 MB 空间
 action_browse = 浏览…
 
@@ -25,6 +25,7 @@ progress_copying = 正在复制文件
 progress_service = 正在注册后台服务
 progress_finishing = 正在完成配置
 progress_do_not_close = 安装完成前，此窗口需要保持打开。
+progress_do_not_close_uninstall = 卸载完成前，请保持此窗口打开。
 progress_percent = { $percent }%
 
 finish_title = Cairn 已安装
@@ -32,6 +33,7 @@ finish_body = 后台服务会建立索引；首次搜索可能需要几分钟。
 finish_restart = 需要重启电脑才能完成部分更改。
 
 uninstall_missing_title = 未找到 Cairn
+uninstall_missing_body = 这台电脑上没有安装 Cairn，因此无需卸载。
 
 error_uninstall_title = 卸载未完成
 error_uninstall_msi_unknown = 卸载没有完成，Cairn 仍在这台电脑上。请查看日志了解原因，然后重试。
@@ -39,7 +41,7 @@ error_uninstall_msi_cancelled = 卸载已取消，Cairn 仍在这台电脑上。
 error_uninstall_msi_busy = 另一个安装或卸载程序正在运行，请等待其完成后重试。
 error_uninstall_msi_invalid = 卸载所需的安装信息不完整或已损坏。请重新运行卸载程序。
 error_uninstall_msi_platform = 这个安装记录不支持当前版本的 Windows。
-error_uninstall_msi_fatal = Windows 安装程序未能完成卸载。请查看日志或以管理员身份重试。
+error_uninstall_msi_fatal = Windows 安装程序未能完成卸载。请查看日志后重试。
 error_uninstall_not_installed = 没有找到 Cairn 的安装记录。
 
 error_title = 安装未完成
@@ -49,7 +51,7 @@ error_msi_cancelled = 安装已取消。
 error_msi_busy = 另一个安装程序正在运行，请等待其完成后重试。
 error_msi_invalid = 安装包不完整或已损坏。请重新下载安装程序。
 error_msi_platform = 这个安装包不支持当前版本的 Windows。
-error_msi_fatal = Windows 安装程序未能完成操作。请查看日志或以管理员身份重试。
+error_msi_fatal = Windows 安装程序未能完成操作。请查看日志后重试。
 error_legacy_failed = 请先在“应用和功能”中卸载旧版本，然后重试。
 error_not_installed = 没有找到 Cairn 的安装记录。
 error_launch = 无法启动 Cairn，请从开始菜单打开。
@@ -64,7 +66,7 @@ uninstall_progress_title = 正在卸载 Cairn
 uninstall_progress_working = 正在移除 Cairn 文件和设置…
 uninstall_restart = 请重启 Windows 以完成 Cairn 的移除。
 uninstall_done_title = 卸载完成
-uninstall_done_body = 程序文件、命令行工具、后台服务、索引和设置已移除。
+uninstall_done_body = Cairn 程序、命令行工具、后台服务、索引、设置和注册表项已移除。
 
 path_empty = 请输入安装文件夹。
 path_not_absolute = 请输入完整的本地路径，例如 C:\Program Files\Cairn。

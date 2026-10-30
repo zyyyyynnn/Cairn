@@ -152,14 +152,35 @@ fn temp_path(suffix: &str) -> PathBuf {
     ))
 }
 
+/// Administrator-owned staging root for the extracted MSI and cleanup helper. A user-writable
+/// `%TEMP%` would let a standard user replace the file between extraction and elevated use.
+fn staging_root() -> std::io::Result<PathBuf> {
+    let root = crate::model::program_files_root().join("CairnSetup");
+    if std::fs::create_dir_all(&root).is_ok() {
+        return Ok(root);
+    }
+    if cfg!(debug_assertions) {
+        let fallback = std::env::temp_dir().join("CairnSetup");
+        std::fs::create_dir_all(&fallback)?;
+        return Ok(fallback);
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        format!(
+            "could not create the installer staging directory {}",
+            root.display()
+        ),
+    ))
+}
+
 /// A private directory for the extracted MSI. It is removed when the install session ends.
 pub fn create_payload_dir() -> std::io::Result<PathBuf> {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or_default();
-    let dir = std::env::temp_dir().join(format!("CairnSetup-{}-{nanos}", std::process::id()));
-    std::fs::create_dir_all(&dir)?;
+    let dir = staging_root()?.join(format!("payload-{}-{nanos}", std::process::id()));
+    std::fs::create_dir(&dir)?;
     Ok(dir)
 }
 
@@ -249,8 +270,9 @@ pub fn prepare_install_dir_cleanup() -> Option<PathBuf> {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or_default();
-    let helper =
-        std::env::temp_dir().join(format!("CairnCleanup-{}-{nanos}.exe", std::process::id()));
+    let helper = staging_root()
+        .ok()?
+        .join(format!("cleanup-{}-{nanos}.exe", std::process::id()));
     std::fs::copy(&current, &helper).ok()?;
     Some(helper)
 }
@@ -265,12 +287,16 @@ pub fn spawn_install_dir_cleanup(install_dir: &Path, helper: Option<PathBuf>) {
     let Some(helper) = helper else {
         return;
     };
+    let working_dir = helper
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(std::env::temp_dir);
     let _ = Command::new(&helper)
         .arg("--cleanup-install-dir")
         .arg(install_dir)
         .arg("--wait-pid")
         .arg(std::process::id().to_string())
-        .current_dir(std::env::temp_dir())
+        .current_dir(working_dir)
         .spawn();
 }
 

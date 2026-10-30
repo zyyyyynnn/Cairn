@@ -8,10 +8,11 @@ use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use gpui_kit::component::input::InputState;
+use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::gpui::{
     AppContext as _, Context, Entity, FocusHandle, KeyBinding, Subscription, WeakEntity, Window,
 };
+use gpui_kit::Focusable;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::i18n::I18n;
@@ -69,6 +70,16 @@ impl SetupError {
     }
 }
 
+/// MSI progress resets at action boundaries. The visible bar must not jump backwards, so the
+/// displayed percentage is monotonic across one transaction.
+fn progress_percent(previous: Option<f32>, current: u32, total: u32) -> Option<f32> {
+    if total == 0 {
+        return None;
+    }
+    let next = (current as f32 / total as f32 * 100.0).clamp(0.0, 100.0);
+    Some(previous.map_or(next, |value| value.max(next)))
+}
+
 pub struct SetupApp {
     pub(crate) i18n: I18n,
     pub(crate) launch: Launch,
@@ -95,6 +106,7 @@ pub struct SetupApp {
     payload_dir: Option<PathBuf>,
     _activation: Subscription,
     _focus_lost: Subscription,
+    _path_change: Subscription,
 }
 
 impl SetupApp {
@@ -161,6 +173,17 @@ impl SetupApp {
         let focus_lost = cx.on_focus_lost(window, |this, window, cx| {
             this.root_focus.focus(window, cx);
         });
+        let path_change = cx.subscribe_in(
+            &path_input,
+            window,
+            |this, _input, event: &InputEvent, _window, cx| {
+                if matches!(event, InputEvent::Change) && this.path_error.is_some() {
+                    let raw = this.path_input.read(cx).value().to_string();
+                    this.path_error = validate_install_path(&raw).err();
+                    cx.notify();
+                }
+            },
+        );
         window.focus(&root_focus, cx);
 
         let activation = cx.observe_window_activation(window, move |this, _window, cx| {
@@ -213,6 +236,7 @@ impl SetupApp {
             payload_dir: None,
             _activation: activation,
             _focus_lost: focus_lost,
+            _path_change: path_change,
         }
     }
 
@@ -243,7 +267,7 @@ impl SetupApp {
         }
     }
 
-    pub(crate) fn continue_from_license(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn continue_from_license(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.accepted {
             self.notice = Some("error_license_required");
             cx.notify();
@@ -251,6 +275,7 @@ impl SetupApp {
         }
         self.screen = Screen::Location;
         self.notice = None;
+        self.path_input.read(cx).focus_handle(cx).focus(window, cx);
         cx.notify();
     }
 
@@ -407,8 +432,8 @@ impl SetupApp {
                 }
             }
             MsiEvent::Progress { current, total } => {
-                if total > 0 {
-                    self.progress = Some((current as f32 / total as f32 * 100.0).clamp(0.0, 100.0));
+                if let Some(next) = progress_percent(self.progress, current, total) {
+                    self.progress = Some(next);
                     cx.notify();
                 }
             }
@@ -485,5 +510,20 @@ impl SetupApp {
         } else {
             self.start_install(cx);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::progress_percent;
+
+    #[test]
+    fn progress_never_moves_backwards_when_msi_resets_an_action() {
+        assert_eq!(progress_percent(None, 0, 100), Some(0.0));
+        assert_eq!(progress_percent(Some(42.0), 0, 100), Some(42.0));
+        let forward = progress_percent(Some(42.0), 60, 100).expect("known total");
+        assert!((forward - 60.0).abs() < 0.001, "{forward}");
+        assert_eq!(progress_percent(Some(60.0), 10, 100), Some(60.0));
+        assert_eq!(progress_percent(Some(60.0), 0, 0), None);
     }
 }

@@ -171,6 +171,7 @@ fn run_install(
     request: &InstallRequest,
     sender: Option<&UnboundedSender<MsiEvent>>,
 ) -> Result<MsiSuccess, MsiFailure> {
+    let mut legacy_restart = false;
     for legacy in &request.legacy {
         emit(
             sender,
@@ -196,11 +197,15 @@ fn run_install(
                 log: request.log.clone(),
             });
         }
+        legacy_restart |= code == ERROR_SUCCESS_REBOOT_REQUIRED;
     }
 
     let install_dir = request.install_dir.to_string_lossy();
     let command_line = format!("INSTALLFOLDER=\"{install_dir}\" REBOOT=ReallySuppress");
-    run_msi(&request.msi, &command_line, &request.log, sender)
+    let result = run_msi(&request.msi, &command_line, &request.log, sender)?;
+    Ok(MsiSuccess {
+        restart_required: result.restart_required || legacy_restart,
+    })
 }
 
 fn run_uninstall(

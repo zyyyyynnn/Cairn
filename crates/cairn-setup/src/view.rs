@@ -99,7 +99,7 @@ impl Tokens {
 #[derive(Clone, Copy)]
 enum CaptionAction {
     Minimize,
-    Close { busy: bool },
+    Close,
 }
 
 fn caption_button(
@@ -111,8 +111,7 @@ fn caption_button(
     tokens: &Tokens,
     cx: &mut Context<SetupApp>,
 ) -> AnyElement {
-    let is_close = matches!(action, CaptionAction::Close { .. });
-    let busy = matches!(action, CaptionAction::Close { busy: true });
+    let is_close = matches!(action, CaptionAction::Close);
     // The caption buttons are the window's only minimize and close, so they are Tab stops like
     // any other control: a handle passed to `track_focus` carries its own tab-stop flag.
     let focus = window
@@ -133,19 +132,16 @@ fn caption_button(
         .text_color(tokens.foreground)
         .focus_visible(|style| style.border_1().border_color(tokens.ring))
         .when(is_close, |this| {
-            this.when(busy, |this| this.opacity(0.4))
-                .when(!busy, |this| {
-                    this.hover(|style| style.bg(tokens.danger).text_color(tokens.background))
-                        .active(|style| style.bg(tokens.danger).text_color(tokens.background))
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.close_window(window, cx);
-                        }))
-                        .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                                this.close_window(window, cx);
-                            }
-                        }))
-                })
+            this.hover(|style| style.bg(tokens.danger).text_color(tokens.background))
+                .active(|style| style.bg(tokens.danger).text_color(tokens.background))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.close_window(window, cx);
+                }))
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        this.close_window(window, cx);
+                    }
+                }))
         })
         .when(!is_close, |this| {
             this.hover(|style| style.bg(tokens.row_hover))
@@ -275,17 +271,17 @@ impl SetupApp {
                 tokens,
                 cx,
             ))
-            .child(caption_button(
-                window,
-                "setup-close",
-                self.i18n.get("window_close"),
-                IconName::WindowClose,
-                CaptionAction::Close {
-                    busy: self.is_busy(),
-                },
-                tokens,
-                cx,
-            ))
+            .when(!self.is_busy(), |this| {
+                this.child(caption_button(
+                    window,
+                    "setup-close",
+                    self.i18n.get("window_close"),
+                    IconName::WindowClose,
+                    CaptionAction::Close,
+                    tokens,
+                    cx,
+                ))
+            })
     }
 
     fn render_body(
@@ -296,7 +292,7 @@ impl SetupApp {
     ) -> impl IntoElement {
         let page = match self.screen {
             Screen::License => self.render_license(tokens, window, cx),
-            Screen::Location => self.render_location(tokens, cx),
+            Screen::Location => self.render_location(tokens, window, cx),
             Screen::Installing => self.render_installing(tokens),
             Screen::Finished => self.render_installed(tokens, true),
             Screen::Failed => self.render_failed(tokens),
@@ -380,8 +376,14 @@ impl SetupApp {
             .into_any_element()
     }
 
-    fn render_location(&self, tokens: &Tokens, cx: &mut Context<Self>) -> AnyElement {
+    fn render_location(
+        &self,
+        tokens: &Tokens,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let label = self.i18n.get("install_path_label");
+        let path_focused = self.path_input.read(cx).focus_handle(cx).is_focused(window);
         v_flex()
             .gap(MAIN_GAP)
             .child(self.heading("location_title"))
@@ -407,6 +409,8 @@ impl SetupApp {
                                         .aria_label(label)
                                         .border_color(if self.path_error.is_some() {
                                             tokens.danger
+                                        } else if path_focused {
+                                            tokens.foreground
                                         } else {
                                             tokens.control_stroke
                                         })
@@ -556,7 +560,7 @@ impl SetupApp {
             "error_title"
         };
         let detail = if missing_install {
-            None
+            Some(self.i18n.get("uninstall_missing_body"))
         } else {
             self.error.as_ref().map(|error| {
                 // The uninstall flow names the same failures in uninstall terms: a person who
@@ -699,8 +703,8 @@ impl SetupApp {
                     Button::new("setup-continue")
                         .primary()
                         .label(self.i18n.get("action_continue"))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.continue_from_license(cx);
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.continue_from_license(window, cx);
                         }))
                         .into_any_element(),
                 );
@@ -728,11 +732,16 @@ impl SetupApp {
                 );
             }
             Screen::Installing | Screen::Uninstalling => {
+                let key = if self.screen == Screen::Uninstalling {
+                    "progress_do_not_close_uninstall"
+                } else {
+                    "progress_do_not_close"
+                };
                 leading.push(
                     div()
                         .text_sm()
                         .text_color(tokens.muted_foreground)
-                        .child(self.i18n.get("progress_do_not_close"))
+                        .child(self.i18n.get(key))
                         .into_any_element(),
                 );
             }
