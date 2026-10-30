@@ -160,6 +160,10 @@ fn caption_button(
 impl Render for SetupApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let tokens = Tokens::new(cx);
+        if self.focused_screen != Some(self.screen) {
+            self.focused_screen = Some(self.screen);
+            window.focus(&self.screen_focus, cx);
+        }
         v_flex()
             .id("setup-root")
             .size_full()
@@ -965,6 +969,7 @@ impl SetupApp {
             .id(key)
             .role(Role::Heading)
             .aria_level(1)
+            .track_focus(&self.screen_focus)
             .text_size(rems(PAGE_TITLE_SIZE))
             .line_height(relative(SERIF_LINE_HEIGHT))
             .font(serif_font(FontWeight::SEMIBOLD))

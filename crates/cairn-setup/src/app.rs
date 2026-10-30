@@ -103,6 +103,10 @@ pub struct SetupApp {
     /// even when no control holds focus. Without it the keymap only sees the window chrome's own
     /// context, and the window-level Escape gesture never matches.
     pub(crate) root_focus: FocusHandle,
+    /// The page heading receives focus when the screen changes, so a keyboard or screen-reader
+    /// user lands on the new task instead of the disappearing control that opened it.
+    pub(crate) screen_focus: FocusHandle,
+    pub(crate) focused_screen: Option<Screen>,
     payload_dir: Option<PathBuf>,
     _activation: Subscription,
     _focus_lost: Subscription,
@@ -166,6 +170,7 @@ impl SetupApp {
         // focus keeps the context on the path, so the Escape gesture answers even when no control
         // holds focus.
         let root_focus = cx.focus_handle();
+        let screen_focus = cx.focus_handle();
 
         // Keep the window key context reachable: if a rendered region disappears and focus is
         // dropped, return it to the window's own handle rather than leaving the commands
@@ -233,6 +238,8 @@ impl SetupApp {
                 .as_ref()
                 .is_some_and(|preview| preview.uninstall_attempted),
             root_focus,
+            screen_focus,
+            focused_screen: None,
             payload_dir: None,
             _activation: activation,
             _focus_lost: focus_lost,
@@ -274,6 +281,7 @@ impl SetupApp {
             return;
         }
         self.screen = Screen::Location;
+        self.focused_screen = Some(Screen::Location);
         self.notice = None;
         self.path_input.read(cx).focus_handle(cx).focus(window, cx);
         cx.notify();
