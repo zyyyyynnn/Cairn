@@ -11,6 +11,7 @@
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use windows::core::{PCWSTR, PWSTR};
@@ -211,6 +212,7 @@ fn run_uninstall(
     let product_wide = wide(std::ffi::OsStr::new(product_code));
     let callback_context = sender.map(|sender| CallbackContext {
         sender: sender.clone(),
+        progress: Mutex::new(ProgressState::default()),
     });
     let context_ptr = callback_context
         .as_ref()
@@ -241,6 +243,7 @@ fn run_msi(
     let log_wide = wide(log.as_os_str());
     let callback_context = sender.map(|sender| CallbackContext {
         sender: sender.clone(),
+        progress: Mutex::new(ProgressState::default()),
     });
     let context_ptr = callback_context
         .as_ref()
@@ -285,6 +288,41 @@ fn emit(sender: Option<&UnboundedSender<MsiEvent>>, event: MsiEvent) {
 
 struct CallbackContext {
     sender: UnboundedSender<MsiEvent>,
+    progress: Mutex<ProgressState>,
+}
+
+#[derive(Default)]
+struct ProgressState {
+    current: u64,
+    total: u64,
+}
+
+impl ProgressState {
+    /// `kind` is progress record field 1, `value` is field 2. The total comes from a reset and can
+    /// grow when an action adds ticks; a tick advances the current value.
+    fn apply(&mut self, kind: i32, value: i32) -> Option<(u32, u32)> {
+        if value < 0 {
+            return None;
+        }
+        let value = value as u64;
+        match kind {
+            0 => {
+                self.current = 0;
+                self.total = value;
+                (self.total > 0).then_some((0, self.total.min(u32::MAX as u64) as u32))
+            }
+            2 if self.total > 0 => {
+                self.current = self.current.saturating_add(value).min(self.total);
+                Some((self.current as u32, self.total as u32))
+            }
+            3 => {
+                self.total = self.total.saturating_add(value);
+                (self.total > 0)
+                    .then_some((self.current as u32, self.total.min(u32::MAX as u64) as u32))
+            }
+            _ => None,
+        }
+    }
 }
 
 /// # Safety
@@ -301,15 +339,15 @@ unsafe extern "system" fn external_ui_handler(
     };
 
     if message == INSTALLMESSAGE_PROGRESS.0 as u32 {
-        let field = unsafe { MsiRecordGetInteger(record, 2) };
-        let current = unsafe { MsiRecordGetInteger(record, 3) };
-        let total = unsafe { MsiRecordGetInteger(record, 4) };
-        // Field 2: 0 resets, 3 is a tick, 2 adds to the total. A reset tick has no percentage.
-        if field == 3 && current >= 0 && total > 0 {
-            let _ = context.sender.send(MsiEvent::Progress {
-                current: current as u32,
-                total: total as u32,
-            });
+        let kind = unsafe { MsiRecordGetInteger(record, 1) };
+        let value = unsafe { MsiRecordGetInteger(record, 2) };
+        let event = context
+            .progress
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .apply(kind, value);
+        if let Some((current, total)) = event {
+            let _ = context.sender.send(MsiEvent::Progress { current, total });
         }
     } else if message == INSTALLMESSAGE_ACTIONSTART.0 as u32 {
         if let Some(action) = record_string(record, 1) {
@@ -348,8 +386,18 @@ fn wide(value: &std::ffi::OsStr) -> Vec<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::{FailureKind, MsiFailure};
+    use super::{FailureKind, MsiFailure, ProgressState};
     use std::path::PathBuf;
+
+    #[test]
+    fn progress_records_track_total_and_ticks() {
+        let mut state = ProgressState::default();
+        assert_eq!(state.apply(0, 100), Some((0, 100)));
+        assert_eq!(state.apply(2, 25), Some((25, 100)));
+        assert_eq!(state.apply(3, 50), Some((25, 150)));
+        assert_eq!(state.apply(2, 200), Some((150, 150)));
+        assert_eq!(state.apply(1, 1), None);
+    }
 
     #[test]
     fn installer_exit_codes_map_to_user_facing_failures() {

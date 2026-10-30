@@ -74,7 +74,6 @@ struct Tokens {
     border: Hsla,
     control_stroke: Hsla,
     danger: Hsla,
-    danger_foreground: Hsla,
     muted: Hsla,
     row_hover: Hsla,
     ring: Hsla,
@@ -90,7 +89,6 @@ impl Tokens {
             border: theme.border,
             control_stroke: cairn_ui::theme::control_stroke(theme),
             danger: theme.danger,
-            danger_foreground: theme.danger_foreground,
             muted: theme.muted,
             row_hover: theme.list_hover,
             ring: theme.ring,
@@ -98,15 +96,23 @@ impl Tokens {
     }
 }
 
+#[derive(Clone, Copy)]
+enum CaptionAction {
+    Minimize,
+    Close { busy: bool },
+}
+
 fn caption_button(
     window: &mut Window,
     id: &'static str,
     label: String,
     icon: IconName,
-    is_close: bool,
+    action: CaptionAction,
     tokens: &Tokens,
     cx: &mut Context<SetupApp>,
 ) -> AnyElement {
+    let is_close = matches!(action, CaptionAction::Close { .. });
+    let busy = matches!(action, CaptionAction::Close { busy: true });
     // The caption buttons are the window's only minimize and close, so they are Tab stops like
     // any other control: a handle passed to `track_focus` carries its own tab-stop flag.
     let focus = window
@@ -127,16 +133,19 @@ fn caption_button(
         .text_color(tokens.foreground)
         .focus_visible(|style| style.border_1().border_color(tokens.ring))
         .when(is_close, |this| {
-            this.hover(|style| style.bg(tokens.danger).text_color(tokens.danger_foreground))
-                .active(|style| style.bg(tokens.danger))
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.close_window(window, cx);
-                }))
-                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                        this.close_window(window, cx);
-                    }
-                }))
+            this.when(busy, |this| this.opacity(0.4))
+                .when(!busy, |this| {
+                    this.hover(|style| style.bg(tokens.danger).text_color(tokens.background))
+                        .active(|style| style.bg(tokens.danger).text_color(tokens.background))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.close_window(window, cx);
+                        }))
+                        .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                this.close_window(window, cx);
+                            }
+                        }))
+                })
         })
         .when(!is_close, |this| {
             this.hover(|style| style.bg(tokens.row_hover))
@@ -262,7 +271,7 @@ impl SetupApp {
                 "setup-minimize",
                 self.i18n.get("window_minimize"),
                 IconName::WindowMinimize,
-                false,
+                CaptionAction::Minimize,
                 tokens,
                 cx,
             ))
@@ -271,7 +280,9 @@ impl SetupApp {
                 "setup-close",
                 self.i18n.get("window_close"),
                 IconName::WindowClose,
-                true,
+                CaptionAction::Close {
+                    busy: self.is_busy(),
+                },
                 tokens,
                 cx,
             ))
@@ -611,6 +622,7 @@ impl SetupApp {
 
     fn render_uninstalling(&self, tokens: &Tokens) -> AnyElement {
         let progress = self.progress.unwrap_or(0.0);
+        let working = self.i18n.get("uninstall_progress_working");
         v_flex()
             .gap(MAIN_GAP)
             .child(self.heading("uninstall_progress_title"))
@@ -622,7 +634,7 @@ impl SetupApp {
                             .justify_between()
                             .text_sm()
                             .text_color(tokens.muted_foreground)
-                            .child(self.i18n.get(self.stage.message_key()))
+                            .child(working.clone())
                             .child(div().font_features(tabular_figures()).child(
                                 if self.progress.is_some() {
                                     self.i18n.format(
@@ -638,7 +650,7 @@ impl SetupApp {
                         Progress::new("setup-uninstall-progress")
                             .value(progress)
                             .loading(self.progress.is_none())
-                            .accessibility_label(self.i18n.get(self.stage.message_key())),
+                            .accessibility_label(working),
                     ),
             )
             .into_any_element()
@@ -653,6 +665,14 @@ impl SetupApp {
             .gap(MAIN_GAP)
             .child(self.title_row(icon, "uninstall_done_title"))
             .child(self.paragraph("uninstall_done_body", tokens))
+            .when(self.restart_required, |this| {
+                this.child(
+                    div()
+                        .text_sm()
+                        .text_color(tokens.muted_foreground)
+                        .child(self.i18n.get("uninstall_restart")),
+                )
+            })
             .when_some(self.notice, |this, key| {
                 this.child(
                     div()
