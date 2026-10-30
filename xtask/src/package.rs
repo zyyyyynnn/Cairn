@@ -147,7 +147,19 @@ fn run_package_with(
     let staging_dir = create_staging_dir(&out_dir)?;
     let outcome = build_package(&staging_dir, &bin_dir, wix, mt)
         .and_then(|()| publish_package(&staging_dir, &out_dir));
-    let _ = fs::remove_dir_all(&staging_dir);
+    let backup_remaining = staging_dir
+        .join(".previous")
+        .read_dir()
+        .map(|mut entries| entries.next().is_some())
+        .unwrap_or(false);
+    if backup_remaining {
+        eprintln!(
+            "warning: the previous release was not fully restored; kept {} for recovery",
+            staging_dir.display()
+        );
+    } else {
+        let _ = fs::remove_dir_all(&staging_dir);
+    }
 
     match outcome {
         Ok(()) => {
@@ -283,6 +295,9 @@ fn append_payload(exe: &Path, msi: &Path) -> Result<(), Box<dyn Error>> {
     let msi_bytes = fs::read(msi)?;
     if msi_bytes.is_empty() {
         return Err("refusing to embed an empty MSI".into());
+    }
+    if msi_bytes.len() > 512 * 1024 * 1024 {
+        return Err("refusing to embed an MSI larger than the setup reader accepts".into());
     }
     let checksum = crc32fast::hash(&msi_bytes);
     let mut file = fs::OpenOptions::new().append(true).open(exe)?;

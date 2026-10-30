@@ -115,6 +115,16 @@ pub fn legacy_burn_uninstallers() -> Vec<LegacyUninstall> {
                 continue;
             }
             let program = PathBuf::from(parts.remove(0));
+            let Some(parent) = program.parent() else {
+                continue;
+            };
+            // The legacy command is about to run with the installer's administrator token. Only
+            // accept an executable that still sits in an administrator-owned product folder.
+            if crate::model::validate_install_path(&parent.to_string_lossy()).is_err()
+                || !program.is_file()
+            {
+                continue;
+            }
             let candidate = LegacyUninstall {
                 program,
                 args: parts,
