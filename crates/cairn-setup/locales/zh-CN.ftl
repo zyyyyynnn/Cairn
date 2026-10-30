@@ -66,7 +66,7 @@ uninstall_progress_title = 正在卸载 Cairn
 uninstall_progress_working = 正在移除 Cairn 文件和设置…
 uninstall_restart = 请重启 Windows 以完成 Cairn 的移除。
 uninstall_done_title = 卸载完成
-uninstall_done_body = Cairn 程序、命令行工具、后台服务、索引、设置和注册表项已移除。
+uninstall_done_body = 这台电脑上已不再安装 Cairn。
 
 path_empty = 请输入安装文件夹。
 path_not_absolute = 请输入完整的本地路径，例如 C:\Program Files\Cairn。

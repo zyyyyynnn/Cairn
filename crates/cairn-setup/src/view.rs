@@ -731,7 +731,7 @@ impl SetupApp {
                     Button::new("setup-install")
                         .primary()
                         .label(self.i18n.get(label))
-                        .on_click(cx.listener(|this, _, _, cx| this.start_install(cx)))
+                        .on_click(cx.listener(|this, _, window, cx| this.start_install(window, cx)))
                         .into_any_element(),
                 );
             }
@@ -799,7 +799,7 @@ impl SetupApp {
                         Button::new("setup-retry")
                             .primary()
                             .label(self.i18n.get("action_retry"))
-                            .on_click(cx.listener(|this, _, _, cx| this.retry(cx)))
+                            .on_click(cx.listener(|this, _, window, cx| this.retry(window, cx)))
                             .into_any_element(),
                     );
                 }

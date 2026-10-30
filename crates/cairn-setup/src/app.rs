@@ -318,7 +318,7 @@ impl SetupApp {
         cx.notify();
     }
 
-    pub(crate) fn start_install(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn start_install(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.launch != Launch::Setup || self.is_busy() {
             return;
         }
@@ -328,6 +328,8 @@ impl SetupApp {
             Err(problem) => {
                 self.path_error = Some(problem);
                 self.screen = Screen::Location;
+                self.focused_screen = Some(Screen::Location);
+                self.path_input.read(cx).focus_handle(cx).focus(window, cx);
                 cx.notify();
                 return;
             }
@@ -512,11 +514,11 @@ impl SetupApp {
         }
     }
 
-    pub(crate) fn retry(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn retry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.is_uninstall() || self.uninstall_attempted {
             self.start_uninstall(cx);
         } else {
-            self.start_install(cx);
+            self.start_install(window, cx);
         }
     }
 }

@@ -66,7 +66,7 @@ uninstall_progress_title = Uninstalling Cairn
 uninstall_progress_working = Removing Cairn files and settings…
 uninstall_restart = Restart Windows to finish removing Cairn.
 uninstall_done_title = Cairn is uninstalled
-uninstall_done_body = Cairn, its CLI, service, index, settings, and registry entries were removed.
+uninstall_done_body = Cairn is no longer installed on this PC.
 
 path_empty = Enter an install folder.
 path_not_absolute = Enter a full local path, for example C:\Program Files\Cairn.
