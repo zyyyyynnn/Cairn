@@ -40,8 +40,6 @@ use std::time::Duration;
 const SKELETON_DELAY: Duration = Duration::from_millis(180);
 /// One full traversal of the row-to-row pulse.
 const SKELETON_PULSE: Duration = Duration::from_millis(1400);
-/// The pulse is decoration over a static structure; 30 fps is enough and costs half the repaints.
-const SKELETON_MAX_FPS: f32 = 30.0;
 /// How long the first page takes to fade in where the skeleton used to be.
 const ROW_REVEAL: Duration = Duration::from_millis(140);
 /// Placeholder-bar geometry is local to the skeleton: no real control shares this height or width.
@@ -693,9 +691,10 @@ impl CairnApp {
             return row.opacity(1.0).into_any_element();
         }
 
-        let pulse = Animation::new(SKELETON_PULSE)
-            .repeat_synced()
-            .with_max_fps(SKELETON_MAX_FPS);
+        // The pulse rides the window's frame clock. A timer cap ran on the platform timer, whose
+        // 15.6ms Windows resolution stepped every row at ~47ms; the rows share the frame the
+        // platform already delivers, and a known-long wait still renders the still skeleton.
+        let pulse = Animation::new(SKELETON_PULSE).repeat_synced();
         // The list length must not change between frames: GPUI persists the active animation index
         // in the element state, and a shorter list makes that index out of bounds. The ordinary
         // first page has a non-zero wait phase; a known-long state never reaches this path.

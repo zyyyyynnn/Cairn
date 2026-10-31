@@ -35,6 +35,19 @@ fn treemap_category_key(category: TreemapCategory) -> &'static str {
     }
 }
 
+/// The band marks a loading state only while the current view has nothing to show.
+///
+/// A volume that is still catching up does not blank a table that already has rows: that
+/// progress belongs to the sidebar's drive row, and the band keeps showing the result summary.
+fn status_waiting(
+    awaiting_results: bool,
+    index_loading: bool,
+    searching: bool,
+    probing: bool,
+) -> bool {
+    awaiting_results && (index_loading || searching || probing)
+}
+
 impl CairnApp {
     pub(crate) fn render_status_line(
         &self,
@@ -189,15 +202,16 @@ impl CairnApp {
         } else {
             let index_loading = self.service.status.is_any_loading();
             let awaiting_results = self.results.table.total_rows() == 0;
-            // A total can only be final once the index has settled. While volumes are still
-            // building, a completed query describes a partial index, so its number would climb in
-            // steps as batches land. The band shows the loading indicator alone until the status
-            // poll asks for the result set of the completed index.
-            summary_loading = index_loading
-                || (awaiting_results
-                    && (self.query.is_searching || self.service.is_probing_service));
-            // Paging lazy rows during scrollbar dragging must not flicker the status refresh control.
-            // Only genuine searches, index builds, or connection probes show the loading indicator.
+            // The band marks only a wait that blocks what the view can show. Once rows are on
+            // screen the table is usable while a volume catches up; that volume state belongs to
+            // the sidebar's drive row, not here.
+            summary_loading = status_waiting(
+                awaiting_results,
+                index_loading,
+                self.query.is_searching,
+                self.service.is_probing_service,
+            );
+            // Paging keeps the refresh control: rows already on screen are not a first-page wait.
             icon_loading = summary_loading;
             if !summary_loading
                 && self.service.is_service_connected
@@ -219,35 +233,22 @@ impl CairnApp {
         // Keep the native xsmall button body (20px). A forced 24px minimum made the hover
         // surface extend a row above/below the status line.
         //
-        // While the window waits, the control is replaced by the single loading indicator: a
-        // second circular mark beside the refresh arrow reads as two loaders. The indicator turns
-        // at 30 FPS, and it is not interactive; refreshing is the idle control's job.
-        let refresh_control: AnyElement = if icon_loading {
-            div()
-                .flex()
-                .items_center()
-                .justify_center()
-                // The slot is the xsmall icon-only button's own footprint (size_5 = 1.25rem),
-                // so swapping the refresh glyph for the loader cannot move or resize the band.
-                .w(rems(1.25))
-                .h(rems(1.25))
-                .child(crate::shell::loading_indicator::loading_indicator(
-                    !cx.reduce_motion(),
-                ))
-                .into_any_element()
-        } else {
-            let refresh_label = self.i18n.get_text("status_refresh");
-            Button::new("status-refresh")
-                .ghost()
-                .xsmall()
-                .icon(IconName::RefreshCw)
-                .tooltip(refresh_label.clone())
-                .accessibility_label(refresh_label)
-                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                    this.refresh_current_view(cx);
-                }))
-                .into_any_element()
-        };
+        // While the current view waits for its own data, the refresh button keeps its footprint
+        // and takes the component's own loading state: the RefreshCw glyph becomes the spinner,
+        // the button dims and stops answering clicks. A second circular mark beside the refresh
+        // arrow would read as two loaders.
+        let refresh_label = self.i18n.get_text("status_refresh");
+        let refresh = Button::new("status-refresh")
+            .ghost()
+            .xsmall()
+            .icon(IconName::RefreshCw)
+            .loading_icon(IconName::LoaderCircle)
+            .loading(icon_loading)
+            .tooltip(refresh_label.clone())
+            .accessibility_label(refresh_label)
+            .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                this.refresh_current_view(cx);
+            }));
         let refresh_slot = div()
             .flex_shrink_0()
             // The window root clears selection on every left press; the idle refresh is a control,
@@ -255,7 +256,7 @@ impl CairnApp {
             .on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, _, cx| {
                 cx.stop_propagation()
             })
-            .child(refresh_control);
+            .child(refresh);
 
         // Opt-in acceptance trace (`CAIRN_PERF_LOG`): the visible summary and the loading state,
         // never a hidden animated value.
@@ -529,5 +530,26 @@ impl CairnApp {
             return;
         }
         self.trigger_search(cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::status_waiting;
+
+    #[test]
+    fn a_loaded_table_is_not_waiting_on_a_background_index() {
+        assert!(
+            !status_waiting(false, true, false, false),
+            "a volume catching up must not keep the status mark turning over visible rows"
+        );
+    }
+
+    #[test]
+    fn an_empty_table_waits_for_its_first_results() {
+        assert!(status_waiting(true, true, false, false));
+        assert!(status_waiting(true, false, true, false));
+        assert!(status_waiting(true, false, false, true));
+        assert!(!status_waiting(true, false, false, false));
     }
 }

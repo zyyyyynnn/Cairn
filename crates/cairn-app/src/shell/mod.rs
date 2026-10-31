@@ -11,7 +11,6 @@ pub(crate) mod accessibility;
 pub(crate) mod command_groups;
 pub(crate) mod commands;
 pub(crate) mod i18n;
-pub(crate) mod loading_indicator;
 pub(crate) mod menu_actions;
 pub(crate) mod menu_rules;
 pub(crate) mod nav_history;
