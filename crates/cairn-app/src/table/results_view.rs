@@ -617,7 +617,7 @@ impl CairnApp {
                 div()
                     .lane_grow(self.results.column_widths.name)
                     .min_w(rems(layout::NAME_MIN_COLUMN))
-                    .pl(rems(layout::CONTENT_INSET))
+                    .pl(rems(layout::CONTENT_INSET - layout::SPACE_4))
                     .pr(rems(layout::INNER_SPACING))
                     .flex()
                     .items_center()
@@ -1288,7 +1288,7 @@ impl CairnApp {
             .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
             .lane_grow(self.results.column_widths.name)
             .min_w(rems(layout::NAME_MIN_COLUMN))
-            .pl(rems(layout::CONTENT_INSET))
+            .pl(rems(layout::CONTENT_INSET - layout::SPACE_4))
             .pr(rems(layout::INNER_SPACING))
             .flex()
             .items_center()
@@ -1429,7 +1429,7 @@ impl CairnApp {
                 div()
                     .lane_grow(self.results.column_widths.name)
                     .min_w(rems(layout::NAME_MIN_COLUMN))
-                    .pl(rems(layout::CONTENT_INSET))
+                    .pl(rems(layout::CONTENT_INSET - layout::SPACE_4))
                     .pr(rems(layout::INNER_SPACING))
                     .flex()
                     .items_center()
@@ -1649,7 +1649,7 @@ impl CairnApp {
             HeaderLane::Name => cell
                 .lane_grow(self.results.column_widths.name)
                 .min_w(rems(layout::NAME_MIN_COLUMN))
-                .pl(rems(layout::CONTENT_INSET))
+                .pl(rems(layout::CONTENT_INSET - layout::SPACE_4))
                 .pr(rems(layout::INNER_SPACING)),
             HeaderLane::Path => cell
                 .lane_grow(self.results.column_widths.path)

@@ -808,11 +808,55 @@ impl CairnApp {
                 .flex_1()
                 .min_w_0()
                 .min_h_0()
+                .relative()
                 .m(rems(layout::SPACE_4))
                 .bg(tokens.background)
                 .rounded(tokens.radius)
                 .overflow_hidden()
-                .child(body);
+                .child(body)
+            // GPUI clips children to a rectangle, so the table's white surfaces would square off
+            // the panel corners. Cut the four corners back with frame-coloured masks.
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .w(tokens.radius)
+                    .h(tokens.radius)
+                    .bg(tokens.chrome)
+                    .rounded_br(tokens.radius),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .right_0()
+                    .w(tokens.radius)
+                    .h(tokens.radius)
+                    .bg(tokens.chrome)
+                    .rounded_bl(tokens.radius),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .bottom_0()
+                    .left_0()
+                    .w(tokens.radius)
+                    .h(tokens.radius)
+                    .bg(tokens.chrome)
+                    .rounded_tr(tokens.radius),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .bottom_0()
+                    .right_0()
+                    .w(tokens.radius)
+                    .h(tokens.radius)
+                    .bg(tokens.chrome)
+                    .rounded_tl(tokens.radius),
+            )
+;
             return v_flex()
                 .flex_1()
                 .min_w_0()
@@ -840,11 +884,55 @@ impl CairnApp {
             .flex_1()
             .min_w_0()
             .min_h_0()
+            .relative()
             .m(rems(layout::SPACE_4))
             .bg(tokens.background)
             .rounded(tokens.radius)
             .overflow_hidden()
-            .child(results);
+            .child(results)
+            // GPUI clips children to a rectangle, so the table's white surfaces would square off
+            // the panel corners. Cut the four corners back with frame-coloured masks.
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .w(tokens.radius)
+                    .h(tokens.radius)
+                    .bg(tokens.chrome)
+                    .rounded_br(tokens.radius),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .right_0()
+                    .w(tokens.radius)
+                    .h(tokens.radius)
+                    .bg(tokens.chrome)
+                    .rounded_bl(tokens.radius),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .bottom_0()
+                    .left_0()
+                    .w(tokens.radius)
+                    .h(tokens.radius)
+                    .bg(tokens.chrome)
+                    .rounded_tr(tokens.radius),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .bottom_0()
+                    .right_0()
+                    .w(tokens.radius)
+                    .h(tokens.radius)
+                    .bg(tokens.chrome)
+                    .rounded_tl(tokens.radius),
+            )
+;
         v_flex()
             .flex_1()
             .min_w_0()
