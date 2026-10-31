@@ -537,18 +537,23 @@ impl SetupApp {
     fn pump(&mut self, mut events: UnboundedReceiver<MsiEvent>, cx: &mut Context<Self>) {
         let weak: WeakEntity<Self> = cx.entity().downgrade();
         cx.spawn(async move |_this, cx| {
+            let mut completed = false;
             while let Some(event) = events.recv().await {
                 let done = matches!(&event, MsiEvent::Done(_));
                 weak.update(cx, |this, cx| this.handle_msi_event(event, cx))
                     .ok();
                 if done {
+                    completed = true;
                     break;
                 }
             }
             // The worker sends Done even on failure. A closed channel without it means the worker
-            // ended abnormally; leaving the busy flag set would make the window impossible to close.
-            weak.update(cx, |this, cx| this.handle_msi_channel_closed(cx))
-                .ok();
+            // ended abnormally. A Done handler may have started a second cleanup session; that
+            // session owns the busy state, so the completed pump must not clear it.
+            if !completed {
+                weak.update(cx, |this, cx| this.handle_msi_channel_closed(cx))
+                    .ok();
+            }
         })
         .detach();
     }
