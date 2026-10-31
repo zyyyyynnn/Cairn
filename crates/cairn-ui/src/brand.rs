@@ -42,11 +42,9 @@ pub const SERIF_FONT_FAMILY_WESTERN: &str = "Cormorant";
 /// Paired CJK serif family for Chinese headings.
 pub const SERIF_FONT_FAMILY_CJK: &str = "Noto Serif SC";
 
-/// Embedded TTF font files for the designated Western serif family (Cormorant).
-const CORMORANT_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/Cormorant-Regular.ttf");
-const CORMORANT_SEMIBOLD: &[u8] = include_bytes!("../../../assets/fonts/Cormorant-SemiBold.ttf");
-const CORMORANT_BOLD: &[u8] = include_bytes!("../../../assets/fonts/Cormorant-Bold.ttf");
-const CORMORANT_ITALIC: &[u8] = include_bytes!("../../../assets/fonts/Cormorant-Italic.ttf");
+/// Embedded OpenType files from the official Cormorant v4.002 release.
+const CORMORANT_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/Cormorant-Regular.otf");
+const CORMORANT_SEMIBOLD: &[u8] = include_bytes!("../../../assets/fonts/Cormorant-SemiBold.otf");
 
 /// Registers the embedded Cormorant font family with GPUI's text system.
 ///
@@ -57,8 +55,6 @@ pub fn init_fonts(cx: &App) {
         let fonts = vec![
             Cow::Borrowed(CORMORANT_REGULAR),
             Cow::Borrowed(CORMORANT_SEMIBOLD),
-            Cow::Borrowed(CORMORANT_BOLD),
-            Cow::Borrowed(CORMORANT_ITALIC),
         ];
         let _ = cx.text_system().add_fonts(fonts);
     });
@@ -127,12 +123,8 @@ mod tests {
     fn embedded_cormorant_fonts_are_valid_and_non_empty() {
         assert!(CORMORANT_REGULAR.len() > 100_000);
         assert!(CORMORANT_SEMIBOLD.len() > 100_000);
-        assert!(CORMORANT_BOLD.len() > 100_000);
-        assert!(CORMORANT_ITALIC.len() > 100_000);
-        assert_eq!(&CORMORANT_REGULAR[0..4], &[0x00, 0x01, 0x00, 0x00]);
-        assert_eq!(&CORMORANT_SEMIBOLD[0..4], &[0x00, 0x01, 0x00, 0x00]);
-        assert_eq!(&CORMORANT_BOLD[0..4], &[0x00, 0x01, 0x00, 0x00]);
-        assert_eq!(&CORMORANT_ITALIC[0..4], &[0x00, 0x01, 0x00, 0x00]);
+        assert_eq!(&CORMORANT_REGULAR[0..4], b"OTTO");
+        assert_eq!(&CORMORANT_SEMIBOLD[0..4], b"OTTO");
     }
 
     #[test]
@@ -144,10 +136,15 @@ mod tests {
     }
 
     #[test]
-    fn serif_font_config_points_to_cormorant() {
-        let font = serif_font(FontWeight::SEMIBOLD);
-        assert_eq!(font.family.as_str(), "Cormorant");
-        assert!(font.fallbacks.is_some());
+    fn serif_font_config_selects_the_embedded_weights() {
+        let regular = serif_font(FontWeight::NORMAL);
+        assert_eq!(regular.family.as_str(), SERIF_FONT_FAMILY_WESTERN);
+        assert_eq!(regular.weight, FontWeight::NORMAL);
+
+        let semibold = serif_font(FontWeight::SEMIBOLD);
+        assert_eq!(semibold.family.as_str(), SERIF_FONT_FAMILY_WESTERN);
+        assert_eq!(semibold.weight, FontWeight::SEMIBOLD);
+        assert!(semibold.fallbacks.is_some());
     }
 
     #[test]
