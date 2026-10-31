@@ -141,9 +141,10 @@ pub fn uninstall_error_key(install_key: &str) -> &'static str {
     match install_key {
         "error_msi_cancelled" => "error_uninstall_msi_cancelled",
         "error_msi_busy" => "error_uninstall_msi_busy",
-        "error_msi_invalid" => "error_uninstall_msi_invalid",
         "error_msi_platform" => "error_uninstall_msi_platform",
         "error_msi_fatal" => "error_uninstall_msi_fatal",
+        "error_msi_invalid" => "error_uninstall_msi_invalid",
+        "error_msi_cleanup_failed" => "error_uninstall_cleanup_failed",
         "error_not_installed" => "error_uninstall_not_installed",
         _ => "error_uninstall_msi_unknown",
     }
@@ -351,9 +352,10 @@ mod tests {
         for (install_key, uninstall_key) in [
             ("error_msi_cancelled", "error_uninstall_msi_cancelled"),
             ("error_msi_busy", "error_uninstall_msi_busy"),
-            ("error_msi_invalid", "error_uninstall_msi_invalid"),
             ("error_msi_platform", "error_uninstall_msi_platform"),
             ("error_msi_fatal", "error_uninstall_msi_fatal"),
+            ("error_msi_invalid", "error_uninstall_msi_invalid"),
+            ("error_msi_cleanup_failed", "error_uninstall_cleanup_failed"),
             ("error_not_installed", "error_uninstall_not_installed"),
             ("error_msi_unknown", "error_uninstall_msi_unknown"),
         ] {

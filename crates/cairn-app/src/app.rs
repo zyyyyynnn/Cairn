@@ -371,6 +371,8 @@ pub struct CairnApp {
     /// the lifetime of the view. Never read: dropping this field would cancel
     /// the focus restoration above.
     pub _focus_lost: Vec<Subscription>,
+    /// Records whether the keyboard drives focus, including the Tab the focus walk consumes.
+    pub _keyboard_modality: Subscription,
     pub sidebar_collapsed: bool,
     pub nav_history: Vec<NavState>,
     pub nav_history_index: usize,
@@ -427,6 +429,7 @@ impl CairnApp {
                 .unwrap_or_else(|| this.query.search_focus.clone());
             target.focus(window, cx);
         });
+        let keyboard_modality = cairn_ui::focus::observe_keyboard(cx);
 
         // The service registration is read once here: it decides both whether the window may
         // offer the machine-wide scope and which scope a first run opens in.
@@ -494,6 +497,7 @@ impl CairnApp {
             group_menu: None,
             group_menu_dismiss: None,
             _focus_lost: vec![focus_lost],
+            _keyboard_modality: keyboard_modality,
             sidebar_collapsed: false,
             nav_history: vec![NavState {
                 text: String::new(),

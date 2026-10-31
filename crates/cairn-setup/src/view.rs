@@ -23,6 +23,10 @@ use crate::model::Screen;
 /// One physical platform surface: the caption row is 34 px at every zoom, like the product shell.
 const TITLE_BAR_HEIGHT: Pixels = px(34.0);
 const CAPTION_WIDTH: Pixels = px(34.0);
+/// The focus frame's box around the caption glyph. It stays clear of the window's native frame
+/// and rounded corner, and leaves the full-cell hover surface untouched. The size is chosen so the
+/// frame and the glyph land on the same pixel grid at the common display scales.
+const CAPTION_FOCUS_SIZE: Pixels = px(22.0);
 /// Chrome horizontal inset (12 px), matching the product shell's title bar and footer margins.
 const PAGE_INSET: Pixels = px(12.0);
 /// Single vertical spacing token (16 px) for the main body area between title, description,
@@ -50,6 +54,19 @@ fn path_accessible_label(label: &str, error: Option<&str>) -> String {
         Some(error) => format!("{label}: {error}"),
         None => label.to_string(),
     }
+}
+
+/// Whether the failure page offers Try again. A missing product, a damaged payload or package,
+/// and an unsupported package cannot be retried from this window.
+fn failure_offers_retry(error_key: &str) -> bool {
+    !matches!(
+        error_key,
+        "error_not_installed"
+            | "error_no_payload"
+            | "error_msi_platform"
+            | "error_msi_invalid"
+            | "error_msi_cleanup_failed"
+    )
 }
 
 /// The line box and baseline offset the text system actually uses for one shaped line.
@@ -93,6 +110,15 @@ struct Tokens {
     ring: Hsla,
 }
 
+/// One destructive control. The action's identity, label and activation travel together, so the
+/// places that render one cannot pair an id with the wrong sentence.
+struct DangerAction<'a> {
+    id: &'static str,
+    label_key: &'static str,
+    focus: &'a FocusHandle,
+    on_activate: fn(&mut SetupApp, &mut Context<SetupApp>),
+}
+
 impl Tokens {
     fn new(cx: &App) -> Self {
         let theme = cx.theme();
@@ -120,61 +146,92 @@ enum CaptionAction {
     Close,
 }
 
-fn caption_button(
-    window: &mut Window,
+/// One title-bar control: its stable id, accessible label, glyph and action.
+struct CaptionButton {
     id: &'static str,
     label: String,
     icon: IconName,
     action: CaptionAction,
-    tokens: &Tokens,
-    cx: &mut Context<SetupApp>,
-) -> AnyElement {
-    let is_close = matches!(action, CaptionAction::Close);
-    // The caption buttons are the window's only minimize and close, so they are Tab stops like
-    // any other control: a handle passed to `track_focus` carries its own tab-stop flag.
-    let focus = window
-        .use_keyed_state(id, cx, |_, cx| cx.focus_handle().tab_stop(true))
-        .read(cx)
-        .clone();
+}
 
-    div()
-        .id(id)
-        .role(Role::Button)
-        .aria_label(label)
-        .track_focus(&focus)
-        .flex()
-        .w(CAPTION_WIDTH)
-        .h_full()
-        .items_center()
-        .justify_center()
-        .text_color(tokens.foreground)
-        // The close button fills with danger on hover; the ring must clear that fill as well as
-        // the page, so it uses the full foreground ink rather than the lighter ring token.
-        .focus_visible(|style| style.border_1().border_color(tokens.foreground))
-        .when(is_close, |this| {
-            this.hover(|style| style.bg(tokens.danger).text_color(tokens.background))
-                .active(|style| style.bg(tokens.danger).text_color(tokens.background))
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.close_window(window, cx);
-                }))
-                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+impl SetupApp {
+    fn caption_button(
+        &self,
+        window: &mut Window,
+        button: CaptionButton,
+        tokens: &Tokens,
+        cx: &mut Context<SetupApp>,
+    ) -> AnyElement {
+        let CaptionButton {
+            id,
+            label,
+            icon,
+            action,
+        } = button;
+        let is_close = matches!(action, CaptionAction::Close);
+        // The caption buttons are the window's only minimize and close, so they are Tab stops like
+        // any other control: a handle passed to `track_focus` carries its own tab-stop flag.
+        let focus = window
+            .use_keyed_state(id, cx, |_, cx| cx.focus_handle().tab_stop(true))
+            .read(cx)
+            .clone();
+
+        div()
+            .id(id)
+            .role(Role::Button)
+            .aria_label(label)
+            .track_focus(&focus)
+            .flex()
+            .w(CAPTION_WIDTH)
+            .h_full()
+            .items_center()
+            .justify_center()
+            .text_color(tokens.foreground)
+            .when(is_close, |this| {
+                this.hover(|style| style.bg(tokens.danger).text_color(tokens.background))
+                    .active(|style| style.bg(tokens.danger).text_color(tokens.background))
+                    .on_click(cx.listener(|this, _, window, cx| {
                         this.close_window(window, cx);
-                    }
-                }))
-        })
-        .when(!is_close, |this| {
-            this.hover(|style| style.bg(tokens.row_hover))
-                .active(|style| style.bg(tokens.row_hover))
-                .on_click(|_, window, _| window.minimize_window())
-                .on_key_down(|event, window, _| {
-                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                        window.minimize_window();
-                    }
-                })
-        })
-        .child(Icon::new(icon).size(rems(UI_ICON_SIZE)))
-        .into_any_element()
+                    }))
+                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            this.close_window(window, cx);
+                        }
+                    }))
+            })
+            .when(!is_close, |this| {
+                this.hover(|style| style.bg(tokens.row_hover))
+                    .active(|style| style.bg(tokens.row_hover))
+                    .on_click(|_, window, _| window.minimize_window())
+                    .on_key_down(|event, window, _| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            window.minimize_window();
+                        }
+                    })
+            })
+            .child(
+                div()
+                    .relative()
+                    .size(CAPTION_FOCUS_SIZE)
+                    .flex()
+                    .flex_shrink_0()
+                    .items_center()
+                    .justify_center()
+                    .child(Icon::new(icon).size(rems(UI_ICON_SIZE)))
+                    .when_some(
+                        cairn_ui::focus::edge(
+                            &focus,
+                            tokens.foreground,
+                            px(0.0),
+                            cairn_ui::focus::keyboard_navigation(cx),
+                            window,
+                            cx,
+                        ),
+                        |this, ring| this.child(ring),
+                    ),
+            )
+            .into_any_element()
+    }
 }
 
 impl Render for SetupApp {
@@ -200,6 +257,18 @@ impl Render for SetupApp {
             .on_action(
                 cx.listener(|this, _: &crate::app::CancelSetup, window, cx| {
                     this.on_escape(window, cx)
+                }),
+            )
+            // Input modality for focus painting. The app-level keystroke interceptor records the
+            // keyboard side, including the Tab the focus walk consumes; a pointer press clears it
+            // before the next frame, so a click never paints the ring.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_this, _: &MouseDownEvent, _, cx| {
+                    if cairn_ui::focus::keyboard_navigation(cx) {
+                        cairn_ui::focus::set_keyboard_navigation(false, cx);
+                        cx.notify();
+                    }
                 }),
             )
             .child(self.render_titlebar(&tokens, window, cx))
@@ -286,22 +355,26 @@ impl SetupApp {
                     .h_full()
                     .window_control_area(WindowControlArea::Drag),
             )
-            .child(caption_button(
+            .child(self.caption_button(
                 window,
-                "setup-minimize",
-                self.i18n.get("window_minimize"),
-                IconName::WindowMinimize,
-                CaptionAction::Minimize,
+                CaptionButton {
+                    id: "setup-minimize",
+                    label: self.i18n.get("window_minimize"),
+                    icon: IconName::WindowMinimize,
+                    action: CaptionAction::Minimize,
+                },
                 tokens,
                 cx,
             ))
             .when(!self.is_busy(), |this| {
-                this.child(caption_button(
+                this.child(self.caption_button(
                     window,
-                    "setup-close",
-                    self.i18n.get("window_close"),
-                    IconName::WindowClose,
-                    CaptionAction::Close,
+                    CaptionButton {
+                        id: "setup-close",
+                        label: self.i18n.get("window_close"),
+                        icon: IconName::WindowClose,
+                        action: CaptionAction::Close,
+                    },
                     tokens,
                     cx,
                 ))
@@ -405,7 +478,8 @@ impl SetupApp {
             .path_error
             .map(|problem| self.i18n.get(problem.message_key()));
         let accessible_label = path_accessible_label(&label, path_error.as_deref());
-        let path_focused = self.path_input.read(cx).focus_handle(cx).is_focused(window);
+        let path_focus = self.path_input.read(cx).focus_handle(cx);
+        let path_focused = path_focus.is_focused(window);
         v_flex()
             .gap(MAIN_GAP)
             .child(self.heading("location_title"))
@@ -691,9 +765,19 @@ impl SetupApp {
             .size(PAGE_ICON)
             .text_color(tokens.foreground)
             .into_any_element();
+        // A forced cleanup can finish with the Windows Installer record still in place. The page
+        // says what was removed and what remains instead of claiming a complete uninstall.
+        let title = if self.record_remaining {
+            "uninstall_files_removed_title"
+        } else {
+            "uninstall_done_title"
+        };
         v_flex()
             .gap(MAIN_GAP)
-            .child(self.title_row(icon, "uninstall_done_title"))
+            .child(self.title_row(icon, title))
+            .when(self.record_remaining, |this| {
+                this.child(self.paragraph("uninstall_record_remaining", tokens))
+            })
             .when(self.restart_required, |this| {
                 this.child(
                     div()
@@ -813,32 +897,57 @@ impl SetupApp {
                 if self.log.is_some() {
                     actions.push(self.log_button(cx));
                 }
-                actions.push(
-                    Button::new("setup-failed-close")
-                        .ghost()
-                        .label(self.i18n.get("action_close"))
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.close_window(window, cx);
-                        }))
-                        .into_any_element(),
-                );
-                let no_retry = self.error.as_ref().is_some_and(|error| {
-                    matches!(
-                        error.key,
-                        "error_not_installed"
-                            | "error_no_payload"
-                            | "error_msi_invalid"
-                            | "error_msi_platform"
-                    )
-                });
-                if !no_retry {
+                let uninstall = self.is_uninstall() || self.uninstall_attempted;
+                let uninstall_invalid = uninstall
+                    && self
+                        .error
+                        .as_ref()
+                        .is_some_and(|error| error.key == "error_msi_invalid");
+                if uninstall_invalid {
+                    // A damaged saved package cannot be retried into working, so the page's one
+                    // recovery is the file cleanup. It keeps the log beside it and leaves the way
+                    // out to the title bar and Escape.
+                    actions.push(self.danger_action(
+                        DangerAction {
+                            id: "setup-force-cleanup",
+                            label_key: "action_remove_remaining",
+                            focus: &self.force_cleanup_focus,
+                            on_activate: SetupApp::start_force_cleanup,
+                        },
+                        tokens,
+                        window,
+                        cx,
+                    ));
+                } else {
                     actions.push(
-                        Button::new("setup-retry")
-                            .primary()
-                            .label(self.i18n.get("action_retry"))
-                            .on_click(cx.listener(|this, _, window, cx| this.retry(window, cx)))
+                        Button::new("setup-failed-close")
+                            .ghost()
+                            .label(self.i18n.get("action_close"))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.close_window(window, cx);
+                            }))
                             .into_any_element(),
                     );
+                    // A damaged payload or package, a missing product and an unsupported package
+                    // cannot be retried from this window. A failed forced cleanup cannot either:
+                    // it may have stopped because a newer install appeared, and retrying would
+                    // remove that install. Transient MSI failures can be retried.
+                    if !self.forced_cleanup
+                        && failure_offers_retry(
+                            self.error
+                                .as_ref()
+                                .map(|error| error.key)
+                                .unwrap_or_default(),
+                        )
+                    {
+                        actions.push(
+                            Button::new("setup-retry")
+                                .primary()
+                                .label(self.i18n.get("action_retry"))
+                                .on_click(cx.listener(|this, _, window, cx| this.retry(window, cx)))
+                                .into_any_element(),
+                        );
+                    }
                 }
             }
             Screen::Uninstall => {
@@ -892,20 +1001,26 @@ impl SetupApp {
     /// The destructive action owns its focus treatment: the framework draws the filled-button
     /// focus line at 60% of the label ink inside the fill, which measures 2.51:1 on the light
     /// danger fill. The reserved 1 px foreground frame sits on the component edge, matching the
-    /// other focus frames without a gap.
-    fn uninstall_button(
+    /// product's other focus frames without a gap.
+    fn danger_action(
         &self,
+        action: DangerAction<'_>,
         tokens: &Tokens,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let label = self.i18n.get("action_uninstall");
-        let is_focused = self.uninstall_focus.is_focused(window);
+        let DangerAction {
+            id,
+            label_key,
+            focus,
+            on_activate,
+        } = action;
+        let label = self.i18n.get(label_key);
         h_flex()
-            .id("setup-uninstall-now")
+            .id(id)
             .role(Role::Button)
             .aria_label(label.clone())
-            .track_focus(&self.uninstall_focus)
+            .track_focus(focus)
             .h(px(28.0))
             .px(rems(0.625))
             .flex()
@@ -914,13 +1029,13 @@ impl SetupApp {
             .justify_center()
             .whitespace_nowrap()
             .rounded(RADIUS)
-            // The frame is always reserved on the component edge, like the product's other focus
-            // frames, so focusing the destructive action cannot move the footer.
             .border_1()
             .border_color(
-                tokens
-                    .foreground
-                    .opacity(if is_focused { 1.0 } else { 0.0 }),
+                if cairn_ui::focus::keyboard_navigation(cx) && focus.is_focused(window) {
+                    tokens.foreground
+                } else {
+                    tokens.foreground.opacity(0.0)
+                },
             )
             .bg(tokens.danger_fill)
             .text_color(tokens.danger_label)
@@ -929,14 +1044,33 @@ impl SetupApp {
             .cursor_pointer()
             .hover(|style| style.bg(tokens.danger_hover))
             .active(|style| style.bg(tokens.danger_active))
-            .on_click(cx.listener(|this, _, _, cx| this.start_uninstall(cx)))
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+            .on_click(cx.listener(move |this, _, _, cx| on_activate(this, cx)))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
                 if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                    this.start_uninstall(cx);
+                    on_activate(this, cx);
                 }
             }))
             .child(label)
             .into_any_element()
+    }
+
+    fn uninstall_button(
+        &self,
+        tokens: &Tokens,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.danger_action(
+            DangerAction {
+                id: "setup-uninstall-now",
+                label_key: "action_uninstall",
+                focus: &self.uninstall_focus,
+                on_activate: SetupApp::start_uninstall,
+            },
+            tokens,
+            window,
+            cx,
+        )
     }
 
     fn title_row(&self, icon: AnyElement, key: &'static str) -> Div {
@@ -959,7 +1093,7 @@ impl SetupApp {
         let description = (self.notice == Some("error_license_required"))
             .then(|| self.i18n.get("error_license_required"));
         let focus = &self.license_focus;
-        let is_focused = focus.is_focused(window);
+        let is_focused = cairn_ui::focus::keyboard_navigation(cx) && focus.is_focused(window);
 
         let on_click = std::rc::Rc::new(on_click);
         let on_click_mouse = on_click.clone();
@@ -1072,7 +1206,7 @@ impl SetupApp {
 
 #[cfg(test)]
 mod tests {
-    use super::path_accessible_label;
+    use super::{failure_offers_retry, path_accessible_label};
 
     #[test]
     fn the_path_label_carries_the_validation_message() {
@@ -1084,5 +1218,26 @@ mod tests {
             path_accessible_label("Install folder", Some("Enter a full local path.")),
             "Install folder: Enter a full local path."
         );
+    }
+
+    #[test]
+    fn the_failure_page_only_retries_transient_failures() {
+        for key in [
+            "error_not_installed",
+            "error_no_payload",
+            "error_msi_platform",
+            "error_msi_invalid",
+            "error_msi_cleanup_failed",
+        ] {
+            assert!(!failure_offers_retry(key), "{key} must not offer a retry");
+        }
+        for key in [
+            "error_msi_busy",
+            "error_msi_cancelled",
+            "error_msi_fatal",
+            "error_msi_unknown",
+        ] {
+            assert!(failure_offers_retry(key), "{key} must offer a retry");
+        }
     }
 }

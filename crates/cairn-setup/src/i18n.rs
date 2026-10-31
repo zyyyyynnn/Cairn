@@ -86,6 +86,9 @@ mod tests {
                 "action_install",
                 "action_cancel",
                 "uninstall_title",
+                "uninstall_files_removed_title",
+                "uninstall_record_remaining",
+                "action_remove_remaining",
                 "error_title",
             ] {
                 assert_ne!(i18n.get(key), key, "{lang} is missing {key}");
@@ -158,9 +161,10 @@ mod tests {
             for key in [
                 "error_uninstall_msi_cancelled",
                 "error_uninstall_msi_busy",
-                "error_uninstall_msi_invalid",
                 "error_uninstall_msi_platform",
                 "error_uninstall_msi_fatal",
+                "error_uninstall_msi_invalid",
+                "error_uninstall_cleanup_failed",
                 "error_uninstall_not_installed",
             ] {
                 assert_ne!(i18n.get(key), key, "{lang} is missing {key}");
@@ -177,9 +181,9 @@ mod tests {
             for (install_key, uninstall_key) in [
                 ("error_msi_cancelled", "error_uninstall_msi_cancelled"),
                 ("error_msi_busy", "error_uninstall_msi_busy"),
-                ("error_msi_invalid", "error_uninstall_msi_invalid"),
                 ("error_msi_platform", "error_uninstall_msi_platform"),
                 ("error_msi_fatal", "error_uninstall_msi_fatal"),
+                ("error_msi_invalid", "error_uninstall_msi_invalid"),
             ] {
                 assert_ne!(
                     i18n.get(install_key),

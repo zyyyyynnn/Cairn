@@ -26,6 +26,7 @@ pub struct Preview {
     pub log: Option<PathBuf>,
     pub error: Option<SetupError>,
     pub uninstall_attempted: bool,
+    pub record_remaining: bool,
 }
 
 impl Preview {
@@ -39,11 +40,13 @@ impl Preview {
         {
             let key = std::env::var("CAIRN_SETUP_PREVIEW").ok()?;
             let screen = screen_from_key(&key)?;
-            let uninstall_flow =
-                matches!(
-                    screen,
-                    Screen::Uninstall | Screen::Uninstalling | Screen::Uninstalled
-                ) || matches!(key.as_str(), "uninstall-failed" | "uninstall-missing");
+            let uninstall_flow = matches!(
+                screen,
+                Screen::Uninstall | Screen::Uninstalling | Screen::Uninstalled
+            ) || matches!(
+                key.as_str(),
+                "uninstall-failed" | "uninstall-missing" | "uninstall-invalid"
+            );
             let launch = if uninstall_flow {
                 Launch::Uninstall
             } else {
@@ -56,7 +59,9 @@ impl Preview {
                     | Screen::Uninstalling
                     | Screen::Uninstalled
             ) || key == "uninstall-failed";
-            let log = (screen == Screen::Failed && launch == Launch::Setup).then(|| {
+            let log = ((screen == Screen::Failed && launch == Launch::Setup)
+                || matches!(key.as_str(), "uninstall-failed" | "uninstall-invalid"))
+            .then(|| {
                 let path = std::env::temp_dir().join("CairnSetup-preview.log");
                 let _ = std::fs::write(
                     &path,
@@ -68,6 +73,9 @@ impl Preview {
                 (Screen::Failed, Launch::Setup) => Some(SetupError::simple("error_msi_unknown")),
                 (Screen::Failed, Launch::Uninstall) if key == "uninstall-missing" => {
                     Some(SetupError::simple("error_not_installed"))
+                }
+                (Screen::Failed, Launch::Uninstall) if key == "uninstall-invalid" => {
+                    Some(SetupError::simple("error_msi_invalid"))
                 }
                 (Screen::Failed, Launch::Uninstall) => {
                     Some(SetupError::simple("error_msi_unknown"))
@@ -98,6 +106,7 @@ impl Preview {
                 log,
                 error,
                 uninstall_attempted: launch == Launch::Uninstall,
+                record_remaining: key == "uninstalled-record",
             })
         }
     }
@@ -131,8 +140,8 @@ fn screen_from_key(key: &str) -> Option<Screen> {
         "maintenance" => Some(Screen::Maintenance),
         "uninstall" => Some(Screen::Uninstall),
         "uninstalling" => Some(Screen::Uninstalling),
-        "uninstalled" => Some(Screen::Uninstalled),
-        "uninstall-failed" | "uninstall-missing" => Some(Screen::Failed),
+        "uninstalled" | "uninstalled-record" => Some(Screen::Uninstalled),
+        "uninstall-failed" | "uninstall-missing" | "uninstall-invalid" => Some(Screen::Failed),
         _ => None,
     }
 }

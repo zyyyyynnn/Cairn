@@ -94,6 +94,13 @@ pub fn find_product_codes() -> Vec<String> {
     find_product_codes_checked().unwrap_or_default()
 }
 
+/// Whether every product registered now was part of the removal that started with `expected`.
+/// A product registered under a code the removal did not start with belongs to a newer install
+/// and is refused; a record that disappeared meanwhile is still safe to clean up.
+pub(crate) fn all_products_are_expected(current: &[String], expected: &[String]) -> bool {
+    current.iter().all(|code| expected.contains(code))
+}
+
 /// The checked form keeps an installer API failure distinct from "no products". A damaged or
 /// unavailable MSI database must never trigger the registration-only cleanup path.
 pub fn find_product_codes_checked() -> Result<Vec<String>, u32> {
@@ -322,6 +329,26 @@ mod tests {
         let guid = upgrade_code_guid();
         assert!(guid.starts_with('{') && guid.ends_with('}'), "{guid}");
         assert_eq!(guid.len(), 38, "{guid}");
+    }
+
+    use super::all_products_are_expected;
+
+    #[test]
+    fn a_cleanup_only_owns_products_that_were_registered_when_it_started() {
+        let expected = vec!["{A}".to_string()];
+        assert!(
+            all_products_are_expected(&[], &expected),
+            "a record that disappeared on its own is still a useful cleanup"
+        );
+        assert!(all_products_are_expected(&["{A}".to_string()], &expected));
+        assert!(
+            !all_products_are_expected(&["{A}".to_string(), "{B}".to_string()], &expected),
+            "a product registered after the window opened must survive"
+        );
+        assert!(
+            !all_products_are_expected(&["{B}".to_string()], &[]),
+            "a record found by a cleanup launched for no product is not ours to delete"
+        );
     }
 
     use super::split_command_line;

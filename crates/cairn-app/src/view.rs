@@ -33,19 +33,39 @@ use gpui_kit::gpui::*;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// The focus frame's box around the caption glyph. It stays clear of the native window frame and
+/// the rounded window corner, and leaves the full-cell hover surface untouched. The size is chosen
+/// so the frame and the glyph land on the same pixel grid at the common display scales.
+const WINDOW_CONTROL_FOCUS_SIZE: Pixels = px(22.0);
+
+/// The fixed identity of one caption button. The action stays a separate argument so each call
+/// site keeps its own closure.
+struct WindowControl<'a> {
+    control: &'static KeyControl,
+    label: String,
+    icon: IconName,
+    area: WindowControlArea,
+    focus: &'a FocusHandle,
+}
+
 /// One platform caption button. It keeps the square, full-height hit target and the
 /// `window_control_area` that snap layouts and the native caption expect, while adding the
 /// semantics the hand-drawn div lacked: a registered `Button` role and name, a focus stop, and
 /// Enter/Space activation through GPUI's own click path.
 fn render_window_control(
-    control: &'static KeyControl,
-    label: String,
-    icon: IconName,
-    area: WindowControlArea,
-    focus: &FocusHandle,
+    control: WindowControl<'_>,
+    keyboard_navigation: bool,
+    window: &Window,
     tokens: &ShellTokens,
     on_click: impl Fn(&mut Window) + 'static,
 ) -> ControlElement {
+    let WindowControl {
+        control,
+        label,
+        icon,
+        area,
+        focus,
+    } = control;
     let is_close = matches!(area, WindowControlArea::Close);
     // The caption is a div with a window-control hit target, not a `Button`, so Enter/Space have
     // to run the same action explicitly. `WINDOW_CONTROL_CONTEXT` binds those keys to `NoAction`
@@ -58,9 +78,6 @@ fn render_window_control(
         .tab_stop(true)
         .track_focus(focus)
         .key_context(WINDOW_CONTROL_CONTEXT)
-        // The caption is a physical platform surface, so its focus cue is an inset hairline rather
-        // than the component focus ring, which would extend into the window border.
-        .focus_visible(|style| style.border_1().border_color(tokens.ring))
         .window_control_area(area)
         .flex()
         .w(layout::WINDOW_CONTROL_WIDTH)
@@ -84,8 +101,27 @@ fn render_window_control(
             }
         })
         // Same 34 px control width and full-height center as the GPUI Kit caption controls;
-        // the glyph reads the shared 1rem control-icon token.
-        .child(Icon::new(icon).size(rems(theme::UI_ICON_SIZE)))
+        // the glyph reads the shared 1rem control-icon token. The focus frame is drawn around the
+        // glyph so the window's rounded corner cannot clip it.
+        .child(
+            div()
+                .relative()
+                .size(WINDOW_CONTROL_FOCUS_SIZE)
+                .flex()
+                .flex_shrink_0()
+                .items_center()
+                .justify_center()
+                .child(Icon::new(icon).size(rems(theme::UI_ICON_SIZE)))
+                .when(keyboard_navigation && focus.is_focused(window), |this| {
+                    this.child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .border_1()
+                            .border_color(tokens.foreground),
+                    )
+                }),
+        )
 }
 
 static FIRST_SKELETON_FRAME: AtomicBool = AtomicBool::new(false);
@@ -351,6 +387,11 @@ impl Render for CairnApp {
                         .is_some_and(|state| state.clear_selection());
                     if this.results.keyboard_navigation || had_selection {
                         this.results.keyboard_navigation = false;
+                        cx.notify();
+                    }
+                    // The caption focus frame follows the same pointer rule as the result ring.
+                    if cairn_ui::focus::keyboard_navigation(cx) {
+                        cairn_ui::focus::set_keyboard_navigation(false, cx);
                         cx.notify();
                     }
                 }),
@@ -705,33 +746,45 @@ impl CairnApp {
                     .flex_shrink_0()
                     .h_full()
                     .child(render_window_control(
-                        minimize_control,
-                        minimize_label,
-                        IconName::WindowMinimize,
-                        WindowControlArea::Min,
-                        &minimize_focus,
+                        WindowControl {
+                            control: minimize_control,
+                            label: minimize_label,
+                            icon: IconName::WindowMinimize,
+                            area: WindowControlArea::Min,
+                            focus: &minimize_focus,
+                        },
+                        cairn_ui::focus::keyboard_navigation(cx),
+                        window,
                         tokens,
                         |window| window.minimize_window(),
                     ))
                     .child(render_window_control(
-                        maximize_control,
-                        maximize_label,
-                        if is_maximized {
-                            IconName::WindowRestore
-                        } else {
-                            IconName::WindowMaximize
+                        WindowControl {
+                            control: maximize_control,
+                            label: maximize_label,
+                            icon: if is_maximized {
+                                IconName::WindowRestore
+                            } else {
+                                IconName::WindowMaximize
+                            },
+                            area: WindowControlArea::Max,
+                            focus: &maximize_focus,
                         },
-                        WindowControlArea::Max,
-                        &maximize_focus,
+                        cairn_ui::focus::keyboard_navigation(cx),
+                        window,
                         tokens,
                         |window| window.zoom_window(),
                     ))
                     .child(render_window_control(
-                        close_control,
-                        close_label,
-                        IconName::WindowClose,
-                        WindowControlArea::Close,
-                        &close_focus,
+                        WindowControl {
+                            control: close_control,
+                            label: close_label,
+                            icon: IconName::WindowClose,
+                            area: WindowControlArea::Close,
+                            focus: &close_focus,
+                        },
+                        cairn_ui::focus::keyboard_navigation(cx),
+                        window,
                         tokens,
                         |window| window.remove_window(),
                     )),

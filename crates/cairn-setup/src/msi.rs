@@ -181,11 +181,10 @@ pub(crate) fn append_cleanup_failures(log: &Path, failures: &[String]) {
     }
 }
 
-/// Runs the registration-only cleanup when the MSI product record is gone but a visible Cairn
-/// entry remains. Warnings still produce the normal success page with the cleanup alert; a failure
-/// to remove the visible ARP key is reported as an uninstall failure so the entry is not silently
-/// left behind.
-pub fn start_orphan_cleanup(
+/// Runs a registration-only or force cleanup when Windows Installer cannot remove the product.
+/// Warnings still produce the normal success page with the cleanup alert; a failure to remove the
+/// visible ARP key is reported as an uninstall failure so the entry is not silently left behind.
+pub fn start_cleanup(
     cleanup: impl FnOnce() -> Result<Vec<String>, String> + Send + 'static,
     log: PathBuf,
 ) -> MsiSession {
@@ -197,7 +196,7 @@ pub fn start_orphan_cleanup(
             .append(true)
             .open(&log)
         {
-            let _ = writeln!(file, "Cairn registration-only uninstall");
+            let _ = writeln!(file, "Cairn uninstall cleanup");
         }
         match cleanup() {
             Ok(warnings) => {
@@ -498,21 +497,20 @@ mod tests {
     #[test]
     fn orphan_cleanup_creates_the_log_even_without_warnings() {
         let log = unique_log("orphan-success");
-        let mut session = super::start_orphan_cleanup(|| Ok(Vec::new()), log.clone());
+        let mut session = super::start_cleanup(|| Ok(Vec::new()), log.clone());
         assert!(matches!(
             session.events.blocking_recv(),
             Some(super::MsiEvent::Done(Ok(_)))
         ));
         let text = std::fs::read_to_string(&log).expect("read cleanup log");
-        assert!(text.contains("registration-only"));
+        assert!(text.contains("uninstall cleanup"));
         let _ = std::fs::remove_file(log);
     }
 
     #[test]
     fn orphan_cleanup_reports_warnings_before_success() {
         let log = unique_log("orphan-warning");
-        let mut session =
-            super::start_orphan_cleanup(|| Ok(vec!["locked data".to_string()]), log.clone());
+        let mut session = super::start_cleanup(|| Ok(vec!["locked data".to_string()]), log.clone());
         assert!(matches!(
             session.events.blocking_recv(),
             Some(super::MsiEvent::CleanupFailed)
@@ -529,7 +527,7 @@ mod tests {
     #[test]
     fn orphan_cleanup_treats_an_arp_failure_as_an_uninstall_failure() {
         let log = unique_log("orphan-critical");
-        let mut session = super::start_orphan_cleanup(
+        let mut session = super::start_cleanup(
             || Err("Apps & features entry: access denied".to_string()),
             log.clone(),
         );

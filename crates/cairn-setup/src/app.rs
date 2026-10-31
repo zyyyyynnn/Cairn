@@ -87,6 +87,26 @@ pub(crate) fn visible_progress(progress: Option<f32>) -> f32 {
     progress.unwrap_or(0.0).min(99.0)
 }
 
+/// A product whose MSI record is missing can be removed by the cleanup pass. A damaged cached
+/// package is different: it fails before Windows Installer can remove the product, so the page
+/// offers the explicit file cleanup instead of a retry.
+fn uninstall_can_fall_back_to_cleanup(kind: msi::FailureKind) -> bool {
+    kind == msi::FailureKind::NotInstalled
+}
+
+/// The disclosure on the uninstall result page. After a forced cleanup, Windows Installer may still
+/// hold the product record it could not remove; the page says so rather than claiming a clean
+/// removal. A failed enumeration cannot confirm the record is gone, so it discloses as well.
+fn record_remaining_after_cleanup(forced: bool, codes: Result<Vec<String>, u32>) -> bool {
+    forced && codes.map_or(true, |codes| !codes.is_empty())
+}
+
+/// A forced cleanup starts from the progress page when Windows Installer reports the record gone,
+/// or from the failure page when the person chooses it. Any other page has no cleanup to start.
+fn force_cleanup_allowed(screen: Screen) -> bool {
+    matches!(screen, Screen::Uninstalling | Screen::Failed)
+}
+
 pub struct SetupApp {
     pub(crate) i18n: I18n,
     pub(crate) launch: Launch,
@@ -103,9 +123,18 @@ pub struct SetupApp {
     pub(crate) notice: Option<&'static str>,
     pub(crate) cleanup_incomplete: bool,
     pub(crate) restart_required: bool,
+    /// The forced cleanup could not remove the hidden Windows Installer product record.
+    pub(crate) record_remaining: bool,
     pub(crate) installed: Option<InstalledProduct>,
     pub(crate) install_dir: Option<PathBuf>,
     pub(crate) uninstall_attempted: bool,
+    /// The products the running removal was started for. A forced cleanup re-checks this set
+    /// under the Windows Installer lock, so a product registered under a new code is refused.
+    active_product_codes: Vec<String>,
+    /// The running transaction is a registration-only cleanup after Windows Installer could not
+    /// remove the product itself. It stays set after a failed cleanup so the failure page can
+    /// withhold Retry: a retry could target a newer install that appeared meanwhile.
+    pub(crate) forced_cleanup: bool,
     /// The window's own focus handle. It is not a Tab stop, so it adds no stop to the Tab order;
     /// it gives the window a focus target so the window's key context stays on the dispatch path
     /// even when no control holds focus. Without it the keymap only sees the window chrome's own
@@ -120,11 +149,14 @@ pub struct SetupApp {
     /// The destructive uninstall action owns its focus ring because the framework's filled-button
     /// focus line is drawn at reduced opacity inside the danger fill.
     pub(crate) uninstall_focus: FocusHandle,
+    /// The failure page's explicit "remove remaining files" action.
+    pub(crate) force_cleanup_focus: FocusHandle,
     pub(crate) focused_screen: Option<Screen>,
     payload_dir: Option<PathBuf>,
     _activation: Subscription,
     _focus_lost: Subscription,
     _path_change: Subscription,
+    _keyboard_modality: Subscription,
 }
 
 impl SetupApp {
@@ -187,6 +219,7 @@ impl SetupApp {
         let screen_focus = cx.focus_handle();
         let license_focus = cx.focus_handle().tab_stop(true);
         let uninstall_focus = cx.focus_handle().tab_stop(true);
+        let force_cleanup_focus = cx.focus_handle().tab_stop(true);
 
         // Keep the window key context reachable: if a rendered region disappears and focus is
         // dropped, return it to the window's own handle rather than leaving the commands
@@ -194,6 +227,9 @@ impl SetupApp {
         let focus_lost = cx.on_focus_lost(window, |this, window, cx| {
             this.root_focus.focus(window, cx);
         });
+        // Tab is consumed by the focus walk before an element listener runs, so the keyboard
+        // modality is recorded at the app level.
+        let keyboard_modality = cairn_ui::focus::observe_keyboard(cx);
         let path_change = cx.subscribe_in(
             &path_input,
             window,
@@ -249,20 +285,27 @@ impl SetupApp {
             notice: None,
             cleanup_incomplete: false,
             restart_required: false,
+            record_remaining: preview
+                .as_ref()
+                .is_some_and(|preview| preview.record_remaining),
             installed,
             install_dir,
             uninstall_attempted: preview
                 .as_ref()
                 .is_some_and(|preview| preview.uninstall_attempted),
+            active_product_codes: Vec::new(),
+            forced_cleanup: false,
             root_focus,
             screen_focus,
             license_focus,
             uninstall_focus,
+            force_cleanup_focus,
             focused_screen: None,
             payload_dir: None,
             _activation: activation,
             _focus_lost: focus_lost,
             _path_change: path_change,
+            _keyboard_modality: keyboard_modality,
         }
     }
 
@@ -386,6 +429,10 @@ impl SetupApp {
         self.progress = None;
         self.stage = Stage::Preparing;
         self.restart_required = false;
+        self.cleanup_incomplete = false;
+        self.record_remaining = false;
+        self.active_product_codes.clear();
+        self.forced_cleanup = false;
         self.uninstall_attempted = false;
         self.screen = Screen::Installing;
         self.installing.set(true);
@@ -397,6 +444,9 @@ impl SetupApp {
         if self.is_busy() {
             return;
         }
+        self.active_product_codes.clear();
+        self.forced_cleanup = false;
+        self.record_remaining = false;
         // The visible screen may have been opened before another process upgraded or removed
         // Cairn; the removal decision uses the current registration, not the cached banner state.
         let product = installed::installed_product();
@@ -418,6 +468,7 @@ impl SetupApp {
                 return;
             }
         };
+        self.active_product_codes = product_codes.clone();
         if product_codes.is_empty() {
             self.start_orphan_uninstall(product, cx);
             return;
@@ -457,7 +508,7 @@ impl SetupApp {
         let helper = platform::prepare_install_dir_cleanup();
         let install_dir = product.install_dir;
         let cleanup_dir = install_dir.clone();
-        let session = msi::start_orphan_cleanup(
+        let session = msi::start_cleanup(
             move || {
                 let Some(_lock) = platform::acquire_msi_execution(30_000) else {
                     return Err("another Windows Installer operation is running".to_string());
@@ -490,21 +541,87 @@ impl SetupApp {
         cx.notify();
     }
 
+    /// Completes a removal Windows Installer could not finish. It runs after the product record is
+    /// gone (the automatic fallback) or after the person explicitly chose the file cleanup on the
+    /// failure page. Under the global installer lock it re-checks that every registered product is
+    /// one this removal started with, so a product registered under a new code is refused.
+    ///
+    /// It must not reject a busy screen: the automatic fallback runs from the Done event while the
+    /// progress page still owns the busy state, and refusing there would strand the window.
+    pub(crate) fn start_force_cleanup(&mut self, cx: &mut Context<Self>) {
+        if !force_cleanup_allowed(self.screen) {
+            return;
+        }
+        // The automatic fallback arrives with the previous session finished; a duplicate call
+        // while this cleanup is already running must not start a second one.
+        if self.forced_cleanup && self.is_busy() {
+            return;
+        }
+        self.record_remaining = false;
+        let Some(install_dir) = self.install_dir.clone() else {
+            self.error = Some(SetupError::simple("error_msi_unknown"));
+            self.screen = Screen::Failed;
+            cx.notify();
+            return;
+        };
+        let log = self
+            .log
+            .clone()
+            .unwrap_or_else(platform::uninstall_log_path);
+        let helper = platform::prepare_install_dir_cleanup();
+        let expected = self.active_product_codes.clone();
+        let session = msi::start_cleanup(
+            move || {
+                let Some(_lock) = platform::acquire_msi_execution(30_000) else {
+                    return Err("another Windows Installer operation is running".to_string());
+                };
+                let current = installed::find_product_codes_checked()
+                    .map_err(|error| format!("MSI product enumeration failed: {error}"))?;
+                if !installed::all_products_are_expected(&current, &expected) {
+                    return Err(
+                        "Cairn was installed while this window was open; close this window and start again."
+                            .to_string(),
+                    );
+                }
+                platform::remove_orphan_registration(&install_dir, helper)
+            },
+            log.clone(),
+        );
+
+        self.log = Some(log);
+        self.error = None;
+        self.notice = None;
+        self.cleanup_incomplete = false;
+        self.progress = None;
+        self.stage = Stage::Finishing;
+        self.uninstall_attempted = true;
+        self.forced_cleanup = true;
+        self.screen = Screen::Uninstalling;
+        self.installing.set(true);
+        self.pump(session.events, cx);
+        cx.notify();
+    }
+
     fn pump(&mut self, mut events: UnboundedReceiver<MsiEvent>, cx: &mut Context<Self>) {
         let weak: WeakEntity<Self> = cx.entity().downgrade();
         cx.spawn(async move |_this, cx| {
+            let mut completed = false;
             while let Some(event) = events.recv().await {
                 let done = matches!(&event, MsiEvent::Done(_));
                 weak.update(cx, |this, cx| this.handle_msi_event(event, cx))
                     .ok();
                 if done {
+                    completed = true;
                     break;
                 }
             }
             // The worker sends Done even on failure. A closed channel without it means the worker
-            // ended abnormally; leaving the busy flag set would make the window impossible to close.
-            weak.update(cx, |this, cx| this.handle_msi_channel_closed(cx))
-                .ok();
+            // ended abnormally. A Done handler may have started a second cleanup session; that
+            // session owns the busy state, so the completed pump must not clear it.
+            if !completed {
+                weak.update(cx, |this, cx| this.handle_msi_channel_closed(cx))
+                    .ok();
+            }
         })
         .detach();
     }
@@ -553,22 +670,31 @@ impl SetupApp {
                         self.progress = Some(100.0);
                         self.stage = Stage::Finishing;
                         self.restart_required = success.restart_required;
-                        self.screen = if was_uninstalling {
-                            Screen::Uninstalled
+                        if was_uninstalling {
+                            self.record_remaining = record_remaining_after_cleanup(
+                                self.forced_cleanup,
+                                installed::find_product_codes_checked(),
+                            );
+                            self.screen = Screen::Uninstalled;
                         } else {
-                            Screen::Finished
-                        };
+                            self.screen = Screen::Finished;
+                        }
+                        self.forced_cleanup = false;
                         self.notice = None;
                     }
                     Err(failure) => {
                         self.log = Some(failure.log.clone());
-                        let mut error = SetupError::from_failure(&failure);
-                        if was_uninstalling && failure.kind == msi::FailureKind::NotInstalled {
-                            // The visible entry outlived its MSI registration. Setup can repair
-                            // the product; the record-damaged sentence names that recovery.
-                            error = SetupError::simple("error_msi_invalid");
+                        if was_uninstalling && uninstall_can_fall_back_to_cleanup(failure.kind) {
+                            self.start_force_cleanup(cx);
+                            return;
                         }
-                        self.error = Some(error);
+                        // A forced cleanup has its own failure wording: the page offers no retry,
+                        // because a second attempt could target a newer install.
+                        self.error = Some(if was_uninstalling && self.forced_cleanup {
+                            SetupError::simple("error_msi_cleanup_failed")
+                        } else {
+                            SetupError::from_failure(&failure)
+                        });
                         self.screen = Screen::Failed;
                     }
                 }
@@ -632,8 +758,58 @@ impl SetupApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{progress_percent, visible_progress};
+    use super::{
+        force_cleanup_allowed, progress_percent, record_remaining_after_cleanup,
+        uninstall_can_fall_back_to_cleanup, visible_progress,
+    };
+    use crate::model::Screen;
+    use crate::msi::FailureKind;
 
+    #[test]
+    fn a_forced_cleanup_can_start_from_the_progress_or_failure_page() {
+        assert!(force_cleanup_allowed(Screen::Uninstalling));
+        assert!(force_cleanup_allowed(Screen::Failed));
+        for screen in [
+            Screen::License,
+            Screen::Location,
+            Screen::Installing,
+            Screen::Finished,
+            Screen::Maintenance,
+            Screen::Uninstall,
+            Screen::Uninstalled,
+        ] {
+            assert!(!force_cleanup_allowed(screen), "{screen:?}");
+        }
+    }
+
+    #[test]
+    fn only_a_missing_msi_record_falls_back_to_cleanup_without_asking() {
+        assert!(uninstall_can_fall_back_to_cleanup(
+            FailureKind::NotInstalled
+        ));
+        assert!(!uninstall_can_fall_back_to_cleanup(
+            FailureKind::InvalidPackage
+        ));
+        assert!(!uninstall_can_fall_back_to_cleanup(FailureKind::Fatal));
+        assert!(!uninstall_can_fall_back_to_cleanup(FailureKind::Cancelled));
+    }
+
+    #[test]
+    fn a_forced_cleanup_discloses_a_record_it_could_not_confirm_is_gone() {
+        assert!(record_remaining_after_cleanup(
+            true,
+            Ok(vec!["{A}".to_string()])
+        ));
+        assert!(!record_remaining_after_cleanup(true, Ok(Vec::new())));
+        assert!(
+            record_remaining_after_cleanup(true, Err(5)),
+            "an enumeration failure cannot confirm the record is gone"
+        );
+        assert!(
+            !record_remaining_after_cleanup(false, Ok(vec!["{A}".to_string()])),
+            "a normal uninstall reports its own state, not the forced cleanup's"
+        );
+    }
     #[test]
     fn progress_never_moves_backwards_when_msi_resets_an_action() {
         assert_eq!(progress_percent(None, 0, 100), Some(0.0));

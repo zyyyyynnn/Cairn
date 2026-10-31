@@ -9,5 +9,6 @@
 //! the brand mark, system appearance and system language. It contains no application workflow.
 
 pub mod brand;
+pub mod focus;
 pub mod locale;
 pub mod theme;

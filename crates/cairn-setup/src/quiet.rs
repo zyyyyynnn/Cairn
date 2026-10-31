@@ -77,35 +77,18 @@ pub fn quiet_uninstall() -> i32 {
         Err(_) => return EXIT_ERROR,
     };
     if product_codes.is_empty() {
-        let cleaned = (|| {
-            let _lock = platform::acquire_msi_execution(30_000)
-                .ok_or_else(|| "another Windows Installer operation is running".to_string())?;
-            match installed::find_product_codes_checked() {
-                Ok(codes) if codes.is_empty() => {
-                    platform::remove_orphan_registration(&product.install_dir, cleanup_helper)
-                }
-                Ok(_) => Err(
-                    "Cairn was installed while the uninstaller was open; close this window and try again."
-                        .to_string(),
-                ),
-                Err(error) => Err(format!("MSI product enumeration failed: {error}")),
-            }
-        })();
-        return match cleaned {
-            Ok(warnings) => {
-                if !warnings.is_empty() {
-                    msi::append_cleanup_failures(&log, &warnings);
-                }
-                EXIT_OK
-            }
-            Err(critical) => {
-                msi::append_cleanup_failures(&log, &[critical]);
-                EXIT_ERROR
-            }
-        };
+        return finish_with_cleanup(&product.install_dir, &[], cleanup_helper, &log);
     }
 
     let result = msi::uninstall_blocking(&product_codes, &log);
+    if let Err(failure) = &result {
+        // A record Windows Installer reports as missing cannot be removed by it again; the file
+        // cleanup is the useful result. A damaged cached package is not a reason to delete files
+        // unattended: the quiet path reports the failure and leaves the choice to the person.
+        if failure.kind == msi::FailureKind::NotInstalled {
+            return finish_with_cleanup(&product.install_dir, &product_codes, cleanup_helper, &log);
+        }
+    }
     if result.is_ok() {
         let mut failures = platform::remove_product_data();
         if let Err(error) =
@@ -118,6 +101,39 @@ pub fn quiet_uninstall() -> i32 {
         }
     }
     exit_code(result.as_ref().err(), result.as_ref().ok())
+}
+
+/// Removes the leftover registration after Windows Installer could not. The product set is
+/// re-checked under the global installer lock, so a Cairn installed while this process waited is
+/// never cleaned up; `expected` is what the original removal started with.
+fn finish_with_cleanup(
+    install_dir: &std::path::Path,
+    expected: &[String],
+    cleanup_helper: Option<PathBuf>,
+    log: &std::path::Path,
+) -> i32 {
+    let cleaned = (|| {
+        let _lock = platform::acquire_msi_execution(30_000)
+            .ok_or_else(|| "another Windows Installer operation is running".to_string())?;
+        let current = installed::find_product_codes_checked()
+            .map_err(|error| format!("MSI product enumeration failed: {error}"))?;
+        if !installed::all_products_are_expected(&current, expected) {
+            return Err("Cairn was installed while the uninstaller was running.".to_string());
+        }
+        platform::remove_orphan_registration(install_dir, cleanup_helper)
+    })();
+    match cleaned {
+        Ok(warnings) => {
+            if !warnings.is_empty() {
+                msi::append_cleanup_failures(log, &warnings);
+            }
+            EXIT_OK
+        }
+        Err(critical) => {
+            msi::append_cleanup_failures(log, &[critical]);
+            EXIT_ERROR
+        }
+    }
 }
 
 pub(crate) fn msi_for_this_build() -> Result<(PathBuf, PathBuf), payload::PayloadError> {
