@@ -14,7 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use windows::core::{BOOL, PCWSTR};
 use windows::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_ITEMS,
-    ERROR_SUCCESS, LPARAM,
+    ERROR_SUCCESS, HANDLE, LPARAM,
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
@@ -41,7 +41,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 /// transaction mutex serialize concurrent work instead of failing closed for a user who cannot
 /// access another account's named object.
 pub enum InstanceLock {
-    Acquired,
+    /// The handle is held for the process lifetime; dropping the enum without a close keeps the
+    /// mutex claim, which is why it must not be treated as an ordinary owned handle.
+    Acquired(#[allow(dead_code)] HANDLE),
     Running,
     Unavailable,
 }
@@ -64,8 +66,7 @@ pub fn acquire_instance(mutex_name: &str, window_titles: &[&str]) -> InstanceLoc
         return InstanceLock::Running;
     }
     // Windows owns the claim until the process exits; closing the handle here would release it.
-    let _ = handle;
-    InstanceLock::Acquired
+    InstanceLock::Acquired(handle)
 }
 
 /// Brings an existing `window_title` to the foreground. The window class is GPUI's shared class,
@@ -391,8 +392,11 @@ fn remove_run_value(root: HKEY, subkey: &str) -> Result<(), String> {
             &mut key,
         )
     };
-    if status != ERROR_SUCCESS {
+    if status == ERROR_FILE_NOT_FOUND {
         return Ok(());
+    }
+    if status != ERROR_SUCCESS {
+        return Err(format!("RegOpenKeyExW failed: {status:?}"));
     }
     let deleted = unsafe { RegDeleteValueW(key, windows::core::w!("Cairn")) };
     unsafe {
@@ -514,25 +518,29 @@ pub fn prepare_install_dir_cleanup() -> Option<PathBuf> {
 
 /// Starts the prepared helper whose only job is to delete the install folder after this process
 /// exits. The install folder contains the running uninstaller, so it cannot remove itself in place.
-pub fn spawn_install_dir_cleanup(install_dir: &Path, helper: Option<PathBuf>) {
+pub fn spawn_install_dir_cleanup(
+    install_dir: &Path,
+    helper: Option<PathBuf>,
+) -> Result<(), String> {
     if crate::model::validate_install_path(&install_dir.to_string_lossy()).is_err() {
-        return;
+        return Err("install folder is outside the administrator-owned root".to_string());
     }
-    let helper = helper.or_else(prepare_install_dir_cleanup);
-    let Some(helper) = helper else {
-        return;
-    };
+    let helper = helper
+        .or_else(prepare_install_dir_cleanup)
+        .ok_or_else(|| "cleanup helper could not be prepared".to_string())?;
     let working_dir = helper
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(std::env::temp_dir);
-    let _ = Command::new(&helper)
+    Command::new(&helper)
         .arg("--cleanup-install-dir")
         .arg(install_dir)
         .arg("--wait-pid")
         .arg(std::process::id().to_string())
         .current_dir(working_dir)
-        .spawn();
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 /// The helper side of [`spawn_install_dir_cleanup`]. It waits for the uninstaller to exit, removes

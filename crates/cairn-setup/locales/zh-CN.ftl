@@ -61,7 +61,7 @@ maintenance_installed = 版本 { $version }
 maintenance_newer = 这台电脑上已有较新版本 { $version }。
 
 uninstall_title = 卸载 Cairn
-uninstall_body = 将移除 Cairn 程序、命令行工具、后台服务、索引、设置和注册表项。
+uninstall_body = 将移除 Cairn 程序、命令行工具、后台服务、索引、设置和注册表项（适用于所有用户）。
 uninstall_progress_title = 正在卸载 Cairn
 uninstall_progress_working = 正在移除 Cairn 文件和设置…
 uninstall_restart = 请重启 Windows 以完成 Cairn 的移除。

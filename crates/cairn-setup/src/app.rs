@@ -424,11 +424,13 @@ impl SetupApp {
         let install_dir = product.install_dir.clone();
         let cleanup_dir = install_dir.clone();
         let session = msi::start_uninstall_with(product_codes, log.clone(), move || {
-            let failures = platform::remove_product_data();
+            let mut failures = platform::remove_product_data();
             for failure in &failures {
                 tracing::warn!("uninstall cleanup: {failure}");
             }
-            platform::spawn_install_dir_cleanup(&cleanup_dir, helper);
+            if let Err(error) = platform::spawn_install_dir_cleanup(&cleanup_dir, helper) {
+                failures.push(format!("install folder: {error}"));
+            }
             failures
         });
 

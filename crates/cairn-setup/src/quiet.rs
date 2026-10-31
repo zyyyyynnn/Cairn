@@ -86,8 +86,15 @@ pub fn quiet_uninstall() -> i32 {
     };
 
     if result.is_ok() {
-        let _ = platform::remove_product_data();
-        platform::spawn_install_dir_cleanup(&product.install_dir, cleanup_helper);
+        let mut failures = platform::remove_product_data();
+        if let Err(error) =
+            platform::spawn_install_dir_cleanup(&product.install_dir, cleanup_helper)
+        {
+            failures.push(format!("install folder: {error}"));
+        }
+        if !failures.is_empty() {
+            msi::append_cleanup_failures(&log, &failures);
+        }
     }
     exit_code(result.as_ref().err(), result.as_ref().ok())
 }

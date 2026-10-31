@@ -6,6 +6,8 @@
 //! run without the GPUI setup, so the UI's path validation alone does not protect the LocalSystem
 //! service from a user-writable folder.
 
+#![windows_subsystem = "windows"]
+
 use std::path::PathBuf;
 
 use cairn_setup::install_path::validate_install_path_under;

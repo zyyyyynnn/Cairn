@@ -61,7 +61,7 @@ maintenance_installed = Version { $version }
 maintenance_newer = A newer version, { $version }, is already installed.
 
 uninstall_title = Uninstall Cairn
-uninstall_body = Removes Cairn, its CLI, service, index, settings, and registry entries.
+uninstall_body = Removes Cairn, its CLI, service, index, settings, and registry entries for all users.
 uninstall_progress_title = Uninstalling Cairn
 uninstall_progress_working = Removing Cairn files and settings…
 uninstall_restart = Restart Windows to finish removing Cairn.

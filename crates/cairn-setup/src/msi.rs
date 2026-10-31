@@ -166,7 +166,7 @@ pub fn start_uninstall_with(
     MsiSession { events }
 }
 
-fn append_cleanup_failures(log: &Path, failures: &[String]) {
+pub(crate) fn append_cleanup_failures(log: &Path, failures: &[String]) {
     use std::io::Write as _;
     let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
@@ -242,6 +242,10 @@ fn run_uninstall_all(
     log: &Path,
     sender: Option<&UnboundedSender<MsiEvent>>,
 ) -> Result<MsiSuccess, MsiFailure> {
+    let log_wide = wide(log.as_os_str());
+    unsafe {
+        let _ = MsiEnableLogW(log_filter(), PCWSTR(log_wide.as_ptr()), 0);
+    }
     let mut restart_required = false;
     for product_code in product_codes {
         let result = run_uninstall(product_code, log, sender)?;
@@ -255,7 +259,6 @@ fn run_uninstall(
     log: &Path,
     sender: Option<&UnboundedSender<MsiEvent>>,
 ) -> Result<MsiSuccess, MsiFailure> {
-    let log_wide = wide(log.as_os_str());
     let product_wide = wide(std::ffi::OsStr::new(product_code));
     let callback_context = sender.map(|sender| CallbackContext {
         sender: sender.clone(),
@@ -267,7 +270,6 @@ fn run_uninstall(
 
     unsafe {
         let _ = MsiSetInternalUI(INSTALLUILEVEL_NONE, None);
-        let _ = MsiEnableLogW(log_filter(), PCWSTR(log_wide.as_ptr()), 0);
         let _ = MsiSetExternalUIRecord(Some(external_ui_handler), MSI_FILTER, context_ptr, None);
         let code = MsiConfigureProductW(
             PCWSTR(product_wide.as_ptr()),
