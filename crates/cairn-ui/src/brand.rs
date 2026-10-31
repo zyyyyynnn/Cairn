@@ -7,7 +7,9 @@
 use std::borrow::Cow;
 use std::sync::{Arc, OnceLock};
 
-use gpui_kit::gpui::{App, Font, FontFallbacks, FontWeight, Image, ImageFormat, SharedString};
+use gpui_kit::gpui::{
+    App, Font, FontFallbacks, FontWeight, Image, ImageFormat, SharedString, TextRenderingMode,
+};
 
 /// The base font of a Cairn window at zoom 1.0, in pixels. It anchors every `rem` helper.
 pub const BASE_FONT_PX: f32 = 14.0;
@@ -58,6 +60,15 @@ pub fn init_fonts(cx: &App) {
         ];
         let _ = cx.text_system().add_fonts(fonts);
     });
+}
+
+/// Switches every product glyph to grayscale antialiasing.
+///
+/// ClearType paints coloured fringes on the serif's thin strokes at fractional display scales.
+/// Grayscale keeps the edges neutral and still uses the platform's hinting. It must run before
+/// the first window opens so every window inherits the mode.
+pub fn init_text_rendering(cx: &mut App) {
+    cx.set_text_rendering_mode(TextRenderingMode::Grayscale);
 }
 
 /// The 32 px mark drawn at the 20 px title-bar token in every title bar. Assets are frozen:
