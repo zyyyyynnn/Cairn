@@ -396,8 +396,9 @@ impl CairnApp {
             .min_w(rems(layout::SIDEBAR_MIN_WIDTH))
             .flex_shrink_0()
             .h_full()
-            .relative()
             .bg(tokens.sidebar)
+            .border_r_1()
+            .border_color(tokens.border)
             // The sidebar is another content surface: any press in it leaves the result rows,
             // including a press on a row that is navigating away. The bin keeps its
             // identity-keyed selection across these presses.
@@ -424,8 +425,11 @@ impl CairnApp {
                         accessibility::element(locations)
                             .aria_label(locations_title.clone())
                             .px(rems(layout::INNER_SPACING))
-                            .pt(rems(layout::SPACE_4))
-                            .pb(rems(layout::SPACE_4))
+                            // The caption fills the search-band height so its optical centre and
+                            // the first row share the search row and table-head bands.
+                            .h(rems(layout::SEARCH_BAND_HEIGHT - 2.0 * layout::SPACE_4))
+                            .flex()
+                            .items_center()
                             .text_sm()
                             .font_medium()
                             .text_color(tokens.muted_foreground)
@@ -445,17 +449,6 @@ impl CairnApp {
                             .child(drives_title),
                     )
                     .children(drive_elements),
-            )
-            // The column divider begins under the table head, not beside the search band: the
-            // search row and header join the sidebar chrome above this line.
-            .child(
-                div()
-                    .absolute()
-                    .top(rems(layout::SEARCH_BAND_HEIGHT + layout::HEADER_HEIGHT))
-                    .right_0()
-                    .bottom_0()
-                    .w(theme::HAIRLINE)
-                    .bg(tokens.border),
             )
             .into_any_element()
     }

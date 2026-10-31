@@ -174,7 +174,7 @@ fn apply_surface_ramp(theme: &mut Theme) {
     let ramp = surface_ramp(theme.mode == ThemeMode::Dark);
     theme.background = gray(ramp.content);
     theme.muted = gray(ramp.inset);
-    theme.table_head = gray(ramp.inset);
+    theme.table_head = gray(ramp.content);
     theme.sidebar = gray(ramp.frame);
     theme.status_bar = gray(ramp.frame);
     theme.title_bar = gray(ramp.frame);

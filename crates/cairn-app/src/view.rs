@@ -804,12 +804,22 @@ impl CairnApp {
     ) -> Div {
         if self.drive_view.is_some() {
             let body = self.render_treemap_body(tokens, window, cx);
+            let body_surface = v_flex()
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .mx(rems(layout::SPACE_4))
+                .mb(rems(layout::SPACE_4))
+                .bg(tokens.background)
+                .rounded(tokens.radius)
+                .overflow_hidden()
+                .child(body);
             return v_flex()
                 .flex_1()
                 .min_w_0()
                 .min_h_0()
-                .bg(tokens.background)
-                .child(body);
+                .bg(tokens.chrome)
+                .child(body_surface);
         }
 
         let QueryBand {
@@ -827,12 +837,22 @@ impl CairnApp {
             cx,
         );
 
+        let results_surface = v_flex()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .mx(rems(layout::SPACE_4))
+            .mb(rems(layout::SPACE_4))
+            .bg(tokens.background)
+            .rounded(tokens.radius)
+            .overflow_hidden()
+            .child(results);
         v_flex()
             .flex_1()
             .min_w_0()
             .min_h_0()
-            .bg(tokens.background)
+            .bg(tokens.chrome)
             .child(query)
-            .child(results)
+            .child(results_surface)
     }
 }
