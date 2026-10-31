@@ -33,6 +33,21 @@ jobs:
 
       - name: Documentation check
         run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+
+      - name: Internationalization check
+        run: cargo run -p xtask -- check-i18n
+
+  deny:
+    name: Dependency Policy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Dependency policy
+        uses: EmbarkStudios/cargo-deny-action@v2
 
   test:
     name: Domain & System Test Suite
@@ -58,4 +73,32 @@ jobs:
         run: cargo test -p cairn-app
 
       - name: "Layer 4: Tooling & Release Verification"
-        run: cargo test -p cairn-cli -p cairn-worker -p xtask
+        run: cargo test -p cairn-cli -p cairn-worker -p cairn-setup -p xtask
+
+  package:
+    name: Installer Package
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install WiX
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          echo "$env:USERPROFILE\.dotnet\tools" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Add the WiX UI extension
+        run: wix extension add -g WixToolset.Util.wixext/5.0.2
+
+      - name: Build release binaries
+        run: cargo build --release
+
+      - name: Build and validate the installer
+        run: cargo test -p xtask real_package_builds_msi_and_setup -- --ignored --nocapture

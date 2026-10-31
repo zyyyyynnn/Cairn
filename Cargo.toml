@@ -11,6 +11,8 @@ members = [
     "crates/cairn-app",
     "crates/cairn-cli",
     "crates/cairn-ui",
+    "crates/cairn-setup",
+    "crates/cairn-setup-bin",
     "xtask",
 ]
 
@@ -31,6 +33,7 @@ cairn-service = { path = "crates/cairn-service" }
 cairn-worker = { path = "crates/cairn-worker" }
 cairn-client = { path = "crates/cairn-client" }
 cairn-ui = { path = "crates/cairn-ui" }
+cairn-setup = { path = "crates/cairn-setup" }
 
 # Serialization & IPC
 serde = { version = "1.0", features = ["derive"] }
