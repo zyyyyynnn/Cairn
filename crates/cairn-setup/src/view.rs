@@ -90,6 +90,7 @@ struct Tokens {
     danger_label: Hsla,
     muted: Hsla,
     row_hover: Hsla,
+    ring: Hsla,
 }
 
 impl Tokens {
@@ -108,6 +109,7 @@ impl Tokens {
             danger_label: theme.tokens.button_danger_foreground.color,
             muted: theme.muted,
             row_hover: theme.list_hover,
+            ring: theme.ring,
         }
     }
 }
@@ -964,6 +966,14 @@ impl SetupApp {
         let on_click_key = on_click.clone();
 
         let indicator_size = px(14.0);
+        // The frame sits on the indicator edge with no gap. A checked box is filled with the
+        // foreground ink, so its frame uses the ring ink instead and stays visible against both the
+        // fill and the page.
+        let focus_frame = if checked {
+            tokens.ring
+        } else {
+            tokens.foreground
+        };
 
         h_flex()
             .id("setup-accept")
@@ -997,11 +1007,7 @@ impl SetupApp {
                     .rounded(RADIUS)
                     .border_1()
                     // A reserved 1px frame sits on the indicator edge, not around a padded gap.
-                    .border_color(
-                        tokens
-                            .foreground
-                            .opacity(if is_focused { 1.0 } else { 0.0 }),
-                    )
+                    .border_color(focus_frame.opacity(if is_focused { 1.0 } else { 0.0 }))
                     .child(
                         div()
                             .size(indicator_size)
