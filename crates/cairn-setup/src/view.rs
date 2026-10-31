@@ -90,7 +90,6 @@ struct Tokens {
     danger_label: Hsla,
     muted: Hsla,
     row_hover: Hsla,
-    ring: Hsla,
 }
 
 impl Tokens {
@@ -109,7 +108,6 @@ impl Tokens {
             danger_label: theme.tokens.button_danger_foreground.color,
             muted: theme.muted,
             row_hover: theme.list_hover,
-            ring: theme.ring,
         }
     }
 }
@@ -902,7 +900,6 @@ impl SetupApp {
         let is_focused = self.uninstall_focus.is_focused(window);
         h_flex()
             .id("setup-uninstall-now")
-            .relative()
             .role(Role::Button)
             .aria_label(label.clone())
             .track_focus(&self.uninstall_focus)
@@ -914,6 +911,14 @@ impl SetupApp {
             .justify_center()
             .whitespace_nowrap()
             .rounded(RADIUS)
+            // The frame is always reserved on the component edge, like the product's other focus
+            // frames, so focusing the destructive action cannot move the footer.
+            .border_1()
+            .border_color(
+                tokens
+                    .foreground
+                    .opacity(if is_focused { 1.0 } else { 0.0 }),
+            )
             .bg(tokens.danger_fill)
             .text_color(tokens.danger_label)
             .text_sm()
@@ -927,19 +932,6 @@ impl SetupApp {
                     this.start_uninstall(cx);
                 }
             }))
-            .when(is_focused, |this| {
-                this.child(
-                    div()
-                        .absolute()
-                        .top(px(-4.0))
-                        .left(px(-4.0))
-                        .right(px(-4.0))
-                        .bottom(px(-4.0))
-                        .rounded(RADIUS + px(4.0))
-                        .border_2()
-                        .border_color(tokens.foreground),
-                )
-            })
             .child(label)
             .into_any_element()
     }
@@ -1001,11 +993,14 @@ impl SetupApp {
             }))
             .child(
                 div()
-                    .p(px(2.0))
                     .rounded(RADIUS)
                     .border_1()
-                    // Reserve the focus stroke so focusing the checkbox cannot move the row.
-                    .border_color(tokens.ring.opacity(if is_focused { 1.0 } else { 0.0 }))
+                    // A reserved 1px frame sits on the indicator edge, not around a padded gap.
+                    .border_color(
+                        tokens
+                            .foreground
+                            .opacity(if is_focused { 1.0 } else { 0.0 }),
+                    )
                     .child(
                         div()
                             .size(indicator_size)
