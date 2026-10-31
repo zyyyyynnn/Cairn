@@ -9380,6 +9380,7 @@ dependencies = [
  "cairn-ntfs",
  "cairn-protocol",
  "cairn-service",
+ "cairn-setup",
  "clap",
  "crc32fast",
  "rayon",

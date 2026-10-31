@@ -11,6 +11,7 @@
 
 pub(crate) mod app;
 pub(crate) mod i18n;
+pub mod install_path;
 pub(crate) mod installed;
 pub(crate) mod model;
 pub(crate) mod msi;

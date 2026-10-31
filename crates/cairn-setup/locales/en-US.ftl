@@ -39,10 +39,10 @@ error_uninstall_title = Uninstall did not finish
 error_uninstall_msi_unknown = The uninstall did not finish, so Cairn is still installed. Check the log for the reason, then try again.
 error_uninstall_msi_cancelled = The uninstall was cancelled, so Cairn is still installed.
 error_uninstall_msi_busy = Another installer or uninstaller is already running. Please wait for it to complete and try again.
-error_uninstall_msi_invalid = The installation record Cairn needs to uninstall is incomplete or damaged. Run the uninstaller again.
+error_uninstall_msi_invalid = The installation record Cairn needs to uninstall is incomplete or damaged. Run CairnSetup.exe to repair Cairn, then uninstall again.
 error_uninstall_msi_platform = This installation record does not support this version of Windows.
 error_uninstall_msi_fatal = Windows Installer could not complete the uninstall. Check the log, then try again.
-error_uninstall_not_installed = No Cairn installation was found.
+error_uninstall_not_installed = No Cairn installation was found. If Cairn still appears in Apps & features, run CairnSetup.exe to repair it.
 
 error_title = Setup did not finish
 error_msi_unknown = The install did not finish, so existing files were not removed. Check the log for the reason, then try again.
@@ -66,7 +66,7 @@ uninstall_progress_title = Uninstalling Cairn
 uninstall_progress_working = Removing Cairn files and settings…
 uninstall_restart = Restart Windows to finish removing Cairn.
 uninstall_done_title = Cairn is uninstalled
-uninstall_done_body = Your personal files were not changed.
+uninstall_cleanup_incomplete = Some Cairn data could not be removed. Check the log for details.
 
 path_empty = Enter an install folder.
 path_not_absolute = Enter a full local path, for example C:\Program Files\Cairn.

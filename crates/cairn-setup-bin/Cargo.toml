@@ -16,6 +16,11 @@ name = "CairnUninstall"
 path = "src/bin/cairn-uninstall.rs"
 test = false
 
+[[bin]]
+name = "CairnInstallGuard"
+path = "src/bin/cairn-install-guard.rs"
+test = false
+
 [dependencies]
 cairn-setup.workspace = true
 

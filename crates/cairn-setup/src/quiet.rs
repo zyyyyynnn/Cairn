@@ -69,17 +69,21 @@ pub fn quiet_uninstall() -> i32 {
 
     let log = platform::uninstall_log_path();
     let cleanup_helper = platform::prepare_install_dir_cleanup();
-    let result = product
-        .product_code
-        .as_deref()
-        .map(|code| msi::uninstall_blocking(code, &log))
-        .unwrap_or_else(|| {
-            Err(MsiFailure {
-                code: 1605,
-                kind: msi::FailureKind::NotInstalled,
-                log: log.clone(),
-            })
-        });
+    let mut product_codes = installed::find_product_codes();
+    if product_codes.is_empty() {
+        if let Some(code) = product.product_code.clone() {
+            product_codes.push(code);
+        }
+    }
+    let result = if product_codes.is_empty() {
+        Err(MsiFailure {
+            code: 1605,
+            kind: msi::FailureKind::NotInstalled,
+            log: log.clone(),
+        })
+    } else {
+        msi::uninstall_blocking(&product_codes, &log)
+    };
 
     if result.is_ok() {
         let _ = platform::remove_product_data();
@@ -92,20 +96,28 @@ pub(crate) fn msi_for_this_build() -> Result<(PathBuf, PathBuf), payload::Payloa
     let payload_dir = platform::create_payload_dir().map_err(payload::PayloadError::Io)?;
     let msi = payload_dir.join("cairn.msi");
 
-    // A debug build is allowed to point at a freshly built MSI for UI and integration work. Release
-    // builds always use the payload appended to this executable; an elevated process never installs
-    // an arbitrary user-writable path.
-    #[cfg(debug_assertions)]
-    if let Some(path) = std::env::var_os("CAIRN_SETUP_MSI_PATH") {
-        let path = PathBuf::from(path);
-        if path.is_file() {
-            std::fs::copy(&path, &msi).map_err(payload::PayloadError::Io)?;
-            return Ok((msi, payload_dir));
+    let prepared = (|| -> Result<(), payload::PayloadError> {
+        // A debug build is allowed to point at a freshly built MSI for UI and integration work.
+        // Release builds always use the payload appended to this executable; an elevated process
+        // never installs an arbitrary user-writable path.
+        #[cfg(debug_assertions)]
+        if let Some(path) = std::env::var_os("CAIRN_SETUP_MSI_PATH") {
+            let path = PathBuf::from(path);
+            if path.is_file() {
+                std::fs::copy(&path, &msi).map_err(payload::PayloadError::Io)?;
+                return Ok(());
+            }
         }
-    }
 
-    let current = std::env::current_exe().map_err(payload::PayloadError::Io)?;
-    payload::extract_payload(&current, &msi)?;
+        let current = std::env::current_exe().map_err(payload::PayloadError::Io)?;
+        payload::extract_payload(&current, &msi)?;
+        Ok(())
+    })();
+
+    if let Err(error) = prepared {
+        let _ = std::fs::remove_dir_all(&payload_dir);
+        return Err(error);
+    }
     Ok((msi, payload_dir))
 }
 

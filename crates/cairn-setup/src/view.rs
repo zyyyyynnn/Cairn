@@ -17,7 +17,7 @@ use cairn_ui::brand::{
     SERIF_LINE_HEIGHT, UI_ICON_SIZE,
 };
 
-use crate::app::SetupApp;
+use crate::app::{visible_progress, SetupApp};
 use crate::model::Screen;
 
 /// One physical platform surface: the caption row is 34 px at every zoom, like the product shell.
@@ -41,6 +41,16 @@ const TITLE_BAR_ICON: Pixels = cairn_ui::brand::APP_ICON_SIZE;
 const PAGE_TITLE_SIZE: f32 = 16.0 / 14.0;
 const PAGE_ICON: Pixels = px(18.0);
 const CHECK_SVG: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 7.5 6 10l4.5-5.5"/></svg>"#;
+
+/// The path field's accessible name carries its current validation message because the input
+/// component exposes no description attribute. The visible Alert and the focus returned to the
+/// field remain the primary error treatment.
+fn path_accessible_label(label: &str, error: Option<&str>) -> String {
+    match error {
+        Some(error) => format!("{label}: {error}"),
+        None => label.to_string(),
+    }
+}
 
 /// The line box and baseline offset the text system actually uses for one shaped line.
 /// The title-bar lockup positions both runs from these values, so their baselines coincide
@@ -74,6 +84,10 @@ struct Tokens {
     border: Hsla,
     control_stroke: Hsla,
     danger: Hsla,
+    danger_fill: Hsla,
+    danger_hover: Hsla,
+    danger_active: Hsla,
+    danger_label: Hsla,
     muted: Hsla,
     row_hover: Hsla,
     ring: Hsla,
@@ -89,6 +103,10 @@ impl Tokens {
             border: theme.border,
             control_stroke: cairn_ui::theme::control_stroke(theme),
             danger: theme.danger,
+            danger_fill: theme.tokens.button_danger.color,
+            danger_hover: theme.tokens.button_danger_hover.color,
+            danger_active: theme.tokens.button_danger_active.color,
+            danger_label: theme.tokens.button_danger_foreground.color,
             muted: theme.muted,
             row_hover: theme.list_hover,
             ring: theme.ring,
@@ -130,7 +148,9 @@ fn caption_button(
         .items_center()
         .justify_center()
         .text_color(tokens.foreground)
-        .focus_visible(|style| style.border_1().border_color(tokens.ring))
+        // The close button fills with danger on hover; the ring must clear that fill as well as
+        // the page, so it uses the full foreground ink rather than the lighter ring token.
+        .focus_visible(|style| style.border_1().border_color(tokens.foreground))
         .when(is_close, |this| {
             this.hover(|style| style.bg(tokens.danger).text_color(tokens.background))
                 .active(|style| style.bg(tokens.danger).text_color(tokens.background))
@@ -184,7 +204,7 @@ impl Render for SetupApp {
             )
             .child(self.render_titlebar(&tokens, window, cx))
             .child(self.render_body(&tokens, window, cx))
-            .child(self.render_footer(&tokens, cx))
+            .child(self.render_footer(&tokens, window, cx))
     }
 }
 
@@ -354,17 +374,11 @@ impl SetupApp {
             // inside the window's body without scrolling.
             .child(
                 v_flex()
-                    .child(Self::setup_checkbox(
-                        "setup-accept",
-                        self.accepted,
-                        self.i18n.get("license_accept"),
-                        tokens,
-                        window,
-                        cx,
-                        |this, checked, _, cx| {
+                    .child(
+                        self.license_checkbox(tokens, window, cx, |this, checked, _, cx| {
                             this.set_accepted(checked, cx);
-                        },
-                    ))
+                        }),
+                    )
                     .when_some(self.notice, |this, key| {
                         this.child(
                             div()
@@ -387,6 +401,10 @@ impl SetupApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let label = self.i18n.get("install_path_label");
+        let path_error = self
+            .path_error
+            .map(|problem| self.i18n.get(problem.message_key()));
+        let accessible_label = path_accessible_label(&label, path_error.as_deref());
         let path_focused = self.path_input.read(cx).focus_handle(cx).is_focused(window);
         v_flex()
             .gap(MAIN_GAP)
@@ -410,7 +428,11 @@ impl SetupApp {
                             .child(
                                 div().flex_1().min_w_0().child(
                                     Input::new(&self.path_input)
-                                        .aria_label(label)
+                                        .aria_label(accessible_label)
+                                        // The Input's own focus style recolours the border with
+                                        // `theme.ring`, which is the resting stroke; the wrapper's
+                                        // foreground border below is the visible focus indicator.
+                                        .focus_bordered(false)
                                         .border_color(if self.path_error.is_some() {
                                             tokens.danger
                                         } else if path_focused {
@@ -430,7 +452,7 @@ impl SetupApp {
                                     })),
                             ),
                     )
-                    .when_some(self.path_error, |this, problem| {
+                    .when_some(path_error, |this, message| {
                         this.child(
                             div()
                                 .id("setup-path-error")
@@ -438,7 +460,7 @@ impl SetupApp {
                                 .text_sm()
                                 .line_height(relative(1.5))
                                 .text_color(tokens.danger)
-                                .child(self.i18n.get(problem.message_key())),
+                                .child(message),
                         )
                     }),
             )
@@ -457,7 +479,7 @@ impl SetupApp {
     }
 
     fn render_installing(&self, tokens: &Tokens) -> AnyElement {
-        let progress = self.progress.unwrap_or(0.0);
+        let progress = visible_progress(self.progress);
         v_flex()
             .gap(MAIN_GAP)
             .child(self.heading("progress_title"))
@@ -629,7 +651,7 @@ impl SetupApp {
     }
 
     fn render_uninstalling(&self, tokens: &Tokens) -> AnyElement {
-        let progress = self.progress.unwrap_or(0.0);
+        let progress = visible_progress(self.progress);
         let working = self.i18n.get("uninstall_progress_working");
         v_flex()
             .gap(MAIN_GAP)
@@ -672,7 +694,6 @@ impl SetupApp {
         v_flex()
             .gap(MAIN_GAP)
             .child(self.title_row(icon, "uninstall_done_title"))
-            .child(self.paragraph("uninstall_done_body", tokens))
             .when(self.restart_required, |this| {
                 this.child(
                     div()
@@ -691,10 +712,26 @@ impl SetupApp {
                         .child(self.i18n.get(key)),
                 )
             })
+            .when(self.cleanup_incomplete, |this| {
+                this.child(
+                    div()
+                        .id("setup-cleanup-notice")
+                        .role(Role::Alert)
+                        .text_sm()
+                        .line_height(relative(1.5))
+                        .text_color(tokens.danger)
+                        .child(self.i18n.get("uninstall_cleanup_incomplete")),
+                )
+            })
             .into_any_element()
     }
 
-    fn render_footer(&self, tokens: &Tokens, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_footer(
+        &self,
+        tokens: &Tokens,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         // Only progress/status text stays on the leading edge. Every action, including the way
         // out, is grouped at the trailing edge in reading order.
         let mut leading: Vec<AnyElement> = Vec::new();
@@ -806,17 +843,12 @@ impl SetupApp {
             }
             Screen::Uninstall => {
                 actions.push(self.cancel_button(tokens, cx));
-                actions.push(
-                    Button::new("setup-uninstall-now")
-                        .danger()
-                        .label(self.i18n.get("action_uninstall"))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.start_uninstall(cx);
-                        }))
-                        .into_any_element(),
-                );
+                actions.push(self.uninstall_button(tokens, window, cx));
             }
             Screen::Uninstalled => {
+                if self.log.is_some() {
+                    actions.push(self.log_button(cx));
+                }
                 actions.push(
                     Button::new("setup-uninstalled-done")
                         .primary()
@@ -857,6 +889,59 @@ impl SetupApp {
             .into_any_element()
     }
 
+    /// The destructive action owns its focus treatment: the framework draws the filled-button
+    /// focus line at 60% of the label ink inside the fill, which measures 2.51:1 on the light
+    /// danger fill. This ring sits outside the fill on the page and uses the full foreground ink.
+    fn uninstall_button(
+        &self,
+        tokens: &Tokens,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let label = self.i18n.get("action_uninstall");
+        let is_focused = self.uninstall_focus.is_focused(window);
+        h_flex()
+            .id("setup-uninstall-now")
+            .relative()
+            .role(Role::Button)
+            .aria_label(label.clone())
+            .track_focus(&self.uninstall_focus)
+            .h(px(28.0))
+            .px(px(12.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(RADIUS)
+            .bg(tokens.danger_fill)
+            .text_color(tokens.danger_label)
+            .text_sm()
+            .font_weight(FontWeight::MEDIUM)
+            .cursor_pointer()
+            .hover(|style| style.bg(tokens.danger_hover))
+            .active(|style| style.bg(tokens.danger_active))
+            .on_click(cx.listener(|this, _, _, cx| this.start_uninstall(cx)))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    this.start_uninstall(cx);
+                }
+            }))
+            .when(is_focused, |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .top(px(-4.0))
+                        .left(px(-4.0))
+                        .right(px(-4.0))
+                        .bottom(px(-4.0))
+                        .rounded(RADIUS + px(4.0))
+                        .border_2()
+                        .border_color(tokens.foreground),
+                )
+            })
+            .child(label)
+            .into_any_element()
+    }
+
     fn title_row(&self, icon: AnyElement, key: &'static str) -> Div {
         h_flex()
             .items_center()
@@ -865,23 +950,18 @@ impl SetupApp {
             .child(self.heading(key))
     }
 
-    fn setup_checkbox(
-        id: &'static str,
-        checked: bool,
-        label: String,
+    fn license_checkbox(
+        &self,
         tokens: &Tokens,
         window: &mut Window,
         cx: &mut Context<SetupApp>,
         on_click: impl Fn(&mut SetupApp, bool, &mut Window, &mut Context<SetupApp>) + 'static,
     ) -> AnyElement {
-        // A tracked focus handle joins the Tab order only when the handle itself is a tab stop.
-        // The element's own `tab_stop` does not apply to a handle passed to `track_focus`, so a
-        // handle built with `tab_stop(false)` would keep this checkbox out of the Tab order
-        // entirely, and a keyboard user could never reach the license agreement.
-        let focus = window
-            .use_keyed_state(id, cx, |_, cx| cx.focus_handle().tab_stop(true))
-            .read(cx)
-            .clone();
+        let checked = self.accepted;
+        let label = self.i18n.get("license_accept");
+        let description = (self.notice == Some("error_license_required"))
+            .then(|| self.i18n.get("error_license_required"));
+        let focus = &self.license_focus;
         let is_focused = focus.is_focused(window);
 
         let on_click = std::rc::Rc::new(on_click);
@@ -891,15 +971,16 @@ impl SetupApp {
         let indicator_size = px(14.0);
 
         h_flex()
-            .id(id)
+            .id("setup-accept")
             .role(Role::CheckBox)
             .aria_label(label.clone())
+            .when_some(description, |this, text| this.aria_description(text))
             .aria_toggled(if checked {
                 gpui_kit::gpui::accesskit::Toggled::True
             } else {
                 gpui_kit::gpui::accesskit::Toggled::False
             })
-            .track_focus(&focus)
+            .track_focus(focus)
             .min_h(px(24.0))
             .py(px(4.0))
             .items_center()
@@ -982,5 +1063,22 @@ impl SetupApp {
             .line_height(relative(1.5))
             .text_color(tokens.muted_foreground)
             .child(self.i18n.get(key))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::path_accessible_label;
+
+    #[test]
+    fn the_path_label_carries_the_validation_message() {
+        assert_eq!(
+            path_accessible_label("Install folder", None),
+            "Install folder"
+        );
+        assert_eq!(
+            path_accessible_label("Install folder", Some("Enter a full local path.")),
+            "Install folder: Enter a full local path."
+        );
     }
 }

@@ -39,10 +39,10 @@ error_uninstall_title = 卸载未完成
 error_uninstall_msi_unknown = 卸载没有完成，Cairn 仍在这台电脑上。请查看日志了解原因，然后重试。
 error_uninstall_msi_cancelled = 卸载已取消，Cairn 仍在这台电脑上。
 error_uninstall_msi_busy = 另一个安装或卸载程序正在运行，请等待其完成后重试。
-error_uninstall_msi_invalid = 卸载所需的安装信息不完整或已损坏。请重新运行卸载程序。
+error_uninstall_msi_invalid = 卸载所需的安装信息不完整或已损坏。请运行 CairnSetup.exe 修复 Cairn，然后再次卸载。
 error_uninstall_msi_platform = 这个安装记录不支持当前版本的 Windows。
 error_uninstall_msi_fatal = Windows 安装程序未能完成卸载。请查看日志后重试。
-error_uninstall_not_installed = 没有找到 Cairn 的安装记录。
+error_uninstall_not_installed = 没有找到 Cairn 的安装记录。如果“应用和功能”中仍有 Cairn，请运行 CairnSetup.exe 进行修复。
 
 error_title = 安装未完成
 error_msi_unknown = 安装没有完成，现有文件没有被删除。请查看日志了解原因，然后重试。
@@ -66,7 +66,7 @@ uninstall_progress_title = 正在卸载 Cairn
 uninstall_progress_working = 正在移除 Cairn 文件和设置…
 uninstall_restart = 请重启 Windows 以完成 Cairn 的移除。
 uninstall_done_title = 卸载完成
-uninstall_done_body = 你的个人文件未受影响。
+uninstall_cleanup_incomplete = 部分 Cairn 数据未能移除。请查看日志了解详情。
 
 path_empty = 请输入安装文件夹。
 path_not_absolute = 请输入完整的本地路径，例如 C:\Program Files\Cairn。

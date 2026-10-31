@@ -6,8 +6,9 @@
 //! tested without a window or an MSI.
 
 use std::cmp::Ordering;
-use std::path::{Component, Path, PathBuf};
+use std::path::PathBuf;
 
+pub use crate::install_path::{validate_install_path_under, PathProblem};
 use crate::PRODUCT_VERSION;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -119,37 +120,16 @@ pub fn initial_screen(
         // The 0.1.x Burn package predates this installer and must be removed before the new MSI
         // can own the machine. Its version is allowed to look newer than this work line.
         Some(_) if legacy_burn => Screen::License,
-        Some(product) if product.is_newer_than_package() || product.is_same_as_package() => {
+        Some(product)
+            if product
+                .product_code
+                .as_deref()
+                .is_some_and(|code| !code.trim().is_empty())
+                && (product.is_newer_than_package() || product.is_same_as_package()) =>
+        {
             Screen::Maintenance
         }
         Some(_) => Screen::License,
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PathProblem {
-    Empty,
-    NotAbsolute,
-    Network,
-    Root,
-    System,
-    OutsideProgramFiles,
-    File,
-    Invalid,
-}
-
-impl PathProblem {
-    pub fn message_key(self) -> &'static str {
-        match self {
-            PathProblem::Empty => "path_empty",
-            PathProblem::NotAbsolute => "path_not_absolute",
-            PathProblem::Network => "path_network",
-            PathProblem::Root => "path_root",
-            PathProblem::System => "path_system",
-            PathProblem::OutsideProgramFiles => "path_outside_program_files",
-            PathProblem::File => "path_file",
-            PathProblem::Invalid => "path_invalid",
-        }
     }
 }
 
@@ -172,76 +152,7 @@ pub fn uninstall_error_key(install_key: &str) -> &'static str {
 /// Validates a folder typed or picked by the user. It rejects only paths that cannot be a sensible
 /// machine-wide product folder; an existing non-empty folder is allowed because upgrades reuse it.
 pub fn validate_install_path(raw: &str) -> Result<PathBuf, PathProblem> {
-    let raw = raw.trim();
-    if raw.is_empty() {
-        return Err(PathProblem::Empty);
-    }
-    if raw.starts_with(r"\\") || raw.starts_with("//") {
-        return Err(PathProblem::Network);
-    }
-    if !Path::new(raw).is_absolute() {
-        return Err(PathProblem::NotAbsolute);
-    }
-    if raw
-        .chars()
-        .any(|ch| matches!(ch, '<' | '>' | '"' | '|' | '?' | '*'))
-    {
-        return Err(PathProblem::Invalid);
-    }
-    // A colon is legal only as the drive prefix of an absolute path.
-    if raw[2..].contains(':') {
-        return Err(PathProblem::Invalid);
-    }
-
-    let trimmed = raw.trim_end_matches(['\\', '/']);
-    if trimmed.is_empty() {
-        return Err(PathProblem::Root);
-    }
-    let path = PathBuf::from(trimmed);
-    if path.parent().is_none() {
-        return Err(PathProblem::Root);
-    }
-
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
-            Component::RootDir => normalized.push(component.as_os_str()),
-            Component::CurDir => {}
-            Component::ParentDir => return Err(PathProblem::Invalid),
-            Component::Normal(part) => {
-                let text = part.to_string_lossy();
-                if text.ends_with('.') || text.ends_with(' ') || text.contains([';', '%']) {
-                    return Err(PathProblem::Invalid);
-                }
-                normalized.push(part);
-            }
-        }
-    }
-    if normalized.parent().is_none() {
-        return Err(PathProblem::Root);
-    }
-
-    let lower = normalized.to_string_lossy().to_ascii_lowercase();
-    if lower == r"c:\windows"
-        || lower.starts_with(r"c:\windows\")
-        || lower == r"c:\program files"
-        || lower == r"c:\program files (x86)"
-        || lower == r"c:\programdata"
-    {
-        return Err(PathProblem::System);
-    }
-
-    // A machine-wide service and PATH entry must live under an administrator-owned root. Allowing
-    // a user-writable folder would let a standard user replace the service binary after elevation.
-    if !is_under_program_files(&normalized) {
-        return Err(PathProblem::OutsideProgramFiles);
-    }
-
-    if normalized.is_file() {
-        return Err(PathProblem::File);
-    }
-    Ok(normalized)
+    validate_install_path_under(raw, &program_files_root())
 }
 
 /// The machine-wide Program Files root, from the OS rather than a user environment variable.
@@ -264,21 +175,6 @@ pub fn program_files_root() -> PathBuf {
         }
     }
     PathBuf::from(r"C:\Program Files")
-}
-
-fn is_under_program_files(path: &Path) -> bool {
-    let root = program_files_root();
-    let root = root
-        .to_string_lossy()
-        .trim_end_matches(['\\', '/'])
-        .to_ascii_lowercase();
-    let path = path
-        .to_string_lossy()
-        .trim_end_matches(['\\', '/'])
-        .to_ascii_lowercase();
-    path.len() > root.len()
-        && path.starts_with(&root)
-        && path.as_bytes().get(root.len()) == Some(&b'\\')
 }
 
 /// The machine-wide default. The MSI's `ProgramFiles64Folder` and this value both come from the
@@ -327,8 +223,18 @@ mod tests {
         InstalledProduct {
             version: version.to_string(),
             install_dir: PathBuf::from(r"C:\Program Files\Cairn"),
-            product_code: None,
+            product_code: Some("{00000000-0000-0000-0000-000000000000}".to_string()),
         }
+    }
+
+    #[test]
+    fn a_registration_without_a_product_code_is_repaired() {
+        let mut damaged = product(env!("CARGO_PKG_VERSION"));
+        damaged.product_code = None;
+        assert_eq!(
+            initial_screen(Launch::Setup, Some(&damaged), false),
+            Screen::License
+        );
     }
 
     #[test]

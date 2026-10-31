@@ -7,11 +7,20 @@
 use gpui_kit::gpui::*;
 
 use crate::app::SetupApp;
+use crate::i18n::I18n;
 use crate::model::Launch;
 use crate::platform;
 
-const SETUP_TITLE: &str = "Cairn Setup";
-const UNINSTALL_TITLE: &str = "Cairn Uninstall";
+/// The native window title follows the same bundle as the in-window wordmark, so the taskbar and
+/// accessibility tree use the language the person is reading.
+fn window_title(language: &str, launch: Launch) -> String {
+    let i18n = I18n::new(language);
+    let subtitle = match launch {
+        Launch::Setup => i18n.get("setup_subtitle"),
+        Launch::Uninstall => i18n.get("uninstall_subtitle"),
+    };
+    format!("Cairn {subtitle}")
+}
 
 pub fn run_setup() {
     run(Launch::Setup);
@@ -22,13 +31,22 @@ pub fn run_uninstall() {
 }
 
 fn run(launch: Launch) {
+    let language = crate::preview::Preview::from_env()
+        .and_then(|preview| preview.language)
+        .unwrap_or_else(|| cairn_ui::locale::system_language().to_string());
+    let setup_title = window_title(&language, Launch::Setup);
+    let uninstall_title = window_title(&language, Launch::Uninstall);
     let title = match launch {
-        Launch::Setup => SETUP_TITLE,
-        Launch::Uninstall => UNINSTALL_TITLE,
+        Launch::Setup => setup_title.clone(),
+        Launch::Uninstall => uninstall_title.clone(),
     };
-    if platform::acquire_instance(r"Local\CairnSetupInstanceMutex", title).is_none() {
-        return;
-    }
+    let _instance = match platform::acquire_instance(
+        r"Local\CairnSetupInstanceMutex",
+        &[setup_title.as_str(), uninstall_title.as_str()],
+    ) {
+        platform::InstanceLock::Running => return,
+        lock => lock,
+    };
 
     gpui_kit::application()
         .with_assets(gpui_kit::assets::AllAssets)
@@ -67,4 +85,18 @@ fn run(launch: Launch) {
             })
             .expect("failed to open the Cairn setup window");
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::window_title;
+    use crate::model::Launch;
+
+    #[test]
+    fn the_native_title_follows_the_interface_language() {
+        assert_eq!(window_title("en-US", Launch::Setup), "Cairn Setup");
+        assert_eq!(window_title("en-US", Launch::Uninstall), "Cairn Uninstall");
+        assert_eq!(window_title("zh-CN", Launch::Setup), "Cairn 安装程序");
+        assert_eq!(window_title("zh-CN", Launch::Uninstall), "Cairn 卸载程序");
+    }
 }

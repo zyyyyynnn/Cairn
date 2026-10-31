@@ -55,7 +55,9 @@ pub fn installed_product() -> Option<InstalledProduct> {
         install_dir: read_hklm_string(PRODUCT_KEY, "InstallFolder")
             .map(PathBuf::from)
             .unwrap_or_else(default_install_dir),
-        product_code: read_hklm_string(PRODUCT_KEY, "ProductCode"),
+        // The MSI registration is authoritative. A custom ARP key without a product code is a
+        // leftover, not an uninstallable product; setup treats it as a repair case.
+        product_code: None,
     })
 }
 
@@ -67,20 +69,35 @@ pub(crate) fn upgrade_code_guid() -> String {
 /// The ProductCode of the installed Cairn MSI, if any. This is what the uninstaller passes to
 /// `MsiConfigureProductW`; it is not guessed from a version string.
 pub fn find_product_code() -> Option<String> {
+    find_product_codes().into_iter().next()
+}
+
+/// Every product registered under Cairn's upgrade code. A failed side-by-side install can leave
+/// more than one; uninstalling only the first would leave a second entry and its service behind.
+pub fn find_product_codes() -> Vec<String> {
     let upgrade = wide(std::ffi::OsStr::new(&upgrade_code_guid()));
-    let mut product = [0u16; 39];
-    let result = unsafe {
-        MsiEnumRelatedProductsW(
-            PCWSTR(upgrade.as_ptr()),
-            None,
-            0,
-            windows::core::PWSTR(product.as_mut_ptr()),
-        )
-    };
-    if result != ERROR_SUCCESS.0 {
-        return None;
+    let mut codes = Vec::new();
+    let mut index = 0u32;
+    loop {
+        let mut product = [0u16; 39];
+        let result = unsafe {
+            MsiEnumRelatedProductsW(
+                PCWSTR(upgrade.as_ptr()),
+                None,
+                index,
+                windows::core::PWSTR(product.as_mut_ptr()),
+            )
+        };
+        if result != ERROR_SUCCESS.0 {
+            break;
+        }
+        let code = utf16_until_nul(&product);
+        if !code.is_empty() && !codes.contains(&code) {
+            codes.push(code);
+        }
+        index = index.saturating_add(1);
     }
-    Some(utf16_until_nul(&product))
+    codes
 }
 
 /// The old Burn bundles registered their own Apps & features entries and launched `CairnSetup.exe`.

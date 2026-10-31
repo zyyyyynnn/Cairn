@@ -29,6 +29,7 @@ const MSI_FILTER: u32 = INSTALLMESSAGE_PROGRESS.0 as u32
 
 const ERROR_SUCCESS: u32 = 0;
 const ERROR_SUCCESS_REBOOT_REQUIRED: u32 = 3010;
+const ERROR_SUCCESS_REBOOT_INITIATED: u32 = 1641;
 const ERROR_UNKNOWN_PRODUCT: u32 = 1605;
 const ERROR_INSTALL_USEREXIT: u32 = 1602;
 const ERROR_INSTALL_FAILURE: u32 = 1603;
@@ -42,6 +43,7 @@ const ERROR_PRODUCT_VERSION: u32 = 1638;
 pub enum MsiEvent {
     Action(String),
     Progress { current: u32, total: u32 },
+    CleanupFailed,
     Done(Result<MsiSuccess, MsiFailure>),
 }
 
@@ -139,23 +141,44 @@ pub fn start_install(request: InstallRequest) -> MsiSession {
     MsiSession { events }
 }
 
-/// Starts a product removal and runs `after_success` before the final `Done` event. The cleanup of
-/// data outside the MSI therefore belongs to the same visible operation, not to a detached task
-/// that can be interrupted when the window closes.
+/// Starts a product removal and runs `after_success` before the final `Done` event. Every product
+/// registered under the upgrade code is removed, so a failed side-by-side install cannot leave a
+/// second service or Apps & features entry behind. The cleanup of data outside the MSI therefore
+/// belongs to the same visible operation, not to a detached task that can be interrupted when the
+/// window closes.
 pub fn start_uninstall_with(
-    product_code: String,
+    product_codes: Vec<String>,
     log: PathBuf,
-    after_success: impl FnOnce() + Send + 'static,
+    after_success: impl FnOnce() -> Vec<String> + Send + 'static,
 ) -> MsiSession {
     let (sender, events) = unbounded_channel();
     std::thread::spawn(move || {
-        let result = run_uninstall(&product_code, &log, Some(&sender));
+        let result = run_uninstall_all(&product_codes, &log, Some(&sender));
         if result.is_ok() {
-            after_success();
+            let failures = after_success();
+            if !failures.is_empty() {
+                append_cleanup_failures(&log, &failures);
+                let _ = sender.send(MsiEvent::CleanupFailed);
+            }
         }
         let _ = sender.send(MsiEvent::Done(result));
     });
     MsiSession { events }
+}
+
+fn append_cleanup_failures(log: &Path, failures: &[String]) {
+    use std::io::Write as _;
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log)
+    else {
+        return;
+    };
+    let _ = writeln!(file, "Cairn uninstall cleanup incomplete:");
+    for failure in failures {
+        let _ = writeln!(file, "  {failure}");
+    }
 }
 
 /// The quiet path: no window and no progress consumer, but the same transaction and result mapping.
@@ -163,8 +186,8 @@ pub fn install_blocking(request: &InstallRequest) -> Result<MsiSuccess, MsiFailu
     run_install(request, None)
 }
 
-pub fn uninstall_blocking(product_code: &str, log: &Path) -> Result<MsiSuccess, MsiFailure> {
-    run_uninstall(product_code, log, None)
+pub fn uninstall_blocking(product_codes: &[String], log: &Path) -> Result<MsiSuccess, MsiFailure> {
+    run_uninstall_all(product_codes, log, None)
 }
 
 fn run_install(
@@ -190,14 +213,20 @@ fn run_install(
             Ok(status) => status.code().unwrap_or(-1) as u32,
             Err(_) => u32::MAX,
         };
-        if !matches!(code, ERROR_SUCCESS | ERROR_SUCCESS_REBOOT_REQUIRED) {
+        if !matches!(
+            code,
+            ERROR_SUCCESS | ERROR_SUCCESS_REBOOT_REQUIRED | ERROR_SUCCESS_REBOOT_INITIATED
+        ) {
             return Err(MsiFailure {
                 code,
                 kind: FailureKind::Legacy,
                 log: request.log.clone(),
             });
         }
-        legacy_restart |= code == ERROR_SUCCESS_REBOOT_REQUIRED;
+        legacy_restart |= matches!(
+            code,
+            ERROR_SUCCESS_REBOOT_REQUIRED | ERROR_SUCCESS_REBOOT_INITIATED
+        );
     }
 
     let install_dir = request.install_dir.to_string_lossy();
@@ -206,6 +235,19 @@ fn run_install(
     Ok(MsiSuccess {
         restart_required: result.restart_required || legacy_restart,
     })
+}
+
+fn run_uninstall_all(
+    product_codes: &[String],
+    log: &Path,
+    sender: Option<&UnboundedSender<MsiEvent>>,
+) -> Result<MsiSuccess, MsiFailure> {
+    let mut restart_required = false;
+    for product_code in product_codes {
+        let result = run_uninstall(product_code, log, sender)?;
+        restart_required |= result.restart_required;
+    }
+    Ok(MsiSuccess { restart_required })
 }
 
 fn run_uninstall(
@@ -269,7 +311,7 @@ fn finish(code: u32, log: &Path) -> Result<MsiSuccess, MsiFailure> {
         ERROR_SUCCESS => Ok(MsiSuccess {
             restart_required: false,
         }),
-        ERROR_SUCCESS_REBOOT_REQUIRED => Ok(MsiSuccess {
+        ERROR_SUCCESS_REBOOT_REQUIRED | ERROR_SUCCESS_REBOOT_INITIATED => Ok(MsiSuccess {
             restart_required: true,
         }),
         other => Err(MsiFailure::new(other, log.to_path_buf())),
@@ -391,7 +433,7 @@ fn wide(value: &std::ffi::OsStr) -> Vec<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::{FailureKind, MsiFailure, ProgressState};
+    use super::{finish, FailureKind, MsiFailure, ProgressState};
     use std::path::PathBuf;
 
     #[test]
@@ -402,6 +444,12 @@ mod tests {
         assert_eq!(state.apply(3, 50), Some((25, 150)));
         assert_eq!(state.apply(2, 200), Some((150, 150)));
         assert_eq!(state.apply(1, 1), None);
+    }
+
+    #[test]
+    fn a_reboot_initiated_result_is_a_success_with_restart() {
+        let success = finish(1641, &PathBuf::from("uninstall.log")).expect("reboot initiated");
+        assert!(success.restart_required);
     }
 
     #[test]

@@ -48,6 +48,14 @@ pub const BINARIES: [&str; 6] = [
     SETUP_EXE_NAME,
 ];
 
+/// The MSI custom action that rejects an install folder outside Program Files. It is embedded in
+/// the MSI, not installed, so it is not part of the release surface.
+pub const GUARD_NAME: &str = "CairnInstallGuard.exe";
+
+fn package_binaries() -> impl Iterator<Item = &'static str> {
+    BINARIES.into_iter().chain(std::iter::once(GUARD_NAME))
+}
+
 /// Artifacts retired from the release surface. A successful publish removes them so `dist/`
 /// describes exactly one current installer.
 const OBSOLETE_ARTIFACTS: [&str; 4] = ["bundle.wxs", "theme.xml", "zh-CN.wxl", "cairn.yaml"];
@@ -265,7 +273,7 @@ fn build_package(
 }
 
 fn copy_binaries(bin_dir: &Path, staging_dir: &Path) -> Result<(), Box<dyn Error>> {
-    for name in BINARIES {
+    for name in package_binaries() {
         let source = bin_dir.join(name);
         if !source.is_file() {
             return Err(format!("missing release binary: {}", source.display()).into());
@@ -448,9 +456,7 @@ fn check_binaries(bin_dir: &Path) -> Result<(), Box<dyn Error>> {
         .into());
     }
 
-    let missing: Vec<&str> = BINARIES
-        .iter()
-        .copied()
+    let missing: Vec<&str> = package_binaries()
         .filter(|name| !bin_dir.join(name).is_file())
         .collect();
     if !missing.is_empty() {
@@ -531,11 +537,13 @@ fn generate_wix_template(wxs_path: &Path) -> Result<(), Box<dyn Error>> {
     <MajorUpgrade Schedule="afterInstallInitialize"
                   DowngradeErrorMessage="A newer version of Cairn is already installed." />
     <MediaTemplate EmbedCab="yes" />
+    <Binary Id="CairnInstallGuard" SourceFile="{guard}" />
     <Icon Id="CairnIcon.ico" SourceFile="{icon}" />
     <Property Id="ARPPRODUCTICON" Value="CairnIcon.ico" />
     <!-- The MSI's own Apps & features entry stays hidden. The GPUI uninstaller owns the one
          visible entry below, so a person never sees two Cairn products or two uninstall paths. -->
     <Property Id="ARPSYSTEMCOMPONENT" Value="1" />
+    <Property Id="REBOOT" Value="ReallySuppress" />
 
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="Cairn">
@@ -686,6 +694,14 @@ fn generate_wix_template(wxs_path: &Path) -> Result<(), Box<dyn Error>> {
     <!-- The installed service is auto-start, but a crash or a manual stop must not leave a
          non-administrator unable to use the app. Grant Interactive Users SERVICE_START (RP) while
          keeping stop/config rights with SYSTEM and Administrators. -->
+    <!-- The setup UI validates the path, but the published MSI can be run without it. The guard
+         revalidates the property the MSI received so a LocalSystem service can never be installed
+         into a user-writable folder. -->
+    <CustomAction Id="ValidateInstallFolder"
+                  BinaryRef="CairnInstallGuard"
+                  ExeCommand="--install-dir &quot;[INSTALLFOLDER]&quot; --program-files &quot;[ProgramFiles64Folder]&quot;"
+                  Execute="immediate"
+                  Return="check" />
     <CustomAction Id="GrantInteractiveServiceStart"
                   Directory="SystemFolder"
                   ExeCommand="sc.exe sdset CairnService D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWRPLOCRRC;;;IU)(A;;CCLCSWLOCRRC;;;SU)"
@@ -693,6 +709,9 @@ fn generate_wix_template(wxs_path: &Path) -> Result<(), Box<dyn Error>> {
                   Impersonate="no"
                   Return="check" />
     <InstallExecuteSequence>
+      <Custom Action="ValidateInstallFolder"
+              After="CostFinalize"
+              Condition="NOT REMOVE~=&quot;ALL&quot;" />
       <Custom Action="GrantInteractiveServiceStart"
               After="StartServices"
               Condition="NOT REMOVE~=&quot;ALL&quot;" />
@@ -703,7 +722,8 @@ fn generate_wix_template(wxs_path: &Path) -> Result<(), Box<dyn Error>> {
         version = CAIRN_VERSION,
         upgrade_code = MSI_UPGRADE_CODE,
         icon = ICON_NAME,
-        uninstaller = UNINSTALLER_NAME
+        uninstaller = UNINSTALLER_NAME,
+        guard = GUARD_NAME
     );
 
     fs::write(wxs_path, wxs_content)?;
@@ -839,7 +859,7 @@ mod tests {
 
     fn write_fake_binaries(bin_dir: &Path) {
         fs::create_dir_all(bin_dir).expect("create bin dir");
-        for name in BINARIES {
+        for name in package_binaries() {
             fs::write(bin_dir.join(name), b"MZ fake binary").expect("write fake binary");
         }
     }
@@ -1145,6 +1165,8 @@ mod tests {
         run_command(&mut validate, "WiX MSI validation").expect("MSI must pass `wix msi validate`");
 
         // The setup binary carries the exact MSI that was built, with a checked payload footer.
+        // Read it with both the packager's reader and the production reader: a format drift between
+        // the two halves must fail here, not on a first launch.
         let extracted_msi = temp_dir.path().join("payload.msi");
         extract_payload(&setup_path, &extracted_msi).expect("extract setup payload");
         assert_eq!(
@@ -1152,6 +1174,40 @@ mod tests {
             sha256_digest(&fs::read(&msi_path).expect("read built MSI")),
             "the MSI inside CairnSetup.exe differs from cairn.msi"
         );
+        let production_msi = temp_dir.path().join("payload-production.msi");
+        cairn_setup::payload::extract_payload(&setup_path, &production_msi)
+            .expect("the production payload reader must accept the packaged setup");
+        assert_eq!(
+            sha256_digest(&fs::read(&production_msi).expect("read production payload")),
+            sha256_digest(&fs::read(&msi_path).expect("read built MSI")),
+            "the production reader extracted a different MSI"
+        );
+
+        // The guard is what enforces the Program Files rule for a direct `msiexec` invocation.
+        let bin_dir = std::env::var_os("CAIRN_BIN_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| workspace_root().join("target").join("release"));
+        let guard = bin_dir.join(GUARD_NAME);
+        let bad = Command::new(&guard)
+            .args([
+                "--install-dir",
+                r"C:\Users\Public\Cairn",
+                "--program-files",
+                r"C:\Program Files",
+            ])
+            .status()
+            .expect("run install guard");
+        assert!(!bad.success(), "the guard accepted a user-writable folder");
+        let program_files =
+            std::env::var_os("ProgramFiles").unwrap_or_else(|| r"C:\Program Files".into());
+        let good = Command::new(&guard)
+            .arg("--install-dir")
+            .arg(Path::new(&program_files).join("Cairn"))
+            .arg("--program-files")
+            .arg(&program_files)
+            .status()
+            .expect("run install guard");
+        assert!(good.success(), "the guard rejected Program Files");
 
         // The GPUI setup carries the setup manifest resource, not GPUI's asInvoker default. The
         // resource is plain XML in the PE, so the assertion does not need a second tool run on a
@@ -1188,6 +1244,8 @@ mod tests {
                 && decompiled.contains("Account=\"LocalSystem\"")
         );
         assert!(decompiled.contains("GrantInteractiveServiceStart"));
+        assert!(decompiled.contains("ValidateInstallFolder"));
+        assert!(decompiled.contains("CairnInstallGuard"));
         assert!(decompiled.contains("Wix4ServiceConfig"));
         assert!(decompiled.contains("Directory=\"DesktopFolder\""));
         assert!(decompiled.contains("Directory=\"ApplicationProgramsFolder\""));

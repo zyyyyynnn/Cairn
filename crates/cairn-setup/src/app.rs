@@ -80,6 +80,13 @@ fn progress_percent(previous: Option<f32>, current: u32, total: u32) -> Option<f
     Some(previous.map_or(next, |value| value.max(next)))
 }
 
+/// The display value while a transaction is still running. MSI progress totals can grow after a
+/// tick reaches the current total; only `Done` means the work is finished, so the bar never claims
+/// completion before that event.
+pub(crate) fn visible_progress(progress: Option<f32>) -> f32 {
+    progress.unwrap_or(0.0).min(99.0)
+}
+
 pub struct SetupApp {
     pub(crate) i18n: I18n,
     pub(crate) launch: Launch,
@@ -94,6 +101,7 @@ pub struct SetupApp {
     pub(crate) log: Option<PathBuf>,
     pub(crate) error: Option<SetupError>,
     pub(crate) notice: Option<&'static str>,
+    pub(crate) cleanup_incomplete: bool,
     pub(crate) restart_required: bool,
     pub(crate) installed: Option<InstalledProduct>,
     pub(crate) install_dir: Option<PathBuf>,
@@ -106,6 +114,12 @@ pub struct SetupApp {
     /// The page heading receives focus when the screen changes, so a keyboard or screen-reader
     /// user lands on the new task instead of the disappearing control that opened it.
     pub(crate) screen_focus: FocusHandle,
+    /// The license agreement is the field that a missing acceptance refers to, so an error can
+    /// return the person to it instead of leaving focus on the Continue button.
+    pub(crate) license_focus: FocusHandle,
+    /// The destructive uninstall action owns its focus ring because the framework's filled-button
+    /// focus line is drawn at reduced opacity inside the danger fill.
+    pub(crate) uninstall_focus: FocusHandle,
     pub(crate) focused_screen: Option<Screen>,
     payload_dir: Option<PathBuf>,
     _activation: Subscription,
@@ -171,6 +185,8 @@ impl SetupApp {
         // holds focus.
         let root_focus = cx.focus_handle();
         let screen_focus = cx.focus_handle();
+        let license_focus = cx.focus_handle().tab_stop(true);
+        let uninstall_focus = cx.focus_handle().tab_stop(true);
 
         // Keep the window key context reachable: if a rendered region disappears and focus is
         // dropped, return it to the window's own handle rather than leaving the commands
@@ -231,6 +247,7 @@ impl SetupApp {
             log: preview.as_ref().and_then(|preview| preview.log.clone()),
             error,
             notice: None,
+            cleanup_incomplete: false,
             restart_required: false,
             installed,
             install_dir,
@@ -239,6 +256,8 @@ impl SetupApp {
                 .is_some_and(|preview| preview.uninstall_attempted),
             root_focus,
             screen_focus,
+            license_focus,
+            uninstall_focus,
             focused_screen: None,
             payload_dir: None,
             _activation: activation,
@@ -277,6 +296,7 @@ impl SetupApp {
     pub(crate) fn continue_from_license(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.accepted {
             self.notice = Some("error_license_required");
+            self.license_focus.focus(window, cx);
             cx.notify();
             return;
         }
@@ -377,36 +397,46 @@ impl SetupApp {
         if self.is_busy() {
             return;
         }
-        let product = self.installed.clone().or_else(installed::installed_product);
+        // The visible screen may have been opened before another process upgraded or removed
+        // Cairn; the removal decision uses the current registration, not the cached banner state.
+        let product = installed::installed_product();
         let Some(product) = product else {
             self.error = Some(SetupError::simple("error_not_installed"));
             self.screen = Screen::Failed;
             cx.notify();
             return;
         };
-        let Some(product_code) = product.product_code.clone() else {
-            self.error = Some(SetupError::simple("error_not_installed"));
+        let mut product_codes = installed::find_product_codes();
+        if product_codes.is_empty() {
+            if let Some(code) = product.product_code.clone() {
+                product_codes.push(code);
+            }
+        }
+        if product_codes.is_empty() {
+            self.error = Some(SetupError::simple("error_msi_invalid"));
             self.screen = Screen::Failed;
             cx.notify();
             return;
-        };
+        }
 
         let log = platform::uninstall_log_path();
         let helper = platform::prepare_install_dir_cleanup();
         let install_dir = product.install_dir.clone();
         let cleanup_dir = install_dir.clone();
-        let session = msi::start_uninstall_with(product_code, log.clone(), move || {
+        let session = msi::start_uninstall_with(product_codes, log.clone(), move || {
             let failures = platform::remove_product_data();
-            for failure in failures {
+            for failure in &failures {
                 tracing::warn!("uninstall cleanup: {failure}");
             }
             platform::spawn_install_dir_cleanup(&cleanup_dir, helper);
+            failures
         });
 
         self.install_dir = Some(install_dir);
         self.log = Some(log);
         self.error = None;
         self.notice = None;
+        self.cleanup_incomplete = false;
         self.progress = None;
         self.stage = Stage::Preparing;
         self.uninstall_attempted = true;
@@ -427,8 +457,25 @@ impl SetupApp {
                     break;
                 }
             }
+            // The worker sends Done even on failure. A closed channel without it means the worker
+            // ended abnormally; leaving the busy flag set would make the window impossible to close.
+            weak.update(cx, |this, cx| this.handle_msi_channel_closed(cx))
+                .ok();
         })
         .detach();
+    }
+
+    fn handle_msi_channel_closed(&mut self, cx: &mut Context<Self>) {
+        if !self.is_busy() {
+            return;
+        }
+        self.installing.set(false);
+        if let Some(dir) = self.payload_dir.take() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        self.error = Some(SetupError::simple("error_msi_unknown"));
+        self.screen = Screen::Failed;
+        cx.notify();
     }
 
     fn handle_msi_event(&mut self, event: MsiEvent, cx: &mut Context<Self>) {
@@ -446,6 +493,10 @@ impl SetupApp {
                     self.progress = Some(next);
                     cx.notify();
                 }
+            }
+            MsiEvent::CleanupFailed => {
+                self.cleanup_incomplete = true;
+                cx.notify();
             }
             MsiEvent::Done(result) => {
                 let was_uninstalling = self.screen == Screen::Uninstalling;
@@ -467,7 +518,13 @@ impl SetupApp {
                     }
                     Err(failure) => {
                         self.log = Some(failure.log.clone());
-                        self.error = Some(SetupError::from_failure(&failure));
+                        let mut error = SetupError::from_failure(&failure);
+                        if was_uninstalling && failure.kind == msi::FailureKind::NotInstalled {
+                            // The visible entry outlived its MSI registration. Setup can repair
+                            // the product; the record-damaged sentence names that recovery.
+                            error = SetupError::simple("error_msi_invalid");
+                        }
+                        self.error = Some(error);
                         self.screen = Screen::Failed;
                     }
                 }
@@ -482,7 +539,13 @@ impl SetupApp {
             cx.notify();
             return;
         };
-        match platform::launch_installed_app(&dir.join("Cairn.exe")) {
+        let exe = dir.join("Cairn.exe");
+        if !exe.is_file() {
+            self.notice = Some("error_launch");
+            cx.notify();
+            return;
+        }
+        match platform::launch_installed_app(&exe) {
             Ok(()) => window.remove_window(),
             Err(error) => {
                 tracing::warn!("could not launch Cairn: {error}");
@@ -496,14 +559,14 @@ impl SetupApp {
         let Some(log) = self.log.clone() else {
             return;
         };
-        if platform::open_path(&log).is_err() {
+        if !log.is_file() || platform::open_path(&log).is_err() {
             self.notice = Some("error_open_log");
             cx.notify();
         }
     }
 
     pub(crate) fn view_license(&mut self, cx: &mut Context<Self>) {
-        let path = std::env::temp_dir().join("Cairn-LICENSE.txt");
+        let path = platform::license_path();
         let opened = std::fs::write(&path, crate::LICENSE_TEXT)
             .map_err(|error| error.to_string())
             .and_then(|()| platform::open_path(&path));
@@ -525,7 +588,7 @@ impl SetupApp {
 
 #[cfg(test)]
 mod tests {
-    use super::progress_percent;
+    use super::{progress_percent, visible_progress};
 
     #[test]
     fn progress_never_moves_backwards_when_msi_resets_an_action() {
@@ -535,5 +598,12 @@ mod tests {
         assert!((forward - 60.0).abs() < 0.001, "{forward}");
         assert_eq!(progress_percent(Some(60.0), 10, 100), Some(60.0));
         assert_eq!(progress_percent(Some(60.0), 0, 0), None);
+    }
+
+    #[test]
+    fn the_working_bar_never_claims_completion() {
+        assert_eq!(visible_progress(None), 0.0);
+        assert_eq!(visible_progress(Some(42.0)), 42.0);
+        assert_eq!(visible_progress(Some(100.0)), 99.0);
     }
 }
