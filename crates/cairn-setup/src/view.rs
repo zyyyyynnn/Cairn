@@ -889,7 +889,8 @@ impl SetupApp {
 
     /// The destructive action owns its focus treatment: the framework draws the filled-button
     /// focus line at 60% of the label ink inside the fill, which measures 2.51:1 on the light
-    /// danger fill. This ring sits outside the fill on the page and uses the full foreground ink.
+    /// danger fill. The reserved 1 px foreground frame sits on the component edge, matching the
+    /// other focus frames without a gap.
     fn uninstall_button(
         &self,
         tokens: &Tokens,
