@@ -32,7 +32,10 @@ pub fn quiet_setup() -> i32 {
     let legacy = installed::legacy_burn_uninstallers();
 
     if let Some(product) = &installed {
-        if legacy.is_empty() && (product.is_same_as_package() || product.is_newer_than_package()) {
+        if legacy.is_empty()
+            && product.product_code.is_some()
+            && (product.is_same_as_package() || product.is_newer_than_package())
+        {
             return EXIT_OK;
         }
     }
@@ -74,7 +77,21 @@ pub fn quiet_uninstall() -> i32 {
         Err(_) => return EXIT_ERROR,
     };
     if product_codes.is_empty() {
-        return match platform::remove_orphan_registration(&product.install_dir, cleanup_helper) {
+        let cleaned = (|| {
+            let _lock = platform::acquire_msi_execution(30_000)
+                .ok_or_else(|| "another Windows Installer operation is running".to_string())?;
+            match installed::find_product_codes_checked() {
+                Ok(codes) if codes.is_empty() => {
+                    platform::remove_orphan_registration(&product.install_dir, cleanup_helper)
+                }
+                Ok(_) => Err(
+                    "Cairn was installed while the uninstaller was open; close this window and try again."
+                        .to_string(),
+                ),
+                Err(error) => Err(format!("MSI product enumeration failed: {error}")),
+            }
+        })();
+        return match cleaned {
             Ok(warnings) => {
                 if !warnings.is_empty() {
                     msi::append_cleanup_failures(&log, &warnings);

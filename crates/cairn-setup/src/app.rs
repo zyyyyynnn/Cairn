@@ -458,7 +458,21 @@ impl SetupApp {
         let install_dir = product.install_dir;
         let cleanup_dir = install_dir.clone();
         let session = msi::start_orphan_cleanup(
-            move || platform::remove_orphan_registration(&cleanup_dir, helper),
+            move || {
+                let Some(_lock) = platform::acquire_msi_execution(30_000) else {
+                    return Err("another Windows Installer operation is running".to_string());
+                };
+                match installed::find_product_codes_checked() {
+                    Ok(codes) if codes.is_empty() => {
+                        platform::remove_orphan_registration(&cleanup_dir, helper)
+                    }
+                    Ok(_) => Err(
+                        "Cairn was installed while the uninstaller was open; close this window and try again."
+                            .to_string(),
+                    ),
+                    Err(error) => Err(format!("MSI product enumeration failed: {error}")),
+                }
+            },
             log.clone(),
         );
 

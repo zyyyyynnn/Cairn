@@ -55,6 +55,15 @@ pub fn installed_product() -> Option<InstalledProduct> {
     let install_dir = read_hklm_string(PRODUCT_KEY, "InstallFolder")
         .or_else(|| read_hklm_string(ARP_KEY, "InstallLocation"));
     if version.is_none() && install_dir.is_none() {
+        if read_hklm_string(ARP_KEY, "DisplayName")
+            .is_some_and(|name| name.eq_ignore_ascii_case("Cairn"))
+        {
+            return Some(InstalledProduct {
+                version: String::new(),
+                install_dir: default_install_dir(),
+                product_code: None,
+            });
+        }
         return None;
     }
     Some(InstalledProduct {

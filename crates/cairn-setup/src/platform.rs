@@ -14,7 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use windows::core::{BOOL, PCWSTR};
 use windows::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_ITEMS,
-    ERROR_SUCCESS, HANDLE, LPARAM, WPARAM,
+    ERROR_SUCCESS, HANDLE, LPARAM, WAIT_ABANDONED, WAIT_OBJECT_0, WPARAM,
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
@@ -26,8 +26,8 @@ use windows::Win32::System::Registry::{
     RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ,
 };
 use windows::Win32::System::Threading::{
-    CreateMutexW, OpenProcess, WaitForSingleObject, INFINITE, PROCESS_QUERY_LIMITED_INFORMATION,
-    PROCESS_SYNCHRONIZE,
+    CreateMutexW, OpenProcess, ReleaseMutex, WaitForSingleObject, INFINITE,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
 };
 use windows::Win32::UI::Shell::{
     FileOpenDialog, IFileOpenDialog, IShellItem, FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST,
@@ -38,14 +38,51 @@ use windows::Win32::UI::WindowsAndMessaging::{
     ShowWindow, HWND_BROADCAST, SMTO_ABORTIFHUNG, SW_RESTORE, WM_SETTINGCHANGE,
 };
 
-/// The result of the single-instance check. `Acquired` owns the process's claim on the mutex;
+impl Drop for InstanceLock {
+    fn drop(&mut self) {
+        if let InstanceLock::Acquired(handle) = self {
+            unsafe {
+                let _ = CloseHandle(*handle);
+            }
+        }
+    }
+}
+
+/// A held Windows Installer execute mutex. Registration-only cleanup must not run while another
+/// `msiexec` transaction is applying an upgrade. The setup's own mutex does not cover a direct MSI
+/// invocation, so the worker waits on the installer's global execute lock and rechecks the product
+/// list before deleting anything.
+pub struct MsiExecutionLock(HANDLE);
+
+impl Drop for MsiExecutionLock {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = ReleaseMutex(self.0);
+            let _ = CloseHandle(self.0);
+        }
+    }
+}
+
+pub fn acquire_msi_execution(timeout_ms: u32) -> Option<MsiExecutionLock> {
+    let name = wide(OsStr::new(r"Global\_MSIExecute"));
+    let handle = unsafe { CreateMutexW(None, false, PCWSTR(name.as_ptr())) }.ok()?;
+    let wait = unsafe { WaitForSingleObject(handle, timeout_ms) };
+    if matches!(wait, WAIT_OBJECT_0 | WAIT_ABANDONED) {
+        Some(MsiExecutionLock(handle))
+    } else {
+        unsafe {
+            let _ = CloseHandle(handle);
+        }
+        None
+    }
+}
+/// The result of the single-instance check. `Acquired` holds the mutex until the guard drops;
 /// `Unavailable` means the check itself failed, so setup proceeds and lets the MSI's own
 /// transaction mutex serialize concurrent work instead of failing closed for a user who cannot
 /// access another account's named object.
 pub enum InstanceLock {
-    /// The handle is held for the process lifetime; dropping the enum without a close keeps the
-    /// mutex claim, which is why it must not be treated as an ordinary owned handle.
-    Acquired(#[allow(dead_code)] HANDLE),
+    /// The handle keeps the mutex claim until the guard drops at app exit.
+    Acquired(HANDLE),
     Running,
     Unavailable,
 }
@@ -630,6 +667,11 @@ fn remove_machine_path_entry(install_dir: &Path) -> Result<(), String> {
         let Some(replacement) = path_without_entry(current, install_dir) else {
             return Ok(());
         };
+        let write_type = if value_type == REG_EXPAND_SZ {
+            REG_EXPAND_SZ
+        } else {
+            REG_SZ
+        };
         let replacement = wide(OsStr::new(&replacement));
         let bytes = unsafe {
             std::slice::from_raw_parts(
@@ -642,7 +684,7 @@ fn remove_machine_path_entry(install_dir: &Path) -> Result<(), String> {
                 key,
                 windows::core::w!("Path"),
                 None,
-                REG_EXPAND_SZ,
+                write_type,
                 Some(bytes),
             )
         };
@@ -664,6 +706,9 @@ fn path_without_entry(current: &str, install_dir: &Path) -> Option<String> {
         .to_string_lossy()
         .trim_end_matches(['\\', '/'])
         .to_ascii_lowercase();
+    if install.is_empty() {
+        return None;
+    }
     let mut kept = Vec::new();
     let mut changed = false;
     for part in current.split(';') {
@@ -710,7 +755,8 @@ fn remove_service(name: &str) -> Result<(), String> {
         .output()
         .map_err(|error| error.to_string())?;
     match output.status.code() {
-        Some(0 | 1060 | 1072) => Ok(()),
+        Some(0 | 1060) => Ok(()),
+        Some(1072) => Err("service removal is pending a restart".to_string()),
         other => Err(format!("sc delete returned {other:?}")),
     }
 }
@@ -893,6 +939,7 @@ mod tests {
             path_without_entry(r"C:\Tools;C:\Program Files\Cairn64", install),
             None
         );
+        assert_eq!(path_without_entry(";C:\\Tools", Path::new("")), None);
     }
 
     #[test]

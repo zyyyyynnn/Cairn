@@ -190,23 +190,33 @@ pub fn start_orphan_cleanup(
     log: PathBuf,
 ) -> MsiSession {
     let (sender, events) = unbounded_channel();
-    std::thread::spawn(move || match cleanup() {
-        Ok(warnings) => {
-            if !warnings.is_empty() {
-                append_cleanup_failures(&log, &warnings);
-                let _ = sender.send(MsiEvent::CleanupFailed);
-            }
-            let _ = sender.send(MsiEvent::Done(Ok(MsiSuccess {
-                restart_required: false,
-            })));
+    std::thread::spawn(move || {
+        use std::io::Write as _;
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log)
+        {
+            let _ = writeln!(file, "Cairn registration-only uninstall");
         }
-        Err(critical) => {
-            append_cleanup_failures(&log, &[critical]);
-            let _ = sender.send(MsiEvent::Done(Err(MsiFailure {
-                code: 0,
-                kind: FailureKind::Other(0),
-                log,
-            })));
+        match cleanup() {
+            Ok(warnings) => {
+                if !warnings.is_empty() {
+                    append_cleanup_failures(&log, &warnings);
+                    let _ = sender.send(MsiEvent::CleanupFailed);
+                }
+                let _ = sender.send(MsiEvent::Done(Ok(MsiSuccess {
+                    restart_required: false,
+                })));
+            }
+            Err(critical) => {
+                append_cleanup_failures(&log, &[critical]);
+                let _ = sender.send(MsiEvent::Done(Err(MsiFailure {
+                    code: 0,
+                    kind: FailureKind::Other(0),
+                    log,
+                })));
+            }
         }
     });
     MsiSession { events }
@@ -483,6 +493,19 @@ mod tests {
     fn a_reboot_initiated_result_is_a_success_with_restart() {
         let success = finish(1641, &PathBuf::from("uninstall.log")).expect("reboot initiated");
         assert!(success.restart_required);
+    }
+
+    #[test]
+    fn orphan_cleanup_creates_the_log_even_without_warnings() {
+        let log = unique_log("orphan-success");
+        let mut session = super::start_orphan_cleanup(|| Ok(Vec::new()), log.clone());
+        assert!(matches!(
+            session.events.blocking_recv(),
+            Some(super::MsiEvent::Done(Ok(_)))
+        ));
+        let text = std::fs::read_to_string(&log).expect("read cleanup log");
+        assert!(text.contains("registration-only"));
+        let _ = std::fs::remove_file(log);
     }
 
     #[test]
