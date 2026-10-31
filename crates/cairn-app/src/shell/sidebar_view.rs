@@ -8,7 +8,7 @@ use crate::app::{element_id, layout, CairnApp};
 use crate::search::filters::FilterCategory;
 use crate::shell::accessibility::{self, ControlElement};
 use crate::shell::commands::OpenSelected;
-use crate::shell::theme::ShellTokens;
+use crate::shell::theme::{self, ShellTokens};
 use fluent_bundle::FluentArgs;
 use gpui_kit::assets::{AllAssets, IconName};
 use gpui_kit::base::StyledExt;
@@ -60,7 +60,7 @@ fn sidebar_icon_svg(icon: IconName) -> Option<Arc<[u8]>> {
 fn sidebar_icon_metrics(window: &Window) -> SidebarIconMetrics {
     let style = window.text_style();
     let font = style.font();
-    let font_size = window.rem_size() * 0.875;
+    let font_size = window.rem_size() * theme::SMALL_TEXT_SIZE;
     let text_system = window.text_system();
     let sample = "文";
     let layout = text_system.layout_line(
@@ -427,10 +427,10 @@ impl CairnApp {
                             .px(rems(layout::INNER_SPACING))
                             .pt(rems(layout::SPACE_4))
                             .pb(rems(layout::SPACE_4))
-                            .text_xs()
-                            .font_semibold()
+                            .text_sm()
+                            .font(theme::serif_font(FontWeight::SEMIBOLD))
                             .text_color(tokens.muted_foreground)
-                            .child(locations_title),
+                            .child(theme::heading_text(locations_title, FontWeight::SEMIBOLD)),
                     )
                     .children(quick_access)
                     .child(recycle_entry)
@@ -440,10 +440,10 @@ impl CairnApp {
                             .px(rems(layout::INNER_SPACING))
                             .pt(rems(layout::SPACE_8))
                             .pb(rems(layout::SPACE_4))
-                            .text_xs()
-                            .font_semibold()
+                            .text_sm()
+                            .font(theme::serif_font(FontWeight::SEMIBOLD))
                             .text_color(tokens.muted_foreground)
-                            .child(drives_title),
+                            .child(theme::heading_text(drives_title, FontWeight::SEMIBOLD)),
                     )
                     .children(drive_elements),
             )

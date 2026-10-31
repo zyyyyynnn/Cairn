@@ -93,7 +93,7 @@ pub mod layout {
     /// The status line: the compact data row, so it takes the result-row step. The shell pins it
     /// so its arithmetic and the rendered band cannot drift apart.
     pub const STATUS_HEIGHT: f32 = ROW_HEIGHT;
-    /// The Treemap category legend is a compact status item: one 12px swatch plus a text_xs
+    /// The Treemap category legend is a compact status item: one 12px swatch plus a text_sm
     /// label inside a 20px hit row. Its 2px horizontal inset is an optical exception, like
     /// `MENU_LEAD`, and stays off the 4px ladder.
     pub const LEGEND_ROW: f32 = 5.0 * STEP;

@@ -19,7 +19,6 @@ use cairn_protocol::message::FileRowData;
 use cairn_protocol::status::ContentIndexState;
 use fluent_bundle::FluentArgs;
 use gpui_kit::assets::IconName as AssetIconName;
-use gpui_kit::base::StyledExt;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::menu::ContextMenuExt;
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
@@ -319,13 +318,14 @@ fn render_state_band(
                 .text_sm()
                 .font(theme::serif_font(FontWeight::SEMIBOLD))
                 .text_color(tokens.foreground)
-                .child(title),
+                .child(theme::heading_text(title, FontWeight::SEMIBOLD)),
         )
         .child(
             div()
                 .max_w(rems(layout::MESSAGE_MAX_WIDTH))
                 .text_center()
-                .text_xs()
+                .text_sm()
+                .line_height(relative(1.5))
                 .text_color(tokens.muted_foreground)
                 .child(hint),
         );
@@ -787,6 +787,7 @@ impl CairnApp {
             let retry = accessibility::control("recycle-bin-retry");
             let retry_label = accessibility::name(retry, &self.i18n);
             let action = Button::new(retry.element)
+                .font_weight(FontWeight::MEDIUM)
                 .label(retry_label.clone())
                 .accessibility_label(retry_label)
                 .mt(rems(layout::SPACE_8))
@@ -931,15 +932,16 @@ impl CairnApp {
             .child(
                 div()
                     .text_sm()
-                    .font_medium()
+                    .font(theme::serif_font(FontWeight::SEMIBOLD))
                     .text_color(tokens.foreground)
-                    .child(title),
+                    .child(theme::heading_text(title, FontWeight::SEMIBOLD)),
             )
             .child(
                 div()
                     .max_w(rems(layout::MESSAGE_MAX_WIDTH))
                     .text_center()
-                    .text_xs()
+                    .text_sm()
+                    .line_height(relative(1.5))
                     .text_color(tokens.muted_foreground)
                     .child(hint),
             )
@@ -951,6 +953,7 @@ impl CairnApp {
                     .when(can_start, |this| {
                         this.child(
                             Button::new(start.element)
+                                .font_weight(FontWeight::MEDIUM)
                                 .label(start_label.clone())
                                 .accessibility_label(start_label)
                                 .small()
@@ -963,6 +966,7 @@ impl CairnApp {
                     .when(!can_start, |this| {
                         this.child(
                             Button::new(retry.element)
+                                .font_weight(FontWeight::MEDIUM)
                                 .label(retry_label.clone())
                                 .accessibility_label(retry_label)
                                 .small()
@@ -1373,7 +1377,7 @@ impl CairnApp {
                         .px(rems(layout::SPACE_4))
                         .rounded(tokens.radius)
                         .bg(tokens.muted)
-                        .text_xs()
+                        .text_sm()
                         .text_color(tokens.muted_foreground)
                         .child(self.i18n.get_text("result_content_match")),
                 )

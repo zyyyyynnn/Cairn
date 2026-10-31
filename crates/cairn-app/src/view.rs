@@ -510,6 +510,7 @@ impl CairnApp {
         let click_view = view.clone();
 
         let trigger = Button::new(element_id("toolbar-menu", group.key()))
+            .font_weight(FontWeight::MEDIUM)
             .accessibility_label(name)
             .ghost()
             .small()

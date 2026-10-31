@@ -12,8 +12,8 @@ use gpui_kit::component::ActiveTheme;
 use gpui_kit::gpui::{App, Hsla, Pixels, Window};
 
 pub use cairn_ui::brand::{
-    serif_font, tabular_figures, BASE_FONT_PX, BRAND_TITLE_SIZE, HAIRLINE, RADIUS,
-    SERIF_LINE_HEIGHT, UI_ICON_SIZE,
+    heading_text, serif_font, tabular_figures, BASE_FONT_PX, BRAND_TITLE_SIZE, HAIRLINE, RADIUS,
+    SERIF_LINE_HEIGHT, SMALL_TEXT_SIZE, UI_ICON_SIZE,
 };
 pub use cairn_ui::locale::system_prefers_dark;
 pub use cairn_ui::theme::clamp_zoom;

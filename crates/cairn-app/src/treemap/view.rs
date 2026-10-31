@@ -66,7 +66,7 @@ fn text_width(window: &Window, text: &str, weight: FontWeight) -> f32 {
         return 0.0;
     }
     let mut style = window.text_style();
-    style.font_size = rems(0.75).into();
+    style.font_size = rems(theme::SMALL_TEXT_SIZE).into();
     style.font_weight = weight;
     style.font_features = theme::tabular_figures();
     let font_size = style.font_size.to_pixels(window.rem_size());
@@ -844,7 +844,7 @@ fn label_row(
         .flex_1()
         .min_w_0()
         .truncate()
-        .text_xs()
+        .text_sm()
         .text_color(ink);
     let text = if semibold {
         text.font_semibold()
@@ -892,7 +892,7 @@ fn compact_block_content(
         content = content.child(
             div()
                 .whitespace_nowrap()
-                .text_xs()
+                .text_sm()
                 .font_features(theme::tabular_figures())
                 .text_color(secondary)
                 .child(size.to_string()),
@@ -1098,7 +1098,7 @@ fn render_nested_node(
                         .flex_1()
                         .min_w_0()
                         .truncate()
-                        .text_xs()
+                        .text_sm()
                         .font_semibold()
                         .text_color(rcx.palette.ink())
                         .child(name),
@@ -1108,7 +1108,7 @@ fn render_nested_node(
                         div()
                             .flex_shrink_0()
                             .whitespace_nowrap()
-                            .text_xs()
+                            .text_sm()
                             .font_features(theme::tabular_figures())
                             .text_color(rcx.palette.ink_secondary())
                             .child(header_size_label),

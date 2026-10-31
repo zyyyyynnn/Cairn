@@ -59,6 +59,7 @@ impl CairnApp {
                 div()
                     .min_w_0()
                     .truncate()
+                    .text_sm()
                     .font_features(theme::tabular_figures())
                     .child(text)
                     .into_any_element(),
@@ -157,12 +158,14 @@ impl CairnApp {
                                     div()
                                         .min_w_0()
                                         .truncate()
+                                        .text_sm()
                                         .font_features(theme::tabular_figures())
                                         .child(name),
                                 )
                                 .child(
                                     div()
                                         .flex_shrink_0()
+                                        .text_sm()
                                         .font_features(theme::tabular_figures())
                                         .child(size),
                                 )
@@ -307,7 +310,8 @@ impl CairnApp {
                     .child(
                         Button::new("treemap-zoom-reset")
                             .ghost()
-                            .xsmall()
+                            .small()
+                            .font_weight(FontWeight::MEDIUM)
                             .min_h(rems(layout::SPACE_24))
                             .label(format!("{percent}%"))
                             .tooltip(reset_tooltip)
@@ -327,6 +331,7 @@ impl CairnApp {
             .border_color(tokens.border)
             // The count is a live value; its digits must not reflow as results arrive.
             .font_features(theme::tabular_figures())
+            .text_sm()
             .bg(tokens.status_bar)
             .text_color(tokens.muted_foreground)
             // The summary can carry a full path; let it ellipsize before it
@@ -367,7 +372,8 @@ impl CairnApp {
         let label = accessibility::name(control, &self.i18n);
         Some(
             Button::new(control.element)
-                .xsmall()
+                .small()
+                .font_weight(FontWeight::MEDIUM)
                 .ghost()
                 .min_h(rems(layout::SPACE_24))
                 .label(label.clone())
@@ -441,6 +447,7 @@ impl CairnApp {
                     .border_1()
                     .border_color(tokens.border.opacity(0.0))
                     .focus_visible(move |style| style.border_color(tokens.ring))
+                    .text_sm()
                     .text_color(tokens.muted_foreground)
                     .hover(move |this| this.bg(tokens.row_hover).text_color(tokens.foreground))
                     .when(!visible, |this| this.opacity(0.35))
