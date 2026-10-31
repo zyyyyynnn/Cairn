@@ -164,6 +164,7 @@ mod tests {
                 "error_uninstall_msi_platform",
                 "error_uninstall_msi_fatal",
                 "error_uninstall_msi_invalid",
+                "error_uninstall_cleanup_failed",
                 "error_uninstall_not_installed",
             ] {
                 assert_ne!(i18n.get(key), key, "{lang} is missing {key}");

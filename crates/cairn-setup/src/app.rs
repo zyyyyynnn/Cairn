@@ -129,7 +129,7 @@ pub struct SetupApp {
     pub(crate) install_dir: Option<PathBuf>,
     pub(crate) uninstall_attempted: bool,
     /// The products the running removal was started for. A forced cleanup re-checks this set
-    /// under the Windows Installer lock so it never removes a newer install.
+    /// under the Windows Installer lock, so a product registered under a new code is refused.
     active_product_codes: Vec<String>,
     /// The running transaction is a registration-only cleanup after Windows Installer could not
     /// remove the product itself. It stays set after a failed cleanup so the failure page can
@@ -544,12 +544,17 @@ impl SetupApp {
     /// Completes a removal Windows Installer could not finish. It runs after the product record is
     /// gone (the automatic fallback) or after the person explicitly chose the file cleanup on the
     /// failure page. Under the global installer lock it re-checks that every registered product is
-    /// one this removal started with, so a newer install is never deleted.
+    /// one this removal started with, so a product registered under a new code is refused.
     ///
     /// It must not reject a busy screen: the automatic fallback runs from the Done event while the
     /// progress page still owns the busy state, and refusing there would strand the window.
     pub(crate) fn start_force_cleanup(&mut self, cx: &mut Context<Self>) {
         if !force_cleanup_allowed(self.screen) {
+            return;
+        }
+        // The automatic fallback arrives with the previous session finished; a duplicate call
+        // while this cleanup is already running must not start a second one.
+        if self.forced_cleanup && self.is_busy() {
             return;
         }
         self.record_remaining = false;
@@ -683,7 +688,13 @@ impl SetupApp {
                             self.start_force_cleanup(cx);
                             return;
                         }
-                        self.error = Some(SetupError::from_failure(&failure));
+                        // A forced cleanup has its own failure wording: the page offers no retry,
+                        // because a second attempt could target a newer install.
+                        self.error = Some(if was_uninstalling && self.forced_cleanup {
+                            SetupError::simple("error_msi_cleanup_failed")
+                        } else {
+                            SetupError::from_failure(&failure)
+                        });
                         self.screen = Screen::Failed;
                     }
                 }

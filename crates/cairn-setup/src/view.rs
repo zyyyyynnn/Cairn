@@ -61,7 +61,11 @@ fn path_accessible_label(label: &str, error: Option<&str>) -> String {
 fn failure_offers_retry(error_key: &str) -> bool {
     !matches!(
         error_key,
-        "error_not_installed" | "error_no_payload" | "error_msi_platform" | "error_msi_invalid"
+        "error_not_installed"
+            | "error_no_payload"
+            | "error_msi_platform"
+            | "error_msi_invalid"
+            | "error_msi_cleanup_failed"
     )
 }
 
@@ -1223,6 +1227,7 @@ mod tests {
             "error_no_payload",
             "error_msi_platform",
             "error_msi_invalid",
+            "error_msi_cleanup_failed",
         ] {
             assert!(!failure_offers_retry(key), "{key} must not offer a retry");
         }

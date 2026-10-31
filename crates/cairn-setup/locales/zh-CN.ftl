@@ -43,6 +43,7 @@ error_uninstall_not_installed = 没有找到 Cairn 的安装记录。
 error_uninstall_msi_platform = 这个安装记录不支持当前版本的 Windows。
 error_uninstall_msi_fatal = Windows 安装程序未能完成卸载。请查看日志后重试。
 error_uninstall_msi_invalid = Windows 安装程序无法读取为 Cairn 保存的数据。移除剩余文件会同时移除 Cairn 的设置和注册表项，且无法撤销。
+error_uninstall_cleanup_failed = 未能移除 Cairn 的全部文件。请查看日志了解原因。
 
 error_title = 安装未完成
 error_msi_unknown = 安装没有完成，现有文件没有被删除。请查看日志了解原因，然后重试。
@@ -50,6 +51,7 @@ error_no_payload = 安装包缺少必要文件。请重新下载安装程序。
 error_msi_cancelled = 安装已取消。
 error_msi_busy = 另一个安装程序正在运行，请等待其完成后重试。
 error_msi_invalid = 安装包不完整或已损坏。请重新下载安装程序。
+error_msi_cleanup_failed = 清理未完成。请查看日志了解原因。
 error_msi_platform = 这个安装包不支持当前版本的 Windows。
 error_msi_fatal = Windows 安装程序未能完成操作。请查看日志后重试。
 error_legacy_failed = 请先在“应用和功能”中卸载旧版本，然后重试。

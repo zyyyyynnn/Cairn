@@ -95,8 +95,8 @@ pub fn find_product_codes() -> Vec<String> {
 }
 
 /// Whether every product registered now was part of the removal that started with `expected`.
-/// A product registered after the removal began belongs to a newer install and must survive; a
-/// record that disappeared meanwhile is still safe to clean up.
+/// A product registered under a code the removal did not start with belongs to a newer install
+/// and is refused; a record that disappeared meanwhile is still safe to clean up.
 pub(crate) fn all_products_are_expected(current: &[String], expected: &[String]) -> bool {
     current.iter().all(|code| expected.contains(code))
 }

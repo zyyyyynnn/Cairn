@@ -144,6 +144,7 @@ pub fn uninstall_error_key(install_key: &str) -> &'static str {
         "error_msi_platform" => "error_uninstall_msi_platform",
         "error_msi_fatal" => "error_uninstall_msi_fatal",
         "error_msi_invalid" => "error_uninstall_msi_invalid",
+        "error_msi_cleanup_failed" => "error_uninstall_cleanup_failed",
         "error_not_installed" => "error_uninstall_not_installed",
         _ => "error_uninstall_msi_unknown",
     }
@@ -354,6 +355,7 @@ mod tests {
             ("error_msi_platform", "error_uninstall_msi_platform"),
             ("error_msi_fatal", "error_uninstall_msi_fatal"),
             ("error_msi_invalid", "error_uninstall_msi_invalid"),
+            ("error_msi_cleanup_failed", "error_uninstall_cleanup_failed"),
             ("error_not_installed", "error_uninstall_not_installed"),
             ("error_msi_unknown", "error_uninstall_msi_unknown"),
         ] {

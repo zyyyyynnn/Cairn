@@ -43,6 +43,7 @@ error_uninstall_not_installed = No Cairn installation was found.
 error_uninstall_msi_platform = This installation record does not support this version of Windows.
 error_uninstall_msi_fatal = Windows Installer could not complete the uninstall. Check the log, then try again.
 error_uninstall_msi_invalid = Windows Installer could not read the data it saved for Cairn. Removing the remaining files also removes Cairn’s settings and registry entries. This cannot be undone.
+error_uninstall_cleanup_failed = Cairn’s files could not all be removed. Check the log for the reason.
 
 error_title = Setup did not finish
 error_msi_unknown = The install did not finish, so existing files were not removed. Check the log for the reason, then try again.
@@ -50,6 +51,7 @@ error_no_payload = Installer files are missing. Download CairnSetup.exe again.
 error_msi_cancelled = Setup was cancelled.
 error_msi_busy = Another installer is already running. Please wait for it to complete and try again.
 error_msi_invalid = The installer is damaged. Download it again.
+error_msi_cleanup_failed = The cleanup did not finish. Check the log for the reason.
 error_msi_platform = This package does not support this version of Windows.
 error_msi_fatal = Windows Installer could not complete the operation. Check the log, then try again.
 error_legacy_failed = Remove the old version in Apps & features, then try again.
