@@ -52,14 +52,6 @@ const RESIZE_HIT_WIDTH: Pixels = px(8.0);
 const RESIZE_LINE_OFFSET: Pixels = px(3.0);
 /// Wide enough for the row commands without letting a long path set the menu's width.
 const CONTEXT_MENU_MIN_WIDTH: f32 = 12.0;
-/// A soft shade at the bottom edge, not a background-colored veil. A veil over interactive rows
-/// washes out their hover and selection fills; this only deepens the surface for a few pixels, so
-/// the last row stays legible and its state stays visible.
-const ROWS_EDGE_SHADE_HEIGHT: f32 = 3.0 * layout::STEP;
-const ROWS_EDGE_SHADE_ALPHA: f32 = 0.06;
-/// The shade ramps out over the final row, so reaching the end of the list has no visible step.
-const ROWS_EDGE_SHADE_RAMP_ROWS: f32 = 1.0;
-
 /// Why a `content:` query has no rows to show. Silence would read as "no file matches", which is
 /// only true once the content index is ready.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -200,15 +192,6 @@ fn rows_to_paint(
             pinned: true,
         }
     }
-}
-
-/// Strength of the bottom edge shade: full while there is more than one row left to scroll,
-/// ramping to nothing at the end so the list never carries a permanent dim band.
-fn rows_edge_opacity(remaining: f32, row_height: f32) -> f32 {
-    if remaining <= 0.0 || row_height <= 0.0 {
-        return 0.0;
-    }
-    (remaining / (row_height * ROWS_EDGE_SHADE_RAMP_ROWS)).clamp(0.0, 1.0)
 }
 
 /// Broad file kind behind a result row's icon, from the taxonomy the Treemap already uses.
@@ -440,23 +423,6 @@ impl CairnApp {
             None
         };
         let has_content = rows.is_some();
-        // The edge shade belongs to the result body as a whole, not just the row band: it spans
-        // the row viewport and the vertical scrollbar gutter so the bottom edge is continuous
-        // instead of leaving a bright strip beside the rows. The skeleton and state bands own their
-        // own surfaces and must not take it.
-        let showing_result_rows = self.recycle_bin.error().is_none()
-            && !(first_page_loading || index_loading)
-            && local_location
-            && self.results.table.total_rows() > 0;
-        let row_height_f = f32::from(row_height);
-        let scroll_below = (self.results.table.max_scroll_top(row_height_f)
-            - self.results.table.scroll_top)
-            .max(0.0);
-        let shade = if showing_result_rows {
-            rows_edge_opacity(scroll_below, row_height_f)
-        } else {
-            0.0
-        };
         let state = if has_content {
             None
         } else if local_location {
@@ -572,31 +538,6 @@ impl CairnApp {
                                 },
                             )),
                     )
-                    // The same shade spans the row viewport and the vertical scrollbar gutter,
-                    // so the table's bottom edge stays continuous instead of leaving a bright
-                    // strip beside the rows. It is paint-only; the scrollbar and rows keep their
-                    // hitboxes.
-                    .when(shade > 0.0, |this| {
-                        this.child(
-                            div()
-                                .absolute()
-                                .left_0()
-                                .right_0()
-                                .bottom_0()
-                                .h(rems(ROWS_EDGE_SHADE_HEIGHT))
-                                .opacity(shade)
-                                // 180° puts the transparent stop at the top and the shade at the
-                                // edge; 0° in this renderer runs the other way.
-                                .bg(linear_gradient(
-                                    180.0,
-                                    linear_color_stop(tokens.muted_foreground.opacity(0.0), 0.0),
-                                    linear_color_stop(
-                                        tokens.muted_foreground.opacity(ROWS_EDGE_SHADE_ALPHA),
-                                        1.0,
-                                    ),
-                                )),
-                        )
-                    }),
             )
             .when(overflows_sideways, |this| {
                 this.child(
@@ -1787,7 +1728,7 @@ mod tests {
 
     use super::{
         column_label_key, content_query_notice, pulse_opacity, result_command_label_key,
-        rows_band_local_top, rows_edge_opacity, rows_to_paint, ContentQueryNotice,
+        rows_band_local_top, rows_to_paint, ContentQueryNotice,
     };
     use crate::app::CairnApp;
     use crate::shell::command_groups::GroupCommand;
@@ -2061,14 +2002,4 @@ mod tests {
         assert!(!painted.pinned);
     }
 
-    #[test]
-    fn the_bottom_edge_shade_disappears_before_the_last_row() {
-        let row = 28.0;
-        assert_eq!(rows_edge_opacity(0.0, row), 0.0);
-        assert_eq!(rows_edge_opacity(-5.0, row), 0.0);
-        assert_eq!(rows_edge_opacity(row * 0.5, row), 0.5);
-        assert_eq!(rows_edge_opacity(row, row), 1.0);
-        assert_eq!(rows_edge_opacity(row * 10.0, row), 1.0);
-        assert_eq!(rows_edge_opacity(row, 0.0), 0.0);
-    }
 }

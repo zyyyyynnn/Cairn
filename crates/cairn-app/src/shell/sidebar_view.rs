@@ -428,6 +428,7 @@ impl CairnApp {
                             // The caption fills the search-band height so its optical centre and
                             // the first row share the search row and table-head bands.
                             .h(rems(layout::SEARCH_BAND_HEIGHT - 2.0 * layout::SPACE_4))
+                            .mb(rems(layout::SPACE_4))
                             .flex()
                             .items_center()
                             .text_sm()
