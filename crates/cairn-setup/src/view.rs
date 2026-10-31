@@ -93,6 +93,7 @@ fn line_metrics(
 #[derive(Clone, Copy)]
 struct Tokens {
     background: Hsla,
+    chrome: Hsla,
     foreground: Hsla,
     muted_foreground: Hsla,
     border: Hsla,
@@ -121,6 +122,7 @@ impl Tokens {
         let theme = cx.theme();
         Self {
             background: theme.background,
+            chrome: theme.title_bar,
             foreground: theme.foreground,
             muted_foreground: theme.muted_foreground,
             border: theme.border,
@@ -334,7 +336,7 @@ impl SetupApp {
             .items_center()
             .border_b_1()
             .border_color(tokens.border)
-            .bg(tokens.background)
+            .bg(tokens.chrome)
             .child(
                 h_flex()
                     .h_full()
@@ -987,6 +989,7 @@ impl SetupApp {
             .justify_between()
             .border_t_1()
             .border_color(tokens.border)
+            .bg(tokens.chrome)
             .px(PAGE_INSET)
             .gap(GROUP_GAP)
             .child(h_flex().gap(GROUP_GAP).items_center().children(leading))

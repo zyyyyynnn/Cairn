@@ -617,7 +617,7 @@ impl CairnApp {
             .h(layout::TITLE_BAR_HEIGHT)
             .border_b_1()
             .border_color(tokens.border)
-            .bg(tokens.background)
+            .bg(tokens.chrome)
             // The left half keeps the sidebar's width, so the brand and navigation controls do not
             // move when the tree collapses. The divider belongs to the sidebar below; it stops at
             // the title bar instead of drawing a line through the window chrome.

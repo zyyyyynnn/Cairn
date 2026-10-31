@@ -190,7 +190,7 @@ impl CairnApp {
             .flex()
             .flex_col()
             .rounded(tokens.radius)
-            .bg(tokens.background)
+            .bg(tokens.muted)
             .border_1()
             .border_color(tokens.border)
             .child(
