@@ -181,6 +181,37 @@ pub(crate) fn append_cleanup_failures(log: &Path, failures: &[String]) {
     }
 }
 
+/// Runs the registration-only cleanup when the MSI product record is gone but a visible Cairn
+/// entry remains. Warnings still produce the normal success page with the cleanup alert; a failure
+/// to remove the visible ARP key is reported as an uninstall failure so the entry is not silently
+/// left behind.
+pub fn start_orphan_cleanup(
+    cleanup: impl FnOnce() -> Result<Vec<String>, String> + Send + 'static,
+    log: PathBuf,
+) -> MsiSession {
+    let (sender, events) = unbounded_channel();
+    std::thread::spawn(move || match cleanup() {
+        Ok(warnings) => {
+            if !warnings.is_empty() {
+                append_cleanup_failures(&log, &warnings);
+                let _ = sender.send(MsiEvent::CleanupFailed);
+            }
+            let _ = sender.send(MsiEvent::Done(Ok(MsiSuccess {
+                restart_required: false,
+            })));
+        }
+        Err(critical) => {
+            append_cleanup_failures(&log, &[critical]);
+            let _ = sender.send(MsiEvent::Done(Err(MsiFailure {
+                code: 0,
+                kind: FailureKind::Other(0),
+                log,
+            })));
+        }
+    });
+    MsiSession { events }
+}
+
 /// The quiet path: no window and no progress consumer, but the same transaction and result mapping.
 pub fn install_blocking(request: &InstallRequest) -> Result<MsiSuccess, MsiFailure> {
     run_install(request, None)
@@ -452,6 +483,51 @@ mod tests {
     fn a_reboot_initiated_result_is_a_success_with_restart() {
         let success = finish(1641, &PathBuf::from("uninstall.log")).expect("reboot initiated");
         assert!(success.restart_required);
+    }
+
+    #[test]
+    fn orphan_cleanup_reports_warnings_before_success() {
+        let log = unique_log("orphan-warning");
+        let mut session =
+            super::start_orphan_cleanup(|| Ok(vec!["locked data".to_string()]), log.clone());
+        assert!(matches!(
+            session.events.blocking_recv(),
+            Some(super::MsiEvent::CleanupFailed)
+        ));
+        assert!(matches!(
+            session.events.blocking_recv(),
+            Some(super::MsiEvent::Done(Ok(_)))
+        ));
+        let text = std::fs::read_to_string(&log).expect("read cleanup log");
+        assert!(text.contains("locked data"));
+        let _ = std::fs::remove_file(log);
+    }
+
+    #[test]
+    fn orphan_cleanup_treats_an_arp_failure_as_an_uninstall_failure() {
+        let log = unique_log("orphan-critical");
+        let mut session = super::start_orphan_cleanup(
+            || Err("Apps & features entry: access denied".to_string()),
+            log.clone(),
+        );
+        assert!(matches!(
+            session.events.blocking_recv(),
+            Some(super::MsiEvent::Done(Err(_)))
+        ));
+        let text = std::fs::read_to_string(&log).expect("read cleanup log");
+        assert!(text.contains("access denied"));
+        let _ = std::fs::remove_file(log);
+    }
+
+    fn unique_log(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "CairnSetup-{name}-{}-{}.log",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default()
+        ))
     }
 
     #[test]

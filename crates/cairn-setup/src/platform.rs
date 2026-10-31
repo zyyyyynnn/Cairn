@@ -14,15 +14,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use windows::core::{BOOL, PCWSTR};
 use windows::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_ITEMS,
-    ERROR_SUCCESS, HANDLE, LPARAM,
+    ERROR_SUCCESS, HANDLE, LPARAM, WPARAM,
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
 };
 use windows::Win32::System::Registry::{
-    RegCloseKey, RegDeleteValueW, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW, HKEY,
-    HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, HKEY_USERS, KEY_READ, KEY_SET_VALUE, KEY_WOW64_64KEY,
-    REG_SAM_FLAGS, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ,
+    RegCloseKey, RegDeleteTreeW, RegDeleteValueW, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW,
+    RegQueryValueExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, HKEY_USERS,
+    KEY_READ, KEY_SET_VALUE, KEY_WOW64_64KEY, REG_EXPAND_SZ, REG_SAM_FLAGS, REG_SZ,
+    RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ,
 };
 use windows::Win32::System::Threading::{
     CreateMutexW, OpenProcess, WaitForSingleObject, INFINITE, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -33,7 +34,8 @@ use windows::Win32::UI::Shell::{
     FOS_PICKFOLDERS, SIGDN_FILESYSPATH,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetForegroundWindow, GetWindowTextW, SetForegroundWindow, ShowWindow, SW_RESTORE,
+    EnumWindows, GetForegroundWindow, GetWindowTextW, SendMessageTimeoutW, SetForegroundWindow,
+    ShowWindow, HWND_BROADCAST, SMTO_ABORTIFHUNG, SW_RESTORE, WM_SETTINGCHANGE,
 };
 
 /// The result of the single-instance check. `Acquired` owns the process's claim on the mutex;
@@ -207,7 +209,35 @@ fn log_path(suffix: &str) -> PathBuf {
 fn log_directory() -> Option<PathBuf> {
     let dir = staging_root().ok()?.join("logs");
     std::fs::create_dir_all(&dir).ok()?;
+    sweep_old_logs(&dir);
     Some(dir)
+}
+
+fn sweep_old_logs(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let now = SystemTime::now();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let age = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .unwrap_or_default();
+        if is_stale_log(&name, age) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+fn is_stale_log(name: &str, age: std::time::Duration) -> bool {
+    const A_WEEK: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);
+    age >= A_WEEK && name.starts_with("CairnSetup-") && name.ends_with(".log")
 }
 
 fn temp_path(suffix: &str) -> PathBuf {
@@ -500,6 +530,229 @@ fn read_hklm_string(subkey: &str, value: &str) -> Option<String> {
     ))
 }
 
+const SERVICE_NAME: &str = "CairnService";
+const ENVIRONMENT_KEY: &str = r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment";
+
+/// Removes the leftover registration of a Cairn entry whose MSI product record is gone. The ARP
+/// key is critical because it owns the visible entry; the remaining leftovers are reported as
+/// warnings and written to the same uninstall log.
+pub fn remove_orphan_registration(
+    install_dir: &Path,
+    helper: Option<PathBuf>,
+) -> Result<Vec<String>, String> {
+    remove_hklm_key_tree(r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Cairn")
+        .map_err(|error| format!("Apps & features entry: {error}"))?;
+
+    let mut warnings = Vec::new();
+    if let Err(error) = remove_hklm_key_tree(r"Software\Cairn") {
+        warnings.push(format!("Cairn registry key: {error}"));
+    }
+    if let Err(error) = remove_machine_path_entry(install_dir) {
+        warnings.push(format!("machine PATH: {error}"));
+    }
+    if let Err(error) = remove_service(SERVICE_NAME) {
+        warnings.push(format!("service: {error}"));
+    }
+    warnings.extend(remove_orphan_shortcuts());
+    warnings.extend(remove_product_data());
+    if let Err(error) = spawn_install_dir_cleanup(install_dir, helper) {
+        warnings.push(format!("install folder: {error}"));
+    }
+    Ok(warnings)
+}
+
+fn remove_hklm_key_tree(subkey: &str) -> Result<(), String> {
+    let subkey = wide(OsStr::new(subkey));
+    let status = unsafe { RegDeleteTreeW(HKEY_LOCAL_MACHINE, PCWSTR(subkey.as_ptr())) };
+    if status == ERROR_SUCCESS || status == ERROR_FILE_NOT_FOUND {
+        return Ok(());
+    }
+    Err(format!("RegDeleteTreeW failed: {status:?}"))
+}
+
+fn remove_machine_path_entry(install_dir: &Path) -> Result<(), String> {
+    let key_name = wide(OsStr::new(ENVIRONMENT_KEY));
+    let mut key = HKEY::default();
+    let status = unsafe {
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            PCWSTR(key_name.as_ptr()),
+            None,
+            KEY_READ | KEY_SET_VALUE | KEY_WOW64_64KEY,
+            &mut key,
+        )
+    };
+    if status == ERROR_FILE_NOT_FOUND {
+        return Ok(());
+    }
+    if status != ERROR_SUCCESS {
+        return Err(format!("RegOpenKeyExW failed: {status:?}"));
+    }
+
+    let result = (|| -> Result<(), String> {
+        let mut value_type = REG_SZ;
+        let mut size = 0u32;
+        let status = unsafe {
+            RegQueryValueExW(
+                key,
+                windows::core::w!("Path"),
+                None,
+                Some(&mut value_type),
+                None,
+                Some(&mut size),
+            )
+        };
+        if status == ERROR_FILE_NOT_FOUND {
+            return Ok(());
+        }
+        if status != ERROR_SUCCESS {
+            return Err(format!("RegQueryValueExW failed: {status:?}"));
+        }
+        let mut buffer = vec![0u16; (size as usize / 2).max(1)];
+        let mut read = size;
+        let status = unsafe {
+            RegQueryValueExW(
+                key,
+                windows::core::w!("Path"),
+                None,
+                Some(&mut value_type),
+                Some(buffer.as_mut_ptr() as *mut u8),
+                Some(&mut read),
+            )
+        };
+        if status != ERROR_SUCCESS {
+            return Err(format!("RegQueryValueExW failed: {status:?}"));
+        }
+        let length = (read as usize / 2).min(buffer.len());
+        let current = String::from_utf16_lossy(&buffer[..length]);
+        let current = current.trim_end_matches('\0');
+
+        let Some(replacement) = path_without_entry(current, install_dir) else {
+            return Ok(());
+        };
+        let replacement = wide(OsStr::new(&replacement));
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                replacement.as_ptr() as *const u8,
+                replacement.len() * std::mem::size_of::<u16>(),
+            )
+        };
+        let status = unsafe {
+            RegSetValueExW(
+                key,
+                windows::core::w!("Path"),
+                None,
+                REG_EXPAND_SZ,
+                Some(bytes),
+            )
+        };
+        if status != ERROR_SUCCESS {
+            return Err(format!("RegSetValueExW failed: {status:?}"));
+        }
+        broadcast_environment_change();
+        Ok(())
+    })();
+
+    unsafe {
+        let _ = RegCloseKey(key);
+    }
+    result
+}
+
+fn path_without_entry(current: &str, install_dir: &Path) -> Option<String> {
+    let install = install_dir
+        .to_string_lossy()
+        .trim_end_matches(['\\', '/'])
+        .to_ascii_lowercase();
+    let mut kept = Vec::new();
+    let mut changed = false;
+    for part in current.split(';') {
+        let entry = part
+            .trim()
+            .trim_matches('"')
+            .trim_end_matches(['\\', '/'])
+            .to_ascii_lowercase();
+        if entry == install {
+            changed = true;
+        } else {
+            kept.push(part.to_string());
+        }
+    }
+    changed.then(|| kept.join(";"))
+}
+
+fn broadcast_environment_change() {
+    let environment = wide(OsStr::new("Environment"));
+    unsafe {
+        let _ = SendMessageTimeoutW(
+            HWND_BROADCAST,
+            WM_SETTINGCHANGE,
+            WPARAM(0),
+            LPARAM(environment.as_ptr() as isize),
+            SMTO_ABORTIFHUNG,
+            5000,
+            None,
+        );
+    }
+}
+
+fn remove_service(name: &str) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let sc = system32("sc.exe");
+    let _ = Command::new(&sc)
+        .args(["stop", name])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+    let output = Command::new(&sc)
+        .args(["delete", name])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|error| error.to_string())?;
+    match output.status.code() {
+        Some(0 | 1060 | 1072) => Ok(()),
+        other => Err(format!("sc delete returned {other:?}")),
+    }
+}
+
+fn system32(program: &str) -> PathBuf {
+    use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
+    let mut buffer = [0u16; 260];
+    let length = unsafe { GetSystemDirectoryW(Some(&mut buffer)) } as usize;
+    let directory = if length > 0 && length < buffer.len() {
+        PathBuf::from(String::from_utf16_lossy(&buffer[..length]))
+    } else {
+        PathBuf::from(r"C:\Windows\System32")
+    };
+    directory.join(program)
+}
+
+fn remove_orphan_shortcuts() -> Vec<String> {
+    let mut failures = Vec::new();
+    if let Some(base) = std::env::var_os("ProgramData") {
+        let dir = PathBuf::from(base)
+            .join("Microsoft")
+            .join("Windows")
+            .join("Start Menu")
+            .join("Programs")
+            .join("Cairn");
+        if dir.is_dir() {
+            if let Err(error) = std::fs::remove_dir_all(&dir) {
+                failures.push(format!("start menu: {error}"));
+            }
+        }
+    }
+    if let Some(base) = std::env::var_os("PUBLIC") {
+        let shortcut = PathBuf::from(base).join("Desktop").join("Cairn.lnk");
+        if shortcut.is_file() {
+            if let Err(error) = std::fs::remove_file(&shortcut) {
+                failures.push(format!("desktop shortcut: {error}"));
+            }
+        }
+    }
+    failures
+}
+
 /// Copies this binary to a temporary helper before the MSI removes it from the install folder.
 /// The copy must happen before uninstall starts; the running image's original path can be gone by
 /// the time the transaction finishes.
@@ -614,9 +867,43 @@ pub fn wide(value: &OsStr) -> Vec<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::{explorer_executable, is_stale_staging_entry, push_user_data_dirs};
+    use super::{
+        explorer_executable, is_stale_log, is_stale_staging_entry, path_without_entry,
+        push_user_data_dirs,
+    };
     use std::path::{Path, PathBuf};
     use std::time::Duration;
+
+    #[test]
+    fn the_machine_path_loses_only_the_install_entry() {
+        let install = Path::new(r"C:\Program Files\Cairn");
+        assert_eq!(
+            path_without_entry(r"C:\Tools;C:\Program Files\Cairn;C:\More", install),
+            Some(r"C:\Tools;C:\More".to_string())
+        );
+        assert_eq!(
+            path_without_entry(r#""C:\Program Files\Cairn\";C:\Tools"#, install),
+            Some(r"C:\Tools".to_string())
+        );
+        assert_eq!(
+            path_without_entry(r"%SystemRoot%;C:\Program Files\CAIRN", install),
+            Some(r"%SystemRoot%".to_string())
+        );
+        assert_eq!(
+            path_without_entry(r"C:\Tools;C:\Program Files\Cairn64", install),
+            None
+        );
+    }
+
+    #[test]
+    fn logs_are_kept_for_a_week_and_license_files_are_not_swept() {
+        let old = Duration::from_secs(8 * 24 * 60 * 60);
+        let young = Duration::from_secs(6 * 24 * 60 * 60);
+        assert!(is_stale_log("CairnSetup-1-2.log", old));
+        assert!(is_stale_log("CairnSetup-1-2.uninstall.log", old));
+        assert!(!is_stale_log("CairnSetup-1-2.log", young));
+        assert!(!is_stale_log("LICENSE.txt", old));
+    }
 
     #[test]
     fn every_profile_contributes_its_roaming_and_local_data_once() {

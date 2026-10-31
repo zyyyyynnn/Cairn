@@ -406,16 +406,20 @@ impl SetupApp {
             cx.notify();
             return;
         };
-        let mut product_codes = installed::find_product_codes();
-        if product_codes.is_empty() {
-            if let Some(code) = product.product_code.clone() {
-                product_codes.push(code);
+        let product_codes = match installed::find_product_codes_checked() {
+            Ok(codes) => codes,
+            Err(error) => {
+                let log = platform::uninstall_log_path();
+                let _ = std::fs::write(&log, format!("MSI product enumeration failed: {error}\n"));
+                self.log = Some(log);
+                self.error = Some(SetupError::simple("error_msi_unknown"));
+                self.screen = Screen::Failed;
+                cx.notify();
+                return;
             }
-        }
+        };
         if product_codes.is_empty() {
-            self.error = Some(SetupError::simple("error_msi_invalid"));
-            self.screen = Screen::Failed;
-            cx.notify();
+            self.start_orphan_uninstall(product, cx);
             return;
         }
 
@@ -441,6 +445,30 @@ impl SetupApp {
         self.cleanup_incomplete = false;
         self.progress = None;
         self.stage = Stage::Preparing;
+        self.uninstall_attempted = true;
+        self.screen = Screen::Uninstalling;
+        self.installing.set(true);
+        self.pump(session.events, cx);
+        cx.notify();
+    }
+
+    fn start_orphan_uninstall(&mut self, product: InstalledProduct, cx: &mut Context<Self>) {
+        let log = platform::uninstall_log_path();
+        let helper = platform::prepare_install_dir_cleanup();
+        let install_dir = product.install_dir;
+        let cleanup_dir = install_dir.clone();
+        let session = msi::start_orphan_cleanup(
+            move || platform::remove_orphan_registration(&cleanup_dir, helper),
+            log.clone(),
+        );
+
+        self.install_dir = Some(install_dir);
+        self.log = Some(log);
+        self.error = None;
+        self.notice = None;
+        self.cleanup_incomplete = false;
+        self.progress = None;
+        self.stage = Stage::Finishing;
         self.uninstall_attempted = true;
         self.screen = Screen::Uninstalling;
         self.installing.set(true);

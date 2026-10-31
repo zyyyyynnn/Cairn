@@ -69,22 +69,26 @@ pub fn quiet_uninstall() -> i32 {
 
     let log = platform::uninstall_log_path();
     let cleanup_helper = platform::prepare_install_dir_cleanup();
-    let mut product_codes = installed::find_product_codes();
-    if product_codes.is_empty() {
-        if let Some(code) = product.product_code.clone() {
-            product_codes.push(code);
-        }
-    }
-    let result = if product_codes.is_empty() {
-        Err(MsiFailure {
-            code: 1605,
-            kind: msi::FailureKind::NotInstalled,
-            log: log.clone(),
-        })
-    } else {
-        msi::uninstall_blocking(&product_codes, &log)
+    let product_codes = match installed::find_product_codes_checked() {
+        Ok(codes) => codes,
+        Err(_) => return EXIT_ERROR,
     };
+    if product_codes.is_empty() {
+        return match platform::remove_orphan_registration(&product.install_dir, cleanup_helper) {
+            Ok(warnings) => {
+                if !warnings.is_empty() {
+                    msi::append_cleanup_failures(&log, &warnings);
+                }
+                EXIT_OK
+            }
+            Err(critical) => {
+                msi::append_cleanup_failures(&log, &[critical]);
+                EXIT_ERROR
+            }
+        };
+    }
 
+    let result = msi::uninstall_blocking(&product_codes, &log);
     if result.is_ok() {
         let mut failures = platform::remove_product_data();
         if let Err(error) =

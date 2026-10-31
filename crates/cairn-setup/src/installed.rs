@@ -24,6 +24,7 @@ use crate::model::{default_install_dir, InstalledProduct};
 use crate::msi::LegacyUninstall;
 
 const PRODUCT_KEY: &str = r"Software\Cairn";
+const ARP_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Cairn";
 const UNINSTALL_KEYS: [&str; 2] = [
     r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
     r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
@@ -49,10 +50,16 @@ pub fn installed_product() -> Option<InstalledProduct> {
         });
     }
 
-    let version = read_hklm_string(PRODUCT_KEY, "Version")?;
+    let version = read_hklm_string(PRODUCT_KEY, "Version")
+        .or_else(|| read_hklm_string(ARP_KEY, "DisplayVersion"));
+    let install_dir = read_hklm_string(PRODUCT_KEY, "InstallFolder")
+        .or_else(|| read_hklm_string(ARP_KEY, "InstallLocation"));
+    if version.is_none() && install_dir.is_none() {
+        return None;
+    }
     Some(InstalledProduct {
-        version,
-        install_dir: read_hklm_string(PRODUCT_KEY, "InstallFolder")
+        version: version.unwrap_or_default(),
+        install_dir: install_dir
             .map(PathBuf::from)
             .unwrap_or_else(default_install_dir),
         // The MSI registration is authoritative. A custom ARP key without a product code is a
@@ -75,6 +82,12 @@ pub fn find_product_code() -> Option<String> {
 /// Every product registered under Cairn's upgrade code. A failed side-by-side install can leave
 /// more than one; uninstalling only the first would leave a second entry and its service behind.
 pub fn find_product_codes() -> Vec<String> {
+    find_product_codes_checked().unwrap_or_default()
+}
+
+/// The checked form keeps an installer API failure distinct from "no products". A damaged or
+/// unavailable MSI database must never trigger the registration-only cleanup path.
+pub fn find_product_codes_checked() -> Result<Vec<String>, u32> {
     let upgrade = wide(std::ffi::OsStr::new(&upgrade_code_guid()));
     let mut codes = Vec::new();
     let mut index = 0u32;
@@ -88,8 +101,11 @@ pub fn find_product_codes() -> Vec<String> {
                 windows::core::PWSTR(product.as_mut_ptr()),
             )
         };
+        if result == ERROR_NO_MORE_ITEMS.0 {
+            return Ok(codes);
+        }
         if result != ERROR_SUCCESS.0 {
-            break;
+            return Err(result);
         }
         let code = utf16_until_nul(&product);
         if !code.is_empty() && !codes.contains(&code) {
@@ -97,7 +113,6 @@ pub fn find_product_codes() -> Vec<String> {
         }
         index = index.saturating_add(1);
     }
-    codes
 }
 
 /// The old Burn bundles registered their own Apps & features entries and launched `CairnSetup.exe`.
