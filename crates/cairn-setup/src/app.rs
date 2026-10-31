@@ -87,6 +87,15 @@ pub(crate) fn visible_progress(progress: Option<f32>) -> f32 {
     progress.unwrap_or(0.0).min(99.0)
 }
 
+/// A product whose MSI record is missing or damaged cannot be removed by Windows Installer. The
+/// same uninstaller removes the remaining registration and files instead of asking for a reinstall.
+fn uninstall_can_fall_back_to_cleanup(kind: msi::FailureKind) -> bool {
+    matches!(
+        kind,
+        msi::FailureKind::InvalidPackage | msi::FailureKind::NotInstalled
+    )
+}
+
 pub struct SetupApp {
     pub(crate) i18n: I18n,
     pub(crate) launch: Launch,
@@ -457,7 +466,7 @@ impl SetupApp {
         let helper = platform::prepare_install_dir_cleanup();
         let install_dir = product.install_dir;
         let cleanup_dir = install_dir.clone();
-        let session = msi::start_orphan_cleanup(
+        let session = msi::start_cleanup(
             move || {
                 let Some(_lock) = platform::acquire_msi_execution(30_000) else {
                     return Err("another Windows Installer operation is running".to_string());
@@ -477,6 +486,41 @@ impl SetupApp {
         );
 
         self.install_dir = Some(install_dir);
+        self.log = Some(log);
+        self.error = None;
+        self.notice = None;
+        self.cleanup_incomplete = false;
+        self.progress = None;
+        self.stage = Stage::Finishing;
+        self.uninstall_attempted = true;
+        self.screen = Screen::Uninstalling;
+        self.installing.set(true);
+        self.pump(session.events, cx);
+        cx.notify();
+    }
+
+    fn start_force_cleanup(&mut self, cx: &mut Context<Self>) {
+        let Some(install_dir) = self.install_dir.clone() else {
+            self.error = Some(SetupError::simple("error_msi_unknown"));
+            self.screen = Screen::Failed;
+            cx.notify();
+            return;
+        };
+        let log = self
+            .log
+            .clone()
+            .unwrap_or_else(platform::uninstall_log_path);
+        let helper = platform::prepare_install_dir_cleanup();
+        let session = msi::start_cleanup(
+            move || {
+                let Some(_lock) = platform::acquire_msi_execution(30_000) else {
+                    return Err("another Windows Installer operation is running".to_string());
+                };
+                platform::remove_orphan_registration(&install_dir, helper)
+            },
+            log.clone(),
+        );
+
         self.log = Some(log);
         self.error = None;
         self.notice = None;
@@ -562,13 +606,11 @@ impl SetupApp {
                     }
                     Err(failure) => {
                         self.log = Some(failure.log.clone());
-                        let mut error = SetupError::from_failure(&failure);
-                        if was_uninstalling && failure.kind == msi::FailureKind::NotInstalled {
-                            // The visible entry outlived its MSI registration. Setup can repair
-                            // the product; the record-damaged sentence names that recovery.
-                            error = SetupError::simple("error_msi_invalid");
+                        if was_uninstalling && uninstall_can_fall_back_to_cleanup(failure.kind) {
+                            self.start_force_cleanup(cx);
+                            return;
                         }
-                        self.error = Some(error);
+                        self.error = Some(SetupError::from_failure(&failure));
                         self.screen = Screen::Failed;
                     }
                 }
@@ -632,8 +674,20 @@ impl SetupApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{progress_percent, visible_progress};
+    use super::{progress_percent, uninstall_can_fall_back_to_cleanup, visible_progress};
+    use crate::msi::FailureKind;
 
+    #[test]
+    fn a_damaged_or_missing_msi_record_falls_back_to_cleanup() {
+        assert!(uninstall_can_fall_back_to_cleanup(
+            FailureKind::InvalidPackage
+        ));
+        assert!(uninstall_can_fall_back_to_cleanup(
+            FailureKind::NotInstalled
+        ));
+        assert!(!uninstall_can_fall_back_to_cleanup(FailureKind::Fatal));
+        assert!(!uninstall_can_fall_back_to_cleanup(FailureKind::Cancelled));
+    }
     #[test]
     fn progress_never_moves_backwards_when_msi_resets_an_action() {
         assert_eq!(progress_percent(None, 0, 100), Some(0.0));

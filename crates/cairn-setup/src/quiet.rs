@@ -106,6 +106,30 @@ pub fn quiet_uninstall() -> i32 {
     }
 
     let result = msi::uninstall_blocking(&product_codes, &log);
+    if let Err(failure) = &result {
+        if matches!(
+            failure.kind,
+            msi::FailureKind::InvalidPackage | msi::FailureKind::NotInstalled
+        ) {
+            let cleaned = (|| {
+                let _lock = platform::acquire_msi_execution(30_000)
+                    .ok_or_else(|| "another Windows Installer operation is running".to_string())?;
+                platform::remove_orphan_registration(&product.install_dir, cleanup_helper)
+            })();
+            return match cleaned {
+                Ok(warnings) => {
+                    if !warnings.is_empty() {
+                        msi::append_cleanup_failures(&log, &warnings);
+                    }
+                    EXIT_OK
+                }
+                Err(critical) => {
+                    msi::append_cleanup_failures(&log, &[critical]);
+                    EXIT_ERROR
+                }
+            };
+        }
+    }
     if result.is_ok() {
         let mut failures = platform::remove_product_data();
         if let Err(error) =
