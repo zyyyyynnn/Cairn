@@ -83,10 +83,12 @@ impl CairnApp {
             .gap(rems(layout::INNER_SPACING))
             .flex()
             .items_center()
-            // Full-bleed, with the product's restrained 3px corners. The top and bottom borders
-            // still act as the title-bar divider and the table-head separator.
             .rounded(tokens.radius)
-            .bg(tokens.chrome)
+            .bg(if is_focused {
+                tokens.background
+            } else {
+                tokens.muted
+            })
             .border_1()
             .border_color(if is_focused {
                 tokens.ring

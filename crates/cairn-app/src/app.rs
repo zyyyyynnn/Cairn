@@ -82,9 +82,8 @@ pub mod layout {
     /// parts such as an icon and its label or two peer controls. One token covers both roles so the
     /// same distance cannot drift between an inset and a gap.
     pub const INNER_SPACING: f32 = SPACE_8;
-    /// The search band is the query box itself: its own top and bottom borders separate the title
-    /// bar and the table head, so the band adds no vertical padding.
-    pub const SEARCH_BAND_HEIGHT: f32 = CONTROL_HEIGHT;
+    /// The search band: the query box plus the tight inset that keeps it off the band's edges.
+    pub const SEARCH_BAND_HEIGHT: f32 = CONTROL_HEIGHT + 2.0 * TIGHT_LEAD;
     /// The query box inside the search band. The primary task is a control like any other, so it
     /// takes the control step rather than a step of its own.
     pub const SEARCH_INPUT_HEIGHT: f32 = CONTROL_HEIGHT;
@@ -166,9 +165,8 @@ pub mod layout {
     /// Menu trigger container lead: the content edge minus the small Button's own 8px padding,
     /// plus the optical correction for the first glyph's side bearing.
     pub const MENU_LEAD: f32 = CONTENT_INSET - INNER_SPACING + MENU_OPTICAL_LEAD;
-    /// Search band outer lead, followed by the query box's own leading padding. The two still sum
-    /// to [`CONTENT_INSET`], so the search glyph stays on the content spine.
-    pub const SEARCH_BAND_LEAD: f32 = 0.0;
+    /// Search band outer lead, followed by the query box's own leading padding.
+    pub const SEARCH_BAND_LEAD: f32 = TIGHT_LEAD;
     pub const SEARCH_INPUT_LEAD: f32 = CONTENT_INSET - SEARCH_BAND_LEAD;
     /// Sidebar viewport lead, followed by the row's own [`INNER_SPACING`].
     pub const SIDEBAR_VIEWPORT_LEAD: f32 = TIGHT_LEAD;
@@ -814,8 +812,8 @@ mod tests {
         );
         assert_eq!(
             layout::SEARCH_BAND_HEIGHT,
-            layout::CONTROL_HEIGHT,
-            "the query box fills the band and its own borders separate the chrome and table head"
+            layout::CONTROL_HEIGHT + 2.0 * layout::TIGHT_LEAD,
+            "the search band is its control plus one tight inset on each side"
         );
         assert!(
             layout::INNER_SPACING > 0.0,
