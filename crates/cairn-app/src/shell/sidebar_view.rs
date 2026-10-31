@@ -427,9 +427,10 @@ impl CairnApp {
                             .px(rems(layout::INNER_SPACING))
                             .pt(rems(layout::SPACE_4))
                             .pb(rems(layout::SPACE_4))
-                            .text_sm()
+                            .text_size(rems(theme::BRAND_TITLE_SIZE))
+                            .line_height(relative(theme::SERIF_LINE_HEIGHT))
                             .font(theme::serif_font(FontWeight::SEMIBOLD))
-                            .text_color(tokens.muted_foreground)
+                            .text_color(tokens.foreground)
                             .child(theme::heading_text(locations_title, FontWeight::SEMIBOLD)),
                     )
                     .children(quick_access)
@@ -440,9 +441,10 @@ impl CairnApp {
                             .px(rems(layout::INNER_SPACING))
                             .pt(rems(layout::SPACE_8))
                             .pb(rems(layout::SPACE_4))
-                            .text_sm()
+                            .text_size(rems(theme::BRAND_TITLE_SIZE))
+                            .line_height(relative(theme::SERIF_LINE_HEIGHT))
                             .font(theme::serif_font(FontWeight::SEMIBOLD))
-                            .text_color(tokens.muted_foreground)
+                            .text_color(tokens.foreground)
                             .child(theme::heading_text(drives_title, FontWeight::SEMIBOLD)),
                     )
                     .children(drive_elements),
