@@ -59,7 +59,7 @@ fn sidebar_icon_svg(icon: IconName) -> Option<Arc<[u8]>> {
 /// label's font metrics so the icon shares the text's optical centreline.
 fn sidebar_icon_metrics(window: &Window) -> SidebarIconMetrics {
     let style = window.text_style();
-    let font = style.font();
+    let font = theme::cjk_heading_font();
     let font_size = window.rem_size() * theme::SMALL_TEXT_SIZE;
     let text_system = window.text_system();
     let sample = "文";
@@ -127,6 +127,12 @@ fn sidebar_row(
     tokens: &ShellTokens,
     icon_metrics: SidebarIconMetrics,
 ) -> Div {
+    let label = label.into();
+    let weight = if is_active {
+        FontWeight::SEMIBOLD
+    } else {
+        FontWeight::NORMAL
+    };
     h_flex()
         .w_full()
         .min_h(rems(layout::ROW_HEIGHT))
@@ -137,11 +143,11 @@ fn sidebar_row(
         .gap_x(rems(layout::INNER_SPACING))
         .rounded(tokens.radius)
         .text_sm()
+        .font(theme::serif_font(weight))
         .overflow_x_hidden()
         .when(is_active, |this| {
             this.bg(tokens.sidebar_accent)
                 .text_color(tokens.sidebar_accent_foreground)
-                .font_medium()
         })
         .child(sidebar_icon(icon, icon_metrics))
         .child(
@@ -152,7 +158,7 @@ fn sidebar_row(
                 .min_w_0()
                 .overflow_hidden()
                 .whitespace_nowrap()
-                .child(label.into()),
+                .child(theme::heading_text(label, weight)),
         )
 }
 
@@ -427,11 +433,10 @@ impl CairnApp {
                             .px(rems(layout::INNER_SPACING))
                             .pt(rems(layout::SPACE_4))
                             .pb(rems(layout::SPACE_4))
-                            .text_size(rems(theme::BRAND_TITLE_SIZE))
-                            .line_height(relative(theme::SERIF_LINE_HEIGHT))
-                            .font(theme::serif_font(FontWeight::SEMIBOLD))
-                            .text_color(tokens.foreground)
-                            .child(theme::heading_text(locations_title, FontWeight::SEMIBOLD)),
+                            .text_sm()
+                            .font_medium()
+                            .text_color(tokens.muted_foreground)
+                            .child(locations_title),
                     )
                     .children(quick_access)
                     .child(recycle_entry)
@@ -441,11 +446,10 @@ impl CairnApp {
                             .px(rems(layout::INNER_SPACING))
                             .pt(rems(layout::SPACE_8))
                             .pb(rems(layout::SPACE_4))
-                            .text_size(rems(theme::BRAND_TITLE_SIZE))
-                            .line_height(relative(theme::SERIF_LINE_HEIGHT))
-                            .font(theme::serif_font(FontWeight::SEMIBOLD))
-                            .text_color(tokens.foreground)
-                            .child(theme::heading_text(drives_title, FontWeight::SEMIBOLD)),
+                            .text_sm()
+                            .font_medium()
+                            .text_color(tokens.muted_foreground)
+                            .child(drives_title),
                     )
                     .children(drive_elements),
             )
