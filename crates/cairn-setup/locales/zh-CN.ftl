@@ -42,6 +42,7 @@ error_uninstall_msi_busy = 另一个安装或卸载程序正在运行，请等�
 error_uninstall_not_installed = 没有找到 Cairn 的安装记录。
 error_uninstall_msi_platform = 这个安装记录不支持当前版本的 Windows。
 error_uninstall_msi_fatal = Windows 安装程序未能完成卸载。请查看日志后重试。
+error_uninstall_msi_invalid = Windows 安装程序无法读取为 Cairn 保存的数据。移除剩余文件会同时移除 Cairn 的设置和注册表项，且无法撤销。
 
 error_title = 安装未完成
 error_msi_unknown = 安装没有完成，现有文件没有被删除。请查看日志了解原因，然后重试。
@@ -65,6 +66,8 @@ uninstall_progress_title = 正在卸载 Cairn
 uninstall_progress_working = 正在移除 Cairn 文件和设置…
 uninstall_restart = 请重启 Windows 以完成 Cairn 的移除。
 uninstall_done_title = 卸载完成
+uninstall_files_removed_title = Cairn 文件已移除
+uninstall_record_remaining = Windows Installer 中仍保留 Cairn 的安装记录。文件已移除，但之后的安装可能认为 Cairn 已安装。
 uninstall_cleanup_incomplete = 部分 Cairn 数据未能移除。请查看日志了解详情。
 
 path_empty = 请输入安装文件夹。
@@ -84,6 +87,7 @@ action_update = 更新
 action_close = 关闭
 action_retry = 重试
 action_uninstall = 卸载
+action_remove_remaining = 移除剩余文件
 action_open_app = 打开 Cairn
 action_finish = 完成
 action_view_log = 查看日志
