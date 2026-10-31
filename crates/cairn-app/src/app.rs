@@ -168,7 +168,7 @@ pub mod layout {
     pub const MENU_LEAD: f32 = CONTENT_INSET - INNER_SPACING + MENU_OPTICAL_LEAD;
     /// Search band outer lead, followed by the query box's own leading padding. The two still sum
     /// to [`CONTENT_INSET`], so the search glyph stays on the content spine.
-    pub const SEARCH_BAND_LEAD: f32 = TIGHT_LEAD;
+    pub const SEARCH_BAND_LEAD: f32 = 0.0;
     pub const SEARCH_INPUT_LEAD: f32 = CONTENT_INSET - SEARCH_BAND_LEAD;
     /// Sidebar viewport lead, followed by the row's own [`INNER_SPACING`].
     pub const SIDEBAR_VIEWPORT_LEAD: f32 = TIGHT_LEAD;

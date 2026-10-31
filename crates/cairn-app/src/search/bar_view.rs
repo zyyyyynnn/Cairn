@@ -83,12 +83,9 @@ impl CairnApp {
             .gap(rems(layout::INNER_SPACING))
             .flex()
             .items_center()
-            .rounded(tokens.radius)
-            .bg(if is_focused {
-                tokens.background
-            } else {
-                tokens.muted
-            })
+            // Full-bleed and square: the top and bottom borders meet the content edges and act
+            // as the title-bar divider and the table-head separator.
+            .bg(tokens.chrome)
             .border_1()
             .border_color(if is_focused {
                 tokens.ring
