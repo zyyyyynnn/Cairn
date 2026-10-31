@@ -25,7 +25,7 @@
 
 ## 交互与渲染
 
-14. **Hover 挂在命中区域上**：在交互包装层的普通子节点上增加 `.hover()`，在现有版本中可能不再触发；把 hover 样式放在拥有 hitbox 的交互节点上。
+14. **Hover 挂在命中区域上**：在交互包装层的普通子节点上增加 `.hover()`，可能不触发；把 hover 样式放在拥有 hitbox 的交互节点上。
 15. **鼠标监听器在绘制时注册**：`Window::on_mouse_event` 只接收当前绘制帧注册的监听器；拖拽监听宜在 `canvas` 的绘制回调中注册。
 16. **Dialog 不能在窗口创建闭包中打开**：`window.open_dialog(...)` 必须由后续用户动作触发，否则会撞上组件窗口状态未初始化。
 17. **Button 的重复 Hover 会 panic**：不要在 `Button` 上重复声明 `.hover()`；Ghost 的 hover 通过主题/全局交互样式配置。
@@ -36,15 +36,16 @@
 19. **单实例唤醒匹配产品标题，不匹配共享类名**：GPUI 的窗口类名可能与其他应用共用。当前 Cairn 通过 `EnumWindows` 匹配标题 `Cairn`（或校验进程）后调用 `ShowWindow(SW_RESTORE)`、`BringWindowToTop`、`SetForegroundWindow`；没有活动窗口时允许新实例自愈启动。托盘唤醒走同一路径。
 20. **主题切换分两步**：在同一个 `Theme::update` 中同时修改 mode 与修复颜色可能被丢弃；先切 mode，再在下一步修复颜色。
 21. **UI 验收没有 headless 捷径**：当前应用未接入无头窗口测试；涉及窗口截图、焦点与输入法的验证必须在真实窗口中完成，并使用最新屏幕捕获。
+    解除这一限制需要 `gpui-kit 0.8.0` 的 `test-support` 特性与 `TestAppContext` 无头装置。当前 `shell/accessibility.rs` 的“渲染路径确实请求了这个控件”把被渲染的源文件当作文本扫描，是渲染期不变量的静态代理，不是行为断言；接入无头装置后应改为直接读可访问性树。
 22. **Sidebar 的辅助功能边界**：`Sidebar<E>` 不提供独立 a11y 树；不要把它的根节点当成可靠的导航 landmark。需要可访问交互时，由应用层建立显式 role/name/focus 结构。
 
 ## 相关代码
 
 - `crates/cairn-app/src/app.rs`：布局阶梯、窗口尺寸。
-- `crates/cairn-app/src/theme.rs`：字号、主题、等宽数字。
-- `crates/cairn-app/src/search_bar_view.rs`：搜索框与光标。
+- `crates/cairn-app/src/shell/theme.rs`：字号、主题、等宽数字。
+- `crates/cairn-app/src/search/bar_view.rs`：搜索框与光标。
 - `crates/cairn-app/src/main.rs`：单实例唤醒与托盘。
-- `crates/cairn-app/src/accessibility.rs`：可观察控件注册。
+- `crates/cairn-app/src/shell/accessibility.rs`：可观察控件注册。
 
 ---
 
@@ -90,12 +91,12 @@
 - 找到窗口：`ShowWindow(SW_RESTORE)` → `BringWindowToTop` → `SetForegroundWindow`。
 - 找不到活动窗口（互斥体存在但窗口已消失）：允许新实例启动，避免用户被困在无窗口状态。
 - 托盘“显示 Cairn”和托盘双击复用同一唤醒函数。
-- 第二次启动 `cairn.exe` 不应并发创建第二个主窗口；这也会让截图/自动化误连到旧进程。
+- 第二次启动 `Cairn.exe` 不应并发创建第二个主窗口；这也会让截图/自动化误连到旧进程。
 
 ## 5. 验证位置
 
-- `crates/cairn-app/src/input.rs`：快照栈、词边界、IME 范围替换及单测。
-- `crates/cairn-app/src/menu_actions.rs`：撤销/重做/剪切/粘贴动作与焦点恢复。
-- `crates/cairn-app/src/commands.rs`：全局键位与必选绑定。
+- `crates/cairn-app/src/search/input.rs`：快照栈、词边界、IME 范围替换及单测。
+- `crates/cairn-app/src/shell/menu_actions.rs`：撤销/重做/剪切/粘贴动作与焦点恢复。
+- `crates/cairn-app/src/shell/commands.rs`：全局键位与必选绑定。
 - `crates/cairn-app/src/main.rs`：单实例唤醒、托盘。
-- `crates/cairn-app/src/sidebar_view.rs`：焦点模态与键盘导航。
+- `crates/cairn-app/src/shell/sidebar_view.rs`：焦点模态与键盘导航。
