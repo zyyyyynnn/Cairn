@@ -1043,8 +1043,12 @@ impl CairnApp {
                     style_confirmation_alert(alert, window, ok.clone(), cancel.clone())
                         .title(
                             div()
+                                .id("dialog-title")
+                                .role(Role::Heading)
+                                .aria_level(1)
+                                .aria_label(title.clone())
                                 .font(theme::serif_font(FontWeight::SEMIBOLD))
-                                .child(title.clone()),
+                                .child(theme::heading_text(title.clone(), FontWeight::SEMIBOLD)),
                         )
                         .description(description.clone())
                         .confirm()
@@ -1405,8 +1409,12 @@ impl CairnApp {
             style_confirmation_alert(alert, window, ok.clone(), cancel.clone())
                 .title(
                     div()
+                        .id("dialog-title")
+                        .role(Role::Heading)
+                        .aria_level(1)
+                        .aria_label(title.clone())
                         .font(theme::serif_font(FontWeight::SEMIBOLD))
-                        .child(title.clone()),
+                        .child(theme::heading_text(title.clone(), FontWeight::SEMIBOLD)),
                 )
                 .description(description.clone())
                 .confirm()
@@ -1489,8 +1497,12 @@ impl CairnApp {
             style_confirmation_alert(alert, window, ok.clone(), cancel.clone())
                 .title(
                     div()
+                        .id("dialog-title")
+                        .role(Role::Heading)
+                        .aria_level(1)
+                        .aria_label(title.clone())
                         .font(theme::serif_font(FontWeight::SEMIBOLD))
-                        .child(title.clone()),
+                        .child(theme::heading_text(title.clone(), FontWeight::SEMIBOLD)),
                 )
                 .description(description.clone())
                 .confirm()
@@ -1608,8 +1620,12 @@ impl CairnApp {
             style_confirmation_alert(alert, window, ok.clone(), cancel.clone())
                 .title(
                     div()
+                        .id("dialog-title")
+                        .role(Role::Heading)
+                        .aria_level(1)
+                        .aria_label(title.clone())
                         .font(theme::serif_font(FontWeight::SEMIBOLD))
-                        .child(title.clone()),
+                        .child(theme::heading_text(title.clone(), FontWeight::SEMIBOLD)),
                 )
                 .description(description.clone())
                 .confirm()

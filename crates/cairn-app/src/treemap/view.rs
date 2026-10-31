@@ -66,7 +66,7 @@ fn text_width(window: &Window, text: &str, weight: FontWeight) -> f32 {
         return 0.0;
     }
     let mut style = window.text_style();
-    style.font_size = rems(0.75).into();
+    style.font_size = rems(theme::SMALL_TEXT_SIZE).into();
     style.font_weight = weight;
     style.font_features = theme::tabular_figures();
     let font_size = style.font_size.to_pixels(window.rem_size());
@@ -378,13 +378,22 @@ impl CairnApp {
         } else {
             f32::from(theme::rem(window) * layout::SIDEBAR_WIDTH)
         };
-        let avail_w = (f32::from(window_bounds.size.width) - sidebar_w).max(100.0);
+        // The canvas is the content column's panel, so it keeps the panel's own
+        // margin on every side. Pointer coordinates and the tile layout both
+        // read this rect; leaving the margin out put every hit a panel step
+        // right and below the tile it aimed at and let the layout run past the
+        // panel edge.
+        let panel_margin = f32::from(theme::rem(window) * layout::SPACE_4);
+        let avail_w =
+            (f32::from(window_bounds.size.width) - sidebar_w - 2.0 * panel_margin).max(100.0);
         let chrome_h = f32::from(layout::TITLE_BAR_HEIGHT)
             + f32::from(theme::rem(window) * layout::STATUS_HEIGHT);
-        let avail_h = (f32::from(window_bounds.size.height) - chrome_h).max(100.0);
-        // Canvas-space pointer coordinates start below the title bar and right
-        // of the sidebar; the layout bounds above already use the same box.
-        let canvas_origin = (sidebar_w, f32::from(layout::TITLE_BAR_HEIGHT));
+        let avail_h =
+            (f32::from(window_bounds.size.height) - chrome_h - 2.0 * panel_margin).max(100.0);
+        let canvas_origin = (
+            sidebar_w + panel_margin,
+            f32::from(layout::TITLE_BAR_HEIGHT) + panel_margin,
+        );
         let canvas_size = (avail_w, avail_h);
         state.last_scale_factor = window.scale_factor().max(1.0);
 
@@ -844,7 +853,7 @@ fn label_row(
         .flex_1()
         .min_w_0()
         .truncate()
-        .text_xs()
+        .text_sm()
         .text_color(ink);
     let text = if semibold {
         text.font_semibold()
@@ -892,7 +901,7 @@ fn compact_block_content(
         content = content.child(
             div()
                 .whitespace_nowrap()
-                .text_xs()
+                .text_sm()
                 .font_features(theme::tabular_figures())
                 .text_color(secondary)
                 .child(size.to_string()),
@@ -1098,7 +1107,7 @@ fn render_nested_node(
                         .flex_1()
                         .min_w_0()
                         .truncate()
-                        .text_xs()
+                        .text_sm()
                         .font_semibold()
                         .text_color(rcx.palette.ink())
                         .child(name),
@@ -1108,7 +1117,7 @@ fn render_nested_node(
                         div()
                             .flex_shrink_0()
                             .whitespace_nowrap()
-                            .text_xs()
+                            .text_sm()
                             .font_features(theme::tabular_figures())
                             .text_color(rcx.palette.ink_secondary())
                             .child(header_size_label),

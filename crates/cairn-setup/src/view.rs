@@ -13,8 +13,8 @@ use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::*;
 
 use cairn_ui::brand::{
-    app_icon, serif_font, tabular_figures, BRAND_DESCRIPTOR_SIZE, BRAND_TITLE_SIZE, RADIUS,
-    SERIF_LINE_HEIGHT, UI_ICON_SIZE,
+    app_icon, cjk_heading_font, has_cjk, heading_text, serif_font, tabular_figures,
+    BRAND_TITLE_SIZE, RADIUS, SERIF_LINE_HEIGHT, SMALL_TEXT_SIZE, UI_ICON_SIZE,
 };
 
 use crate::app::{visible_progress, SetupApp};
@@ -40,9 +40,6 @@ const FOOTER_HEIGHT: Pixels = px(40.0);
 /// The title-bar app mark token, separate from the 16 px wordmark.
 const TITLE_BAR_ICON: Pixels = cairn_ui::brand::APP_ICON_SIZE;
 
-/// Page titles use the shared serif set at the body size plus one step; the status icon matches
-/// that 16 px measure so icon and title read as one unit.
-const PAGE_TITLE_SIZE: f32 = 16.0 / 14.0;
 const PAGE_ICON: Pixels = px(18.0);
 const CHECK_SVG: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 7.5 6 10l4.5-5.5"/></svg>"#;
 
@@ -96,6 +93,7 @@ fn line_metrics(
 #[derive(Clone, Copy)]
 struct Tokens {
     background: Hsla,
+    chrome: Hsla,
     foreground: Hsla,
     muted_foreground: Hsla,
     border: Hsla,
@@ -124,6 +122,7 @@ impl Tokens {
         let theme = cx.theme();
         Self {
             background: theme.background,
+            chrome: theme.title_bar,
             foreground: theme.foreground,
             muted_foreground: theme.muted_foreground,
             border: theme.border,
@@ -292,7 +291,11 @@ impl SetupApp {
         let subtitle_text = self.i18n.get(subtitle);
         let title_text = self.i18n.get("app_title");
         let wordmark_font = serif_font(FontWeight::SEMIBOLD);
-        let descriptor_font = serif_font(FontWeight::NORMAL);
+        let descriptor_font = if has_cjk(&subtitle_text) {
+            cjk_heading_font()
+        } else {
+            serif_font(FontWeight::NORMAL)
+        };
         let rem = window.rem_size();
         let (wordmark_line, wordmark_baseline) = line_metrics(
             window,
@@ -305,7 +308,7 @@ impl SetupApp {
             window,
             &subtitle_text,
             descriptor_font.clone(),
-            rem * BRAND_DESCRIPTOR_SIZE,
+            rem * SMALL_TEXT_SIZE,
             tokens.muted_foreground,
         );
         let descriptor_top = wordmark_baseline - descriptor_baseline;
@@ -315,7 +318,7 @@ impl SetupApp {
             .font(wordmark_font)
             .child(title_text);
         let descriptor = div()
-            .text_size(rems(BRAND_DESCRIPTOR_SIZE))
+            .text_size(rems(SMALL_TEXT_SIZE))
             .line_height(descriptor_line)
             .mt(descriptor_top)
             .font(descriptor_font)
@@ -333,7 +336,7 @@ impl SetupApp {
             .items_center()
             .border_b_1()
             .border_color(tokens.border)
-            .bg(tokens.background)
+            .bg(tokens.chrome)
             .child(
                 h_flex()
                     .h_full()
@@ -427,11 +430,12 @@ impl SetupApp {
             .child(
                 div()
                     .text_sm()
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .font_weight(FontWeight::MEDIUM)
                     .child(self.i18n.get("license_name")),
             )
             .child(
                 Button::new("setup-view-license")
+                    .font_weight(FontWeight::MEDIUM)
                     .small()
                     .label(self.i18n.get("action_view_license"))
                     .border_color(tokens.control_stroke)
@@ -519,6 +523,7 @@ impl SetupApp {
                             )
                             .child(
                                 Button::new("setup-browse")
+                                    .font_weight(FontWeight::MEDIUM)
                                     .label(self.i18n.get("action_browse"))
                                     .border_color(tokens.control_stroke)
                                     .on_click(cx.listener(|this, _, window, cx| {
@@ -826,6 +831,7 @@ impl SetupApp {
                 actions.push(self.cancel_button(tokens, cx));
                 actions.push(
                     Button::new("setup-continue")
+                        .font_weight(FontWeight::MEDIUM)
                         .primary()
                         .label(self.i18n.get("action_continue"))
                         .on_click(cx.listener(|this, _, window, cx| {
@@ -837,6 +843,7 @@ impl SetupApp {
             Screen::Location => {
                 actions.push(
                     Button::new("setup-back")
+                        .font_weight(FontWeight::MEDIUM)
                         .ghost()
                         .label(self.i18n.get("action_back"))
                         .on_click(cx.listener(|this, _, _, cx| this.back(cx)))
@@ -850,6 +857,7 @@ impl SetupApp {
                 };
                 actions.push(
                     Button::new("setup-install")
+                        .font_weight(FontWeight::MEDIUM)
                         .primary()
                         .label(self.i18n.get(label))
                         .on_click(cx.listener(|this, _, window, cx| this.start_install(window, cx)))
@@ -876,6 +884,7 @@ impl SetupApp {
                 }
                 actions.push(
                     Button::new("setup-done")
+                        .font_weight(FontWeight::MEDIUM)
                         .ghost()
                         .label(self.i18n.get("action_close"))
                         .on_click(cx.listener(|this, _, window, cx| this.close_window(window, cx)))
@@ -884,6 +893,7 @@ impl SetupApp {
                 if !self.restart_required {
                     actions.push(
                         Button::new("setup-launch-app")
+                            .font_weight(FontWeight::MEDIUM)
                             .primary()
                             .label(self.i18n.get("action_open_app"))
                             .on_click(cx.listener(|this, _, window, cx| {
@@ -921,6 +931,7 @@ impl SetupApp {
                 } else {
                     actions.push(
                         Button::new("setup-failed-close")
+                            .font_weight(FontWeight::MEDIUM)
                             .ghost()
                             .label(self.i18n.get("action_close"))
                             .on_click(cx.listener(|this, _, window, cx| {
@@ -942,6 +953,7 @@ impl SetupApp {
                     {
                         actions.push(
                             Button::new("setup-retry")
+                                .font_weight(FontWeight::MEDIUM)
                                 .primary()
                                 .label(self.i18n.get("action_retry"))
                                 .on_click(cx.listener(|this, _, window, cx| this.retry(window, cx)))
@@ -960,6 +972,7 @@ impl SetupApp {
                 }
                 actions.push(
                     Button::new("setup-uninstalled-done")
+                        .font_weight(FontWeight::MEDIUM)
                         .primary()
                         .label(self.i18n.get("action_finish"))
                         .on_click(cx.listener(|this, _, window, cx| this.close_window(window, cx)))
@@ -976,6 +989,7 @@ impl SetupApp {
             .justify_between()
             .border_t_1()
             .border_color(tokens.border)
+            .bg(tokens.chrome)
             .px(PAGE_INSET)
             .gap(GROUP_GAP)
             .child(h_flex().gap(GROUP_GAP).items_center().children(leading))
@@ -984,6 +998,7 @@ impl SetupApp {
 
     fn cancel_button(&self, _tokens: &Tokens, cx: &mut Context<Self>) -> AnyElement {
         Button::new("setup-cancel")
+            .font_weight(FontWeight::MEDIUM)
             .ghost()
             .label(self.i18n.get("action_cancel"))
             .on_click(cx.listener(|this, _, window, cx| this.close_window(window, cx)))
@@ -992,6 +1007,7 @@ impl SetupApp {
 
     fn log_button(&self, cx: &mut Context<Self>) -> AnyElement {
         Button::new("setup-log")
+            .font_weight(FontWeight::MEDIUM)
             .ghost()
             .label(self.i18n.get("action_view_log"))
             .on_click(cx.listener(|this, _, _, cx| this.open_log(cx)))
@@ -1188,11 +1204,12 @@ impl SetupApp {
             .id(key)
             .role(Role::Heading)
             .aria_level(1)
+            .aria_label(self.i18n.get(key))
             .track_focus(&self.screen_focus)
-            .text_size(rems(PAGE_TITLE_SIZE))
+            .text_size(rems(BRAND_TITLE_SIZE))
             .line_height(relative(SERIF_LINE_HEIGHT))
             .font(serif_font(FontWeight::SEMIBOLD))
-            .child(self.i18n.get(key))
+            .child(heading_text(self.i18n.get(key), FontWeight::SEMIBOLD))
     }
 
     fn paragraph(&self, key: &str, tokens: &Tokens) -> Div {

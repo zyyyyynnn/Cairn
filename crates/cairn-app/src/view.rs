@@ -213,6 +213,76 @@ pub(crate) fn announce_shortcut(element: ControlElement, control: &KeyControl) -
     element.aria_keyshortcuts(shortcuts.join(", "))
 }
 
+/// Repaints the four corner crescents a rounded panel cuts out of its rectangle.
+///
+/// GPUI clips children to a rectangle, so the heading and row surfaces inside a panel paint over
+/// its corner radii and square them off. The overlay repaints only the area between each corner's
+/// edge and its arc, in the band colour behind the panel. It takes no part in layout or hit
+/// testing, so the heading stays where the shell's bands put it.
+fn rounded_panel_corners(radius: Pixels, color: Hsla) -> impl IntoElement {
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            let r = f32::from(radius);
+            if r <= 0.0 {
+                return;
+            }
+            // Control offset that turns a cubic segment into a quarter circle.
+            let k = r * 0.552_284_8;
+            let left = f32::from(bounds.origin.x);
+            let top = f32::from(bounds.origin.y);
+            let right = left + f32::from(bounds.size.width);
+            let bottom = top + f32::from(bounds.size.height);
+            let at = |x: f32, y: f32| point(px(x), px(y));
+
+            let mut path = PathBuilder::fill();
+            // Each crescent runs along the arc between its two tangency points, then back
+            // through the outer corner.
+            path.move_to(at(left + r, top));
+            path.cubic_bezier_to(
+                at(left, top + r),
+                at(left + r - k, top),
+                at(left, top + r - k),
+            );
+            path.line_to(at(left, top));
+            path.close();
+
+            path.move_to(at(right - r, top));
+            path.cubic_bezier_to(
+                at(right, top + r),
+                at(right - r + k, top),
+                at(right, top + r - k),
+            );
+            path.line_to(at(right, top));
+            path.close();
+
+            path.move_to(at(right, bottom - r));
+            path.cubic_bezier_to(
+                at(right - r, bottom),
+                at(right, bottom - r + k),
+                at(right - r + k, bottom),
+            );
+            path.line_to(at(right, bottom));
+            path.close();
+
+            path.move_to(at(left, bottom - r));
+            path.cubic_bezier_to(
+                at(left + r, bottom),
+                at(left, bottom - r + k),
+                at(left + r - k, bottom),
+            );
+            path.line_to(at(left, bottom));
+            path.close();
+
+            if let Ok(path) = path.build() {
+                window.paint_path(path, color);
+            }
+        },
+    )
+    .absolute()
+    .inset_0()
+}
+
 /// The query box and the command bar act through the same window entity and share its focus state,
 /// so the content column is handed one bundle instead of three parameters that never separate.
 struct QueryBand {
@@ -510,6 +580,7 @@ impl CairnApp {
         let click_view = view.clone();
 
         let trigger = Button::new(element_id("toolbar-menu", group.key()))
+            .font_weight(FontWeight::MEDIUM)
             .accessibility_label(name)
             .ghost()
             .small()
@@ -616,7 +687,7 @@ impl CairnApp {
             .h(layout::TITLE_BAR_HEIGHT)
             .border_b_1()
             .border_color(tokens.border)
-            .bg(tokens.background)
+            .bg(tokens.chrome)
             // The left half keeps the sidebar's width, so the brand and navigation controls do not
             // move when the tree collapses. The divider belongs to the sidebar below; it stops at
             // the title bar instead of drawing a line through the window chrome.
@@ -803,12 +874,23 @@ impl CairnApp {
     ) -> Div {
         if self.drive_view.is_some() {
             let body = self.render_treemap_body(tokens, window, cx);
+            let body_surface = v_flex()
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .relative()
+                .m(rems(layout::SPACE_4))
+                .bg(tokens.background)
+                .rounded(tokens.radius)
+                .overflow_hidden()
+                .child(body)
+                .child(rounded_panel_corners(tokens.radius, tokens.chrome));
             return v_flex()
                 .flex_1()
                 .min_w_0()
                 .min_h_0()
-                .bg(tokens.background)
-                .child(body);
+                .bg(tokens.chrome)
+                .child(body_surface);
         }
 
         let QueryBand {
@@ -826,12 +908,26 @@ impl CairnApp {
             cx,
         );
 
+        // The search band's own bottom inset is this panel's top gap. Repeating it as a margin
+        // would space the same boundary twice and push the heading off the row band.
+        let results_surface = v_flex()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .relative()
+            .mx(rems(layout::SPACE_4))
+            .mb(rems(layout::SPACE_4))
+            .bg(tokens.background)
+            .rounded(tokens.radius)
+            .overflow_hidden()
+            .child(results)
+            .child(rounded_panel_corners(tokens.radius, tokens.chrome));
         v_flex()
             .flex_1()
             .min_w_0()
             .min_h_0()
-            .bg(tokens.background)
+            .bg(tokens.chrome)
             .child(query)
-            .child(results)
+            .child(results_surface)
     }
 }

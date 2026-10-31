@@ -113,104 +113,102 @@ fn enforce_contrast_floor(ink: Hsla, surfaces: &[Hsla], floor: f32) -> Hsla {
     best
 }
 
-/// Enforces pure grayscale tokens and raises the ink roles that render below [`INK_CONTRAST_FLOOR`]
-/// on the surfaces this product actually draws them on.
-fn repair_ink_contrast(theme: &mut Theme) {
-    if theme.mode == ThemeMode::Dark {
-        theme.background = Hsla {
-            h: 0.0,
-            s: 0.0,
-            l: 0.0627,
-            a: 1.0,
-        };
-        theme.foreground = Hsla {
-            h: 0.0,
-            s: 0.0,
-            l: 0.90,
-            a: 1.0,
-        };
-        theme.selection = Hsla {
-            h: 0.0,
-            s: 0.0,
-            l: 0.22,
-            a: 1.0,
-        };
-        theme.list_hover = Hsla {
-            h: 0.0,
-            s: 0.0,
-            l: 0.14,
-            a: 1.0,
-        };
-        theme.sidebar_foreground = Hsla {
-            h: 0.0,
-            s: 0.0,
-            l: 0.90,
-            a: 1.0,
-        };
-        theme.sidebar_accent_foreground = Hsla {
-            h: 0.0,
-            s: 0.0,
-            l: 0.90,
-            a: 1.0,
-        };
-        theme.popover_foreground = Hsla {
-            h: 0.0,
-            s: 0.0,
-            l: 0.90,
-            a: 1.0,
-        };
-        theme.skeleton = Hsla {
-            h: 0.0,
-            s: 0.0,
-            l: 0.20,
-            a: 1.0,
-        };
+/// The product's gray-scale surface ramp: content, inset and frame steps plus one interaction
+/// fill. The three surface steps carry the window hierarchy instead of heavier borders.
+struct SurfaceRamp {
+    content: f32,
+    inset: f32,
+    frame: f32,
+    interaction: f32,
+    border: f32,
+    skeleton: f32,
+    foreground: f32,
+    muted_foreground: f32,
+    input: f32,
+    selection: f32,
+    ring: f32,
+}
+
+fn surface_ramp(dark: bool) -> SurfaceRamp {
+    if dark {
+        SurfaceRamp {
+            content: 0.078431,
+            inset: 0.105882,
+            frame: 0.137255,
+            interaction: 0.172549,
+            border: 0.207843,
+            skeleton: 0.149020,
+            foreground: 0.901961,
+            muted_foreground: 0.600000,
+            input: 0.227451,
+            selection: 0.227451,
+            ring: 0.450980,
+        }
     } else {
-        theme.background = Hsla {
-            h: 0.0,
-            s: 0.0,
-            l: 0.9765,
-            a: 1.0,
-        };
-        theme.foreground = Hsla {
-            h: 0.0,
-            s: 0.0,
-            l: 0.0627,
-            a: 1.0,
-        };
-        theme.selection = Hsla {
-            h: 0.0,
-            s: 0.0,
-            l: 0.85,
-            a: 1.0,
-        };
-        theme.list_hover = Hsla {
-            h: 0.0,
-            s: 0.0,
-            l: 0.90,
-            a: 1.0,
-        };
-        theme.sidebar_accent_foreground = Hsla {
-            h: 0.0,
-            s: 0.0,
-            l: 0.06,
-            a: 1.0,
-        };
-        theme.skeleton = Hsla {
-            h: 0.0,
-            s: 0.0,
-            l: 0.80,
-            a: 1.0,
-        };
+        SurfaceRamp {
+            content: 1.0,
+            inset: 0.964706,
+            frame: 0.949020,
+            interaction: 0.870588,
+            border: 0.886275,
+            skeleton: 0.905882,
+            foreground: 0.090196,
+            muted_foreground: 0.372549,
+            input: 0.862745,
+            selection: 0.850980,
+            ring: 0.639216,
+        }
     }
+}
+
+fn gray(l: f32) -> Hsla {
+    Hsla {
+        h: 0.0,
+        s: 0.0,
+        l,
+        a: 1.0,
+    }
+}
+
+fn apply_surface_ramp(theme: &mut Theme) {
+    let ramp = surface_ramp(theme.mode == ThemeMode::Dark);
+    theme.background = gray(ramp.content);
+    theme.muted = gray(ramp.inset);
+    theme.table_head = gray(ramp.content);
+    theme.sidebar = gray(ramp.frame);
+    theme.status_bar = gray(ramp.frame);
+    theme.title_bar = gray(ramp.frame);
+    theme.border = gray(ramp.border);
+    theme.title_bar_border = gray(ramp.border);
+    theme.sidebar_border = gray(ramp.border);
+    theme.status_bar_border = gray(ramp.border);
+    theme.input = gray(ramp.input);
+    theme.list_hover = gray(ramp.interaction);
+    theme.list_active = gray(ramp.interaction);
+    theme.sidebar_accent = gray(ramp.interaction);
+    theme.selection = gray(ramp.selection);
+    theme.skeleton = gray(ramp.skeleton);
+    theme.foreground = gray(ramp.foreground);
+    theme.muted_foreground = gray(ramp.muted_foreground);
+    theme.table_head_foreground = gray(ramp.muted_foreground);
+    theme.sidebar_foreground = gray(ramp.foreground);
+    theme.sidebar_accent_foreground = gray(ramp.foreground);
+    theme.popover_foreground = gray(ramp.foreground);
+    theme.ring = gray(ramp.ring);
+}
+
+/// Applies the gray-scale surface ramp and raises the ink roles that render below
+/// [`INK_CONTRAST_FLOOR`] on the surfaces this product actually draws them on.
+fn repair_ink_contrast(theme: &mut Theme) {
+    apply_surface_ramp(theme);
 
     let secondary_surfaces = [
         theme.background,
         theme.muted,
-        theme.input,
-        theme.status_bar,
         theme.table_head,
         theme.sidebar,
+        theme.status_bar,
+        theme.title_bar,
     ];
     theme.muted_foreground = enforce_contrast_floor(
         theme.muted_foreground,
@@ -229,7 +227,14 @@ fn repair_ink_contrast(theme: &mut Theme) {
     );
     theme.ring = enforce_contrast_floor(
         theme.ring,
-        &[theme.background, theme.table_head, theme.muted],
+        &[
+            theme.background,
+            theme.table_head,
+            theme.muted,
+            theme.sidebar,
+            theme.status_bar,
+            theme.title_bar,
+        ],
         RING_CONTRAST_FLOOR,
     );
     theme.danger = enforce_contrast_floor(
@@ -715,34 +720,94 @@ mod tests {
     }
 
     #[test]
-    fn repair_ink_contrast_sets_grayscale_tokens() {
+    fn the_product_ring_clears_every_ramp_surface() {
+        for dark in [false, true] {
+            let theme = product_theme(dark);
+            for surface in [
+                theme.background,
+                theme.muted,
+                theme.table_head,
+                theme.sidebar,
+                theme.status_bar,
+                theme.title_bar,
+            ] {
+                let ratio = contrast_ratio(theme.ring, surface);
+                assert!(
+                    ratio >= super::RING_CONTRAST_FLOOR,
+                    "{dark:?} ring contrast {ratio} on {surface:?} is below 3:1"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn repair_ink_contrast_sets_the_gray_ramp() {
         let mut theme = Theme {
             mode: ThemeMode::Light,
             ..Default::default()
         };
         repair_ink_contrast(&mut theme);
         assert_eq!(theme.background.s, 0.0);
-        assert_eq!(theme.background.l, 0.9765);
+        assert_eq!(theme.background.l, 1.0);
+        assert_eq!(theme.muted.l, 0.964706);
+        assert_eq!(theme.sidebar.l, 0.949020);
+        assert_eq!(theme.title_bar.l, theme.sidebar.l);
+        assert_eq!(theme.status_bar.l, theme.sidebar.l);
+        assert_eq!(theme.list_hover.l, 0.870588);
         assert_eq!(theme.foreground.s, 0.0);
-        assert_eq!(theme.foreground.l, 0.0627);
+        assert_eq!(theme.foreground.l, 0.090196);
         assert_eq!(theme.skeleton.s, 0.0);
-        assert_eq!(theme.skeleton.l, 0.80);
+        assert_eq!(theme.skeleton.l, 0.905882);
         assert_eq!(theme.selection.s, 0.0);
-        assert_eq!(theme.list_hover.s, 0.0);
 
         theme.mode = ThemeMode::Dark;
         repair_ink_contrast(&mut theme);
         assert_eq!(theme.background.s, 0.0);
-        assert_eq!(theme.background.l, 0.0627);
+        assert_eq!(theme.background.l, 0.078431);
+        assert_eq!(theme.muted.l, 0.105882);
+        assert_eq!(theme.sidebar.l, 0.137255);
+        assert_eq!(theme.title_bar.l, theme.sidebar.l);
+        assert_eq!(theme.status_bar.l, theme.sidebar.l);
+        assert_eq!(theme.list_hover.l, 0.172549);
         assert_eq!(theme.foreground.s, 0.0);
-        assert_eq!(theme.foreground.l, 0.90);
-        assert_eq!(theme.sidebar_foreground.l, 0.90);
-        assert_eq!(theme.sidebar_accent_foreground.l, 0.90);
-        assert_eq!(theme.popover_foreground.l, 0.90);
+        assert_eq!(theme.foreground.l, 0.901961);
+        assert_eq!(theme.sidebar_foreground.l, 0.901961);
+        assert_eq!(theme.sidebar_accent_foreground.l, 0.901961);
+        assert_eq!(theme.popover_foreground.l, 0.901961);
         assert_eq!(theme.skeleton.s, 0.0);
-        assert_eq!(theme.skeleton.l, 0.20);
+        assert_eq!(theme.skeleton.l, 0.149020);
         assert_eq!(theme.selection.s, 0.0);
-        assert_eq!(theme.list_hover.s, 0.0);
+    }
+
+    #[test]
+    fn the_surface_ramp_separates_content_inset_and_frame() {
+        let light = product_theme(false);
+        assert!(light.background.l > light.muted.l);
+        assert!(light.muted.l > light.sidebar.l);
+        assert_eq!(light.title_bar.l, light.sidebar.l);
+        assert_eq!(light.status_bar.l, light.sidebar.l);
+        assert!(light.list_hover.l < light.sidebar.l);
+
+        let dark = product_theme(true);
+        assert!(dark.background.l < dark.muted.l);
+        assert!(dark.muted.l < dark.sidebar.l);
+        assert_eq!(dark.title_bar.l, dark.sidebar.l);
+        assert_eq!(dark.status_bar.l, dark.sidebar.l);
+        assert!(dark.list_hover.l > dark.sidebar.l);
+    }
+
+    #[test]
+    fn muted_ink_stays_readable_on_the_interaction_fill() {
+        for dark in [false, true] {
+            let theme = product_theme(dark);
+            for surface in [theme.list_hover, theme.sidebar, theme.title_bar] {
+                let ratio = contrast_ratio(theme.muted_foreground, surface);
+                assert!(
+                    ratio >= INK_CONTRAST_FLOOR,
+                    "{dark:?} muted ink contrast {ratio} on {surface:?} is below 4.5:1"
+                );
+            }
+        }
     }
 
     #[test]

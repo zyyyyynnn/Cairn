@@ -19,7 +19,6 @@ use cairn_protocol::message::FileRowData;
 use cairn_protocol::status::ContentIndexState;
 use fluent_bundle::FluentArgs;
 use gpui_kit::assets::IconName as AssetIconName;
-use gpui_kit::base::StyledExt;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::menu::ContextMenuExt;
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
@@ -41,8 +40,6 @@ use std::time::Duration;
 const SKELETON_DELAY: Duration = Duration::from_millis(180);
 /// One full traversal of the row-to-row pulse.
 const SKELETON_PULSE: Duration = Duration::from_millis(1400);
-/// The pulse is decoration over a static structure; 30 fps is enough and costs half the repaints.
-const SKELETON_MAX_FPS: f32 = 30.0;
 /// How long the first page takes to fade in where the skeleton used to be.
 const ROW_REVEAL: Duration = Duration::from_millis(140);
 /// Placeholder-bar geometry is local to the skeleton: no real control shares this height or width.
@@ -53,14 +50,6 @@ const RESIZE_HIT_WIDTH: Pixels = px(8.0);
 const RESIZE_LINE_OFFSET: Pixels = px(3.0);
 /// Wide enough for the row commands without letting a long path set the menu's width.
 const CONTEXT_MENU_MIN_WIDTH: f32 = 12.0;
-/// A soft shade at the bottom edge, not a background-colored veil. A veil over interactive rows
-/// washes out their hover and selection fills; this only deepens the surface for a few pixels, so
-/// the last row stays legible and its state stays visible.
-const ROWS_EDGE_SHADE_HEIGHT: f32 = 3.0 * layout::STEP;
-const ROWS_EDGE_SHADE_ALPHA: f32 = 0.06;
-/// The shade ramps out over the final row, so reaching the end of the list has no visible step.
-const ROWS_EDGE_SHADE_RAMP_ROWS: f32 = 1.0;
-
 /// Why a `content:` query has no rows to show. Silence would read as "no file matches", which is
 /// only true once the content index is ready.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -203,15 +192,6 @@ fn rows_to_paint(
     }
 }
 
-/// Strength of the bottom edge shade: full while there is more than one row left to scroll,
-/// ramping to nothing at the end so the list never carries a permanent dim band.
-fn rows_edge_opacity(remaining: f32, row_height: f32) -> f32 {
-    if remaining <= 0.0 || row_height <= 0.0 {
-        return 0.0;
-    }
-    (remaining / (row_height * ROWS_EDGE_SHADE_RAMP_ROWS)).clamp(0.0, 1.0)
-}
-
 /// Broad file kind behind a result row's icon, from the taxonomy the Treemap already uses.
 ///
 /// A recovered suffix matters when the display name hides or differs from it. In that case the
@@ -319,13 +299,14 @@ fn render_state_band(
                 .text_sm()
                 .font(theme::serif_font(FontWeight::SEMIBOLD))
                 .text_color(tokens.foreground)
-                .child(title),
+                .child(theme::heading_text(title, FontWeight::SEMIBOLD)),
         )
         .child(
             div()
                 .max_w(rems(layout::MESSAGE_MAX_WIDTH))
                 .text_center()
-                .text_xs()
+                .text_sm()
+                .line_height(relative(1.5))
                 .text_color(tokens.muted_foreground)
                 .child(hint),
         );
@@ -440,23 +421,6 @@ impl CairnApp {
             None
         };
         let has_content = rows.is_some();
-        // The edge shade belongs to the result body as a whole, not just the row band: it spans
-        // the row viewport and the vertical scrollbar gutter so the bottom edge is continuous
-        // instead of leaving a bright strip beside the rows. The skeleton and state bands own their
-        // own surfaces and must not take it.
-        let showing_result_rows = self.recycle_bin.error().is_none()
-            && !(first_page_loading || index_loading)
-            && local_location
-            && self.results.table.total_rows() > 0;
-        let row_height_f = f32::from(row_height);
-        let scroll_below = (self.results.table.max_scroll_top(row_height_f)
-            - self.results.table.scroll_top)
-            .max(0.0);
-        let shade = if showing_result_rows {
-            rows_edge_opacity(scroll_below, row_height_f)
-        } else {
-            0.0
-        };
         let state = if has_content {
             None
         } else if local_location {
@@ -571,32 +535,7 @@ impl CairnApp {
                                     )
                                 },
                             )),
-                    )
-                    // The same shade spans the row viewport and the vertical scrollbar gutter,
-                    // so the table's bottom edge stays continuous instead of leaving a bright
-                    // strip beside the rows. It is paint-only; the scrollbar and rows keep their
-                    // hitboxes.
-                    .when(shade > 0.0, |this| {
-                        this.child(
-                            div()
-                                .absolute()
-                                .left_0()
-                                .right_0()
-                                .bottom_0()
-                                .h(rems(ROWS_EDGE_SHADE_HEIGHT))
-                                .opacity(shade)
-                                // 180° puts the transparent stop at the top and the shade at the
-                                // edge; 0° in this renderer runs the other way.
-                                .bg(linear_gradient(
-                                    180.0,
-                                    linear_color_stop(tokens.muted_foreground.opacity(0.0), 0.0),
-                                    linear_color_stop(
-                                        tokens.muted_foreground.opacity(ROWS_EDGE_SHADE_ALPHA),
-                                        1.0,
-                                    ),
-                                )),
-                        )
-                    }),
+                    ),
             )
             .when(overflows_sideways, |this| {
                 this.child(
@@ -618,6 +557,7 @@ impl CairnApp {
                     div()
                         .absolute()
                         .inset_0()
+                        .rounded(tokens.radius)
                         .border_1()
                         .border_color(tokens.ring),
                 )
@@ -676,7 +616,7 @@ impl CairnApp {
                 div()
                     .lane_grow(self.results.column_widths.name)
                     .min_w(rems(layout::NAME_MIN_COLUMN))
-                    .pl(rems(layout::CONTENT_INSET))
+                    .pl(rems(layout::CONTENT_INSET - layout::SPACE_4))
                     .pr(rems(layout::INNER_SPACING))
                     .flex()
                     .items_center()
@@ -751,9 +691,10 @@ impl CairnApp {
             return row.opacity(1.0).into_any_element();
         }
 
-        let pulse = Animation::new(SKELETON_PULSE)
-            .repeat_synced()
-            .with_max_fps(SKELETON_MAX_FPS);
+        // The pulse rides the window's frame clock. A timer cap ran on the platform timer, whose
+        // 15.6ms Windows resolution stepped every row at ~47ms; the rows share the frame the
+        // platform already delivers, and a known-long wait still renders the still skeleton.
+        let pulse = Animation::new(SKELETON_PULSE).repeat_synced();
         // The list length must not change between frames: GPUI persists the active animation index
         // in the element state, and a shorter list makes that index out of bounds. The ordinary
         // first page has a non-zero wait phase; a known-long state never reaches this path.
@@ -787,6 +728,7 @@ impl CairnApp {
             let retry = accessibility::control("recycle-bin-retry");
             let retry_label = accessibility::name(retry, &self.i18n);
             let action = Button::new(retry.element)
+                .font_weight(FontWeight::MEDIUM)
                 .label(retry_label.clone())
                 .accessibility_label(retry_label)
                 .mt(rems(layout::SPACE_8))
@@ -931,15 +873,16 @@ impl CairnApp {
             .child(
                 div()
                     .text_sm()
-                    .font_medium()
+                    .font(theme::serif_font(FontWeight::SEMIBOLD))
                     .text_color(tokens.foreground)
-                    .child(title),
+                    .child(theme::heading_text(title, FontWeight::SEMIBOLD)),
             )
             .child(
                 div()
                     .max_w(rems(layout::MESSAGE_MAX_WIDTH))
                     .text_center()
-                    .text_xs()
+                    .text_sm()
+                    .line_height(relative(1.5))
                     .text_color(tokens.muted_foreground)
                     .child(hint),
             )
@@ -951,6 +894,7 @@ impl CairnApp {
                     .when(can_start, |this| {
                         this.child(
                             Button::new(start.element)
+                                .font_weight(FontWeight::MEDIUM)
                                 .label(start_label.clone())
                                 .accessibility_label(start_label)
                                 .small()
@@ -963,6 +907,7 @@ impl CairnApp {
                     .when(!can_start, |this| {
                         this.child(
                             Button::new(retry.element)
+                                .font_weight(FontWeight::MEDIUM)
                                 .label(retry_label.clone())
                                 .accessibility_label(retry_label)
                                 .small()
@@ -1343,7 +1288,7 @@ impl CairnApp {
             .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
             .lane_grow(self.results.column_widths.name)
             .min_w(rems(layout::NAME_MIN_COLUMN))
-            .pl(rems(layout::CONTENT_INSET))
+            .pl(rems(layout::CONTENT_INSET - layout::SPACE_4))
             .pr(rems(layout::INNER_SPACING))
             .flex()
             .items_center()
@@ -1373,7 +1318,7 @@ impl CairnApp {
                         .px(rems(layout::SPACE_4))
                         .rounded(tokens.radius)
                         .bg(tokens.muted)
-                        .text_xs()
+                        .text_sm()
                         .text_color(tokens.muted_foreground)
                         .child(self.i18n.get_text("result_content_match")),
                 )
@@ -1484,7 +1429,7 @@ impl CairnApp {
                 div()
                     .lane_grow(self.results.column_widths.name)
                     .min_w(rems(layout::NAME_MIN_COLUMN))
-                    .pl(rems(layout::CONTENT_INSET))
+                    .pl(rems(layout::CONTENT_INSET - layout::SPACE_4))
                     .pr(rems(layout::INNER_SPACING))
                     .flex()
                     .items_center()
@@ -1704,7 +1649,7 @@ impl CairnApp {
             HeaderLane::Name => cell
                 .lane_grow(self.results.column_widths.name)
                 .min_w(rems(layout::NAME_MIN_COLUMN))
-                .pl(rems(layout::CONTENT_INSET))
+                .pl(rems(layout::CONTENT_INSET - layout::SPACE_4))
                 .pr(rems(layout::INNER_SPACING)),
             HeaderLane::Path => cell
                 .lane_grow(self.results.column_widths.path)
@@ -1783,7 +1728,7 @@ mod tests {
 
     use super::{
         column_label_key, content_query_notice, pulse_opacity, result_command_label_key,
-        rows_band_local_top, rows_edge_opacity, rows_to_paint, ContentQueryNotice,
+        rows_band_local_top, rows_to_paint, ContentQueryNotice,
     };
     use crate::app::CairnApp;
     use crate::shell::command_groups::GroupCommand;
@@ -2055,16 +2000,5 @@ mod tests {
         assert_eq!(painted.range, 84..101);
         assert_eq!(painted.top, 84.0 * 28.0 - 2_380.0);
         assert!(!painted.pinned);
-    }
-
-    #[test]
-    fn the_bottom_edge_shade_disappears_before_the_last_row() {
-        let row = 28.0;
-        assert_eq!(rows_edge_opacity(0.0, row), 0.0);
-        assert_eq!(rows_edge_opacity(-5.0, row), 0.0);
-        assert_eq!(rows_edge_opacity(row * 0.5, row), 0.5);
-        assert_eq!(rows_edge_opacity(row, row), 1.0);
-        assert_eq!(rows_edge_opacity(row * 10.0, row), 1.0);
-        assert_eq!(rows_edge_opacity(row, 0.0), 0.0);
     }
 }

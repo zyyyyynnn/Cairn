@@ -12,8 +12,8 @@ use gpui_kit::component::ActiveTheme;
 use gpui_kit::gpui::{App, Hsla, Pixels, Window};
 
 pub use cairn_ui::brand::{
-    serif_font, tabular_figures, BASE_FONT_PX, BRAND_TITLE_SIZE, HAIRLINE, RADIUS,
-    SERIF_LINE_HEIGHT, UI_ICON_SIZE,
+    heading_text, serif_font, tabular_figures, BASE_FONT_PX, BRAND_TITLE_SIZE, HAIRLINE, RADIUS,
+    SERIF_LINE_HEIGHT, SMALL_TEXT_SIZE, UI_ICON_SIZE,
 };
 pub use cairn_ui::locale::system_prefers_dark;
 pub use cairn_ui::theme::clamp_zoom;
@@ -55,6 +55,7 @@ pub struct ShellTokens {
     pub background: Hsla,
     pub muted: Hsla,
     pub sidebar: Hsla,
+    pub chrome: Hsla,
     pub sidebar_accent: Hsla,
     pub sidebar_accent_foreground: Hsla,
     pub status_bar: Hsla,
@@ -87,6 +88,7 @@ impl ShellTokens {
             background: theme.background,
             muted: theme.muted,
             sidebar: theme.sidebar,
+            chrome: theme.title_bar,
             sidebar_accent: theme.sidebar_accent,
             sidebar_accent_foreground: theme.sidebar_accent_foreground,
             status_bar: theme.status_bar,

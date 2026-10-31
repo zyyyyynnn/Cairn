@@ -190,7 +190,7 @@ impl CairnApp {
             .flex()
             .flex_col()
             .rounded(tokens.radius)
-            .bg(tokens.background)
+            .bg(tokens.muted)
             .border_1()
             .border_color(tokens.border)
             .child(
@@ -229,7 +229,8 @@ impl CairnApp {
                 div()
                     .pl(rems(layout::SPACE_24))
                     .pt(rems(layout::SPACE_4))
-                    .text_xs()
+                    .text_sm()
+                    .line_height(relative(1.5))
                     .text_color(tokens.muted_foreground)
                     .whitespace_normal()
                     .child(toast.message),
