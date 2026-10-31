@@ -908,6 +908,8 @@ impl CairnApp {
             cx,
         );
 
+        // The search band's own bottom inset is this panel's top gap. Repeating it as a margin
+        // would space the same boundary twice and push the heading off the row band.
         let results_surface = v_flex()
             .flex_1()
             .min_w_0()
