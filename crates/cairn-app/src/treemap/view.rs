@@ -378,13 +378,22 @@ impl CairnApp {
         } else {
             f32::from(theme::rem(window) * layout::SIDEBAR_WIDTH)
         };
-        let avail_w = (f32::from(window_bounds.size.width) - sidebar_w).max(100.0);
+        // The canvas is the content column's panel, so it keeps the panel's own
+        // margin on every side. Pointer coordinates and the tile layout both
+        // read this rect; leaving the margin out put every hit a panel step
+        // right and below the tile it aimed at and let the layout run past the
+        // panel edge.
+        let panel_margin = f32::from(theme::rem(window) * layout::SPACE_4);
+        let avail_w =
+            (f32::from(window_bounds.size.width) - sidebar_w - 2.0 * panel_margin).max(100.0);
         let chrome_h = f32::from(layout::TITLE_BAR_HEIGHT)
             + f32::from(theme::rem(window) * layout::STATUS_HEIGHT);
-        let avail_h = (f32::from(window_bounds.size.height) - chrome_h).max(100.0);
-        // Canvas-space pointer coordinates start below the title bar and right
-        // of the sidebar; the layout bounds above already use the same box.
-        let canvas_origin = (sidebar_w, f32::from(layout::TITLE_BAR_HEIGHT));
+        let avail_h =
+            (f32::from(window_bounds.size.height) - chrome_h - 2.0 * panel_margin).max(100.0);
+        let canvas_origin = (
+            sidebar_w + panel_margin,
+            f32::from(layout::TITLE_BAR_HEIGHT) + panel_margin,
+        );
         let canvas_size = (avail_w, avail_h);
         state.last_scale_factor = window.scale_factor().max(1.0);
 

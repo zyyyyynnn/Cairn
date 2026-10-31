@@ -537,7 +537,7 @@ impl CairnApp {
                                     )
                                 },
                             )),
-                    )
+                    ),
             )
             .when(overflows_sideways, |this| {
                 this.child(
@@ -559,6 +559,7 @@ impl CairnApp {
                     div()
                         .absolute()
                         .inset_0()
+                        .rounded(tokens.radius)
                         .border_1()
                         .border_color(tokens.ring),
                 )
@@ -2001,5 +2002,4 @@ mod tests {
         assert_eq!(painted.top, 84.0 * 28.0 - 2_380.0);
         assert!(!painted.pinned);
     }
-
 }

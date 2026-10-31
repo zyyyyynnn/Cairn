@@ -94,8 +94,8 @@ pub mod layout {
     /// so its arithmetic and the rendered band cannot drift apart.
     pub const STATUS_HEIGHT: f32 = ROW_HEIGHT;
     /// The Treemap category legend is a compact status item: one 12px swatch plus a text_sm
-    /// label inside a 20px hit row. Its 2px horizontal inset is an optical exception, like
-    /// `MENU_LEAD`, and stays off the 4px ladder.
+    /// label inside a 20px hit row. Its 2px horizontal inset is an optical exception and stays
+    /// off the 4px ladder.
     pub const LEGEND_ROW: f32 = 5.0 * STEP;
     pub const LEGEND_SWATCH: f32 = 3.0 * STEP;
     pub const LEGEND_INSET: f32 = 0.5 * STEP;
@@ -158,13 +158,10 @@ pub mod layout {
     /// inset. A small Ghost Button and a sidebar row both pad by [`INNER_SPACING`], so these sum
     /// back to `CONTENT_INSET` for the visible text or icon.
     pub const TIGHT_LEAD: f32 = SPACE_4;
-    /// Optical correction: 文 carries less left side bearing than 名, so without it the first menu
-    /// character's ink sits just left of the search glyph and the Name heading. This is an optical
-    /// 2px exception to the 4px ladder, like the 1px hairline.
-    const MENU_OPTICAL_LEAD: f32 = 2.0 / theme::BASE_FONT_PX;
-    /// Menu trigger container lead: the content edge minus the small Button's own 8px padding,
-    /// plus the optical correction for the first glyph's side bearing.
-    pub const MENU_LEAD: f32 = CONTENT_INSET - INNER_SPACING + MENU_OPTICAL_LEAD;
+    /// Menu trigger container lead. The small Button's own 8px padding completes the content
+    /// inset, so the trigger's label starts on the content spine and its hover surface shares the
+    /// query box's and result panel's outer edge.
+    pub const MENU_LEAD: f32 = TIGHT_LEAD;
     /// Search band outer lead, followed by the query box's own leading padding.
     pub const SEARCH_BAND_LEAD: f32 = TIGHT_LEAD;
     pub const SEARCH_INPUT_LEAD: f32 = CONTENT_INSET - SEARCH_BAND_LEAD;
@@ -749,9 +746,8 @@ mod tests {
             BASE_FONT_PX, 14.0,
             "the compact type scale anchors the 4px step at 100% zoom"
         );
-        // MENU_LEAD and LEGEND_INSET are excluded: their 2px optical corrections are intentional.
-        // The ratio tokens are not distances. Everything that lays out the shell must be a whole
-        // 4px step.
+        // LEGEND_INSET is excluded: its 2px optical correction is intentional. The ratio tokens
+        // are not distances. Everything that lays out the shell must be a whole 4px step.
         let distances = [
             layout::STEP,
             layout::SPACE_4,
@@ -779,6 +775,7 @@ mod tests {
             layout::SIDEBAR_WIDTH,
             layout::CONTENT_INSET,
             layout::TIGHT_LEAD,
+            layout::MENU_LEAD,
             layout::SEARCH_BAND_LEAD,
             layout::SEARCH_INPUT_LEAD,
             layout::SIDEBAR_VIEWPORT_LEAD,

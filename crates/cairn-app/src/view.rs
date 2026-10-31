@@ -213,6 +213,76 @@ pub(crate) fn announce_shortcut(element: ControlElement, control: &KeyControl) -
     element.aria_keyshortcuts(shortcuts.join(", "))
 }
 
+/// Repaints the four corner crescents a rounded panel cuts out of its rectangle.
+///
+/// GPUI clips children to a rectangle, so the heading and row surfaces inside a panel paint over
+/// its corner radii and square them off. The overlay repaints only the area between each corner's
+/// edge and its arc, in the band colour behind the panel. It takes no part in layout or hit
+/// testing, so the heading stays where the shell's bands put it.
+fn rounded_panel_corners(radius: Pixels, color: Hsla) -> impl IntoElement {
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            let r = f32::from(radius);
+            if r <= 0.0 {
+                return;
+            }
+            // Control offset that turns a cubic segment into a quarter circle.
+            let k = r * 0.552_284_8;
+            let left = f32::from(bounds.origin.x);
+            let top = f32::from(bounds.origin.y);
+            let right = left + f32::from(bounds.size.width);
+            let bottom = top + f32::from(bounds.size.height);
+            let at = |x: f32, y: f32| point(px(x), px(y));
+
+            let mut path = PathBuilder::fill();
+            // Each crescent runs along the arc between its two tangency points, then back
+            // through the outer corner.
+            path.move_to(at(left + r, top));
+            path.cubic_bezier_to(
+                at(left, top + r),
+                at(left + r - k, top),
+                at(left, top + r - k),
+            );
+            path.line_to(at(left, top));
+            path.close();
+
+            path.move_to(at(right - r, top));
+            path.cubic_bezier_to(
+                at(right, top + r),
+                at(right - r + k, top),
+                at(right, top + r - k),
+            );
+            path.line_to(at(right, top));
+            path.close();
+
+            path.move_to(at(right, bottom - r));
+            path.cubic_bezier_to(
+                at(right - r, bottom),
+                at(right, bottom - r + k),
+                at(right - r + k, bottom),
+            );
+            path.line_to(at(right, bottom));
+            path.close();
+
+            path.move_to(at(left, bottom - r));
+            path.cubic_bezier_to(
+                at(left + r, bottom),
+                at(left, bottom - r + k),
+                at(left + r - k, bottom),
+            );
+            path.line_to(at(left, bottom));
+            path.close();
+
+            if let Ok(path) = path.build() {
+                window.paint_path(path, color);
+            }
+        },
+    )
+    .absolute()
+    .inset_0()
+}
+
 /// The query box and the command bar act through the same window entity and share its focus state,
 /// so the content column is handed one bundle instead of three parameters that never separate.
 struct QueryBand {
@@ -814,49 +884,7 @@ impl CairnApp {
                 .rounded(tokens.radius)
                 .overflow_hidden()
                 .child(body)
-            // GPUI clips children to a rectangle, so the table's white surfaces would square off
-            // the panel corners. Cut the four corners back with frame-coloured masks.
-            .child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .w(tokens.radius)
-                    .h(tokens.radius)
-                    .bg(tokens.chrome)
-                    .rounded_br(tokens.radius),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .right_0()
-                    .w(tokens.radius)
-                    .h(tokens.radius)
-                    .bg(tokens.chrome)
-                    .rounded_bl(tokens.radius),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .bottom_0()
-                    .left_0()
-                    .w(tokens.radius)
-                    .h(tokens.radius)
-                    .bg(tokens.chrome)
-                    .rounded_tr(tokens.radius),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .bottom_0()
-                    .right_0()
-                    .w(tokens.radius)
-                    .h(tokens.radius)
-                    .bg(tokens.chrome)
-                    .rounded_tl(tokens.radius),
-            )
-;
+                .child(rounded_panel_corners(tokens.radius, tokens.chrome));
             return v_flex()
                 .flex_1()
                 .min_w_0()
@@ -885,54 +913,13 @@ impl CairnApp {
             .min_w_0()
             .min_h_0()
             .relative()
-            .m(rems(layout::SPACE_4))
+            .mx(rems(layout::SPACE_4))
+            .mb(rems(layout::SPACE_4))
             .bg(tokens.background)
             .rounded(tokens.radius)
             .overflow_hidden()
             .child(results)
-            // GPUI clips children to a rectangle, so the table's white surfaces would square off
-            // the panel corners. Cut the four corners back with frame-coloured masks.
-            .child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .w(tokens.radius)
-                    .h(tokens.radius)
-                    .bg(tokens.chrome)
-                    .rounded_br(tokens.radius),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .right_0()
-                    .w(tokens.radius)
-                    .h(tokens.radius)
-                    .bg(tokens.chrome)
-                    .rounded_bl(tokens.radius),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .bottom_0()
-                    .left_0()
-                    .w(tokens.radius)
-                    .h(tokens.radius)
-                    .bg(tokens.chrome)
-                    .rounded_tr(tokens.radius),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .bottom_0()
-                    .right_0()
-                    .w(tokens.radius)
-                    .h(tokens.radius)
-                    .bg(tokens.chrome)
-                    .rounded_tl(tokens.radius),
-            )
-;
+            .child(rounded_panel_corners(tokens.radius, tokens.chrome));
         v_flex()
             .flex_1()
             .min_w_0()

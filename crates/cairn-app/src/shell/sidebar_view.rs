@@ -425,10 +425,10 @@ impl CairnApp {
                         accessibility::element(locations)
                             .aria_label(locations_title.clone())
                             .px(rems(layout::INNER_SPACING))
-                            // The caption fills the search-band height so its optical centre and
-                            // the first row share the search row and table-head bands.
+                            // The caption fills the search-band height so its optical centre
+                            // matches the query box; the list's 4px gap carries the same step
+                            // down to the first row that starts the table heading.
                             .h(rems(layout::SEARCH_BAND_HEIGHT - 2.0 * layout::SPACE_4))
-                            .mb(rems(layout::SPACE_4))
                             .flex()
                             .items_center()
                             .text_sm()
@@ -442,8 +442,10 @@ impl CairnApp {
                         accessibility::element(drives)
                             .aria_label(drives_title.clone())
                             .px(rems(layout::INNER_SPACING))
+                            // The 8px top pad lifts this section off the group above; the
+                            // list's own 4px gap carries the step down to its rows, the same
+                            // way the locations caption keeps its label and first row apart.
                             .pt(rems(layout::SPACE_8))
-                            .pb(rems(layout::SPACE_4))
                             .text_sm()
                             .font_medium()
                             .text_color(tokens.muted_foreground)
