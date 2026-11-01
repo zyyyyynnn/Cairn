@@ -53,64 +53,22 @@ fn sidebar_icon_svg(icon: IconName) -> Option<Arc<[u8]>> {
     bytes.clone()
 }
 
-/// The 24-grid Lucide stroke is scaled by the larger icon box and reads heavier
-/// than the 0.875rem label. Keep the approved 1rem box and restore the stroke
-/// weight the icon had at 0.875rem. The vertical seat is derived from the
-/// label's font metrics so the icon shares the text's optical centreline.
-fn sidebar_icon_metrics(window: &Window) -> SidebarIconMetrics {
+/// How far the sample glyph's ink centre sits below the centre of a line box at
+/// the sidebar's label size. The line box centres ascent and descent; the ink
+/// sits elsewhere, so every label and caption lifts by this one measurement.
+fn glyph_ink_offset(window: &Window, sample: &str) -> Pixels {
+    let Some(glyph) = sample.chars().next() else {
+        return Pixels::ZERO;
+    };
     let style = window.text_style();
     let font = style.font();
     let font_size = window.rem_size() * theme::SMALL_TEXT_SIZE;
     let text_system = window.text_system();
-    let sample = "文";
     let layout = text_system.layout_line(
         sample,
         font_size,
         &[TextRun {
             len: sample.len(),
-            font,
-            color: style.color,
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        }],
-        None,
-    );
-    let label_offset = layout
-        .runs
-        .first()
-        .and_then(|run| {
-            text_system
-                .typographic_bounds(run.font_id, font_size, '文')
-                .ok()
-        })
-        .map(|bounds| {
-            let ink_center = bounds.origin.y + bounds.size.height / 2.0;
-            -text_ink_offset(layout.ascent, layout.descent, ink_center)
-        })
-        .unwrap_or(Pixels::ZERO);
-    SidebarIconMetrics {
-        size: window.rem_size() * layout::SIDEBAR_ICON,
-        label_offset,
-    }
-}
-
-/// The caption's ink sits a fraction below the centre of its line box.
-/// Centre the line box, then lift the ink by the measured difference so the
-/// label's optical centre lands on the query box's centreline at every zoom.
-fn sidebar_caption_ink_offset(window: &Window, text: &str) -> Pixels {
-    let style = window.text_style();
-    let font = style.font();
-    let font_size = window.rem_size() * theme::SMALL_TEXT_SIZE;
-    let text_system = window.text_system();
-    let Some(glyph) = text.chars().next() else {
-        return Pixels::ZERO;
-    };
-    let layout = text_system.layout_line(
-        text,
-        font_size,
-        &[TextRun {
-            len: text.len(),
             font,
             color: style.color,
             background_color: None,
@@ -127,6 +85,24 @@ fn sidebar_caption_ink_offset(window: &Window, text: &str) -> Pixels {
     };
     let ink_center = bounds.origin.y + bounds.size.height / 2.0;
     text_ink_offset(layout.ascent, layout.descent, ink_center)
+}
+
+/// The 24-grid Lucide stroke is scaled by the larger icon box and reads heavier
+/// than the 0.875rem label. Keep the approved 1rem box and restore the stroke
+/// weight the icon had at 0.875rem. The vertical seat is derived from the
+/// label's font metrics so the icon shares the text's optical centreline.
+fn sidebar_icon_metrics(window: &Window) -> SidebarIconMetrics {
+    SidebarIconMetrics {
+        size: window.rem_size() * layout::SIDEBAR_ICON,
+        label_offset: -glyph_ink_offset(window, "文"),
+    }
+}
+
+/// The caption's ink sits a fraction below the centre of its line box.
+/// Centre the line box, then lift the ink by the measured difference so the
+/// label's optical centre lands on the query box's centreline at every zoom.
+fn sidebar_caption_ink_offset(window: &Window, text: &str) -> Pixels {
+    glyph_ink_offset(window, text)
 }
 
 /// One fixed leading lane for every sidebar glyph. Keeping the lane fixed means
@@ -203,7 +179,9 @@ fn sidebar_caption(
     accessibility::element(control)
         .aria_label(title.clone())
         .px(rems(layout::INNER_SPACING))
-        .h(rems(layout::SEARCH_BAND_HEIGHT - 2.0 * layout::SPACE_4))
+        .h(rems(
+            layout::SEARCH_BAND_HEIGHT - 2.0 * layout::SIDEBAR_VIEWPORT_LEAD,
+        ))
         .flex_shrink_0()
         .flex()
         .items_center()
@@ -476,7 +454,7 @@ impl CairnApp {
                     // same 4px viewport inset on the right keeps the row fill symmetric.
                     .pl(rems(layout::SIDEBAR_VIEWPORT_LEAD))
                     .pr(rems(layout::SIDEBAR_VIEWPORT_LEAD))
-                    .py(rems(layout::SPACE_4))
+                    .py(rems(layout::SIDEBAR_VIEWPORT_LEAD))
                     .gap_y(rems(layout::SPACE_4))
                     .child(sidebar_caption(locations, locations_title, window, tokens))
                     .children(quick_access)

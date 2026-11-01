@@ -817,6 +817,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_sidebar_caption_centre_matches_the_query_box() {
+        let caption_height = layout::SEARCH_BAND_HEIGHT - 2.0 * layout::SIDEBAR_VIEWPORT_LEAD;
+        let caption_centre = layout::SIDEBAR_VIEWPORT_LEAD + caption_height / 2.0;
+        let field_centre = layout::TIGHT_LEAD + layout::ROW_HEIGHT / 2.0;
+        assert!(
+            (caption_centre - field_centre).abs() < 0.0001,
+            "the section caption and the query box are centred on one line"
+        );
+        assert!(
+            (layout::SIDEBAR_VIEWPORT_LEAD + caption_height + layout::SPACE_4
+                - layout::SEARCH_BAND_HEIGHT)
+                .abs()
+                < 0.0001,
+            "the first sidebar row starts on the search band's lower edge"
+        );
+    }
+
     fn heights_the_view_pins(source: &str) -> Vec<String> {
         let mut pinned = Vec::new();
         for (at, _) in source.match_indices("layout::") {
