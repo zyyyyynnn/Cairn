@@ -2,103 +2,236 @@ name: CI
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
+
+permissions:
+  contents: read
+  pull-requests: read
+  actions: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('ref-{0}', github.sha) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  changes:
+    name: Detect documentation-only change
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      docs_only: ${{ steps.classify.outputs.docs_only }}
+    steps:
+      - id: filter
+        if: github.event_name == 'pull_request'
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            code:
+              - '**'
+              - '!README.md'
+              - '!docs/**'
+              - '!**/*.md'
+      - id: classify
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" && "${{ steps.filter.outputs.code }}" == "false" ]]; then
+            echo "docs_only=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+          fi
+
   quality:
     name: Code Quality & Static Analysis
+    needs: changes
     runs-on: windows-latest
+    timeout-minutes: 20
     steps:
+      - name: Documentation-only change
+        if: needs.changes.outputs.docs_only == 'true'
+        run: echo "Documentation-only change; static analysis is not required."
       - name: Checkout repository
+        if: needs.changes.outputs.docs_only != 'true'
         uses: actions/checkout@v7
-
       - name: Install Rust toolchain
+        if: needs.changes.outputs.docs_only != 'true'
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy, rustfmt
-
+          components: clippy
       - name: Rust cache
+        if: needs.changes.outputs.docs_only != 'true'
         uses: Swatinem/rust-cache@v2
-
-      - name: Format check
-        run: cargo fmt --all --check
-
+        with:
+          shared-key: windows-debug
+          add-job-id-key: false
+          cache-bin: false
       - name: Clippy lint
+        if: needs.changes.outputs.docs_only != 'true'
         run: cargo clippy --workspace --all-targets -- -D warnings
-
       - name: Documentation check
+        if: needs.changes.outputs.docs_only != 'true'
         run: cargo doc --workspace --no-deps
         env:
           RUSTDOCFLAGS: "-D warnings"
-
       - name: Internationalization check
+        if: needs.changes.outputs.docs_only != 'true'
         run: cargo run -p xtask -- check-i18n
 
   deny:
     name: Dependency Policy
+    needs: changes
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Documentation-only change
+        if: needs.changes.outputs.docs_only == 'true'
+        run: echo "Documentation-only change; dependency checks are not required."
+      - name: Checkout repository
+        if: needs.changes.outputs.docs_only != 'true'
+        uses: actions/checkout@v7
+      - name: Install Rust toolchain
+        if: needs.changes.outputs.docs_only != 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Format check
+        if: needs.changes.outputs.docs_only != 'true'
+        run: cargo fmt --all --check
+      - name: Dependency policy
+        if: needs.changes.outputs.docs_only != 'true'
+        uses: EmbarkStudios/cargo-deny-action@v2
+
+  test-layers:
+    name: "Test / ${{ matrix.name }}"
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Core & Protocol
+            command: cargo test -p cairn-protocol -p cairn-client -p cairn-core -p cairn-ui
+          - name: Content & Filesystem
+            command: cargo test -p cairn-ntfs -p cairn-content
+          - name: Service
+            command: cargo test -p cairn-service
+          - name: Desktop
+            command: cargo test -p cairn-app
+          - name: Tooling
+            command: cargo test -p cairn-cli -p cairn-worker -p cairn-setup -p xtask
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
-
-      - name: Dependency policy
-        uses: EmbarkStudios/cargo-deny-action@v2
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-debug
+          add-job-id-key: false
+          cache-bin: false
+          save-if: false
+      - name: Run tests
+        run: ${{ matrix.command }}
 
   test:
     name: Domain & System Test Suite
-    needs: quality
+    needs: [changes, test-layers]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify every test layer
+        run: |
+          if [[ "${{ needs.changes.outputs.docs_only }}" == "true" ]]; then
+            echo "Documentation-only change; no test layer is required."
+            exit 0
+          fi
+          if [[ "${{ needs.test-layers.result }}" != "success" ]]; then
+            echo "At least one test layer did not succeed."
+            exit 1
+          fi
+
+  release:
+    name: Release Binaries
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true'
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
-
-      - name: "Layer 1: Core Domain & Protocol Models"
-        run: cargo test -p cairn-protocol -p cairn-ntfs -p cairn-content -p cairn-client -p cairn-core -p cairn-ui
-
-      - name: "Layer 2: Service Engine & System IPC"
-        run: cargo test -p cairn-service
-
-      - name: "Layer 3: Desktop UI & State Reconciliation"
-        run: cargo test -p cairn-app
-
-      - name: "Layer 4: Tooling & Release Verification"
-        run: cargo test -p cairn-cli -p cairn-worker -p cairn-setup -p xtask
+        with:
+          shared-key: windows-release
+          add-job-id-key: false
+          cache-bin: false
+          save-if: "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}"
+      - name: Build release binaries
+        run: cargo build --release
+      - name: Upload release binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-binaries
+          path: |
+            target/release/Cairn.exe
+            target/release/CairnService.exe
+            target/release/CairnCli.exe
+            target/release/CairnWorker.exe
+            target/release/CairnSetup.exe
+            target/release/CairnUninstall.exe
+            target/release/CairnInstallGuard.exe
+          if-no-files-found: error
+          retention-days: 1
 
   package:
     name: Installer Package
-    needs: test
+    needs: [changes, test, release]
+    if: always() && (needs.changes.outputs.docs_only == 'true' || (needs.test.result == 'success' && needs.release.result == 'success'))
     runs-on: windows-latest
+    timeout-minutes: 25
     steps:
+      - name: Documentation-only change
+        if: needs.changes.outputs.docs_only == 'true'
+        run: echo "Documentation-only change; installer packaging is not required."
       - name: Checkout repository
+        if: needs.changes.outputs.docs_only != 'true'
         uses: actions/checkout@v7
-
       - name: Install Rust toolchain
+        if: needs.changes.outputs.docs_only != 'true'
         uses: dtolnay/rust-toolchain@stable
-
       - name: Rust cache
+        if: needs.changes.outputs.docs_only != 'true'
         uses: Swatinem/rust-cache@v2
-
+        with:
+          shared-key: windows-debug
+          add-job-id-key: false
+          cache-bin: false
+          save-if: false
+      - name: Download release binaries
+        if: needs.changes.outputs.docs_only != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: release-binaries
+          path: release-bin
       - name: Install WiX
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           dotnet tool install --global wix --version 5.0.2
           echo "$env:USERPROFILE\.dotnet\tools" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-
       - name: Add the WiX UI extension
+        if: needs.changes.outputs.docs_only != 'true'
         run: wix extension add -g WixToolset.Util.wixext/5.0.2
-
-      - name: Build release binaries
-        run: cargo build --release
-
       - name: Build and validate the installer
+        if: needs.changes.outputs.docs_only != 'true'
+        env:
+          CAIRN_BIN_DIR: ${{ github.workspace }}/release-bin
         run: cargo test -p xtask real_package_builds_msi_and_setup -- --ignored --nocapture
