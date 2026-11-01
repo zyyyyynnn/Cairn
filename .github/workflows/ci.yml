@@ -122,8 +122,6 @@ jobs:
             command: cargo test -p cairn-service
           - name: Desktop
             command: cargo test -p cairn-app
-          - name: Tooling
-            command: cargo test -p cairn-cli -p cairn-worker -p cairn-setup -p xtask
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -139,9 +137,45 @@ jobs:
       - name: Run tests
         run: ${{ matrix.command }}
 
+  tooling:
+    name: Test / Tooling
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-debug
+          add-job-id-key: false
+          cache-bin: false
+          save-if: false
+      - name: Run tests
+        run: cargo test -p cairn-cli -p cairn-worker -p cairn-setup -p xtask
+      - name: Locate installer test binary
+        shell: pwsh
+        run: |
+          $artifact = cargo test -p xtask real_package_builds_msi_and_setup --no-run --message-format=json |
+            ForEach-Object { $_ | ConvertFrom-Json } |
+            Where-Object { $_.reason -eq 'compiler-artifact' -and $_.executable -and $_.profile.test } |
+            Select-Object -Last 1
+          if (-not $artifact) { throw "The installer test binary was not produced." }
+          Copy-Item -LiteralPath $artifact.executable -Destination package-test.exe
+      - name: Upload installer test binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-test-binary
+          path: package-test.exe
+          retention-days: 1
+
   test:
     name: Domain & System Test Suite
-    needs: [changes, test-layers]
+    needs: [changes, test-layers, tooling]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -152,13 +186,13 @@ jobs:
             echo "Documentation-only change; no test layer is required."
             exit 0
           fi
-          if [[ "${{ needs.test-layers.result }}" != "success" ]]; then
+          if [[ "${{ needs.test-layers.result }}" != "success" || "${{ needs.tooling.result }}" != "success" ]]; then
             echo "At least one test layer did not succeed."
             exit 1
           fi
 
-  release:
-    name: Release Binaries
+  release_runtime:
+    name: Release / Runtime
     needs: changes
     if: needs.changes.outputs.docs_only != 'true'
     runs-on: windows-latest
@@ -175,17 +209,45 @@ jobs:
           add-job-id-key: false
           cache-bin: false
           save-if: "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}"
-      - name: Build release binaries
-        run: cargo build --release -p cairn-app -p cairn-service -p cairn-cli -p cairn-worker -p cairn-setup-bin
-      - name: Upload release binaries
+      - name: Build runtime binaries
+        run: cargo build --release -p cairn-app -p cairn-service -p cairn-cli -p cairn-worker
+      - name: Upload runtime binaries
         uses: actions/upload-artifact@v4
         with:
-          name: release-binaries
+          name: release-runtime-binaries
           path: |
             target/release/Cairn.exe
             target/release/CairnService.exe
             target/release/CairnCli.exe
             target/release/CairnWorker.exe
+          if-no-files-found: error
+          retention-days: 1
+
+  release_installer:
+    name: Release / Installer
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: package
+          add-job-id-key: false
+          cache-bin: false
+          save-if: false
+      - name: Build installer binaries
+        run: cargo build --release -p cairn-setup-bin
+      - name: Upload installer binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-installer-binaries
+          path: |
             target/release/CairnSetup.exe
             target/release/CairnUninstall.exe
             target/release/CairnInstallGuard.exe
@@ -194,10 +256,10 @@ jobs:
 
   package:
     name: Installer Package
-    needs: [changes, release]
-    if: always() && (needs.changes.outputs.docs_only == 'true' || needs.release.result == 'success')
+    needs: [changes, release_runtime, release_installer, tooling]
+    if: always() && (needs.changes.outputs.docs_only == 'true' || (needs.release_runtime.result == 'success' && needs.release_installer.result == 'success' && needs.tooling.result == 'success'))
     runs-on: windows-latest
-    timeout-minutes: 25
+    timeout-minutes: 20
     steps:
       - name: Documentation-only change
         if: needs.changes.outputs.docs_only == 'true'
@@ -205,23 +267,24 @@ jobs:
       - name: Checkout repository
         if: needs.changes.outputs.docs_only != 'true'
         uses: actions/checkout@v7
-      - name: Install Rust toolchain
-        if: needs.changes.outputs.docs_only != 'true'
-        uses: dtolnay/rust-toolchain@stable
-      - name: Rust cache
-        if: needs.changes.outputs.docs_only != 'true'
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: windows-debug
-          add-job-id-key: false
-          cache-bin: false
-          save-if: false
-      - name: Download release binaries
+      - name: Download runtime binaries
         if: needs.changes.outputs.docs_only != 'true'
         uses: actions/download-artifact@v4
         with:
-          name: release-binaries
+          name: release-runtime-binaries
           path: release-bin
+      - name: Download installer binaries
+        if: needs.changes.outputs.docs_only != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: release-installer-binaries
+          path: release-bin
+      - name: Download installer test binary
+        if: needs.changes.outputs.docs_only != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: package-test-binary
+          path: package-test-bin
       - name: Install WiX
         if: needs.changes.outputs.docs_only != 'true'
         run: |
@@ -234,4 +297,6 @@ jobs:
         if: needs.changes.outputs.docs_only != 'true'
         env:
           CAIRN_BIN_DIR: ${{ github.workspace }}/release-bin
-        run: cargo test -p xtask real_package_builds_msi_and_setup -- --ignored --nocapture
+        run: |
+          & "$env:GITHUB_WORKSPACE\package-test-bin\package-test.exe" real_package_builds_msi_and_setup --ignored --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
