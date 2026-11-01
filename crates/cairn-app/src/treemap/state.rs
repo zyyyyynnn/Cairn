@@ -177,6 +177,10 @@ impl TreemapViewState {
         self.navigation.can_go_forward()
     }
 
+    pub fn can_go_up(&self) -> bool {
+        self.navigation.can_go_up()
+    }
+
     pub fn clear_selection(&mut self) -> bool {
         self.selected_path.take().is_some()
     }
@@ -211,23 +215,26 @@ impl TreemapViewState {
                     .unwrap_or_else(|| current_dir.clone())
             };
 
-            let dir_idx = if is_drive_root(&current_dir) {
-                None
+            // A directory the snapshot does not contain must fall through to the
+            // stored tree or a scan. Treating a failed lookup as `None` here would
+            // build the volume root and show it under the requested path.
+            let resolved = if is_drive_root(&current_dir) {
+                Some(None)
             } else {
                 idx.dir_index
                     .resolve_path_to_idx(&idx.records, &idx.arena, &current_dir)
-                    .flatten()
             };
+            if let Some(dir_idx) = resolved {
+                let tree =
+                    idx.dir_index
+                        .build_tree_node(&idx.records, &idx.arena, dir_idx, &root_name, 6);
 
-            let tree =
-                idx.dir_index
-                    .build_tree_node(&idx.records, &idx.arena, dir_idx, &root_name, 6);
-
-            if !tree.children.is_empty() {
-                self.current_dir_total_items = idx.dir_index.descendant_count(dir_idx);
-                self.set_tree(tree);
-                self.reveal_content();
-                return None;
+                if !tree.children.is_empty() {
+                    self.current_dir_total_items = idx.dir_index.descendant_count(dir_idx);
+                    self.set_tree(tree);
+                    self.reveal_content();
+                    return None;
+                }
             }
         }
 
@@ -437,15 +444,24 @@ impl TreemapViewState {
         self.load_current_dir()
     }
 
-    /// Drills up to the parent directory.
+    /// Drills up to the parent directory as a history step.
     pub(super) fn drill_up(&mut self) -> Option<PathBuf> {
+        if !self.navigation.up() {
+            return None;
+        }
+        self.load_current_dir()
+    }
+
+    /// Returns to the directory most recently left by a drill or [`Self::drill_up`].
+    pub(super) fn drill_back(&mut self) -> Option<PathBuf> {
         if !self.navigation.back() {
             return None;
         }
         self.load_current_dir()
     }
 
-    /// Returns to the directory most recently left by [`Self::drill_up`].
+    /// Returns to the directory most recently left by Back, keeping older
+    /// departures for the Forward after it.
     pub(super) fn drill_forward(&mut self) -> Option<PathBuf> {
         if !self.navigation.forward() {
             return None;

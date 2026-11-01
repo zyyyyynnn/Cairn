@@ -77,7 +77,7 @@ const EMPTY: &[&str] = &[];
 /// below reject a row the render path does not build.
 pub const KEY_CONTROLS: &[KeyControl] = &[
     // ---- locations sidebar: the file-type rows, and the column that holds them (UI-01, QRY-06) ----
-    // ---- title bar: sidebar toggle, back/forward navigation (UI-01) --------------
+    // ---- title bar: sidebar toggle, back/forward/up navigation (UI-01) -----------
     KeyControl {
         key: "sidebar-toggle",
         element: "sidebar-toggle",
@@ -102,6 +102,15 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         indexed: false,
         role: Role::Button,
         messages: &["nav_forward"],
+        named_by: "",
+        requirement: "UI-01",
+    },
+    KeyControl {
+        key: "nav-up",
+        element: "nav-up",
+        indexed: false,
+        role: Role::Button,
+        messages: &["nav_up"],
         named_by: "",
         requirement: "UI-01",
     },
@@ -269,6 +278,15 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         messages: &["query_clear"],
         named_by: "",
         requirement: "UI-01, UI-03",
+    },
+    KeyControl {
+        key: "treemap-path-clear",
+        element: "treemap-path-clear",
+        indexed: false,
+        role: Role::Button,
+        messages: &["treemap_path_clear"],
+        named_by: "",
+        requirement: "DSV-04",
     },
     // ---- title-bar menu bar: the six top-level menus (UI-01, UI-03) ----------------
     // Each trigger is a `Button` carrying the element id the view builds, so `element` is exactly what

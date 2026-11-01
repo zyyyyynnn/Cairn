@@ -26,6 +26,7 @@ use crate::shell::settings::AppSettings;
 use crate::shell::status_bar::StatusBarModel;
 use crate::table::model::{ColumnBoundary, ColumnWidths, TableState};
 use cairn_protocol::status::ContentIndexStatus;
+use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::menu::PopupMenu;
 use gpui_kit::gpui::*;
 use std::cell::RefCell;
@@ -347,6 +348,15 @@ pub struct ServiceDomain {
     pub(crate) status_generation: u64,
 }
 
+/// The Treemap address field's retained state. The field is an ecosystem
+/// input; this wrapper owns the entity, the edit mode and the last rejection.
+pub(crate) struct TreemapPathField {
+    pub input: Entity<InputState>,
+    pub editing: bool,
+    pub error: bool,
+    pub _subscription: Subscription,
+}
+
 pub struct CairnApp {
     pub i18n: Rc<I18nManager>,
     pub query: QueryDomain,
@@ -377,6 +387,7 @@ pub struct CairnApp {
     /// When `Some(drive)`, the main content area renders the disk visualization (Treemap).
     pub drive_view: Option<char>,
     pub treemap_state: Option<crate::treemap::state::TreemapViewState>,
+    pub(crate) treemap_path: TreemapPathField,
     /// The Recycle Bin view. The bin is a location, not a search scope: the view owns its rows,
     /// its selection and its error band together, so any query or drive switch releases the whole
     /// location instead of leaving half of it behind.
@@ -431,6 +442,20 @@ impl CairnApp {
         // The service registration is read once here: it decides both whether the window may
         // offer the machine-wide scope and which scope a first run opens in.
         let service_state = crate::service::service_control::service_state();
+
+        let treemap_path_placeholder = i18n.get_text("treemap_path_placeholder");
+        let treemap_path_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder(treemap_path_placeholder));
+        let treemap_path_subscription = cx.subscribe_in(
+            &treemap_path_input,
+            window,
+            |this, _, event: &InputEvent, window, cx| match event {
+                InputEvent::PressEnter { .. } => this.commit_treemap_path(window, cx),
+                InputEvent::Blur => this.cancel_treemap_path_edit(cx),
+                InputEvent::Change => this.treemap_path_changed(cx),
+                InputEvent::Focus => {}
+            },
+        );
 
         let mut app = Self {
             i18n,
@@ -505,6 +530,12 @@ impl CairnApp {
             sidebar_scroll: ScrollHandle::default(),
             drive_view: None,
             treemap_state: None,
+            treemap_path: TreemapPathField {
+                input: treemap_path_input,
+                editing: false,
+                error: false,
+                _subscription: treemap_path_subscription,
+            },
             recycle_bin: crate::shell::recycle_bin::RecycleBinView::closed(),
             delete_in_flight: false,
             toast: None,

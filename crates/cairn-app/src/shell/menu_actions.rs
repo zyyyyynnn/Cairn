@@ -436,9 +436,10 @@ impl CairnApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // The Treemap replaces the query band; focusing its hidden search box
-        // would take the keyboard away from the visualization.
+        // The Treemap replaces the query band with the path field, which is its
+        // address bar; the same desktop shortcut reaches it.
         if self.drive_view.is_some() {
+            self.begin_treemap_path_edit(window, cx);
             return;
         }
         self.dismiss_result_selection_on_chrome_press(cx);
@@ -492,6 +493,11 @@ impl CairnApp {
     }
 
     pub fn escape_query(&mut self, _: &EscapeQuery, window: &mut Window, cx: &mut Context<Self>) {
+        // The address field is the innermost editing surface while it is open.
+        if self.treemap_path.editing {
+            self.cancel_treemap_path_edit(cx);
+            return;
+        }
         // While a dropdown is open the keystroke belongs to it: `Popover` gives its surface focus
         // and handles Escape→Cancel in the bubble phase, where actions stop propagation by default,
         // so this handler is not reached. If focus has not moved into the popover yet, closing the

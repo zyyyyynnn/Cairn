@@ -22,6 +22,7 @@ use crate::shell::accessibility::{self, ControlElement, KeyControl};
 use crate::shell::command_groups::{menu_groups, GroupCommand, MenuGroup};
 use crate::shell::commands::{self, WINDOW_CONTEXT, WINDOW_CONTROL_CONTEXT};
 use crate::shell::theme::{self, ShellTokens};
+use gpui_kit::assets::IconName as AssetIconName;
 use gpui_kit::base::Disableable;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
@@ -211,6 +212,25 @@ pub(crate) fn announce_shortcut(element: ControlElement, control: &KeyControl) -
         return element;
     }
     element.aria_keyshortcuts(shortcuts.join(", "))
+}
+
+/// The Treemap address field's clear control.
+///
+/// It belongs to the shell's control registry, so its element, role and name
+/// come from there; the Treemap view supplies only the click.
+pub(crate) fn treemap_path_clear_button(
+    i18n: &crate::shell::i18n::I18nManager,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let control = accessibility::control("treemap-path-clear");
+    Button::new(control.element)
+        .ghost()
+        .small()
+        .min_w(rems(layout::SPACE_24))
+        .min_h(rems(layout::SPACE_24))
+        .icon(AssetIconName::X)
+        .accessibility_label(accessibility::name(control, i18n))
+        .on_click(on_click)
 }
 
 /// Repaints the four corner crescents a rounded panel cuts out of its rectangle.
@@ -432,6 +452,7 @@ impl Render for CairnApp {
                     this.go_forward(window, cx)
                 }),
             )
+            .on_action(cx.listener(|this, _: &commands::NavigateUp, _, cx| this.go_up(cx)))
             .on_action(cx.listener(Self::delete_selected))
             .on_action(cx.listener(Self::restore_selected))
             // Input modality for focus painting. Any key means the keyboard is driving, and any
@@ -649,8 +670,10 @@ impl CairnApp {
         let toggle_view = view.clone();
         let back_view = view.clone();
         let forward_view = view.clone();
+        let up_view = view.clone();
         let can_back = self.can_go_back();
         let can_forward = self.can_go_forward();
+        let can_up = self.can_go_up();
         let is_collapsed = self.sidebar_collapsed;
         let is_maximized = window.is_maximized();
         let minimize_focus = window
@@ -759,6 +782,23 @@ impl CairnApp {
                                     .on_click(move |_, window, cx| {
                                         forward_view
                                             .update(cx, |this, cx| this.go_forward(window, cx));
+                                    }),
+                            )
+                            .child(
+                                Button::new("nav-up")
+                                    .ghost()
+                                    .small()
+                                    .icon(
+                                        Icon::new(IconName::ArrowUp)
+                                            .size(rems(theme::UI_ICON_SIZE)),
+                                    )
+                                    .disabled(!can_up)
+                                    .accessibility_label(accessibility::name(
+                                        accessibility::control("nav-up"),
+                                        &self.i18n,
+                                    ))
+                                    .on_click(move |_, _, cx| {
+                                        up_view.update(cx, |this, cx| this.go_up(cx));
                                     }),
                             )
                             .child(
@@ -873,13 +913,17 @@ impl CairnApp {
         cx: &mut Context<Self>,
     ) -> Div {
         if self.drive_view.is_some() {
+            let path_band = self.render_treemap_path_band(tokens, band.view.clone(), cx);
             let body = self.render_treemap_body(tokens, window, cx);
+            // The path band's bottom inset is this panel's top gap, the same
+            // relationship the search band has with the result panel.
             let body_surface = v_flex()
                 .flex_1()
                 .min_w_0()
                 .min_h_0()
                 .relative()
-                .m(rems(layout::SPACE_4))
+                .mx(rems(layout::SPACE_4))
+                .mb(rems(layout::SPACE_4))
                 .bg(tokens.background)
                 .rounded(tokens.radius)
                 .overflow_hidden()
@@ -890,6 +934,7 @@ impl CairnApp {
                 .min_w_0()
                 .min_h_0()
                 .bg(tokens.chrome)
+                .child(path_band)
                 .child(body_surface);
         }
 
