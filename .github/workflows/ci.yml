@@ -160,12 +160,11 @@ jobs:
       - name: Locate installer test binary
         shell: pwsh
         run: |
-          $artifact = cargo test -p xtask real_package_builds_msi_and_setup --no-run --message-format=json |
-            ForEach-Object { $_ | ConvertFrom-Json } |
-            Where-Object { $_.reason -eq 'compiler-artifact' -and $_.executable -and $_.profile.test } |
-            Select-Object -Last 1
-          if (-not $artifact) { throw "The installer test binary was not produced." }
-          Copy-Item -LiteralPath $artifact.executable -Destination package-test.exe
+          $binary = Get-ChildItem -Path target\debug\deps -Filter "CairnXtask-*.exe" |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+          if (-not $binary) { throw "The installer test binary was not produced." }
+          Copy-Item -LiteralPath $binary.FullName -Destination package-test.exe
       - name: Upload installer test binary
         uses: actions/upload-artifact@v4
         with:
@@ -205,10 +204,11 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: package
+          shared-key: release
           add-job-id-key: false
           cache-bin: false
-          save-if: "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}"
+          cache-workspace-crates: true
+          save-if: "${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.actor != 'dependabot[bot]') }}"
       - name: Build runtime binaries
         run: cargo build --release -p cairn-app -p cairn-service -p cairn-cli -p cairn-worker
       - name: Upload runtime binaries
@@ -237,9 +237,10 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: package
+          shared-key: release
           add-job-id-key: false
           cache-bin: false
+          cache-workspace-crates: true
           save-if: false
       - name: Build installer binaries
         run: cargo build --release -p cairn-setup-bin
