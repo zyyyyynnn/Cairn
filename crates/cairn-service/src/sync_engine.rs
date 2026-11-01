@@ -12,7 +12,10 @@ use cairn_core::path_cache::DirectoryPathCache;
 use cairn_core::sort::{PresortedIndices, SortColumn, SortDirection};
 use cairn_core::syntax::{parse_query_with, QueryDefaults, QueryExpr};
 use cairn_core::treemap::DirectorySizeIndex;
-use cairn_protocol::message::TreeEntryData;
+use cairn_protocol::message::{
+    TreeEntryData, ERROR_CODE_TREE_NOT_DIRECTORY, ERROR_CODE_TREE_NOT_INDEXED,
+    ERROR_CODE_TREE_TOO_LARGE,
+};
 use rayon::prelude::*;
 
 /// Flattens a finished tree pre-order (parent before children) for the wire.
@@ -1041,6 +1044,31 @@ pub type MultiSearchResult = (
     u64,
 );
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TreeUnavailable {
+    NotIndexed,
+    NotDirectory,
+    TooLarge,
+}
+
+impl TreeUnavailable {
+    pub const fn code(self) -> u32 {
+        match self {
+            Self::NotIndexed => ERROR_CODE_TREE_NOT_INDEXED,
+            Self::NotDirectory => ERROR_CODE_TREE_NOT_DIRECTORY,
+            Self::TooLarge => ERROR_CODE_TREE_TOO_LARGE,
+        }
+    }
+
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::NotIndexed => "the path is not covered by the volume index",
+            Self::NotDirectory => "the path is not a directory",
+            Self::TooLarge => "the directory tree exceeds the one-response budget",
+        }
+    }
+}
+
 impl MultiVolumeEngine {
     pub fn new() -> Self {
         Self::with_config(ServiceConfig::default())
@@ -1504,16 +1532,23 @@ impl MultiVolumeEngine {
     const TREE_ENTRY_OVERHEAD: usize = 64;
 
     /// Reads the directory tree below `path` from the owning volume's index,
-    /// flattened pre-order for the wire. `None` when no loaded volume covers
-    /// the drive in `path` (the caller then answers with empty entries).
+    /// flattened pre-order for the wire.
     ///
     /// The size index is built per request: it is an O(records) pass the
     /// Treemap only asks for when it opens a drive, and keeping it resident
     /// for one view would tax every query in between.
-    pub fn treemap_tree(&self, path: &str, max_depth: usize) -> Option<Vec<TreeEntryData>> {
-        let drive = path.chars().next()?.to_ascii_uppercase();
+    pub fn treemap_tree(
+        &self,
+        path: &str,
+        max_depth: usize,
+    ) -> Result<Vec<TreeEntryData>, TreeUnavailable> {
+        let drive = path
+            .chars()
+            .next()
+            .map(|letter| letter.to_ascii_uppercase())
+            .ok_or(TreeUnavailable::NotIndexed)?;
         let volumes = self.volumes.read().unwrap();
-        let volume = volumes.get(&drive)?;
+        let volume = volumes.get(&drive).ok_or(TreeUnavailable::NotIndexed)?;
         let dir_index = DirectorySizeIndex::build(&volume.records, &volume.arena);
 
         let is_root = path
@@ -1524,13 +1559,11 @@ impl MultiVolumeEngine {
         } else {
             let idx = dir_index
                 .resolve_path_to_idx(&volume.records, &volume.arena, path)
-                .flatten()?;
+                .flatten()
+                .ok_or(TreeUnavailable::NotIndexed)?;
             let record = &volume.records[idx as usize];
-            // A file has no Treemap body. Answering with an empty root would
-            // present it as an empty folder; the caller's unavailable state is
-            // the truthful answer.
             if !record.is_dir() {
-                return None;
+                return Err(TreeUnavailable::NotDirectory);
             }
             (
                 Some(idx),
@@ -1543,7 +1576,7 @@ impl MultiVolumeEngine {
 
         let entry_count = dir_index.subtree_entry_count(dir_idx, max_depth);
         if entry_count > Self::MAX_TREE_ENTRIES {
-            return None;
+            return Err(TreeUnavailable::TooLarge);
         }
         let tree = dir_index.build_tree_node(
             &volume.records,
@@ -1554,18 +1587,17 @@ impl MultiVolumeEngine {
         );
         let mut entries = Vec::with_capacity(entry_count);
         flatten_tree(&tree, 0, &mut entries);
-        // A path above either budget cannot be answered in one response; returning None makes the
-        // caller report "not indexed here" and use its own scan instead of dropping the pipe.
+        // A path above either budget cannot be answered in one response.
         if entries.len() > Self::MAX_TREE_ENTRIES {
-            return None;
+            return Err(TreeUnavailable::TooLarge);
         }
         let estimated_bytes = entries.iter().fold(0usize, |total, entry| {
             total.saturating_add(entry.name.len().saturating_add(Self::TREE_ENTRY_OVERHEAD))
         });
         if estimated_bytes > Self::MAX_TREE_PAYLOAD_BYTES {
-            return None;
+            return Err(TreeUnavailable::TooLarge);
         }
-        Some(entries)
+        Ok(entries)
     }
 
     /// `true` when the service must answer queries from administrators only (SPEC SVC-02, SVC-05).

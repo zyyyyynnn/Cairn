@@ -239,6 +239,23 @@ pub(crate) fn treemap_path_clear_button(
 /// its corner radii and square them off. The overlay repaints only the area between each corner's
 /// edge and its arc, in the band colour behind the panel. It takes no part in layout or hit
 /// testing, so the heading stays where the shell's bands put it.
+/// The one rounded content panel used by the result table and the Treemap:
+/// the 4px frame gap, the panel surface and the corner crescent overlay.
+fn content_panel(tokens: &ShellTokens, child: impl IntoElement) -> Div {
+    v_flex()
+        .flex_1()
+        .min_w_0()
+        .min_h_0()
+        .relative()
+        .mx(rems(layout::SPACE_4))
+        .mb(rems(layout::SPACE_4))
+        .bg(tokens.background)
+        .rounded(tokens.radius)
+        .overflow_hidden()
+        .child(child)
+        .child(rounded_panel_corners(tokens.radius, tokens.chrome))
+}
+
 fn rounded_panel_corners(radius: Pixels, color: Hsla) -> impl IntoElement {
     canvas(
         |_, _, _| {},
@@ -919,18 +936,7 @@ impl CairnApp {
             let body = self.render_treemap_body(tokens, window, cx);
             // The path band's bottom inset is this panel's top gap, the same
             // relationship the search band has with the result panel.
-            let body_surface = v_flex()
-                .flex_1()
-                .min_w_0()
-                .min_h_0()
-                .relative()
-                .mx(rems(layout::SPACE_4))
-                .mb(rems(layout::SPACE_4))
-                .bg(tokens.background)
-                .rounded(tokens.radius)
-                .overflow_hidden()
-                .child(body)
-                .child(rounded_panel_corners(tokens.radius, tokens.chrome));
+            let body_surface = content_panel(tokens, body);
             return v_flex()
                 .flex_1()
                 .min_w_0()
@@ -957,18 +963,7 @@ impl CairnApp {
 
         // The search band's own bottom inset is this panel's top gap. Repeating it as a margin
         // would space the same boundary twice and push the heading off the row band.
-        let results_surface = v_flex()
-            .flex_1()
-            .min_w_0()
-            .min_h_0()
-            .relative()
-            .mx(rems(layout::SPACE_4))
-            .mb(rems(layout::SPACE_4))
-            .bg(tokens.background)
-            .rounded(tokens.radius)
-            .overflow_hidden()
-            .child(results)
-            .child(rounded_panel_corners(tokens.radius, tokens.chrome));
+        let results_surface = content_panel(tokens, results);
         v_flex()
             .flex_1()
             .min_w_0()

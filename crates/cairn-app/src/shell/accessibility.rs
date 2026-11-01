@@ -482,7 +482,13 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         element: "treemap-state",
         indexed: false,
         role: Role::Status,
-        messages: &["treemap_empty_directory", "treemap_unavailable"],
+        messages: &[
+            "treemap_empty_directory",
+            "treemap_unavailable_not_indexed",
+            "treemap_unavailable_not_directory",
+            "treemap_unavailable_too_large",
+            "treemap_unavailable_service",
+        ],
         named_by: "",
         requirement: "DSV-04",
     },
@@ -607,6 +613,15 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         requirement: "UI-03",
     },
     KeyControl {
+        key: "toast-info",
+        element: "toast-info",
+        indexed: false,
+        role: Role::Status,
+        messages: &["toast_status"],
+        named_by: "",
+        requirement: "UI-03",
+    },
+    KeyControl {
         key: "toast-dismiss",
         element: "toast-dismiss",
         indexed: false,
@@ -691,6 +706,24 @@ pub type ControlElement = ObservedElement<Stateful<Div>>;
 /// accessible name and its own styling.
 pub fn element(control: &KeyControl) -> ControlElement {
     div().id(control.element).role(control.role).test_support()
+}
+
+/// [`element_at`] for a repeated family whose member is named by a model key
+/// (a path segment, a setting id) rather than by a row index. The key is part
+/// of the element identity, so a changed path cannot inherit another member's
+/// focus or hover state.
+pub fn element_at_key(control: &KeyControl, key: &str) -> ControlElement {
+    div()
+        .id(format!("{}:{key}", control.element))
+        .role(control.role)
+        .test_support()
+}
+
+/// The accessible name for a component-owned control (an Input, a picker) whose
+/// role and element come from the component. The registry still supplies the
+/// words, and the static source check can tell this label from an element label.
+pub fn component_name(control: &KeyControl, i18n: &I18nManager) -> String {
+    name(control, i18n)
 }
 
 /// [`element`] for a control the view repeats inside one parent, where GPUI needs the registered id
@@ -828,6 +861,7 @@ mod tests {
         include_str!("status_bar_view.rs"),
         include_str!("toast.rs"),
         include_str!("../table/results_view.rs"),
+        include_str!("../treemap/view.rs"),
     ];
 
     fn zh() -> I18nManager {
@@ -1100,26 +1134,30 @@ mod tests {
             );
 
             let fixed_sites = source.matches("accessibility::element(").count();
-            let indexed_sites = source.matches("accessibility::element_at(").count();
+            let indexed_sites = source.matches("accessibility::element_at(").count()
+                + source.matches("accessibility::element_at_key(").count();
+            let component_named_sites = source
+                .matches(".aria_label(accessibility::component_name(")
+                .count();
             let label_sites = source.matches(".aria_label(").count();
 
             assert_eq!(
                 label_sites,
-                fixed_sites + indexed_sites,
+                fixed_sites + indexed_sites + component_named_sites,
                 "a source builds {} controls but names only {label_sites}",
-                fixed_sites + indexed_sites
+                fixed_sites + indexed_sites + component_named_sites
             );
 
             named_controls += fixed_sites + indexed_sites;
             surfaces += source.matches("accessibility::surface(").count();
         }
 
-        // Indexed families can live in a component-heavy view source whose labels are
-        // component calls, so the family count is read from every view source rather than
-        // from the per-surface label count above.
-        let indexed_controls: usize = VIEW_SOURCES
+        let indexed_controls: usize = RENDERED_SOURCES
             .iter()
-            .map(|source| source.matches("accessibility::element_at(").count())
+            .map(|source| {
+                source.matches("accessibility::element_at(").count()
+                    + source.matches("accessibility::element_at_key(").count()
+            })
             .sum();
         assert_eq!(
             indexed_controls, registered_indexed,

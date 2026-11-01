@@ -19,6 +19,7 @@ use cairn_core::treemap::TreemapCategory;
 use cairn_protocol::message::FileRowData;
 use cairn_protocol::status::ContentIndexState;
 use gpui_kit::assets::IconName as AssetIconName;
+use gpui_kit::base::Disableable as _;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::menu::ContextMenuExt;
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
@@ -803,6 +804,7 @@ impl CairnApp {
                         .accessibility_label(start_label)
                         .small()
                         .loading(self.service.is_probing_service)
+                        .disabled(self.service.is_probing_service)
                         .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
                             this.start_service(cx);
                         })),
@@ -816,6 +818,7 @@ impl CairnApp {
                         .accessibility_label(retry_label)
                         .small()
                         .loading(self.service.is_probing_service)
+                        .disabled(self.service.is_probing_service)
                         .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
                             this.retry_service_connection(cx);
                         })),

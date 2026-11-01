@@ -516,10 +516,13 @@ fn process_request(
             status: engine.content_index_status(),
         },
         ClientRequest::GetTree { path, max_depth } => {
-            let entries = engine
-                .treemap_tree(&path, tree_depth(max_depth))
-                .unwrap_or_default();
-            ResponsePayload::TreeResult { path, entries }
+            match engine.treemap_tree(&path, tree_depth(max_depth)) {
+                Ok(entries) => ResponsePayload::TreeResult { path, entries },
+                Err(reason) => ResponsePayload::Error {
+                    code: reason.code(),
+                    message: reason.message().to_string(),
+                },
+            }
         }
         ClientRequest::CancelContentIndex => ResponsePayload::CancelContentIndexAck {
             success: engine.disable_content_index().is_ok(),

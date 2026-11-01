@@ -14,7 +14,17 @@ use std::path::{Component, Path, PathBuf};
 /// Returned `None` means the text cannot name a drive path at all (empty, a
 /// UNC share, a drive-relative `C:dir`, or a bad quote pair).
 pub(crate) fn normalize_treemap_path(input: &str, current: &str) -> Option<String> {
-    let input = strip_matching_quotes(input.trim());
+    let trimmed = input.trim();
+    if let Some(quote) = trimmed
+        .chars()
+        .next()
+        .filter(|quote| *quote == '"' || *quote == '\'')
+    {
+        if trimmed.len() < 2 || !trimmed.ends_with(quote) {
+            return None;
+        }
+    }
+    let input = strip_matching_quotes(trimmed);
     if input.is_empty() {
         return None;
     }
@@ -161,6 +171,12 @@ mod tests {
             Some(r"C:\Users\ZYN\Folder".to_string())
         );
         assert_eq!(normalize_treemap_path(r"C:\...", r"C:\"), None);
+    }
+
+    #[test]
+    fn an_unmatched_quote_is_not_a_directory_name() {
+        assert_eq!(normalize_treemap_path("\"C:\\Windows", "C:\\"), None);
+        assert_eq!(normalize_treemap_path("'C:\\Windows", "C:\\"), None);
     }
 
     #[test]

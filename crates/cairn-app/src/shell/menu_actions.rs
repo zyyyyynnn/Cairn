@@ -150,6 +150,17 @@ fn menu_entries(
 /// near the top, with the standard footer buttons. The labels travel with the variants so a caller
 /// cannot replace the button configuration and lose the danger commit or the secondary cancel:
 /// every confirmation on this helper destroys data.
+/// One dialog title recipe: the heading role, level, serif face and script split.
+fn dialog_title(title: String) -> impl IntoElement {
+    div()
+        .id("dialog-title")
+        .role(Role::Heading)
+        .aria_level(1)
+        .aria_label(title.clone())
+        .font(theme::serif_font(FontWeight::SEMIBOLD))
+        .child(theme::heading_text(title, FontWeight::SEMIBOLD))
+}
+
 fn style_confirmation_alert(
     alert: AlertDialog,
     window: &Window,
@@ -1006,15 +1017,7 @@ impl CairnApp {
                 let view = cx.entity();
                 window.open_alert_dialog(cx, move |alert, window, _| {
                     style_confirmation_alert(alert, window, ok.clone(), cancel.clone())
-                        .title(
-                            div()
-                                .id("dialog-title")
-                                .role(Role::Heading)
-                                .aria_level(1)
-                                .aria_label(title.clone())
-                                .font(theme::serif_font(FontWeight::SEMIBOLD))
-                                .child(theme::heading_text(title.clone(), FontWeight::SEMIBOLD)),
-                        )
+                        .title(dialog_title(title.clone()))
                         .description(description.clone())
                         .confirm()
                         .on_ok({
@@ -1372,15 +1375,7 @@ impl CairnApp {
         let view = cx.entity();
         window.open_alert_dialog(cx, move |alert, window, _| {
             style_confirmation_alert(alert, window, ok.clone(), cancel.clone())
-                .title(
-                    div()
-                        .id("dialog-title")
-                        .role(Role::Heading)
-                        .aria_level(1)
-                        .aria_label(title.clone())
-                        .font(theme::serif_font(FontWeight::SEMIBOLD))
-                        .child(theme::heading_text(title.clone(), FontWeight::SEMIBOLD)),
-                )
+                .title(dialog_title(title.clone()))
                 .description(description.clone())
                 .confirm()
                 .on_ok({
@@ -1460,15 +1455,7 @@ impl CairnApp {
         let view = cx.entity();
         window.open_alert_dialog(cx, move |alert, window, _| {
             style_confirmation_alert(alert, window, ok.clone(), cancel.clone())
-                .title(
-                    div()
-                        .id("dialog-title")
-                        .role(Role::Heading)
-                        .aria_level(1)
-                        .aria_label(title.clone())
-                        .font(theme::serif_font(FontWeight::SEMIBOLD))
-                        .child(theme::heading_text(title.clone(), FontWeight::SEMIBOLD)),
-                )
+                .title(dialog_title(title.clone()))
                 .description(description.clone())
                 .confirm()
                 .on_ok({
@@ -1583,15 +1570,7 @@ impl CairnApp {
         let view = cx.entity();
         window.open_alert_dialog(cx, move |alert, window, _| {
             style_confirmation_alert(alert, window, ok.clone(), cancel.clone())
-                .title(
-                    div()
-                        .id("dialog-title")
-                        .role(Role::Heading)
-                        .aria_level(1)
-                        .aria_label(title.clone())
-                        .font(theme::serif_font(FontWeight::SEMIBOLD))
-                        .child(theme::heading_text(title.clone(), FontWeight::SEMIBOLD)),
-                )
+                .title(dialog_title(title.clone()))
                 .description(description.clone())
                 .confirm()
                 .on_ok({

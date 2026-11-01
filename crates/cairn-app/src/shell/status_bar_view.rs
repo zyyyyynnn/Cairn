@@ -13,6 +13,7 @@ use cairn_core::format_size_bytes;
 use cairn_core::treemap::TreemapCategory;
 use fluent_bundle::FluentArgs;
 use gpui_kit::assets::IconName;
+use gpui_kit::base::Disableable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::status_bar::StatusBar;
 use gpui_kit::component::tooltip::Tooltip;
@@ -220,8 +221,8 @@ impl CairnApp {
             }
         }
 
-        // Keep the native xsmall button body (20px). A forced 24px minimum made the hover
-        // surface extend a row above/below the status line.
+        // The native xsmall body is 20px; a 24px minimum would let the hover surface
+        // extend a row above/below the status line.
         //
         // While the current view waits for its own data, the refresh button keeps its footprint
         // and takes the component's own loading state: the RefreshCw glyph becomes the spinner,
@@ -234,6 +235,7 @@ impl CairnApp {
             .icon(IconName::RefreshCw)
             .loading_icon(IconName::LoaderCircle)
             .loading(icon_loading)
+            .disabled(icon_loading)
             .tooltip(refresh_label.clone())
             .accessibility_label(refresh_label)
             .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {

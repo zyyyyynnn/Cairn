@@ -156,12 +156,16 @@ impl CairnApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let control = accessibility::control("toast");
+        let is_error = toast.kind == ToastKind::Error;
+        let control = if is_error {
+            accessibility::control("toast")
+        } else {
+            accessibility::control("toast-info")
+        };
         let dismiss = accessibility::control("toast-dismiss");
         let dismiss_label = accessibility::name(dismiss, &self.i18n);
         let serial = self.toast_serial;
         let closing = toast.closing;
-        let is_error = toast.kind == ToastKind::Error;
         let icon = if is_error {
             AssetIconName::CircleAlert
         } else {

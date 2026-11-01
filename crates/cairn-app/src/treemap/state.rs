@@ -12,7 +12,10 @@ use cairn_core::treemap::{
     is_drive_root, layout_nested_treemap, NestedTreemapLayoutNode, NestedTreemapOptions,
     TreemapCategory, TreemapRect, TreemapTreeNode,
 };
-use cairn_protocol::message::TreeEntryData;
+use cairn_protocol::message::{
+    TreeEntryData, ERROR_CODE_TREE_NOT_DIRECTORY, ERROR_CODE_TREE_NOT_INDEXED,
+    ERROR_CODE_TREE_TOO_LARGE,
+};
 use gpui_kit::gpui::*;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -25,6 +28,40 @@ static TREEMAP_REQUEST_EPOCH: AtomicU64 = AtomicU64::new(0);
 
 pub(super) fn next_tree_request_epoch() -> u64 {
     TREEMAP_REQUEST_EPOCH.fetch_add(1, Ordering::Relaxed) + 1
+}
+
+/// Why the service could not provide a Treemap directory. The reason chooses
+/// the one-line state copy and whether another request can help.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TreemapUnavailable {
+    NotIndexed,
+    NotDirectory,
+    TooLarge,
+    ServiceUnavailable,
+}
+
+impl TreemapUnavailable {
+    pub(crate) const fn message_key(self) -> &'static str {
+        match self {
+            Self::NotIndexed => "treemap_unavailable_not_indexed",
+            Self::NotDirectory => "treemap_unavailable_not_directory",
+            Self::TooLarge => "treemap_unavailable_too_large",
+            Self::ServiceUnavailable => "treemap_unavailable_service",
+        }
+    }
+
+    pub(crate) const fn retryable(self) -> bool {
+        matches!(self, Self::NotIndexed | Self::ServiceUnavailable)
+    }
+}
+
+pub(crate) fn tree_unavailable_from_code(code: u32) -> TreemapUnavailable {
+    match code {
+        ERROR_CODE_TREE_NOT_INDEXED => TreemapUnavailable::NotIndexed,
+        ERROR_CODE_TREE_NOT_DIRECTORY => TreemapUnavailable::NotDirectory,
+        ERROR_CODE_TREE_TOO_LARGE => TreemapUnavailable::TooLarge,
+        _ => TreemapUnavailable::ServiceUnavailable,
+    }
 }
 
 /// State for the drive disk space Treemap visualization.
@@ -70,7 +107,7 @@ pub struct TreemapViewState {
     /// for an older directory is ignored.
     pub(super) request_epoch: u64,
     /// The service could not provide the current directory; this is not a legitimate empty folder.
-    pub(super) unavailable: bool,
+    pub(super) unavailable: Option<TreemapUnavailable>,
     /// Whether a complete tree has been computed and revealed on the canvas.
     /// Reset on each new directory request until the tree is ready.
     pub(super) content_revealed: bool,
@@ -104,7 +141,7 @@ impl TreemapViewState {
             cached_index,
             is_scanning: false,
             request_epoch: 0,
-            unavailable: false,
+            unavailable: None,
             content_revealed: false,
             scanned_item_totals: HashMap::new(),
             zoom: TreemapZoom::new(),
@@ -134,7 +171,7 @@ impl TreemapViewState {
             cached_index: None,
             is_scanning: false,
             request_epoch: 0,
-            unavailable: false,
+            unavailable: None,
             content_revealed: false,
             scanned_item_totals: HashMap::new(),
             zoom: TreemapZoom::new(),
@@ -179,7 +216,7 @@ impl TreemapViewState {
         self.zoom.reset_view();
         self.request_epoch = next_tree_request_epoch();
         self.is_scanning = false;
-        self.unavailable = false;
+        self.unavailable = None;
         self.selected_path = None;
 
         let current_dir = self.navigation.current_dir().to_string();
@@ -249,7 +286,7 @@ impl TreemapViewState {
         self.content_revealed = false;
         self.current_dir_total_size = 0;
         self.current_dir_total_items = 0;
-        self.unavailable = false;
+        self.unavailable = None;
         self.is_scanning = true;
 
         Some(PathBuf::from(current_dir))
@@ -284,9 +321,9 @@ impl TreemapViewState {
 
     /// The service could not answer for this directory. The canvas shows the
     /// unavailable message instead of a misleading empty folder.
-    pub(super) fn mark_unavailable(&mut self) {
+    pub(super) fn mark_unavailable(&mut self, reason: TreemapUnavailable) {
         self.is_scanning = false;
-        self.unavailable = true;
+        self.unavailable = Some(reason);
         self.content_revealed = true;
         self.root_tree = None;
         self.layout_nodes.clear();
@@ -300,7 +337,7 @@ impl TreemapViewState {
     /// (`DirectorySizeIndex::build_tree_node` runs the same finish pipeline as
     /// a scan), so no second pass runs here.
     pub(super) fn adopt_service_tree(&mut self, entries: Vec<TreeEntryData>) -> bool {
-        self.unavailable = false;
+        self.unavailable = None;
         let Some(tree) = reassemble_tree(entries) else {
             return false;
         };
@@ -442,6 +479,10 @@ impl TreemapViewState {
     /// The service could not provide the current root; the empty canvas is a
     /// failure, not an empty folder.
     pub fn is_unavailable(&self) -> bool {
+        self.unavailable.is_some()
+    }
+
+    pub(crate) fn unavailable_reason(&self) -> Option<TreemapUnavailable> {
         self.unavailable
     }
 
@@ -1102,10 +1143,34 @@ mod tests {
     }
 
     #[test]
+    fn tree_error_codes_choose_the_state_reason() {
+        assert_eq!(
+            tree_unavailable_from_code(cairn_protocol::message::ERROR_CODE_TREE_NOT_INDEXED),
+            TreemapUnavailable::NotIndexed
+        );
+        assert_eq!(
+            tree_unavailable_from_code(cairn_protocol::message::ERROR_CODE_TREE_NOT_DIRECTORY),
+            TreemapUnavailable::NotDirectory
+        );
+        assert_eq!(
+            tree_unavailable_from_code(cairn_protocol::message::ERROR_CODE_TREE_TOO_LARGE),
+            TreemapUnavailable::TooLarge
+        );
+        assert_eq!(
+            tree_unavailable_from_code(9999),
+            TreemapUnavailable::ServiceUnavailable
+        );
+        assert!(TreemapUnavailable::NotIndexed.retryable());
+        assert!(TreemapUnavailable::ServiceUnavailable.retryable());
+        assert!(!TreemapUnavailable::NotDirectory.retryable());
+        assert!(!TreemapUnavailable::TooLarge.retryable());
+    }
+
+    #[test]
     fn an_unavailable_load_is_not_an_empty_folder() {
         let mut state = TreemapViewState::new_for_test('C');
         state.is_scanning = true;
-        state.mark_unavailable();
+        state.mark_unavailable(TreemapUnavailable::NotIndexed);
 
         assert!(state.is_unavailable());
         assert!(!state.is_scanning());

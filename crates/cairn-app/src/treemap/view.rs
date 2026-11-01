@@ -18,7 +18,9 @@ use crate::treemap::paint::{
 };
 use crate::treemap::palette::{block_fill_states, TreemapPalette};
 use crate::treemap::path_input::normalize_treemap_path;
-use crate::treemap::state::{next_tree_request_epoch, TreemapViewState};
+use crate::treemap::state::{
+    next_tree_request_epoch, tree_unavailable_from_code, TreemapUnavailable, TreemapViewState,
+};
 use crate::treemap::zoom::TreemapViewport;
 use cairn_core::format_size_bytes;
 use cairn_core::treemap::{
@@ -262,7 +264,7 @@ impl CairnApp {
         let epoch = state.request_epoch;
         state.is_scanning = true;
         state.content_revealed = false;
-        state.unavailable = false;
+        state.unavailable = None;
         state.layout_nodes.clear();
         state.root_tree = None;
         cx.notify();
@@ -281,12 +283,16 @@ impl CairnApp {
                 let _ = tx.send(result);
             });
 
-            let entries = match rx.await {
+            let outcome = match rx.await {
                 Ok(Ok(envelope)) => match envelope.payload {
-                    ResponsePayload::TreeResult { entries, .. } => Some(entries),
-                    _ => None,
+                    ResponsePayload::TreeResult { entries, .. } if !entries.is_empty() => {
+                        Ok(entries)
+                    }
+                    ResponsePayload::TreeResult { .. } => Err(TreemapUnavailable::NotIndexed),
+                    ResponsePayload::Error { code, .. } => Err(tree_unavailable_from_code(code)),
+                    _ => Err(TreemapUnavailable::ServiceUnavailable),
                 },
-                _ => None,
+                _ => Err(TreemapUnavailable::ServiceUnavailable),
             };
             let _ = this.update(cx, |this, cx| {
                 let Some(ref mut state) = this.treemap_state else {
@@ -295,17 +301,17 @@ impl CairnApp {
                 if state.request_epoch != epoch {
                     return;
                 }
-                match entries {
-                    Some(entries) if !entries.is_empty() => {
+                match outcome {
+                    Ok(entries) => {
                         crate::shell::perf::mark(&format!(
                             "treemap tree service entries={}",
                             entries.len()
                         ));
                         if !state.adopt_service_tree(entries) {
-                            state.mark_unavailable();
+                            state.mark_unavailable(TreemapUnavailable::ServiceUnavailable);
                         }
                     }
-                    _ => state.mark_unavailable(),
+                    Err(reason) => state.mark_unavailable(reason),
                 }
                 cx.notify();
             });
@@ -447,7 +453,7 @@ impl CairnApp {
                 .h_full()
                 .flex_1()
                 .min_w_0()
-                .aria_label(accessibility::name(
+                .aria_label(accessibility::component_name(
                     accessibility::control("treemap-path"),
                     &self.i18n,
                 ))
@@ -502,7 +508,7 @@ impl CairnApp {
                 let click_focus = focus.clone();
                 let crumb_control = accessibility::control("treemap-crumb");
                 breadcrumb = breadcrumb.child(
-                    accessibility::element_at(crumb_control, ix)
+                    accessibility::element_at_key(crumb_control, &path)
                         .aria_label(label)
                         .relative()
                         .flex_shrink(1.0)
@@ -547,7 +553,7 @@ impl CairnApp {
         };
 
         let full_path = current_dir.clone();
-        h_flex()
+        let band = h_flex()
             .h(rems(layout::SEARCH_BAND_HEIGHT))
             .px(rems(layout::TIGHT_LEAD))
             .py(rems(layout::TIGHT_LEAD))
@@ -633,7 +639,8 @@ impl CairnApp {
                             }),
                         ))
                     }),
-            )
+            );
+        band
     }
 
     pub fn render_treemap_body(
@@ -757,13 +764,13 @@ impl CairnApp {
                 .into_any_element()
         } else if state.layout_nodes.is_empty() {
             let control = accessibility::control("treemap-state");
-            let unavailable = state.is_unavailable();
-            let message = self.i18n.get_text(if unavailable {
-                "treemap_unavailable"
-            } else {
-                "treemap_empty_directory"
-            });
-            let icon = if unavailable {
+            let unavailable = state.unavailable_reason();
+            let message = self.i18n.get_text(
+                unavailable
+                    .map(TreemapUnavailable::message_key)
+                    .unwrap_or("treemap_empty_directory"),
+            );
+            let icon = if unavailable.is_some() {
                 Icon::new(IconName::CircleAlert)
                     .size_8()
                     .text_color(tokens.danger)
@@ -774,28 +781,30 @@ impl CairnApp {
                     .text_color(tokens.muted_foreground)
                     .into_any_element()
             };
-            let action = unavailable.then(|| {
-                let retry = accessibility::control("treemap-retry");
-                let label = accessibility::name(retry, &self.i18n);
-                Button::new(retry.element)
-                    .font_weight(FontWeight::MEDIUM)
-                    .label(label.clone())
-                    .accessibility_label(label)
-                    .small()
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        if let Some(dir) = this
-                            .treemap_state
-                            .as_ref()
-                            .map(|state| state.current_dir().to_string())
-                        {
-                            this.start_treemap_scan(PathBuf::from(dir), cx);
-                            if let Some(state) = this.treemap_state.as_ref() {
-                                state.request_focus(window, cx);
+            let action = unavailable
+                .is_some_and(TreemapUnavailable::retryable)
+                .then(|| {
+                    let retry = accessibility::control("treemap-retry");
+                    let label = accessibility::name(retry, &self.i18n);
+                    Button::new(retry.element)
+                        .font_weight(FontWeight::MEDIUM)
+                        .label(label.clone())
+                        .accessibility_label(label)
+                        .small()
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            if let Some(dir) = this
+                                .treemap_state
+                                .as_ref()
+                                .map(|state| state.current_dir().to_string())
+                            {
+                                this.start_treemap_scan(PathBuf::from(dir), cx);
+                                if let Some(state) = this.treemap_state.as_ref() {
+                                    state.request_focus(window, cx);
+                                }
                             }
-                        }
-                    }))
-                    .into_any_element()
-            });
+                        }))
+                        .into_any_element()
+                });
             render_state_band(tokens, control, message, icon, action).into_any_element()
         } else {
             let mut block_elements = Vec::with_capacity(state.layout_nodes.len() * 4);
