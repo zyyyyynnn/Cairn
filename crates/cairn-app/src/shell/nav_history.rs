@@ -118,7 +118,7 @@ impl CairnApp {
             // Inside the Treemap, Back belongs to the drill path only. Falling
             // through at the drive root would silently restore hidden table
             // state while the Treemap stays on screen.
-            self.treemap_drill_back(cx);
+            self.treemap_drill_back(window, cx);
             return;
         }
         if self.can_go_back() {
@@ -130,20 +130,20 @@ impl CairnApp {
 
     /// Rises to the parent directory of the Treemap. A table or bin view has
     /// no parent path, so the command does nothing there.
-    pub fn go_up(&mut self, cx: &mut Context<Self>) {
+    pub fn go_up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.drive_view.is_some() {
-            self.treemap_drill_up(cx);
+            self.treemap_drill_up(window, cx);
         }
     }
 
-    pub fn go_forward(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    pub fn go_forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.recycle_bin.is_open() {
             // Forward is disabled in the bin; the guard keeps a stale key or
             // programmatic dispatch from advancing history behind the location.
             return;
         }
         if self.drive_view.is_some() {
-            self.treemap_drill_forward(cx);
+            self.treemap_drill_forward(window, cx);
             return;
         }
         if self.can_go_forward() {

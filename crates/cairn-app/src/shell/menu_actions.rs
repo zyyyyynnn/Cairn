@@ -495,7 +495,7 @@ impl CairnApp {
     pub fn escape_query(&mut self, _: &EscapeQuery, window: &mut Window, cx: &mut Context<Self>) {
         // The address field is the innermost editing surface while it is open.
         if self.treemap_path.editing {
-            self.cancel_treemap_path_edit(cx);
+            self.cancel_treemap_path_edit(window, cx);
             return;
         }
         // While a dropdown is open the keystroke belongs to it: `Popover` gives its surface focus
@@ -1226,7 +1226,7 @@ impl CairnApp {
         cx.notify();
     }
 
-    pub fn open_selected(&mut self, _: &OpenSelected, _w: &mut Window, cx: &mut Context<Self>) {
+    pub fn open_selected(&mut self, _: &OpenSelected, window: &mut Window, cx: &mut Context<Self>) {
         // Inside the Recycle Bin view Enter opens the deleted item straight
         // from the bin payload, exactly like opening it in Explorer.
         if self.recycle_bin.is_open() {
@@ -1243,10 +1243,10 @@ impl CairnApp {
                         if let Some(parent) = cairn_core::treemap::aggregate_parent_path(&node.path)
                             .map(str::to_string)
                         {
-                            self.treemap_drill_down(&parent, cx);
+                            self.treemap_drill_down(&parent, window, cx);
                         }
                     } else if node.item.is_dir {
-                        self.treemap_drill_down(&node.path, cx);
+                        self.treemap_drill_down(&node.path, window, cx);
                     } else {
                         let _ = open_file(&node.path);
                     }

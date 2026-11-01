@@ -127,6 +127,14 @@ impl CairnApp {
         if self.drive_view.is_none() {
             return;
         }
+        let input = self.treemap_path.input.clone();
+        if self.treemap_path.editing {
+            // A second request lands on the text already in the field; replacing
+            // it with the current directory would discard what the person typed.
+            input.update(cx, |input, cx| input.select_all(window, cx));
+            input.read(cx).focus_handle(cx).focus(window, cx);
+            return;
+        }
         let Some(current) = self
             .treemap_state
             .as_ref()
@@ -136,23 +144,26 @@ impl CairnApp {
         };
         self.treemap_path.editing = true;
         self.treemap_path.error = false;
-        let input = self.treemap_path.input.clone();
         input.update(cx, |input, cx| {
             input.set_value(current, window, cx);
             input.select_all(window, cx);
         });
-        let focus = input.read(cx).focus_handle(cx);
-        focus.focus(window, cx);
+        input.read(cx).focus_handle(cx).focus(window, cx);
         cx.notify();
     }
 
-    /// Leaves path editing without navigating. The breadcrumb returns.
-    pub(crate) fn cancel_treemap_path_edit(&mut self, cx: &mut Context<Self>) {
-        if self.treemap_path.editing {
-            self.treemap_path.editing = false;
-            self.treemap_path.error = false;
-            cx.notify();
+    /// Leaves path editing without navigating. The breadcrumb returns and the
+    /// canvas takes the focus, so the next key still reaches the Treemap.
+    pub(crate) fn cancel_treemap_path_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.treemap_path.editing {
+            return;
         }
+        self.treemap_path.editing = false;
+        self.treemap_path.error = false;
+        if let Some(state) = self.treemap_state.as_ref() {
+            state.request_focus(window, cx);
+        }
+        cx.notify();
     }
 
     pub(crate) fn treemap_path_changed(&mut self, cx: &mut Context<Self>) {
@@ -185,7 +196,7 @@ impl CairnApp {
             .as_ref()
             .map(|state| state.current_dir().to_string())
         else {
-            self.cancel_treemap_path_edit(cx);
+            self.cancel_treemap_path_edit(window, cx);
             return;
         };
         let target =
@@ -214,7 +225,7 @@ impl CairnApp {
                 self.open_drive_visualization(drive, window, cx);
             }
         }
-        self.treemap_drill_down(&target, cx);
+        self.treemap_drill_down(&target, window, cx);
         if let Some(state) = self.treemap_state.as_ref() {
             state.request_focus(window, cx);
         }
@@ -395,7 +406,15 @@ impl CairnApp {
         .detach();
     }
 
-    pub fn treemap_drill_down(&mut self, target_path: &str, cx: &mut Context<Self>) {
+    pub fn treemap_drill_down(
+        &mut self,
+        target_path: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // A navigation step ends address editing: the field describes the
+        // directory the canvas is leaving, not the one it just opened.
+        self.cancel_treemap_path_edit(window, cx);
         // A summary block owned by the current root cannot drill anywhere; the
         // old code reloaded the same directory and flashed the empty state.
         if self
@@ -418,7 +437,8 @@ impl CairnApp {
 
     /// Moves to the parent directory as a history step. At the drive root the
     /// control is disabled and this does nothing.
-    pub fn treemap_drill_up(&mut self, cx: &mut Context<Self>) {
+    pub fn treemap_drill_up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_treemap_path_edit(window, cx);
         let scan_target = if let Some(ref mut st) = self.treemap_state {
             st.drill_up()
         } else {
@@ -431,7 +451,8 @@ impl CairnApp {
     }
 
     /// Returns to the directory most recently left by any drill step.
-    pub fn treemap_drill_back(&mut self, cx: &mut Context<Self>) {
+    pub fn treemap_drill_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_treemap_path_edit(window, cx);
         let scan_target = if let Some(ref mut st) = self.treemap_state {
             st.drill_back()
         } else {
@@ -443,7 +464,8 @@ impl CairnApp {
         cx.notify();
     }
 
-    pub fn treemap_drill_forward(&mut self, cx: &mut Context<Self>) {
+    pub fn treemap_drill_forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_treemap_path_edit(window, cx);
         let scan_target = if let Some(ref mut st) = self.treemap_state {
             st.drill_forward()
         } else {
@@ -533,8 +555,8 @@ impl CairnApp {
                 breadcrumb = if ix < last {
                     let target = path.clone();
                     let view = view.clone();
-                    breadcrumb.child(item.on_click(move |_, _, cx| {
-                        view.update(cx, |this, cx| this.treemap_drill_down(&target, cx));
+                    breadcrumb.child(item.on_click(move |_, window, cx| {
+                        view.update(cx, |this, cx| this.treemap_drill_down(&target, window, cx));
                         cx.stop_propagation();
                     }))
                 } else {
@@ -591,8 +613,8 @@ impl CairnApp {
                         },
                     ))
                     .on_action(cx.listener(
-                        |this, _: &crate::shell::commands::CancelTreemapPath, _, cx| {
-                            this.cancel_treemap_path_edit(cx);
+                        |this, _: &crate::shell::commands::CancelTreemapPath, window, cx| {
+                            this.cancel_treemap_path_edit(window, cx);
                         },
                     ))
                     .when(!editing, |this| {
@@ -847,7 +869,7 @@ impl CairnApp {
                         None
                     };
                     if let Some(path) = enter_path {
-                        this.treemap_drill_down(&path, cx);
+                        this.treemap_drill_down(&path, window, cx);
                     }
                     cx.stop_propagation();
                 }),
@@ -911,7 +933,7 @@ impl CairnApp {
                         cx.stop_propagation();
                     }
                     "backspace" => {
-                        this.treemap_drill_back(cx);
+                        this.treemap_drill_back(window, cx);
                     }
                     "enter" => {
                         let mut drill = None;
@@ -920,14 +942,14 @@ impl CairnApp {
                                 if node.is_aggregate() {
                                     drill = aggregate_parent_path(&node.path).map(str::to_string);
                                 } else if node.item.is_dir {
-                                    this.treemap_drill_down(&node.path, cx);
+                                    this.treemap_drill_down(&node.path, window, cx);
                                 } else {
                                     let _ = open_file(&node.path);
                                 }
                             }
                         }
                         if let Some(parent) = drill {
-                            this.treemap_drill_down(&parent, cx);
+                            this.treemap_drill_down(&parent, window, cx);
                         }
                     }
                     "+" | "=" => {
@@ -1283,7 +1305,7 @@ fn render_nested_node(
                         }
                     }
                     if let Some(parent) = drill {
-                        this.treemap_drill_down(&parent, cx);
+                        this.treemap_drill_down(&parent, window, cx);
                     }
                     cx.notify();
                     cx.stop_propagation();
@@ -1334,7 +1356,7 @@ fn render_nested_node(
                                 st.selected_path = Some(fp.clone());
                                 st.request_focus(window, cx);
                                 if event.click_count == 2 {
-                                    this.treemap_drill_down(&fp, cx);
+                                    this.treemap_drill_down(&fp, window, cx);
                                 }
                                 cx.notify();
                             }
@@ -1470,7 +1492,7 @@ fn render_nested_node(
                         st.request_focus(window, cx);
                         if event.click_count == 2 {
                             if is_dir {
-                                this.treemap_drill_down(&fp, cx);
+                                this.treemap_drill_down(&fp, window, cx);
                             } else {
                                 let _ = open_file(&fp);
                             }

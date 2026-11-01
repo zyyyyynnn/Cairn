@@ -451,7 +451,7 @@ impl CairnApp {
             window,
             |this, _, event: &InputEvent, window, cx| match event {
                 InputEvent::PressEnter { .. } => this.commit_treemap_path(window, cx),
-                InputEvent::Blur => this.cancel_treemap_path_edit(cx),
+                InputEvent::Blur => this.cancel_treemap_path_edit(window, cx),
                 InputEvent::Change => this.treemap_path_changed(cx),
                 InputEvent::Focus => {}
             },

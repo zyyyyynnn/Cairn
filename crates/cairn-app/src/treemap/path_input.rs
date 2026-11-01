@@ -52,7 +52,18 @@ pub(crate) fn normalize_treemap_path(input: &str, current: &str) -> Option<Strin
             Component::ParentDir => {
                 segments.pop();
             }
-            Component::Normal(name) => segments.push(name.to_string_lossy().into_owned()),
+            Component::Normal(name) => {
+                // Win32 drops trailing dots and spaces from every segment, so
+                // "C:\Windows." opens the same directory as "C:\Windows". The
+                // index lookup compares names exactly, so the field must store
+                // the canonical spelling or every drill would miss the cache.
+                let name = name.to_string_lossy();
+                let name = name.trim_end_matches([' ', '.']);
+                if name.is_empty() {
+                    return None;
+                }
+                segments.push(name.to_string());
+            }
         }
     }
 
@@ -136,6 +147,19 @@ mod tests {
             normalize_treemap_path(r"..\..", r"C:\"),
             Some(r"C:\".to_string())
         );
+    }
+
+    #[test]
+    fn win32_trailing_dots_and_spaces_collapse_to_the_directory_name() {
+        assert_eq!(
+            normalize_treemap_path(r"C:\Windows. ", r"C:\"),
+            Some(r"C:\Windows".to_string())
+        );
+        assert_eq!(
+            normalize_treemap_path(r"C:\Users\ZYN.\Folder", r"C:\"),
+            Some(r"C:\Users\ZYN\Folder".to_string())
+        );
+        assert_eq!(normalize_treemap_path(r"C:\...", r"C:\"), None);
     }
 
     #[test]

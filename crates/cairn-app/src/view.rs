@@ -452,7 +452,9 @@ impl Render for CairnApp {
                     this.go_forward(window, cx)
                 }),
             )
-            .on_action(cx.listener(|this, _: &commands::NavigateUp, _, cx| this.go_up(cx)))
+            .on_action(
+                cx.listener(|this, _: &commands::NavigateUp, window, cx| this.go_up(window, cx)),
+            )
             .on_action(cx.listener(Self::delete_selected))
             .on_action(cx.listener(Self::restore_selected))
             // Input modality for focus painting. Any key means the keyboard is driving, and any
@@ -797,8 +799,8 @@ impl CairnApp {
                                         accessibility::control("nav-up"),
                                         &self.i18n,
                                     ))
-                                    .on_click(move |_, _, cx| {
-                                        up_view.update(cx, |this, cx| this.go_up(cx));
+                                    .on_click(move |_, window, cx| {
+                                        up_view.update(cx, |this, cx| this.go_up(window, cx));
                                     }),
                             )
                             .child(
