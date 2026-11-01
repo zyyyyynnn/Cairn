@@ -240,11 +240,11 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: release
+          shared-key: release-installer
           add-job-id-key: false
           cache-bin: false
           cache-workspace-crates: true
-          save-if: false
+          save-if: "${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.actor != 'dependabot[bot]') }}"
       - name: Build installer binaries
         run: cargo build --release -p cairn-setup-bin
       - name: Upload installer binaries
