@@ -18,7 +18,6 @@
 
 use crate::search::filters::FilterCategory;
 use crate::search::input::{QueryTextMetrics, SearchInputState};
-use crate::service::search_scope::SearchScope;
 use crate::shell::command_groups::MenuGroup;
 use crate::shell::i18n::I18nManager;
 use crate::shell::menu_actions::sort_column_from_key;
@@ -303,13 +302,6 @@ pub struct ResultsDomain {
 /// The indexer this window talks to, and everything it reports back.
 pub struct ServiceDomain {
     pub is_service_connected: bool,
-    /// `true` while the window is served by its own user-privilege indexer instead of the installed
-    /// LocalSystem service. This is a normal mode, not a failure: the local scan sees fewer files,
-    /// but every result view works.
-    pub local_mode: bool,
-    /// The user-mode indexer this window started. It exits with the window through its
-    /// `--parent-pid` monitor; the handle is kept so switching to the service can end it at once.
-    pub(crate) user_indexer: Option<std::process::Child>,
     /// Whether SCM knows `CairnService`. It decides whether the recovery band can offer an elevated
     /// start; opening the window never asks for elevation.
     pub service_installed: bool,
@@ -336,16 +328,6 @@ pub struct ServiceDomain {
     /// A local submission failure (config write/pipe), kept separate from the service's own
     /// content-index error so the page can show both without overwriting one with the other.
     pub content_action_error: Option<String>,
-    /// The scope the window is currently reading from (UI-10). It is the user's choice, so it is
-    /// remembered in the settings and survives a restart.
-    pub search_scope: SearchScope,
-    /// `true` while a scope switch is running. The menu row that started it must not start a
-    /// second one, and the window must not claim the new scope before it is actually in force.
-    pub(crate) is_switching_scope: bool,
-    /// Bumped whenever the window starts reading from a different indexer. A status poll that
-    /// belongs to the previous scope sees the change and stops, so the window never mixes the
-    /// state of two indexers.
-    pub(crate) status_generation: u64,
 }
 
 /// The Treemap address field's retained state. The field is an ecosystem
@@ -441,7 +423,6 @@ impl CairnApp {
 
         // The service registration is read once here: it decides both whether the window may
         // offer the machine-wide scope and which scope a first run opens in.
-        let service_state = crate::service::service_control::service_state();
 
         let treemap_path_placeholder = i18n.get_text("treemap_path_placeholder");
         let treemap_path_input =
@@ -485,8 +466,6 @@ impl CairnApp {
             },
             service: ServiceDomain {
                 is_service_connected: true,
-                local_mode: false,
-                user_indexer: None,
                 // The probe below is already in flight by the time the first frame is drawn.
                 is_probing_service: true,
                 service_issue: None,
@@ -496,20 +475,9 @@ impl CairnApp {
                 content_status_error: None,
                 content_action_pending: false,
                 content_action_error: None,
-                service_installed: crate::service::service_control::service_is_registered(
-                    service_state,
-                ),
+                service_installed: crate::service::service_control::service_is_installed(),
                 has_attempted_silent_start: false,
                 is_refreshing_status: false,
-                // A saved scope is the user's own choice and wins; without one the window follows
-                // the machine: a service that is already running is the answer the window would
-                // otherwise have to ask for, and taking it never prompts for admin rights.
-                search_scope: crate::service::search_scope::initial_scope(
-                    settings.search_scope,
-                    crate::service::service_control::service_is_running(service_state),
-                ),
-                is_switching_scope: false,
-                status_generation: 0,
             },
             root_focus,
             zoom_level: settings.zoom_level,

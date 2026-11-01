@@ -7,7 +7,6 @@
 
 use crate::app::{join_row_path, layout, CairnApp};
 use crate::search::filters::FilterCategory;
-use crate::service::search_scope::SearchScope;
 use crate::shell::command_groups::{group_spec, GroupCommand, MenuGroup, ZoomPreset};
 use crate::shell::commands::*;
 use crate::shell::menu_rules::IndexMenuState;
@@ -703,7 +702,6 @@ impl CairnApp {
     }
 
     fn command_label(&self, command: GroupCommand) -> String {
-        let index = self.index_menu_state();
         match command {
             // The content-search row names the action it will perform, so the row never reads as
             // a status line the user cannot act on.
@@ -713,12 +711,6 @@ impl CairnApp {
             // The two facts the popup carries beside that state.
             GroupCommand::ContentSearchUsage => self.content_search_usage_label(),
             GroupCommand::ContentSearchUpdated => self.content_search_updated_label(),
-            // "所有文件" needs the background service. Where the service is missing the row is
-            // disabled, and it says why here: the menu has no tooltip channel, so the visible
-            // label is the only place the reason can reach the reader.
-            GroupCommand::SetSearchScope(scope) if index.scope_choice_is_unavailable(scope) => self
-                .i18n
-                .get_text("menu_search_scope_all_files_unavailable"),
             GroupCommand::DeleteSelected if self.recycle_bin.is_open() => {
                 self.i18n.get_text("ctx_delete_permanently")
             }
@@ -737,23 +729,19 @@ impl CairnApp {
     /// the reason the band gives cannot drift apart.
     pub(crate) fn index_menu_state(&self) -> IndexMenuState<'_> {
         IndexMenuState {
-            scope: self.service.search_scope,
-            service_installed: self.service.service_installed,
             service_connected: self.service.is_service_connected,
-            switching_scope: self.service.is_switching_scope,
             content_loading: self.service.content_status_loading,
             content_failed: content_failed(
                 self.service.content_status_error.as_deref(),
                 self.service.content_action_error.as_deref(),
             ),
             content_action_pending: self.service.content_action_pending,
-            local_mode: self.service.local_mode,
             content_state: &self.service.content_status.state,
         }
     }
 
     /// The single content-search switch. Its label names what clicking it will do, so the row is
-    /// an action rather than a status line the user cannot act on (UI-10).
+    /// an action rather than a status line the user cannot act on (CNT-01).
     fn content_search_toggle_label(&self) -> String {
         let enabled = self.index_menu_state().content_index_is_on();
         self.i18n.get_text(if enabled {
@@ -853,24 +841,6 @@ impl CairnApp {
     /// shown disabled row after row. In particular a failed index offers one retry, not a second
     /// "enable" entry that would quietly mean the same request.
     pub fn command_is_hidden(&self, command: GroupCommand) -> bool {
-        let index = self.index_menu_state();
-        // The content switch and its details only mean something where a content index exists.
-        // In the readable-files scope the user indexer has none, so those rows are absent rather
-        // than promises the window cannot keep (UI-10). The popup that holds them goes with
-        // them: a trigger left behind would open an empty window.
-        let content_row = matches!(
-            command,
-            GroupCommand::ToggleContentSearch
-                | GroupCommand::ContentSearchDetailsMenu
-                | GroupCommand::ContentSearchDetails
-                | GroupCommand::ContentSearchUsage
-                | GroupCommand::ContentSearchUpdated
-                | GroupCommand::RetryContentSearch
-                | GroupCommand::ClearContentSearch
-        );
-        if content_row && index.content_rows_are_hidden() {
-            return true;
-        }
         match command {
             // A retry only exists for an index that failed, and a clear only for one that holds
             // something. Both are shown when they apply and absent otherwise, so the popup never
@@ -916,9 +886,8 @@ impl CairnApp {
             GroupCommand::SetLanguage(code) => self.settings.language == code,
             GroupCommand::SetZoom(preset) => ZoomPreset::nearest(self.zoom_level) == preset,
             GroupCommand::ToggleAutostart => self.settings.autostart,
-            GroupCommand::SetSearchScope(scope) => self.service.search_scope.as_str() == scope,
             // A backfill in progress has its own progress line; the checkmark appears only once
-            // the index is ready, so the mark never claims a finished index (UI-10).
+            // the index is ready, so the mark never claims a finished index (CNT-01).
             GroupCommand::ToggleContentSearch => index.content_switch_is_checked(),
             _ => false,
         }
@@ -946,12 +915,6 @@ impl CairnApp {
             GroupCommand::CopyPaths | GroupCommand::CopyNames => {
                 self.selection_indices().is_empty()
             }
-            // A scope that is already in force is not a choice the user can make again, and a
-            // switch that is running must not be started a second time. "所有文件" needs the
-            // background service, so it is out of reach where the service is not installed.
-            GroupCommand::SetSearchScope(scope) => index.scope_choice_is_disabled(scope),
-            // A scope switch moves the window between two indexers. The content rows belong to
-            // the one the window is leaving, so they wait until the switch has settled.
             GroupCommand::ToggleContentSearch => index.content_switch_is_disabled(),
             GroupCommand::ContentSearchDetails
             | GroupCommand::ContentSearchUsage
@@ -1022,10 +985,6 @@ impl CairnApp {
             GroupCommand::ToggleAutostart => {
                 let enabled = !self.settings.autostart;
                 self.set_autostart(enabled, cx);
-            }
-            GroupCommand::SetSearchScope(scope) => {
-                self.close_group();
-                self.switch_search_scope(SearchScope::from_stored(scope), cx);
             }
             GroupCommand::ToggleContentSearch => {
                 // The label beside this row promises what the click does, so both read the same

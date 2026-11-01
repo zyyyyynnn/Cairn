@@ -1116,43 +1116,6 @@ fn shell_item_from_path(path: &str) -> Result<IShellItem, String> {
     item
 }
 
-/// Starts the sibling `CairnService.exe` as this account on the user pipe.
-///
-/// This is not an elevation path: the process runs with the app's own token, indexes only what
-/// that token can read, and exits with the window that started it. It is how a machine without
-/// the installed service is still fully usable.
-#[cfg(windows)]
-pub fn spawn_user_indexer(parent_pid: u32) -> Result<std::process::Child, String> {
-    use std::os::windows::process::CommandExt;
-    use std::process::Stdio;
-
-    // CREATE_NO_WINDOW: the indexer is a console binary and must not flash a console over the GUI.
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-    let executable = std::env::current_exe()
-        .map_err(|error| format!("this program's location could not be read: {error}"))?
-        .with_file_name("CairnService.exe");
-    if !executable.is_file() {
-        return Err(format!("{} was not found", executable.display()));
-    }
-
-    std::process::Command::new(&executable)
-        .arg("--user-mode")
-        .arg("--parent-pid")
-        .arg(parent_pid.to_string())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn()
-        .map_err(|error| format!("could not start {}: {error}", executable.display()))
-}
-
-#[cfg(not(windows))]
-pub fn spawn_user_indexer(_parent_pid: u32) -> Result<std::process::Child, String> {
-    Err("the user-mode indexer is only available on Windows".to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use core::prelude::rust_2021::test;

@@ -8,8 +8,6 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::service::search_scope::SearchScope;
-
 /// The interface languages `AppSettings::language` stores, the `I18nManager` selects its bundle with,
 /// and the settings dialog offers. The dialog's option list, the startup selection and the persisted
 /// value all read these, so a third locale cannot be offered before it can be resolved.
@@ -122,22 +120,6 @@ impl Default for HotkeySettings {
     }
 }
 
-/// Reads the stored scope without letting one unreadable field cost the user the whole file.
-///
-/// A settings file written by another build, or edited by hand, must still yield the language,
-/// the theme and the column widths. A value that is not one of the two documented spellings is
-/// simply no preference.
-fn tolerant_search_scope<'de, D>(deserializer: D) -> Result<Option<SearchScope>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let raw = Option::<toml::Value>::deserialize(deserializer)?;
-    Ok(raw
-        .as_ref()
-        .and_then(|value| value.as_str())
-        .and_then(SearchScope::parse_stored))
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct AppSettings {
     #[serde(default = "default_language")]
@@ -148,10 +130,6 @@ pub struct AppSettings {
     pub zoom_level: f32,
     #[serde(default)]
     pub autostart: bool,
-    /// The search scope the user last chose (UI-10). `None` means the window picks the scope the
-    /// machine offers, not that the choice was never made.
-    #[serde(default, deserialize_with = "tolerant_search_scope")]
-    pub search_scope: Option<SearchScope>,
     #[serde(default)]
     pub columns: ColumnSettings,
     #[serde(default)]
@@ -165,7 +143,6 @@ impl Default for AppSettings {
             theme: default_theme(),
             zoom_level: default_zoom_level(),
             autostart: false,
-            search_scope: None,
             columns: ColumnSettings::default(),
             hotkeys: HotkeySettings::default(),
         }
@@ -390,55 +367,20 @@ mod tests {
         assert!(loaded.autostart);
     }
 
-    /// The scope is remembered across restarts (UI-10: "切换范围记住并在重启后保持").
+    /// A settings file written before the local fallback was removed still loads: the retired
+    /// `search_scope` key is ignored, and the rest of the preferences survive.
     #[test]
-    fn the_search_scope_survives_a_restart() {
+    fn a_settings_file_with_a_removed_scope_key_still_loads() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.toml");
-
-        let settings = AppSettings {
-            search_scope: Some(SearchScope::AllFiles),
-            ..Default::default()
-        };
-        settings.save_to_path(&path).unwrap();
+        fs::write(
+            &path,
+            "language = \"en-US\"\nsearch_scope = \"readable-files\"\nautostart = true\n",
+        )
+        .unwrap();
 
         let loaded = AppSettings::load_from_path(&path).unwrap();
-        assert_eq!(loaded.search_scope, Some(SearchScope::AllFiles));
-    }
-
-    /// The stored spelling is the product's, not the enum variant's: a settings file written by
-    /// an earlier build still loads, and a file written by hand still reads back.
-    #[test]
-    fn the_stored_scope_uses_its_own_spelling() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("settings.toml");
-
-        let settings = AppSettings {
-            search_scope: Some(SearchScope::ReadableFiles),
-            ..Default::default()
-        };
-        settings.save_to_path(&path).unwrap();
-
-        let written = fs::read_to_string(&path).unwrap();
-        assert!(
-            written.contains("readable-files"),
-            "the scope must persist by its own spelling: {written}"
-        );
-        assert!(
-            !written.contains("ReadableFiles"),
-            "the enum variant name must not reach the settings file: {written}"
-        );
-    }
-
-    /// A settings file without the scope is valid: the window then picks the default scope and
-    /// writes the choice back.
-    #[test]
-    fn a_settings_file_without_a_scope_loads_with_no_preference() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("settings.toml");
-        fs::write(&path, "language = \"system\"\n").unwrap();
-
-        let loaded = AppSettings::load_from_path(&path).unwrap();
-        assert_eq!(loaded.search_scope, None);
+        assert!(loaded.autostart);
+        assert_eq!(loaded.language, "en-US");
     }
 }

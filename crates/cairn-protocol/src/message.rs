@@ -14,10 +14,6 @@ use serde::{Deserialize, Serialize};
 /// requires a coordinated client+service bump.
 pub const PROTOCOL_VERSION: u16 = 6;
 pub const PIPE_NAME: &str = r"\\.\pipe\Cairn.Service";
-/// The pipe of a user-privilege indexer started by the desktop app when the installed LocalSystem
-/// service is not available. It is a separate name so the two indexers never compete for the same
-/// pipe, and so a running service is always preferred over a local scan.
-pub const USER_PIPE_NAME: &str = r"\\.\pipe\Cairn.User";
 
 /// Machine-readable `ResponsePayload::Error` codes. Text stays in English and technical:
 /// localizing it is the presentation layer's responsibility (SPEC UI-07).

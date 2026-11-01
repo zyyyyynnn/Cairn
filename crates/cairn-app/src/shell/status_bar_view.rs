@@ -105,8 +105,8 @@ impl CairnApp {
                     // No counts or bytes are published until the scan has a complete tree.
                     summary_loading = true;
                     icon_loading = true;
-                } else if st.is_unreadable() {
-                    let text = self.i18n.get_text("treemap_unreadable");
+                } else if st.is_unavailable() {
+                    let text = self.i18n.get_text("treemap_unavailable");
                     summary_aria = Some(text.clone());
                     summary = Some(
                         div()

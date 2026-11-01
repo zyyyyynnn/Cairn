@@ -73,6 +73,7 @@ pub struct ShellTokens {
     pub selection: Hsla,
     pub row_hover: Hsla,
     // ---- emphasis, spent sparingly -------------------------------------------------
+    pub warning: Hsla,
     pub danger: Hsla,
     pub danger_foreground: Hsla,
     // ---- shape --------------------------------------------------------------------
@@ -103,6 +104,7 @@ impl ShellTokens {
             caret: theme.caret,
             selection: theme.selection,
             row_hover: theme.list_hover,
+            warning: theme.warning,
             danger: theme.danger,
             danger_foreground: theme.danger_foreground,
             radius: RADIUS,

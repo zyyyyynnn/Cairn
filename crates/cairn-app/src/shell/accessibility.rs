@@ -462,22 +462,26 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         messages: &[
             "empty_index_empty_title",
             "empty_no_matches",
+            "empty_content_scope_line",
+            "empty_content_loading_title",
+            "empty_content_unreadable_title",
+            "empty_content_disabled_title",
+            "empty_content_backfilling_title",
+            "empty_content_error_title",
             "recycle_bin_empty_title",
-            "recycle_bin_empty_hint",
             "recycle_bin_no_matches_title",
-            "recycle_bin_no_matches_hint",
         ],
         named_by: "",
         requirement: "UI-01, DSV-08",
     },
     // Each service failure is its own entry: the same element has to name the condition it reports,
-    // so the title and the recovery message are registered per issue (SVC-03, SVC-04).
+    // and that one sentence carries the recovery direction (SVC-03, SVC-04).
     KeyControl {
         key: "service-issue-not-running",
         element: "service-issue",
         indexed: false,
         role: Role::Alert,
-        messages: &["service_not_running_title", "service_not_running_desc"],
+        messages: &["service_not_running_title"],
         named_by: "",
         requirement: "SVC-03, SVC-04",
     },
@@ -486,7 +490,7 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         element: "service-issue",
         indexed: false,
         role: Role::Alert,
-        messages: &["service_not_installed_title", "service_not_installed_desc"],
+        messages: &["service_not_installed_title"],
         named_by: "",
         requirement: "SVC-03, SVC-04",
     },
@@ -495,7 +499,7 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         element: "service-issue",
         indexed: false,
         role: Role::Alert,
-        messages: &["service_incompatible_title", "service_incompatible_desc"],
+        messages: &["service_incompatible_title"],
         named_by: "",
         requirement: "SVC-03, SVC-04",
     },
@@ -504,7 +508,7 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         element: "service-issue",
         indexed: false,
         role: Role::Alert,
-        messages: &["service_unauthorized_title", "service_unauthorized_desc"],
+        messages: &["service_unauthorized_title"],
         named_by: "",
         requirement: "SVC-03, SVC-04",
     },
@@ -577,10 +581,7 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         element: "recycle-bin-error",
         indexed: false,
         role: Role::Alert,
-        messages: &[
-            "recycle_bin_unavailable_title",
-            "recycle_bin_unavailable_hint",
-        ],
+        messages: &["recycle_bin_unavailable_title"],
         named_by: "",
         requirement: "DSV-08",
     },
@@ -1134,9 +1135,9 @@ mod tests {
     }
 
     /// The window reports one element for every service failure. Each entry
-    /// must carry its own distinct pair of messages — title first, recovery
-    /// second — so one condition can never hide behind another's wording
-    /// (SVC-03, SVC-04).
+    /// carries its own single sentence, which names the condition and the
+    /// recovery direction, so one condition can never hide behind another's
+    /// wording (SVC-03, SVC-04).
     #[test]
     fn each_service_failure_registers_its_own_condition_and_recovery() {
         let issues = [
@@ -1148,7 +1149,7 @@ mod tests {
             ),
             (ServiceIssue::Unauthorized, "service-issue-unauthorized"),
         ];
-        let mut pairs = HashSet::new();
+        let mut messages = HashSet::new();
         for (_issue, key) in issues {
             let entry = control(key);
             assert_eq!(entry.element, "service-issue");
@@ -1159,12 +1160,12 @@ mod tests {
             );
             assert_eq!(
                 entry.messages.len(),
-                2,
-                "{key} needs a title and a recovery text"
+                1,
+                "{key} carries one sentence, not a title and a description"
             );
             assert!(
-                pairs.insert((entry.message_at(0), entry.message_at(1))),
-                "{key} reuses another failure's message pair"
+                messages.insert(entry.message_at(0)),
+                "{key} reuses another failure's message"
             );
         }
     }

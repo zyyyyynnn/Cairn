@@ -28,13 +28,7 @@
 - 正文解析/索引在工作进程中完成，宿主服务不承接第三方解析器的崩溃风险。
 - 首次启用需要可见的回填进度、取消和失败原因；回填完成前不得宣称内容可搜。
 
-## 5. 用户模式降级的边界
-
-- 服务不可用时可启动用户模式索引器，但只能看到当前账户可读的文件；结果集小于服务模式是预期行为。
-- 用户模式不写服务数据目录，不注册服务，不要求 UAC。
-- 关闭窗口后用户模式索引器必须随父进程退出。
-
-## 6. 缺陷修复的验收格式
+## 5. 缺陷修复的验收格式
 
 重复出现的同类缺陷必须同时交付：
 
@@ -47,6 +41,5 @@
 ## 代码位置
 
 - `crates/cairn-service/src/sync_engine/`：USN、日记账、内容索引与卷同步。
-- `crates/cairn-service/src/user_mode.rs`：用户模式降级。
 - `crates/cairn-core/src/engine.rs`、`crates/cairn-core/src/syntax.rs`：查询与过滤。
-- `crates/cairn-core/src/treemap/`：磁盘空间扫描、CSR 目录聚合索引与嵌套布局。服务的 `GetTree` 请求从活跃卷索引直接构建目录树供 Treemap 一次往返取用（`sync_engine.rs::treemap_tree`），无索引路径由应用内渐进扫描兜底。
+- `crates/cairn-core/src/treemap/`：磁盘空间语义、CSR 目录聚合索引与嵌套布局。服务的 `GetTree` 请求从活跃卷索引直接构建目录树供 Treemap 一次往返取用（`sync_engine.rs::treemap_tree`）；未索引路径显示不可用态。

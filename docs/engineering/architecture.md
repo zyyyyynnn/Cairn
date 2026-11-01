@@ -81,7 +81,7 @@ flowchart TD
 - 采用滑动窗口顺序流式分块读取，结合 Rayon 并行线程池解压 Fixup 校验序列与多属性记录，跳过系统保留元文件与未分配簇。
 
 ### 1.6 命名管道 IPC 协议与帧封装
-- 管道地址：服务 `\.\pipe\Cairn.Service`；标准用户降级索引器 `\.\pipe\Cairn.User`。
+- 管道地址：`\.\pipe\Cairn.Service`，只有已安装的 LocalSystem 服务监听该管道。
 - 协议版本为 `4`；连接必须先完成 `Hello` 握手，版本不匹配时拒绝请求。
 - 帧格式：`[u32: 负载长度][u16: 协议版本][postcard 序列化二进制内容]`。
 - 响应封套：所有服务端响应必须包裹 `Envelope<T>`，强制携带各卷实时状态列表（`VolumeStatusSummary`），确保客户端 UI 每一帧都能明确掌握数据同步状态。

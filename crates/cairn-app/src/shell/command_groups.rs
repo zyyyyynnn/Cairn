@@ -15,7 +15,6 @@
 //! its label through Fluent at the call site. A [`GroupCommand::Heading`] is a section label, not a
 //! command, and renders as plain text inside the popup.
 
-use crate::service::search_scope::{SEARCH_SCOPE_ALL_FILES, SEARCH_SCOPE_READABLE_FILES};
 use crate::shell::commands::{
     CopyFileNames, CopyFullPaths, CutQueryText, DeleteSelected, EscapeQuery, OpenSelected,
     PasteQueryText, RedoQueryText, RestoreSelected, RevealSelectedLocation, SelectAllQueryText,
@@ -167,15 +166,11 @@ pub enum GroupCommand {
     Submenu(&'static str, &'static [GroupCommand]),
     SetLanguage(&'static str),
     ToggleAutostart,
-    /// The "搜索范围" submenu's two choices. They are the only two scopes the product offers
-    /// (UI-10), and picking one either takes effect at once or is refused outright.
-    SetSearchScope(&'static str),
     /// The single "搜索文件内容" switch. Turning it off pauses the content index and keeps what
     /// is already indexed; turning it on resumes it.
     ToggleContentSearch,
     /// The popup that carries the content-search facts and the two recovery actions. It is a
-    /// command of its own because the whole container disappears where no content index exists:
-    /// hiding only its rows would leave a trigger that opens an empty popup (UI-10).
+    /// command of its own, so the trigger and its rows share one hide/show decision (CNT-01).
     ContentSearchDetailsMenu,
     /// Whether the content index is off, backfilling, ready or failed.
     ContentSearchDetails,
@@ -236,7 +231,6 @@ impl GroupCommand {
             GroupCommand::Submenu(label, _) => label,
             GroupCommand::SetLanguage(code) => language_label_key(code),
             GroupCommand::ToggleAutostart => "settings_autostart",
-            GroupCommand::SetSearchScope(scope) => scope_label_key(scope),
             GroupCommand::ToggleContentSearch => "menu_content_search",
             GroupCommand::ContentSearchDetailsMenu => "menu_content_search_details",
             GroupCommand::ContentSearchDetails => "menu_content_search_state",
@@ -345,16 +339,6 @@ fn theme_label_key(mode: &str) -> &'static str {
     }
 }
 
-/// The wording of a search-scope choice. The scope owns its own two names; the menu only asks
-/// for the right one.
-fn scope_label_key(scope: &str) -> &'static str {
-    if scope == SEARCH_SCOPE_ALL_FILES {
-        "menu_search_scope_all_files"
-    } else {
-        "menu_search_scope_readable_files"
-    }
-}
-
 fn language_label_key(code: &str) -> &'static str {
     if code == LANGUAGE_SYSTEM {
         "settings_language_system"
@@ -455,13 +439,6 @@ pub static DEFAULT_GROUPS: &[MenuGroupSpec] = &[
                 GroupCommand::ToggleAutostart,
             ],
             &[
-                GroupCommand::Submenu(
-                    "menu_search_scope",
-                    &[
-                        GroupCommand::SetSearchScope(SEARCH_SCOPE_ALL_FILES),
-                        GroupCommand::SetSearchScope(SEARCH_SCOPE_READABLE_FILES),
-                    ],
-                ),
                 GroupCommand::ToggleContentSearch,
                 GroupCommand::ContentSearchDetailsMenu,
             ],
@@ -516,7 +493,6 @@ mod tests {
         all_commands, group_spec, menu_groups, GroupCommand, MenuGroup, ZoomPreset,
         CONTENT_SEARCH_DETAILS_CHILDREN,
     };
-    use crate::service::search_scope::{SEARCH_SCOPE_ALL_FILES, SEARCH_SCOPE_READABLE_FILES};
     use crate::shell::i18n::I18nManager;
     use crate::table::model::SortColumn;
     use cairn_ui::theme::{MAX_ZOOM, MIN_ZOOM};
@@ -542,40 +518,23 @@ mod tests {
         }
     }
 
-    /// UI-10: the Tools menu offers exactly two index concepts — the search scope and the
-    /// content-search switch — with no index status or maintenance rows beside them. A row that
-    /// names the index source, the backfill state or a maintenance action is a diagnostic the
-    /// user cannot act on.
+    /// The Tools menu offers the content-search switch and its details popup. The search-scope
+    /// submenu is gone: the installed service is the only index source.
     #[test]
-    fn the_tools_menu_offers_only_the_scope_and_the_content_search() {
+    fn the_tools_menu_offers_the_content_search_without_a_scope_choice() {
         let tools = group_spec(MenuGroup::Tools);
 
-        // The scope choices live in the "搜索范围" submenu, so the walk has to descend into it.
-        let mut scope_choices: Vec<&'static str> = Vec::new();
         let mut content_switches = 0usize;
         let mut detail_menus = 0usize;
         for section in tools.sections {
             for command in *section {
                 match command {
-                    GroupCommand::SetSearchScope(scope) => scope_choices.push(scope),
                     GroupCommand::ToggleContentSearch => content_switches += 1,
                     GroupCommand::ContentSearchDetailsMenu => detail_menus += 1,
                     _ => {}
                 }
-                for child in command.submenu_children() {
-                    if let GroupCommand::SetSearchScope(scope) = child {
-                        scope_choices.push(scope);
-                    }
-                }
             }
         }
-        assert_eq!(
-            scope_choices,
-            vec![SEARCH_SCOPE_ALL_FILES, SEARCH_SCOPE_READABLE_FILES],
-            "the search scope offers exactly the two documented scopes"
-        );
-
-        // The content search is one switch, plus one popup that carries its details.
         assert_eq!(content_switches, 1, "content search is a single switch");
         assert_eq!(detail_menus, 1, "the content details live in one popup");
     }
@@ -672,7 +631,6 @@ mod tests {
                 | GroupCommand::Submenu(_, _)
                 | GroupCommand::SetLanguage(_)
                 | GroupCommand::ToggleAutostart
-                | GroupCommand::SetSearchScope(_)
                 | GroupCommand::ToggleContentSearch
                 | GroupCommand::ContentSearchDetailsMenu
                 | GroupCommand::ContentSearchDetails

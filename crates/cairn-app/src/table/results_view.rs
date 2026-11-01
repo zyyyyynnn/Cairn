@@ -17,7 +17,6 @@ use cairn_core::format_size_bytes;
 use cairn_core::treemap::TreemapCategory;
 use cairn_protocol::message::FileRowData;
 use cairn_protocol::status::ContentIndexState;
-use fluent_bundle::FluentArgs;
 use gpui_kit::assets::IconName as AssetIconName;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::menu::ContextMenuExt;
@@ -54,7 +53,6 @@ const CONTEXT_MENU_MIN_WIDTH: f32 = 12.0;
 /// only true once the content index is ready.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ContentQueryNotice {
-    Local,
     Loading,
     /// The status read itself failed; the lifecycle is unknown, not `Disabled`.
     Unreadable,
@@ -63,36 +61,9 @@ enum ContentQueryNotice {
     Error,
 }
 
-impl ContentQueryNotice {
-    fn keys(self) -> (&'static str, &'static str) {
-        match self {
-            Self::Local => ("empty_content_local_title", "empty_content_local_hint"),
-            Self::Loading => ("empty_content_loading_title", "empty_content_loading_hint"),
-            Self::Unreadable => (
-                "empty_content_unreadable_title",
-                "empty_content_unreadable_hint",
-            ),
-            Self::Disabled => (
-                "empty_content_disabled_title",
-                "empty_content_disabled_hint",
-            ),
-            Self::Backfilling => (
-                "empty_content_backfilling_title",
-                "empty_content_backfilling_hint",
-            ),
-            Self::Error => ("empty_content_error_title", "empty_content_error_hint"),
-        }
-    }
-}
-
 /// A disconnected service shows its own offline band, so this only explains states where a query
-/// actually reached an indexer. Local fallback is checked first: the user-privilege indexer
-/// carries file names only, even though it is "connected", so a content query can never be
-/// answered there.
+/// actually reached the service.
 fn content_query_notice(state: &IndexMenuState<'_>) -> Option<ContentQueryNotice> {
-    if state.local_mode {
-        return Some(ContentQueryNotice::Local);
-    }
     if !state.service_connected {
         return None;
     }
@@ -270,45 +241,37 @@ fn column_label_key(column: SortColumn, in_recycle_bin: bool) -> &'static str {
     }
 }
 
-/// Every empty, no-match and unavailable band shares this geometry. The icon and
-/// the optional action are supplied by the state; the rhythm, surface, type and
-/// measure are not copied per state.
+/// Every empty, warning and error band shares this geometry: one centred
+/// icon, one sentence, and the optional recovery action. The sentence carries
+/// the whole message; there is no second description paragraph to drift from it.
 fn render_state_band(
     tokens: &ShellTokens,
     control: &'static crate::shell::accessibility::KeyControl,
-    aria_label: String,
+    message: String,
     icon: AnyElement,
-    title: String,
-    hint: String,
     action: Option<AnyElement>,
 ) -> ControlElement {
     let band = accessibility::element(control)
-        .aria_label(aria_label)
+        .aria_label(message.clone())
         .flex()
         .flex_col()
         .flex_1()
         .min_h_0()
         .items_center()
         .justify_center()
-        .gap(rems(layout::SPACE_8))
+        .gap(rems(layout::SPACE_12))
         .py(rems(layout::SPACE_48))
         .bg(tokens.background)
         .child(icon)
         .child(
             div()
-                .text_sm()
-                .font(theme::serif_font(FontWeight::SEMIBOLD))
-                .text_color(tokens.foreground)
-                .child(theme::heading_text(title, FontWeight::SEMIBOLD)),
-        )
-        .child(
-            div()
                 .max_w(rems(layout::MESSAGE_MAX_WIDTH))
                 .text_center()
-                .text_sm()
-                .line_height(relative(1.5))
-                .text_color(tokens.muted_foreground)
-                .child(hint),
+                .text_base()
+                .font(theme::serif_font(FontWeight::SEMIBOLD))
+                .line_height(relative(1.4))
+                .text_color(tokens.foreground)
+                .child(theme::heading_text(message, FontWeight::SEMIBOLD)),
         );
     match action {
         Some(action) => band.child(action),
@@ -723,15 +686,14 @@ impl CairnApp {
     fn render_empty_state(&self, tokens: &ShellTokens, cx: &mut Context<Self>) -> ControlElement {
         if self.recycle_bin.error().is_some() {
             let control = accessibility::control("recycle-bin-error");
-            let title = self.i18n.get_text("recycle_bin_unavailable_title");
-            let hint = self.i18n.get_text("recycle_bin_unavailable_hint");
+            let message = self.i18n.get_text("recycle_bin_unavailable_title");
             let retry = accessibility::control("recycle-bin-retry");
             let retry_label = accessibility::name(retry, &self.i18n);
             let action = Button::new(retry.element)
                 .font_weight(FontWeight::MEDIUM)
                 .label(retry_label.clone())
                 .accessibility_label(retry_label)
-                .mt(rems(layout::SPACE_8))
+                .small()
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.open_recycle_bin(window, cx);
                 }))
@@ -739,13 +701,11 @@ impl CairnApp {
             return render_state_band(
                 tokens,
                 control,
-                format!("{title}. {hint}"),
+                message,
                 Icon::new(IconName::CircleAlert)
                     .size_8()
-                    .text_color(tokens.muted_foreground)
+                    .text_color(tokens.danger)
                     .into_any_element(),
-                title,
-                hint,
                 Some(action),
             );
         }
@@ -753,26 +713,25 @@ impl CairnApp {
         let control = accessibility::control("result-state");
         if self.recycle_bin.is_open() {
             let bin_empty = self.recycle_bin.all().is_empty();
-            let (title_index, hint_index) = if bin_empty { (2, 3) } else { (4, 5) };
-            let title = accessibility::name_at(control, title_index, &self.i18n);
-            let hint = accessibility::name_at(control, hint_index, &self.i18n);
-            let icon = if bin_empty {
-                Icon::new(AssetIconName::Recycle)
+            let (message_key, icon) = if bin_empty {
+                (
+                    "recycle_bin_empty_title",
+                    Icon::new(AssetIconName::Recycle)
+                        .size_8()
+                        .text_color(tokens.muted_foreground)
+                        .into_any_element(),
+                )
             } else {
-                Icon::new(IconName::Search)
-            }
-            .size_8()
-            .text_color(tokens.muted_foreground)
-            .into_any_element();
-            return render_state_band(
-                tokens,
-                control,
-                format!("{title}. {hint}"),
-                icon,
-                title,
-                hint,
-                None,
-            );
+                (
+                    "recycle_bin_no_matches_title",
+                    Icon::new(IconName::Search)
+                        .size_8()
+                        .text_color(tokens.muted_foreground)
+                        .into_any_element(),
+                )
+            };
+            let message = self.i18n.get_text(message_key);
+            return render_state_band(tokens, control, message, icon, None);
         }
 
         let has_query = self.has_query();
@@ -781,47 +740,69 @@ impl CairnApp {
         } else {
             None
         };
-        let notice_keys = notice.map(ContentQueryNotice::keys);
-        let (title_key, hint_key) = match notice_keys {
-            Some(keys) => keys,
+        let (message_key, icon) = match notice {
+            Some(ContentQueryNotice::Loading) => (
+                "empty_content_loading_title",
+                Icon::new(AssetIconName::Timer)
+                    .size_8()
+                    .text_color(tokens.muted_foreground)
+                    .into_any_element(),
+            ),
+            Some(ContentQueryNotice::Unreadable) => (
+                "empty_content_unreadable_title",
+                Icon::new(AssetIconName::TriangleAlert)
+                    .size_8()
+                    .text_color(tokens.warning)
+                    .into_any_element(),
+            ),
+            Some(ContentQueryNotice::Disabled) => (
+                "empty_content_disabled_title",
+                Icon::new(AssetIconName::Info)
+                    .size_8()
+                    .text_color(tokens.muted_foreground)
+                    .into_any_element(),
+            ),
+            Some(ContentQueryNotice::Backfilling) => (
+                "empty_content_backfilling_title",
+                Icon::new(AssetIconName::Timer)
+                    .size_8()
+                    .text_color(tokens.warning)
+                    .into_any_element(),
+            ),
+            Some(ContentQueryNotice::Error) => (
+                "empty_content_error_title",
+                Icon::new(AssetIconName::CircleAlert)
+                    .size_8()
+                    .text_color(tokens.danger)
+                    .into_any_element(),
+            ),
             // A ready content index answering zero rows is a genuine no-match, but it is a
             // no-match inside a scope narrower than "all files". Say that scope once instead of
             // letting a filename-only explanation imply whole-body coverage.
-            None if has_query && self.has_content_query() => {
-                ("empty_no_matches", "empty_content_scope_hint")
-            }
-            None if has_query => ("empty_no_matches", "empty_no_matches_hint"),
-            None => ("empty_index_empty_title", "empty_index_empty_hint"),
+            None if has_query && self.has_content_query() => (
+                "empty_content_scope_line",
+                Icon::new(AssetIconName::Search)
+                    .size_8()
+                    .text_color(tokens.muted_foreground)
+                    .into_any_element(),
+            ),
+            None if has_query => (
+                "empty_no_matches",
+                Icon::new(AssetIconName::Search)
+                    .size_8()
+                    .text_color(tokens.muted_foreground)
+                    .into_any_element(),
+            ),
+            None => (
+                "empty_index_empty_title",
+                Icon::new(AssetIconName::Search)
+                    .size_8()
+                    .text_color(tokens.muted_foreground)
+                    .into_any_element(),
+            ),
         };
-        let title = self.i18n.get_text(title_key);
-        let hint = match &self.service.content_status.state {
-            ContentIndexState::Error(reason) if notice == Some(ContentQueryNotice::Error) => {
-                let mut args = FluentArgs::new();
-                args.set("reason", reason.trim());
-                self.i18n.get_text_with_args(hint_key, &args)
-            }
-            _ => self.i18n.get_text(hint_key),
-        };
-        let message = match notice_keys {
-            Some(_) => format!("{title}. {hint}"),
-            // The scope sentence is part of the answer, so it belongs in the announced message as
-            // well as in the visible hint.
-            None if has_query && self.has_content_query() => format!("{title}. {hint}"),
-            None if has_query => accessibility::name_at(control, 1, &self.i18n),
-            None => accessibility::name_at(control, 0, &self.i18n),
-        };
-        render_state_band(
-            tokens,
-            control,
-            message,
-            Icon::new(IconName::Search)
-                .size_8()
-                .text_color(tokens.muted_foreground)
-                .into_any_element(),
-            title,
-            hint,
-            None,
-        )
+        let message = self.i18n.get_text(message_key);
+        render_state_band(tokens, control, message, icon, None)
     }
 
     fn render_service_offline_state(
@@ -834,103 +815,62 @@ impl CairnApp {
             .service_issue
             .unwrap_or(ServiceIssue::NotRunning);
         let control = accessibility::control(issue.accessibility_key());
-        let title = accessibility::name_at(control, 0, &self.i18n);
-        let recovery = accessibility::name_at(control, 1, &self.i18n);
+        let message_key = match issue {
+            ServiceIssue::NotRunning => "service_not_running_title",
+            ServiceIssue::NotInstalled => "service_not_installed_title",
+            ServiceIssue::ProtocolIncompatible => "service_incompatible_title",
+            ServiceIssue::Unauthorized => "service_unauthorized_title",
+        };
+        let message = self.i18n.get_text(message_key);
         let retry = accessibility::control("service-retry-button");
         let retry_label = accessibility::name(retry, &self.i18n);
         let start = accessibility::control("service-start-button");
         let start_label = accessibility::name(start, &self.i18n);
         // Starting the service is a UAC action, so it is offered only when SCM says the service
         // exists. A missing service gets install guidance instead of an elevation prompt.
-        let can_start = self.service.service_installed
-            && issue == ServiceIssue::NotRunning
-            && !self.service.search_scope.needs_local_only();
-        // The small line states the outcome or the issue-specific recovery; the button carries
-        // the action. Start and retry states keep the same title + hint + action rhythm.
-        let hint = if can_start {
-            self.i18n.get_text("service_start_hint")
-        } else {
-            recovery.clone()
-        };
-        let announcement = format!("{title}. {hint}");
-
-        accessibility::element(control)
-            .aria_label(announcement)
-            .flex_1()
-            .min_h_0()
-            .flex()
-            .flex_col()
+        let can_start = self.service.service_installed && issue == ServiceIssue::NotRunning;
+        let action = h_flex()
             .items_center()
-            .justify_center()
-            .gap(rems(layout::SPACE_12))
-            .py(rems(layout::SPACE_48))
-            .bg(tokens.background)
-            .child(
-                Icon::new(IconName::CircleAlert)
-                    .size_8()
-                    .text_color(tokens.muted_foreground),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .font(theme::serif_font(FontWeight::SEMIBOLD))
-                    .text_color(tokens.foreground)
-                    .child(theme::heading_text(title, FontWeight::SEMIBOLD)),
-            )
-            .child(
-                div()
-                    .max_w(rems(layout::MESSAGE_MAX_WIDTH))
-                    .text_center()
-                    .text_sm()
-                    .line_height(relative(1.5))
-                    .text_color(tokens.muted_foreground)
-                    .child(hint),
-            )
-            .child(
-                h_flex()
-                    .items_center()
-                    .gap(rems(layout::INNER_SPACING))
-                    .mt(rems(layout::SPACE_8))
-                    .when(can_start, |this| {
-                        this.child(
-                            Button::new(start.element)
-                                .font_weight(FontWeight::MEDIUM)
-                                .label(start_label.clone())
-                                .accessibility_label(start_label)
-                                .small()
-                                .loading(self.service.is_probing_service)
-                                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                                    this.start_service(cx);
-                                })),
-                        )
-                    })
-                    .when(!can_start, |this| {
-                        this.child(
-                            Button::new(retry.element)
-                                .font_weight(FontWeight::MEDIUM)
-                                .label(retry_label.clone())
-                                .accessibility_label(retry_label)
-                                .small()
-                                .loading(self.service.is_probing_service)
-                                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                                    this.retry_service_connection(cx);
-                                })),
-                        )
-                    }),
-            )
+            .gap(rems(layout::INNER_SPACING))
+            .when(can_start, |this| {
+                this.child(
+                    Button::new(start.element)
+                        .font_weight(FontWeight::MEDIUM)
+                        .label(start_label.clone())
+                        .accessibility_label(start_label)
+                        .small()
+                        .loading(self.service.is_probing_service)
+                        .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                            this.start_service(cx);
+                        })),
+                )
+            })
+            .when(!can_start, |this| {
+                this.child(
+                    Button::new(retry.element)
+                        .font_weight(FontWeight::MEDIUM)
+                        .label(retry_label.clone())
+                        .accessibility_label(retry_label)
+                        .small()
+                        .loading(self.service.is_probing_service)
+                        .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                            this.retry_service_connection(cx);
+                        })),
+                )
+            })
+            .into_any_element();
+        render_state_band(
+            tokens,
+            control,
+            message,
+            Icon::new(IconName::CircleAlert)
+                .size_8()
+                .text_color(tokens.danger)
+                .into_any_element(),
+            Some(action),
+        )
     }
 
-    /// Scroll owner of the result band. Only `visible` rows are built. The tall spacer underneath
-    /// gives the scrollbar the full result extent, while the rows are painted in a fixed overlay
-    /// whose top is the viewport-local residual: at a full index the absolute row origin is tens of
-    /// millions of pixels, where f32 rounds every row onto a coarser grid and the row rhythm drifts.
-    ///
-    /// This band stays drawn here instead of using `Table` or `VirtualList` for one reason: the
-    /// service reports a total before it has delivered the rows. Both components measure a collection
-    /// they already hold, so an index beyond the fetched window cannot exist in them — the placeholder
-    /// rows would vanish and the scrollbar would shrink to one page the moment a query returned more.
-    /// The row geometry, the cell lanes, the z-free hover and selection fills and every colour below
-    /// come from the same tokens and scale helpers the components use.
     fn render_rows_band(
         &mut self,
         tokens: &ShellTokens,
@@ -1830,25 +1770,13 @@ mod tests {
     #[test]
     fn a_content_query_explains_an_index_that_cannot_answer() {
         let mut state = crate::shell::menu_rules::IndexMenuState {
-            scope: crate::service::search_scope::SearchScope::AllFiles,
-            service_installed: true,
             service_connected: true,
-            switching_scope: false,
             content_loading: false,
             content_failed: false,
             content_action_pending: false,
-            local_mode: false,
             content_state: &ContentIndexState::Ready,
         };
 
-        state.local_mode = true;
-        assert_eq!(
-            content_query_notice(&state),
-            Some(ContentQueryNotice::Local),
-            "the user indexer carries file names only, even when connected"
-        );
-
-        state.local_mode = false;
         state.service_connected = false;
         assert_eq!(
             content_query_notice(&state),

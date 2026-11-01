@@ -8,9 +8,7 @@
 | --- | --- | --- |
 | `cairn.exe` | 标准用户 | GPUI 界面、结果渲染、用户交互；不直接读取 `$MFT` |
 | `cairnd.exe`（服务） | LocalSystem | 后台索引、NTFS `$MFT`/USN Journal 读取、服务数据目录维护 |
-| `cairnd.exe --user-mode` | 启动它的标准用户 | 服务不可用时的本地降级索引器；只遍历当前账户可读目录，跳过 reparse point |
 
-- 用户模式索引器通过 `--parent-pid` 随桌面进程退出，不注册为服务。
 - `cairnd --console` 只用于开发/测试；生产必须由 Windows 服务承载。
 - 服务名：`CairnService`。
 
@@ -19,9 +17,8 @@
 | 名称 | 使用方 |
 | --- | --- |
 | `\\.\pipe\Cairn.Service` | 已安装的 LocalSystem 服务 |
-| `\\.\pipe\Cairn.User` | 用户模式索引器 |
 
-两种管道分开命名，运行中的服务始终优先于本地扫描，两者不会争用同一实例。
+- 桌面客户端只连接这一条服务管道；服务不可用时显示离线态。
 
 ## 3. 授权与协议
 
@@ -35,7 +32,7 @@
 
 - `SeRestorePrivilege`：用于服务数据目录的 owner 修复；只有该特权允许把任意有效 SID 设为 owner。使用后按原状态释放。
 - `SeTakeOwnershipPrivilege`：只在确有必要的所有权修复路径中使用；单独持有它并不能把 owner 设为任意 SID。
-- 服务数据目录的 ACL 只允许 SYSTEM 与内置 Administrators；用户模式索引器不写入服务数据目录。
+- 服务数据目录的 ACL 只允许 SYSTEM 与内置 Administrators；桌面客户端不写入服务数据目录。
 - 索引/查询代码不得跨线程共享可变状态；管道读写必须带超时、背压与取消路径。
 
 ## 5. UAC 与提权操作
@@ -66,5 +63,4 @@
 - `crates/cairn-service/src/pipe_server.rs`：管道实例、DACL、握手与请求处理。
 - `crates/cairn-service/src/caller_auth.rs`：基于 access token 的调用方识别与授权。
 - `crates/cairn-service/src/security.rs`：数据目录 ACL 与特权使用。
-- `crates/cairn-service/src/user_mode.rs`：用户模式降级索引器。
-- `crates/cairn-service/src/main.rs`：`cairnd` 的 console / service / user-mode 入口。
+- `crates/cairn-service/src/main.rs`：`cairnd` 的 console / service 入口。

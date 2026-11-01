@@ -16,12 +16,11 @@ use crate::treemap::paint::{
 };
 use crate::treemap::palette::{block_fill_states, TreemapPalette};
 use crate::treemap::path_input::normalize_treemap_path;
-use crate::treemap::state::{next_scan_epoch, TreemapViewState};
+use crate::treemap::state::{next_tree_request_epoch, TreemapViewState};
 use crate::treemap::zoom::TreemapViewport;
 use cairn_core::format_size_bytes;
 use cairn_core::treemap::{
-    aggregate_parent_path, scan_directory_tree_progressive, NestedTreemapLayoutNode,
-    TreemapCategory, TreemapRect, TreemapScanEvent,
+    aggregate_parent_path, NestedTreemapLayoutNode, TreemapCategory, TreemapRect,
 };
 use cairn_protocol::message::ResponsePayload;
 use fluent_bundle::FluentArgs;
@@ -36,8 +35,6 @@ use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::*;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::time::Instant;
 
 /// One breadcrumb label never takes more than a readable share of the path band; the
@@ -242,33 +239,27 @@ impl CairnApp {
         }
     }
 
-    /// Starts loading the Treemap for `scan_path`: the live index answers one
-    /// pipe round-trip when it covers the path, and the progressive
-    /// filesystem scan is the fallback for a closed pipe or an unindexed
-    /// drive.
+    /// Loads the Treemap for `scan_path` from the service's live index.
+    ///
+    /// The cached volume index and the stored drive tree are consulted before
+    /// this call. A path they do not hold is answered by one pipe round-trip;
+    /// when the service cannot answer, the canvas reports the directory as
+    /// unavailable rather than scanning the disk itself.
     pub fn start_treemap_scan(&mut self, scan_path: PathBuf, cx: &mut Context<Self>) {
         let Some(ref mut state) = self.treemap_state else {
             return;
         };
-
-        if let Some(cancel) = state.scan_cancel.take() {
-            cancel.store(true, Ordering::Relaxed);
-        }
-
-        state.scan_generation = next_scan_epoch();
-        let gen = state.scan_generation;
+        state.request_epoch = next_tree_request_epoch();
+        let epoch = state.request_epoch;
         state.is_scanning = true;
         state.content_revealed = false;
-        state.scan_unreadable = false;
+        state.unavailable = false;
         state.layout_nodes.clear();
         state.root_tree = None;
         cx.notify();
 
         let path_for_service = scan_path.to_string_lossy().into_owned();
         cx.spawn(async move |this, cx: &mut AsyncApp| {
-            // One round-trip against whichever indexer is selected. Empty
-            // entries mean "not indexed here"; any other failure (no pipe,
-            // old protocol) lands on the same fallback.
             let (tx, rx) = tokio::sync::oneshot::channel();
             get_tokio_runtime().spawn(async move {
                 let result = async {
@@ -281,126 +272,33 @@ impl CairnApp {
                 let _ = tx.send(result);
             });
 
-            let served = match rx.await {
+            let entries = match rx.await {
                 Ok(Ok(envelope)) => match envelope.payload {
-                    ResponsePayload::TreeResult { entries, .. } if !entries.is_empty() => {
+                    ResponsePayload::TreeResult { entries, .. } => Some(entries),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let _ = this.update(cx, |this, cx| {
+                let Some(ref mut state) = this.treemap_state else {
+                    return;
+                };
+                if state.request_epoch != epoch {
+                    return;
+                }
+                match entries {
+                    Some(entries) if !entries.is_empty() => {
                         crate::shell::perf::mark(&format!(
                             "treemap tree service entries={}",
                             entries.len()
                         ));
-                        let applied = this.update(cx, |this, cx| {
-                            if let Some(ref mut st) = this.treemap_state {
-                                if st.scan_generation != gen {
-                                    return false;
-                                }
-                                let ok = st.adopt_service_tree(entries);
-                                cx.notify();
-                                ok
-                            } else {
-                                false
-                            }
-                        });
-                        applied.unwrap_or(false)
-                    }
-                    _ => false,
-                },
-                _ => false,
-            };
-            if served {
-                return;
-            }
-
-            crate::shell::perf::mark("treemap tree filesystem scan");
-            // Fall back to the progressive filesystem scan.
-            let fallback = this.update(cx, |this, cx| {
-                this.run_treemap_filesystem_scan(scan_path, gen, cx);
-            });
-            if fallback.is_err() {
-                // The view died before the answer arrived; nothing to load.
-            }
-        })
-        .detach();
-    }
-
-    /// The std::fs progressive scan fallback: streams Listing/Progress events
-    /// through a channel and folds them into the view state.
-    fn run_treemap_filesystem_scan(
-        &mut self,
-        scan_path: PathBuf,
-        gen: u64,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(ref mut state) = self.treemap_state else {
-            return;
-        };
-        if state.scan_generation != gen {
-            return;
-        }
-
-        let cancel = Arc::new(AtomicBool::new(false));
-        state.scan_cancel = Some(cancel.clone());
-        state.is_scanning = true;
-        state.content_revealed = false;
-        state.scan_unreadable = false;
-        state.layout_nodes.clear();
-        cx.notify();
-
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<TreemapScanEvent>();
-        let cancel_worker = cancel.clone();
-        let target_path = scan_path.clone();
-
-        // Spawn heavy recursive scan on dedicated OS worker thread to avoid blocking UI or Tokio
-        std::thread::Builder::new()
-            .name("cairn-treemap-scanner".into())
-            .spawn(move || {
-                scan_directory_tree_progressive(&target_path, 5, cancel_worker, move |evt| {
-                    let _ = tx.send(evt);
-                });
-            })
-            .expect("failed to spawn treemap scanner thread");
-
-        cx.spawn(async move |this, cx: &mut AsyncApp| {
-            while let Some(event) = rx.recv().await {
-                let update_res = this.update(cx, |this: &mut CairnApp, cx| {
-                    if let Some(ref mut st) = this.treemap_state {
-                        if st.scan_generation != gen {
-                            return;
-                        }
-                        // Progress folds the tree in memory; the canvas shows the skeleton
-                        // until the finished event reveals it, and the status band shows no
-                        // counters during the scan. Repainting for each batch would cost a
-                        // full frame per batch for nothing the reader can see.
-                        let finished = event.is_finished;
-                        st.apply_scan_event(event);
-                        if finished {
-                            cx.notify();
+                        if !state.adopt_service_tree(entries) {
+                            state.mark_unavailable();
                         }
                     }
-                });
-                if update_res.is_err() {
-                    break;
+                    _ => state.mark_unavailable(),
                 }
-            }
-
-            // The channel closes either after the terminal event or because the
-            // scanner died. Never leave the current generation stuck on the
-            // loading skeleton: stop the spinner and reveal whatever arrived.
-            let _ = this.update(cx, |this: &mut CairnApp, cx| {
-                if let Some(ref mut st) = this.treemap_state {
-                    if st.scan_generation == gen {
-                        if st.is_scanning {
-                            st.is_scanning = false;
-                            if let Some(tree) = st.root_tree.as_mut() {
-                                let tree = Arc::make_mut(tree);
-                                tree.compute_aggregated_sizes();
-                                tree.sort_recursive();
-                                st.recompute_layout();
-                            }
-                            st.reveal_content();
-                        }
-                        cx.notify();
-                    }
-                }
+                cx.notify();
             });
         })
         .detach();
@@ -769,8 +667,8 @@ impl CairnApp {
         // An empty directory is content, not a separate surface: it must keep
         // the canvas focus, Backspace/Enter and wheel zoom.
         let content = if state.layout_nodes.is_empty() {
-            let empty_text_key = if state.is_unreadable() {
-                "treemap_unreadable"
+            let empty_text_key = if state.is_unavailable() {
+                "treemap_unavailable"
             } else {
                 "treemap_empty_directory"
             };
