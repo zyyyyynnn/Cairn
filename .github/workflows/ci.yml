@@ -18,6 +18,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
 
+# Rust caches are keyed by lockfiles and the toolchain, so workflow-only edits
+# reuse the compiled release and debug artifacts.
+
 jobs:
   changes:
     name: Detect documentation-only change
