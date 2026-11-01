@@ -17,7 +17,7 @@ use crate::shell::theme::ShellTokens;
 use gpui_kit::assets::IconName as AssetIconName;
 use gpui_kit::base::StyledExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{h_flex, Icon, Sizable as _};
+use gpui_kit::component::{h_flex, v_flex, Icon, Sizable as _};
 use gpui_kit::gpui::*;
 use gpui_kit::gpui::{ease_out_quint, Animation, AnimationExt};
 use std::time::Duration;
@@ -194,46 +194,62 @@ impl CairnApp {
             .border_1()
             .border_color(tokens.border)
             .child(
-                // Icon, title and close share one centre line: a start-aligned
-                // row would put the 16px icon, 20px title line and 24px close
-                // target on three different vertical centres.
+                // The icon centres on the title's 24px row; the title and the
+                // explanation share one text column, so the small line aligns
+                // with the title instead of inventing an indent.
                 h_flex()
                     .w_full()
-                    .items_center()
+                    .items_start()
                     .gap(rems(layout::INNER_SPACING))
                     .child(
-                        Icon::new(icon)
-                            .small()
+                        h_flex()
                             .flex_shrink_0()
-                            .text_color(icon_color),
+                            .h(rems(layout::SPACE_24))
+                            .items_center()
+                            .child(
+                                Icon::new(icon)
+                                    .small()
+                                    .flex_shrink_0()
+                                    .text_color(icon_color),
+                            ),
                     )
                     .child(
-                        div()
+                        v_flex()
                             .flex_1()
                             .min_w_0()
-                            .text_sm()
-                            .font_medium()
-                            .text_color(tokens.foreground)
-                            .child(toast.title),
-                    )
-                    .child(
-                        close
-                            // An icon-only 24px target keeps a 16px glyph
-                            // inset by 4px on each side; pull the target toward
-                            // the card edge so the glyph, not the target, sits
-                            // on the same 12px padding spine as the left icon.
-                            .mr(rems(-layout::SPACE_4)),
+                            .gap(rems(layout::SPACE_4))
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .text_sm()
+                                            .font_medium()
+                                            .text_color(tokens.foreground)
+                                            .child(toast.title),
+                                    )
+                                    .child(
+                                        close
+                                            // An icon-only 24px target keeps a
+                                            // 16px glyph inset by 4px on each side;
+                                            // pull the target toward the card edge so
+                                            // the glyph, not the target, sits on the
+                                            // same 12px padding spine as the left icon.
+                                            .mr(rems(-layout::SPACE_4)),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .line_height(relative(1.5))
+                                    .text_color(tokens.muted_foreground)
+                                    .whitespace_normal()
+                                    .child(toast.message),
+                            ),
                     ),
-            )
-            .child(
-                div()
-                    .pl(rems(layout::SPACE_24))
-                    .pt(rems(layout::SPACE_4))
-                    .text_sm()
-                    .line_height(relative(1.5))
-                    .text_color(tokens.muted_foreground)
-                    .whitespace_normal()
-                    .child(toast.message),
             )
             .with_animation(
                 if closing {
