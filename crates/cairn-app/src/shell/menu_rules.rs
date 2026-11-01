@@ -39,23 +39,16 @@ impl IndexMenuState<'_> {
         !self.service_connected || self.content_action_pending
     }
 
-    /// Whether the content index is on. A backfill in progress counts as on: the switch that
-    /// turns it off has to be offered while the index is still filling.
+    /// Whether the content index is on. A backfill in progress counts as on: the checkmark has
+    /// to say the feature is enabled while the progress row says the index is not ready yet.
     ///
-    /// The row's label, the action it runs and the checkmark beside it all read the same fact,
-    /// so the label can never promise one action while the click performs another.
+    /// The action the row runs and the checkmark beside it read the same fact, so the mark can
+    /// never promise one action while the click performs another.
     pub fn content_index_is_on(&self) -> bool {
         matches!(
             self.content_state,
             ContentIndexState::Backfilling { .. } | ContentIndexState::Ready
         )
-    }
-
-    /// Whether the content switch carries a checkmark. A backfill in progress has its own
-    /// progress line, so the mark appears only once the index is ready: it never claims a
-    /// finished index.
-    pub fn content_switch_is_checked(&self) -> bool {
-        matches!(self.content_state, ContentIndexState::Ready)
     }
 }
 
@@ -78,27 +71,10 @@ mod tests {
         }
     }
 
-    /// A backfill in progress shows its own progress line. The checkmark appears only once the
-    /// index is ready, so the mark never claims a finished index.
+    /// The checkmark tracks the enabled state, including while the index fills; readiness and
+    /// progress belong to the details row, not to the switch mark.
     #[test]
-    fn the_content_switch_is_checked_only_when_the_index_is_ready() {
-        let mut state = ready();
-        assert!(state.content_switch_is_checked());
-
-        state.content_state = &ContentIndexState::Backfilling {
-            processed: 10,
-            total: 100,
-        };
-        assert!(!state.content_switch_is_checked());
-
-        state.content_state = &ContentIndexState::Disabled;
-        assert!(!state.content_switch_is_checked());
-    }
-
-    /// A backfill in progress counts as on: the switch that turns the content index off has to
-    /// be offered while the index is still filling.
-    #[test]
-    fn a_backfill_in_progress_still_counts_as_the_index_being_on() {
+    fn the_content_switch_is_checked_whenever_content_search_is_on() {
         let mut state = ready();
         assert!(state.content_index_is_on());
 
@@ -108,7 +84,7 @@ mod tests {
         };
         assert!(
             state.content_index_is_on(),
-            "the index is filling, so the switch must offer to turn it off"
+            "the feature is on while the index is still filling"
         );
 
         state.content_state = &ContentIndexState::Disabled;

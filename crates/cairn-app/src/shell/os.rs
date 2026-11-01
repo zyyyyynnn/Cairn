@@ -57,7 +57,7 @@ fn owner_hwnd(owner: isize) -> HWND {
     HWND(owner as *mut std::ffi::c_void)
 }
 
-/// Invokes system default associated application to open the file (`ShellExecuteExW`).
+/// Invokes the system default associated application to open the file (`ShellExecuteExW`).
 pub fn open_file(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(windows)]
     {

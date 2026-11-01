@@ -174,10 +174,13 @@ impl SetupApp {
         cairn_ui::theme::apply_appearance(dark, 1.0, cx);
 
         let live_installed = installed::installed_product();
-        let installed = preview
-            .as_ref()
-            .and_then(Preview::installed_product)
-            .or(live_installed);
+        // A preview must render the scene it names, independent of what this machine happens to
+        // have installed. Falling back to the live product made a clean-install scene show the
+        // update action and turned the matrix into a property of the capture machine.
+        let installed = match preview.as_ref() {
+            Some(preview) => preview.installed_product(),
+            None => live_installed,
+        };
         let legacy_burn = preview.is_none()
             && launch == Launch::Setup
             && !installed::legacy_burn_uninstallers().is_empty();
@@ -327,9 +330,9 @@ impl SetupApp {
         }
     }
 
-    /// The window-level Escape gesture. It is the keyboard equivalent of the Cancel button, so a
-    /// person who never uses the pointer can still leave every page that has a Cancel action.
-    /// A page that is running the MSI has no Cancel action and therefore no Escape either.
+    /// The window-level Escape gesture. It is the keyboard way out of a page; the title-bar X is
+    /// the pointer way out. A page that is running the MSI refuses both, because closing the
+    /// window mid-transaction would leave the machine half-installed.
     pub(crate) fn on_escape(&mut self, window: &mut Window, _cx: &mut Context<Self>) {
         if !self.is_busy() && self.screen.can_cancel() {
             window.remove_window();

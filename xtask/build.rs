@@ -12,12 +12,9 @@ fn main() {
         if icon_path.exists() {
             res.set_icon(icon_path.to_str().unwrap());
         }
-        res.set(
-            "FileDescription",
-            "Cairn Engineering Automation Tool (xtask)",
-        );
+        res.set("FileDescription", "Cairn Engineering Automation Tool");
         res.set("ProductName", "Cairn");
-        res.set("OriginalFilename", "xtask.exe");
+        res.set("OriginalFilename", "CairnXtask.exe");
         res.set("LegalCopyright", "Copyright (c) 2026 Cairn Contributors");
         if let Err(e) = res.compile() {
             eprintln!("cargo:warning=Failed to compile Windows resource: {}", e);

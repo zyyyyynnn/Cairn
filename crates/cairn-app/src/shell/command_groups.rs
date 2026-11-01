@@ -166,8 +166,8 @@ pub enum GroupCommand {
     Submenu(&'static str, &'static [GroupCommand]),
     SetLanguage(&'static str),
     ToggleAutostart,
-    /// The single "搜索文件内容" switch. Turning it off pauses the content index and keeps what
-    /// is already indexed; turning it on resumes it.
+    /// The single "Search file contents" switch. Its label is stable; the checkmark carries the
+    /// enabled state, and the details row carries progress and readiness.
     ToggleContentSearch,
     /// The popup that carries the content-search facts and the two recovery actions. It is a
     /// command of its own, so the trigger and its rows share one hide/show decision (CNT-01).
@@ -183,6 +183,9 @@ pub enum GroupCommand {
     /// Removes the indexed contents without touching the file-name index.
     ClearContentSearch,
     // ---- help -----------------------------------------------------------------------
+    /// Opens the public release page in the default browser; the app never downloads or runs an
+    /// installer itself.
+    CheckForUpdates,
     About,
 }
 
@@ -238,6 +241,7 @@ impl GroupCommand {
             GroupCommand::ContentSearchUpdated => "menu_content_search_updated",
             GroupCommand::RetryContentSearch => "menu_content_search_retry",
             GroupCommand::ClearContentSearch => "menu_content_search_clear",
+            GroupCommand::CheckForUpdates => "menu_check_updates",
             GroupCommand::About => "menu_about",
         }
     }
@@ -446,7 +450,7 @@ pub static DEFAULT_GROUPS: &[MenuGroupSpec] = &[
     },
     MenuGroupSpec {
         group: MenuGroup::Help,
-        sections: &[&[GroupCommand::About]],
+        sections: &[&[GroupCommand::CheckForUpdates, GroupCommand::About]],
     },
 ];
 
@@ -516,6 +520,17 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The Help menu keeps the update entry and About in one group, update first.
+    #[test]
+    fn the_help_menu_offers_updates_before_about() {
+        let help = group_spec(MenuGroup::Help);
+        assert_eq!(help.sections.len(), 1);
+        assert_eq!(
+            help.sections[0],
+            &[GroupCommand::CheckForUpdates, GroupCommand::About][..]
+        );
     }
 
     /// The Tools menu offers the content-search switch and its details popup. The search-scope
@@ -639,6 +654,7 @@ mod tests {
                 | GroupCommand::RetryContentSearch
                 | GroupCommand::ClearContentSearch
                 | GroupCommand::EmptyRecycleBin
+                | GroupCommand::CheckForUpdates
                 | GroupCommand::About => {
                     assert!(
                         !has_action,

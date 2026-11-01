@@ -16,7 +16,7 @@ pub use cairn_ui::brand::{
     SERIF_LINE_HEIGHT, SMALL_TEXT_SIZE, UI_ICON_SIZE,
 };
 pub use cairn_ui::locale::system_prefers_dark;
-pub use cairn_ui::theme::{clamp_zoom, control_stroke, warning_ink};
+pub use cairn_ui::theme::{clamp_zoom, field_focus_stroke, field_stroke, warning_ink};
 
 use crate::shell::settings::AppSettings;
 
@@ -61,8 +61,9 @@ pub struct ShellTokens {
     pub status_bar: Hsla,
     pub table_head: Hsla,
     pub table_head_foreground: Hsla,
-    /// Editable and checkable control outlines, held at 3:1 against the page and muted surfaces.
-    pub control_stroke: Hsla,
+    /// Resting and active outlines for editable fields; the active step stays below `ring`.
+    pub field_stroke: Hsla,
+    pub field_focus_stroke: Hsla,
     pub skeleton: Hsla,
     // ---- ink ----------------------------------------------------------------------
     pub foreground: Hsla,
@@ -96,7 +97,8 @@ impl ShellTokens {
             status_bar: theme.status_bar,
             table_head: theme.table_head,
             table_head_foreground: theme.table_head_foreground,
-            control_stroke: control_stroke(theme),
+            field_stroke: field_stroke(theme),
+            field_focus_stroke: field_focus_stroke(theme),
             skeleton: theme.skeleton,
             foreground: theme.foreground,
             muted_foreground: theme.muted_foreground,

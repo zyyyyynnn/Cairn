@@ -5,12 +5,15 @@
 //! The installer window. One column, one decision per page, a fixed footer, and the same chrome
 //! and grayscale palette as the product it installs.
 
+use gpui_kit::base::Progress as BaseProgress;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Input;
-use gpui_kit::component::progress::Progress;
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Icon, IconName, Sizable as _};
 use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::*;
+use gpui_kit::gpui::{ease_in_out, Animation, AnimationExt};
+use std::f32::consts::TAU;
+use std::time::Duration;
 
 use cairn_ui::brand::{
     app_icon, cjk_heading_font, has_cjk, heading_text, serif_font, tabular_figures,
@@ -34,6 +37,14 @@ const PAGE_INSET: Pixels = px(12.0);
 const MAIN_GAP: Pixels = px(16.0);
 /// Inline tight group spacing (8 px) for related controls on the same row.
 const GROUP_GAP: Pixels = px(8.0);
+/// A thin continuous track; the project's frames stay on small radii, so this is not a capsule.
+const PROGRESS_TRACK_HEIGHT: Pixels = px(10.0);
+const PROGRESS_TRACK_RADIUS: Pixels = px(2.0);
+const PROGRESS_TRACK_BORDER: Pixels = px(0.5);
+/// A soft highlight travels across the completed portion. It is deliberately calm: motion
+/// explains that work is still running, without becoming a second loading indicator.
+const PROGRESS_SWEEP: Duration = Duration::from_millis(1800);
+const PROGRESS_INDETERMINATE_WIDTH: f32 = 0.28;
 const CARD_PAD: Pixels = px(12.0);
 /// Action bar height: 40 px, leaving 6 px around the 28 px medium buttons.
 const FOOTER_HEIGHT: Pixels = px(40.0);
@@ -98,6 +109,7 @@ struct Tokens {
     muted_foreground: Hsla,
     border: Hsla,
     control_stroke: Hsla,
+    input_stroke: Hsla,
     danger: Hsla,
     danger_fill: Hsla,
     danger_hover: Hsla,
@@ -127,6 +139,7 @@ impl Tokens {
             muted_foreground: theme.muted_foreground,
             border: theme.border,
             control_stroke: cairn_ui::theme::control_stroke(theme),
+            input_stroke: theme.input,
             danger: theme.danger,
             danger_fill: theme.tokens.button_danger.color,
             danger_hover: theme.tokens.button_danger_hover.color,
@@ -137,6 +150,74 @@ impl Tokens {
             ring: theme.ring,
         }
     }
+}
+
+fn progress_fraction(progress: f32) -> f32 {
+    (progress / 100.0).clamp(0.0, 1.0)
+}
+
+/// A slow brightness breath, not a travelling band: the fill stays solid and the progress
+/// surface never reads as a scanning line.
+fn progress_pulse(phase: f32) -> f32 {
+    0.82 + 0.18 * (0.5 - 0.5 * (phase * TAU).cos())
+}
+
+/// The track carries the value; the scan line or travelling segment carries the running-work
+/// motion. Neither changes layout. [`BaseProgress`] carries the role, label and numeric value for
+/// assistive technology.
+fn progress_bar(tokens: &Tokens, progress: Option<f32>, phase: f32) -> AnyElement {
+    let track = div()
+        .relative()
+        .w_full()
+        .h(PROGRESS_TRACK_HEIGHT)
+        .rounded(PROGRESS_TRACK_RADIUS)
+        .border(PROGRESS_TRACK_BORDER)
+        .border_color(tokens.border)
+        .bg(tokens.muted)
+        .overflow_hidden();
+    match progress {
+        Some(value) => {
+            let fill = div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left_0()
+                .w(relative(progress_fraction(value)))
+                .overflow_hidden()
+                .rounded(PROGRESS_TRACK_RADIUS)
+                .bg(tokens.foreground.opacity(progress_pulse(phase)));
+            track.child(fill).into_any_element()
+        }
+        None => {
+            let left = phase * (1.0 + PROGRESS_INDETERMINATE_WIDTH) - PROGRESS_INDETERMINATE_WIDTH;
+            track
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .left(relative(left))
+                        .w(relative(PROGRESS_INDETERMINATE_WIDTH))
+                        .rounded(PROGRESS_TRACK_RADIUS)
+                        .bg(tokens.foreground.opacity(progress_pulse(phase))),
+                )
+                .into_any_element()
+        }
+    }
+}
+
+fn progress_element(tokens: &Tokens, id: &'static str, progress: Option<f32>) -> AnyElement {
+    let tokens = *tokens;
+    div()
+        .w_full()
+        .with_animation(
+            id,
+            Animation::new(PROGRESS_SWEEP)
+                .with_easing(ease_in_out)
+                .repeat(),
+            move |track, phase| track.child(progress_bar(&tokens, progress, phase)),
+        )
+        .into_any_element()
 }
 
 #[derive(Clone, Copy)]
@@ -151,6 +232,7 @@ struct CaptionButton {
     label: String,
     icon: IconName,
     action: CaptionAction,
+    disabled: bool,
 }
 
 impl SetupApp {
@@ -166,12 +248,13 @@ impl SetupApp {
             label,
             icon,
             action,
+            disabled,
         } = button;
         let is_close = matches!(action, CaptionAction::Close);
         // The caption buttons are the window's only minimize and close, so they are Tab stops like
         // any other control: a handle passed to `track_focus` carries its own tab-stop flag.
         let focus = window
-            .use_keyed_state(id, cx, |_, cx| cx.focus_handle().tab_stop(true))
+            .use_keyed_state(id, cx, move |_, cx| cx.focus_handle().tab_stop(!disabled))
             .read(cx)
             .clone();
 
@@ -185,8 +268,12 @@ impl SetupApp {
             .h_full()
             .items_center()
             .justify_center()
-            .text_color(tokens.foreground)
-            .when(is_close, |this| {
+            .text_color(if disabled {
+                tokens.muted_foreground
+            } else {
+                tokens.foreground
+            })
+            .when(is_close && !disabled, |this| {
                 this.hover(|style| style.bg(tokens.danger).text_color(tokens.background))
                     .active(|style| style.bg(tokens.danger).text_color(tokens.background))
                     .on_click(cx.listener(|this, _, window, cx| {
@@ -365,23 +452,23 @@ impl SetupApp {
                     label: self.i18n.get("window_minimize"),
                     icon: IconName::WindowMinimize,
                     action: CaptionAction::Minimize,
+                    disabled: false,
                 },
                 tokens,
                 cx,
             ))
-            .when(!self.is_busy(), |this| {
-                this.child(self.caption_button(
-                    window,
-                    CaptionButton {
-                        id: "setup-close",
-                        label: self.i18n.get("window_close"),
-                        icon: IconName::WindowClose,
-                        action: CaptionAction::Close,
-                    },
-                    tokens,
-                    cx,
-                ))
-            })
+            .child(self.caption_button(
+                window,
+                CaptionButton {
+                    id: "setup-close",
+                    label: self.i18n.get("window_close"),
+                    icon: IconName::WindowClose,
+                    action: CaptionAction::Close,
+                    disabled: self.is_busy(),
+                },
+                tokens,
+                cx,
+            ))
     }
 
     fn render_body(
@@ -435,10 +522,10 @@ impl SetupApp {
             )
             .child(
                 Button::new("setup-view-license")
+                    .ghost()
                     .font_weight(FontWeight::MEDIUM)
                     .small()
                     .label(self.i18n.get("action_view_license"))
-                    .border_color(tokens.control_stroke)
                     .on_click(cx.listener(|this, _, _, cx| this.view_license(cx))),
             );
 
@@ -477,23 +564,18 @@ impl SetupApp {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let label = self.i18n.get("install_path_label");
         let path_error = self
             .path_error
             .map(|problem| self.i18n.get(problem.message_key()));
-        let accessible_label = path_accessible_label(&label, path_error.as_deref());
+        // The page heading already names the task; the path field reuses it as its accessible
+        // name instead of repeating a visible "Install folder" label under the heading.
+        let accessible_label =
+            path_accessible_label(&self.i18n.get("location_title"), path_error.as_deref());
         let path_focus = self.path_input.read(cx).focus_handle(cx);
         let path_focused = path_focus.is_focused(window);
         v_flex()
             .gap(MAIN_GAP)
             .child(self.heading("location_title"))
-            .child(
-                div()
-                    .text_sm()
-                    .line_height(relative(1.0))
-                    .text_color(tokens.muted_foreground)
-                    .child(label.clone()),
-            )
             // The path field and the sentence that explains it belong together: the error hangs
             // under the field it belongs to instead of taking a block of its own, so a message
             // that wraps to a second line still keeps the page inside the window's body.
@@ -507,16 +589,16 @@ impl SetupApp {
                                 div().flex_1().min_w_0().child(
                                     Input::new(&self.path_input)
                                         .aria_label(accessible_label)
-                                        // The Input's own focus style recolours the border with
-                                        // `theme.ring`, which is the resting stroke; the wrapper's
-                                        // foreground border below is the visible focus indicator.
+                                        // The field carries its own resting, focused and error
+                                        // strokes, so the component's focus border would paint a
+                                        // second frame on top of them.
                                         .focus_bordered(false)
                                         .border_color(if self.path_error.is_some() {
                                             tokens.danger
                                         } else if path_focused {
-                                            tokens.foreground
+                                            tokens.ring
                                         } else {
-                                            tokens.control_stroke
+                                            tokens.input_stroke
                                         })
                                         .w_full(),
                                 ),
@@ -525,7 +607,6 @@ impl SetupApp {
                                 Button::new("setup-browse")
                                     .font_weight(FontWeight::MEDIUM)
                                     .label(self.i18n.get("action_browse"))
-                                    .border_color(tokens.control_stroke)
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.browse(window, cx);
                                     })),
@@ -545,50 +626,69 @@ impl SetupApp {
             )
             .when(self.path_error.is_none(), |this| {
                 this.child(
-                    h_flex()
-                        .gap(GROUP_GAP)
+                    div()
                         .text_sm()
                         .text_color(tokens.muted_foreground)
-                        .child(self.i18n.get("install_scope"))
-                        .child("·")
-                        .child(self.i18n.get("install_space")),
+                        .child(self.i18n.get("install_summary")),
                 )
             })
             .into_any_element()
     }
 
-    fn render_installing(&self, tokens: &Tokens) -> AnyElement {
+    /// The progress page's shared body: current stage, percentage, and the dot matrix.
+    /// Setup and uninstall use the same block so their two long-running pages cannot drift.
+    fn progress_block(&self, tokens: &Tokens, id: &'static str, stage_label: String) -> AnyElement {
         let progress = visible_progress(self.progress);
+        let percent = self.progress.map(|_| {
+            self.i18n.format(
+                "progress_percent",
+                &[("percent", &format!("{progress:.0}"))],
+            )
+        });
+        v_flex()
+            .gap(GROUP_GAP)
+            .child(
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(tokens.muted_foreground)
+                            .child(stage_label.clone()),
+                    )
+                    .when_some(percent, |this, percent| {
+                        this.child(
+                            div()
+                                .text_sm()
+                                .line_height(relative(1.5))
+                                .text_color(tokens.muted_foreground)
+                                .font_features(tabular_figures())
+                                .child(percent),
+                        )
+                    }),
+            )
+            .child(
+                BaseProgress::new(id)
+                    .value(progress)
+                    .indeterminate(self.progress.is_none())
+                    .accessibility_label(stage_label)
+                    .w_full()
+                    .child(progress_element(tokens, id, self.progress)),
+            )
+            .into_any_element()
+    }
+
+    fn render_installing(&self, tokens: &Tokens) -> AnyElement {
         v_flex()
             .gap(MAIN_GAP)
             .child(self.heading("progress_title"))
-            .child(
-                v_flex()
-                    .gap(GROUP_GAP)
-                    .child(
-                        h_flex()
-                            .justify_between()
-                            .text_sm()
-                            .text_color(tokens.muted_foreground)
-                            .child(self.i18n.get(self.stage.message_key()))
-                            .child(div().font_features(tabular_figures()).child(
-                                if self.progress.is_some() {
-                                    self.i18n.format(
-                                        "progress_percent",
-                                        &[("percent", &format!("{progress:.0}"))],
-                                    )
-                                } else {
-                                    String::new()
-                                },
-                            )),
-                    )
-                    .child(
-                        Progress::new("setup-progress")
-                            .value(progress)
-                            .loading(self.progress.is_none())
-                            .accessibility_label(self.i18n.get(self.stage.message_key())),
-                    ),
-            )
+            .child(self.progress_block(
+                tokens,
+                "setup-progress",
+                self.i18n.get(self.stage.message_key()),
+            ))
             .into_any_element()
     }
 
@@ -730,38 +830,14 @@ impl SetupApp {
     }
 
     fn render_uninstalling(&self, tokens: &Tokens) -> AnyElement {
-        let progress = visible_progress(self.progress);
-        let working = self.i18n.get("uninstall_progress_working");
         v_flex()
             .gap(MAIN_GAP)
             .child(self.heading("uninstall_progress_title"))
-            .child(
-                v_flex()
-                    .gap(GROUP_GAP)
-                    .child(
-                        h_flex()
-                            .justify_between()
-                            .text_sm()
-                            .text_color(tokens.muted_foreground)
-                            .child(working.clone())
-                            .child(div().font_features(tabular_figures()).child(
-                                if self.progress.is_some() {
-                                    self.i18n.format(
-                                        "progress_percent",
-                                        &[("percent", &format!("{progress:.0}"))],
-                                    )
-                                } else {
-                                    String::new()
-                                },
-                            )),
-                    )
-                    .child(
-                        Progress::new("setup-uninstall-progress")
-                            .value(progress)
-                            .loading(self.progress.is_none())
-                            .accessibility_label(working),
-                    ),
-            )
+            .child(self.progress_block(
+                tokens,
+                "setup-uninstall-progress",
+                self.i18n.get("uninstall_progress_working"),
+            ))
             .into_any_element()
     }
 
@@ -780,6 +856,9 @@ impl SetupApp {
         v_flex()
             .gap(MAIN_GAP)
             .child(self.title_row(icon, title))
+            .when(!self.record_remaining, |this| {
+                this.child(self.paragraph("uninstall_done_body", tokens))
+            })
             .when(self.record_remaining, |this| {
                 this.child(self.paragraph("uninstall_record_remaining", tokens))
             })
@@ -821,14 +900,13 @@ impl SetupApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        // Only progress/status text stays on the leading edge. Every action, including the way
-        // out, is grouped at the trailing edge in reading order.
+        // Only progress/status text stays on the leading edge. Footer actions sit at the trailing
+        // edge; the title bar owns the window's close control, so no page repeats it as Cancel.
         let mut leading: Vec<AnyElement> = Vec::new();
         let mut actions: Vec<AnyElement> = Vec::new();
 
         match self.screen {
             Screen::License => {
-                actions.push(self.cancel_button(tokens, cx));
                 actions.push(
                     Button::new("setup-continue")
                         .font_weight(FontWeight::MEDIUM)
@@ -849,17 +927,11 @@ impl SetupApp {
                         .on_click(cx.listener(|this, _, _, cx| this.back(cx)))
                         .into_any_element(),
                 );
-                actions.push(self.cancel_button(tokens, cx));
-                let label = if self.installed.is_some() {
-                    "action_update"
-                } else {
-                    "action_install"
-                };
                 actions.push(
                     Button::new("setup-install")
                         .font_weight(FontWeight::MEDIUM)
                         .primary()
-                        .label(self.i18n.get(label))
+                        .label(self.i18n.get("action_install"))
                         .on_click(cx.listener(|this, _, window, cx| this.start_install(window, cx)))
                         .into_any_element(),
                 );
@@ -963,7 +1035,6 @@ impl SetupApp {
                 }
             }
             Screen::Uninstall => {
-                actions.push(self.cancel_button(tokens, cx));
                 actions.push(self.uninstall_button(tokens, window, cx));
             }
             Screen::Uninstalled => {
@@ -994,15 +1065,6 @@ impl SetupApp {
             .gap(GROUP_GAP)
             .child(h_flex().gap(GROUP_GAP).items_center().children(leading))
             .child(h_flex().gap(GROUP_GAP).items_center().children(actions))
-    }
-
-    fn cancel_button(&self, _tokens: &Tokens, cx: &mut Context<Self>) -> AnyElement {
-        Button::new("setup-cancel")
-            .font_weight(FontWeight::MEDIUM)
-            .ghost()
-            .label(self.i18n.get("action_cancel"))
-            .on_click(cx.listener(|this, _, window, cx| this.close_window(window, cx)))
-            .into_any_element()
     }
 
     fn log_button(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1223,17 +1285,25 @@ impl SetupApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{failure_offers_retry, path_accessible_label};
+    use super::{failure_offers_retry, path_accessible_label, progress_fraction};
+
+    #[test]
+    fn progress_fraction_clamps_to_the_track() {
+        assert_eq!(progress_fraction(0.0), 0.0);
+        assert!((progress_fraction(42.0) - 0.42).abs() < f32::EPSILON);
+        assert_eq!(progress_fraction(100.0), 1.0);
+        assert_eq!(progress_fraction(140.0), 1.0);
+    }
 
     #[test]
     fn the_path_label_carries_the_validation_message() {
         assert_eq!(
-            path_accessible_label("Install folder", None),
-            "Install folder"
+            path_accessible_label("Install location", None),
+            "Install location"
         );
         assert_eq!(
-            path_accessible_label("Install folder", Some("Enter a full local path.")),
-            "Install folder: Enter a full local path."
+            path_accessible_label("Install location", Some("Enter a full local path.")),
+            "Install location: Enter a full local path."
         );
     }
 

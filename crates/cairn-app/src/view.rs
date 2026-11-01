@@ -26,6 +26,7 @@ use gpui_kit::assets::IconName as AssetIconName;
 use gpui_kit::base::Disableable;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
+use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{
     h_flex, v_flex, Icon, IconName, InteractiveElementExt as _, Sizable as _,
 };
@@ -149,6 +150,8 @@ pub struct MenuEntry {
     pub hint: Option<Box<dyn Action>>,
     /// The nested menu a submenu row opens. The entity is built with the bar's menu.
     pub submenu: Option<Entity<PopupMenu>>,
+    /// `true` while an asynchronous command owns this row, so the row draws a loading icon.
+    pub loading: bool,
     /// `true` on the first row of a section after the first, where one separator belongs.
     pub separates: bool,
 }
@@ -168,7 +171,26 @@ pub fn build_menu(
             menu = menu.separator();
         }
         let label = entry.label.clone();
-        menu = if let Some(submenu) = entry.submenu.clone() {
+        menu = if entry.loading {
+            let row_label = label.clone();
+            let entity = view.clone();
+            let command = entry.command.expect("a loading row owns a command");
+            menu.item(
+                PopupMenuItem::element(move |_, _| {
+                    h_flex()
+                        .w_full()
+                        .flex_1()
+                        .items_center()
+                        .justify_between()
+                        .child(row_label.clone())
+                        .child(Spinner::new().icon(IconName::LoaderCircle).xsmall())
+                })
+                .disabled(entry.disabled)
+                .on_click(move |_, window, cx| {
+                    entity.update(cx, |this, cx| this.run_group_command(command, window, cx));
+                }),
+            )
+        } else if let Some(submenu) = entry.submenu.clone() {
             menu.item(PopupMenuItem::submenu(label, submenu).disabled(entry.disabled))
         } else {
             match (&entry.action, entry.command) {

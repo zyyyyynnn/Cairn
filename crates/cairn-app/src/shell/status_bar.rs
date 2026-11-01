@@ -165,6 +165,40 @@ mod tests {
     }
 
     #[test]
+    fn treemap_counts_use_the_locale_plural_rule() {
+        fn plain(text: String) -> String {
+            text.replace(['\u{2068}', '\u{2069}'], "")
+        }
+
+        let en = I18nManager::new("en-US");
+        let zh = I18nManager::new("zh-CN");
+        let mut args = FluentArgs::new();
+        args.set("count", 1i64);
+        args.set("size", "1 KB");
+        assert_eq!(
+            plain(en.get_text_with_args("treemap_aggregate", &args)),
+            "1 item"
+        );
+        assert_eq!(
+            plain(en.get_text_with_args("treemap_status_summary", &args)),
+            "1 item 1 KB"
+        );
+        assert_eq!(
+            plain(zh.get_text_with_args("treemap_aggregate", &args)),
+            "1 个项目"
+        );
+        args.set("count", 2i64);
+        assert_eq!(
+            plain(en.get_text_with_args("treemap_aggregate", &args)),
+            "2 items"
+        );
+        assert_eq!(
+            plain(zh.get_text_with_args("treemap_aggregate", &args)),
+            "2 个项目"
+        );
+    }
+
+    #[test]
     fn catching_up_names_the_state_without_a_frozen_percentage() {
         let i18n = I18nManager::default();
         let text = StatusBarModel::default()

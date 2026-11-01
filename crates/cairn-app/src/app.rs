@@ -122,12 +122,16 @@ pub mod layout {
     /// Widest an explanatory line runs before it wraps: long enough to read as one sentence, short
     /// enough that the message never decides the width of the region holding it.
     pub const MESSAGE_MAX_WIDTH: f32 = 154.0 * STEP; // 616px
-    /// A confirmation asks one short question. 384px at 100% keeps a filename and its explanation
-    /// readable without the half-empty surface the framework's 448px default leaves behind.
-    pub const CONFIRMATION_WIDTH: f32 = 96.0 * STEP; // 384px
-    /// Estimated height used only to seat a short confirmation before GPUI has laid it out. It is a
-    /// rem value so the seat scales with interface zoom instead of drifting at 90/110%.
-    pub const CONFIRMATION_ESTIMATED_HEIGHT: f32 = 150.0 / theme::BASE_FONT_PX; // ~150px at 100%
+    /// The serif sentence's ink centre sits 1.5px below its flex line box at this heading step.
+    /// The state action uses it to keep its 24px icon on the sentence's optical centre; it is a
+    /// correction, not a ladder distance.
+    pub const STATE_ACTION_OPTICAL_OFFSET: f32 = 1.5 / theme::BASE_FONT_PX;
+    /// One dialog surface for every alert: 384px wide at 100%, keeping a filename and its
+    /// explanation readable without the half-empty framework default.
+    pub const DIALOG_WIDTH: f32 = 96.0 * STEP; // 384px
+    /// Where a compact alert is seated in the window before layout. The surface itself grows with
+    /// its copy instead of reserving a fixed height; the viewport cap scrolls a very long body.
+    pub const DIALOG_SEAT_HEIGHT: f32 = 32.0 * STEP; // 128px
 
     // ---- panes ---------------------------------------------------------------------
     /// The sidebar keeps its previous rendered width on the 4px ladder: 208px and 152px at 100%.
@@ -376,6 +380,9 @@ pub struct CairnApp {
     /// The app-owned transient status surface. One at a time; errors persist.
     pub toast: Option<crate::shell::toast::ToastState>,
     pub(crate) toast_serial: u64,
+    /// True while the GitHub release check is in flight. The Help menu trigger carries the
+    /// loading icon; no separate waiting dialog is opened.
+    pub(crate) is_checking_update: bool,
 }
 
 impl CairnApp {
@@ -505,8 +512,10 @@ impl CairnApp {
             delete_in_flight: false,
             toast: None,
             toast_serial: 0,
+            is_checking_update: false,
         };
         window.focus(&app.query.search_focus, cx);
+        app.consume_update_notice(cx);
         app.check_service_connection(cx);
         app
     }

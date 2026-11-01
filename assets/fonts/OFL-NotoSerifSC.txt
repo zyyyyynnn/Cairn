@@ -1,5 +1,5 @@
 Copyright © 2017-2023 Adobe (http://www.adobe.com/).
-Cairn CJK Serif is a renamed subset of Noto Serif SC / Source Han Serif, used for Chinese headings.
+Noto Serif SC is a common-character subset of the official Noto Serif SC / Source Han Serif release, used for Chinese headings.
 
 This Font Software is licensed under the SIL Open Font License, Version 1.1.
 This license is copied below, and is also available with a FAQ at:

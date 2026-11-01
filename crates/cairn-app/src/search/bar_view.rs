@@ -91,9 +91,9 @@ impl CairnApp {
             })
             .border_1()
             .border_color(if is_focused {
-                tokens.ring
+                tokens.field_focus_stroke
             } else {
-                tokens.control_stroke
+                tokens.field_stroke
             })
             .text_color(tokens.foreground)
             .cursor(CursorStyle::IBeam)

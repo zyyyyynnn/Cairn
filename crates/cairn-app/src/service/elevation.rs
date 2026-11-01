@@ -10,7 +10,7 @@
 //! of them. Every elevated command therefore goes through this one function, so the UAC prompt,
 //! the wait and the exit-code reading behave identically every time.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[cfg(windows)]
 use crate::win32::{to_wide_literal, win32_code_from_hresult, WIN32_ERROR_USER_CANCELLED};
@@ -130,6 +130,62 @@ pub fn run_elevated(_program: &str, _parameters: &str) -> Result<u32, ElevationE
     Err(ElevationError::Failed {
         os_error: None,
         message: "elevating a command is only available on Windows".to_string(),
+    })
+}
+
+/// Starts a downloaded Cairn installer with the silent, restart-on-finish contract. The caller
+/// exits after this returns `Ok`; the installer launches the installed app when its transaction
+/// succeeds or fails, and the pending-version marker tells the next app launch which happened.
+#[cfg(windows)]
+pub fn launch_elevated_installer(installer: &Path) -> Result<(), ElevationError> {
+    use windows::core::PCWSTR;
+    use windows::Win32::UI::Shell::{ShellExecuteExW, SHELLEXECUTEINFOW};
+    use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
+
+    if !installer.is_file() {
+        return Err(ElevationError::Failed {
+            os_error: None,
+            message: format!(
+                "the downloaded installer is missing: {}",
+                installer.display()
+            ),
+        });
+    }
+
+    let wide_file = to_wide_literal(&installer.to_string_lossy());
+    let wide_parameters = to_wide_literal("/quiet /restart-app");
+    let wide_verb = to_wide_literal("runas");
+    let mut exec_info = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: 0,
+        hwnd: windows::Win32::Foundation::HWND(std::ptr::null_mut()),
+        lpVerb: PCWSTR(wide_verb.as_ptr()),
+        lpFile: PCWSTR(wide_file.as_ptr()),
+        lpParameters: PCWSTR(wide_parameters.as_ptr()),
+        lpDirectory: PCWSTR(std::ptr::null()),
+        nShow: SW_HIDE.0,
+        ..Default::default()
+    };
+
+    // SAFETY: every PCWSTR points at a live null-terminated buffer for the duration of the call.
+    if let Err(err) = unsafe { ShellExecuteExW(&mut exec_info) } {
+        let os_error = win32_code_from_hresult(err.code().0);
+        if os_error == Some(WIN32_ERROR_USER_CANCELLED) {
+            return Err(ElevationError::Cancelled);
+        }
+        return Err(ElevationError::Failed {
+            os_error,
+            message: err.message(),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn launch_elevated_installer(_installer: &Path) -> Result<(), ElevationError> {
+    Err(ElevationError::Failed {
+        os_error: None,
+        message: "starting the installer is only available on Windows".to_string(),
     })
 }
 

@@ -10,7 +10,7 @@ use crate::search::filters::FilterCategory;
 use crate::service::ipc_tasks::get_tokio_runtime;
 use crate::shell::accessibility;
 use crate::shell::os::{open_file, open_folder_and_select, show_properties_dialog};
-use crate::shell::state_view::render_state_band;
+use crate::shell::state_view::{icon_action, render_state_band};
 use crate::shell::theme::{self, ShellTokens};
 use crate::treemap::navigation::path_segments;
 use crate::treemap::paint::{
@@ -30,7 +30,6 @@ use cairn_protocol::message::ResponsePayload;
 use fluent_bundle::FluentArgs;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::StyledExt;
-use gpui_kit::component::button::Button;
 use gpui_kit::component::input::Input;
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::tooltip::Tooltip;
@@ -507,9 +506,15 @@ impl CairnApp {
                 let key_view = view.clone();
                 let click_focus = focus.clone();
                 let crumb_control = accessibility::control("treemap-crumb");
+                let mut crumb_args = FluentArgs::new();
+                crumb_args.set("label", label.as_str());
+                crumb_args.set("path", path.as_str());
+                let crumb_label = self
+                    .i18n
+                    .get_text_with_args("treemap_crumb_label", &crumb_args);
                 breadcrumb = breadcrumb.child(
                     accessibility::element_at_key(crumb_control, &path)
-                        .aria_label(format!("{label}, {path}"))
+                        .aria_label(crumb_label)
                         .relative()
                         .flex_shrink(1.0)
                         .min_w_0()
@@ -578,9 +583,9 @@ impl CairnApp {
                     .border_color(if error {
                         tokens.danger
                     } else if editing {
-                        tokens.ring
+                        tokens.field_focus_stroke
                     } else {
-                        tokens.control_stroke
+                        tokens.field_stroke
                     })
                     .text_color(tokens.foreground)
                     .cursor(CursorStyle::IBeam)
@@ -786,30 +791,25 @@ impl CairnApp {
                     .text_color(tokens.muted_foreground)
                     .into_any_element(),
             };
-            let action = unavailable
-                .is_some_and(TreemapUnavailable::retryable)
-                .then(|| {
-                    let retry = accessibility::control("treemap-retry");
-                    let label = accessibility::name(retry, &self.i18n);
-                    Button::new(retry.element)
-                        .font_weight(FontWeight::MEDIUM)
-                        .label(label.clone())
-                        .accessibility_label(label)
-                        .small()
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            if let Some(dir) = this
-                                .treemap_state
-                                .as_ref()
-                                .map(|state| state.current_dir().to_string())
-                            {
-                                this.start_treemap_scan(PathBuf::from(dir), cx);
-                                if let Some(state) = this.treemap_state.as_ref() {
-                                    state.request_focus(window, cx);
-                                }
+            let retryable = unavailable.is_some_and(TreemapUnavailable::retryable);
+            let action = retryable.then(|| {
+                let retry = accessibility::control("treemap-retry");
+                let label = accessibility::name(retry, &self.i18n);
+                icon_action(retry.element, IconName::RotateCcw, label)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        if let Some(dir) = this
+                            .treemap_state
+                            .as_ref()
+                            .map(|state| state.current_dir().to_string())
+                        {
+                            this.start_treemap_scan(PathBuf::from(dir), cx);
+                            if let Some(state) = this.treemap_state.as_ref() {
+                                state.request_focus(window, cx);
                             }
-                        }))
-                        .into_any_element()
-                });
+                        }
+                    }))
+                    .into_any_element()
+            });
             render_state_band(tokens, control, message, icon, action).into_any_element()
         } else {
             let mut block_elements = Vec::with_capacity(state.layout_nodes.len() * 4);

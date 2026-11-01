@@ -46,14 +46,14 @@ pub const HAIRLINE: gpui_kit::gpui::Pixels = gpui_kit::gpui::px(1.0);
 /// Designated Western serif family for brand mark and Latin headings.
 pub const SERIF_FONT_FAMILY_WESTERN: &str = "Cormorant";
 /// Embedded CJK serif for Chinese headings, a common-character subset of Noto Serif SC.
-pub const SERIF_FONT_FAMILY_CJK: &str = "Cairn CJK Serif";
+pub const SERIF_FONT_FAMILY_CJK: &str = "Noto Serif SC";
 /// The platform system fallback covers any glyph the embedded subset does not contain.
 pub const SERIF_FONT_FALLBACK_SYSTEM: &str = ".SystemUIFont";
 
 /// Embedded OpenType files from the official Cormorant v4.002 release.
 const CORMORANT_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/Cormorant-Regular.otf");
 const CORMORANT_SEMIBOLD: &[u8] = include_bytes!("../../../assets/fonts/Cormorant-SemiBold.otf");
-const CJK_SERIF_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/CairnSerifCJK-Regular.ttf");
+const CJK_SERIF_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/NotoSerifSC-Regular.ttf");
 
 /// Registers the embedded serif faces with GPUI's text system: Cormorant Regular and
 /// SemiBold, plus the common-character CJK subset.
@@ -132,6 +132,25 @@ pub fn serif_font(weight: FontWeight) -> Font {
         fallbacks: config.fallbacks.clone(),
         weight,
         style: Default::default(),
+    }
+}
+
+/// Font runs for a heading. The caller shapes these runs as one line, so Latin, CJK and digits
+/// share a baseline.
+pub fn heading_runs(text: &str, latin_weight: FontWeight) -> Vec<(usize, Font)> {
+    let mut runs = Vec::new();
+    push_heading_runs(&mut runs, text, latin_weight);
+    runs
+}
+
+fn push_heading_runs(runs: &mut Vec<(usize, Font)>, text: &str, latin_weight: FontWeight) {
+    for (cjk, part) in split_scripts(text) {
+        let font = if cjk {
+            cjk_heading_font()
+        } else {
+            serif_font(latin_weight)
+        };
+        runs.push((part.len(), font));
     }
 }
 

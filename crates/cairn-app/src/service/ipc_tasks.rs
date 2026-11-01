@@ -440,12 +440,19 @@ impl CairnApp {
                         {
                             this.service.content_status = status;
                         } else {
+                            tracing::warn!(
+                                "content index status: the service answered with a different payload"
+                            );
                             this.service.content_status_error =
                                 Some("the service answered with a different payload".to_string());
                         }
                     }
-                    Ok(Err(err)) => this.service.content_status_error = Some(err.to_string()),
+                    Ok(Err(err)) => {
+                        tracing::warn!("content index status read failed: {err}");
+                        this.service.content_status_error = Some(err.to_string());
+                    }
                     Err(panic) => {
+                        tracing::warn!("content index status task stopped: {panic}");
                         this.service.content_status_error =
                             Some(format!("the content-index status task stopped: {panic}"));
                     }
@@ -543,8 +550,12 @@ impl CairnApp {
                         this.service.content_action_error = None;
                         this.refresh_content_status(cx);
                     }
-                    Ok(Err(err)) => this.service.content_action_error = Some(err),
+                    Ok(Err(err)) => {
+                        tracing::warn!("content index action failed: {err}");
+                        this.service.content_action_error = Some(err);
+                    }
                     Err(panic) => {
+                        tracing::warn!("content index action task stopped: {panic}");
                         this.service.content_action_error =
                             Some(format!("the content-index action task stopped: {panic}"));
                     }

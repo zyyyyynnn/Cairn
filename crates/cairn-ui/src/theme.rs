@@ -32,6 +32,14 @@ const RING_CONTRAST_FLOOR: f32 = 3.0;
 /// The floor for a control's own boundary against the page (WCAG 1.4.11).
 const CONTROL_CONTRAST_FLOOR: f32 = 3.0;
 
+/// The resting outline of an editable field. It carries the field's boundary without the weight
+/// of the focus ring, which stays at [`RING_CONTRAST_FLOOR`].
+const FIELD_STROKE_CONTRAST_FLOOR: f32 = 1.8;
+
+/// The active outline of an editable field. It steps above the resting outline, below the focus
+/// ring; the field's own fill and caret carry the rest of the focus state.
+const FIELD_FOCUS_CONTRAST_FLOOR: f32 = 2.2;
+
 /// A neutral stroke for form-control boundaries that clears 3:1 against the page.
 /// Structural hairlines keep the lighter `border` token; only the outline of an editable
 /// or checkable control uses this role.
@@ -40,6 +48,25 @@ pub fn control_stroke(theme: &Theme) -> Hsla {
         theme.border,
         &[theme.background, theme.muted, theme.title_bar],
         CONTROL_CONTRAST_FLOOR,
+    )
+}
+
+/// The resting outline of an editable field. It sits above the field's own well and the band it
+/// rests on, and below the focus ring that replaces it while the field is active.
+pub fn field_stroke(theme: &Theme) -> Hsla {
+    enforce_contrast_floor(
+        theme.input,
+        &[theme.muted, theme.title_bar],
+        FIELD_STROKE_CONTRAST_FLOOR,
+    )
+}
+
+/// The active outline of an editable field, one step above [`field_stroke`].
+pub fn field_focus_stroke(theme: &Theme) -> Hsla {
+    enforce_contrast_floor(
+        field_stroke(theme),
+        &[theme.background, theme.muted, theme.title_bar],
+        FIELD_FOCUS_CONTRAST_FLOOR,
     )
 }
 
@@ -727,6 +754,45 @@ mod tests {
             assert!(
                 ratio >= 3.0,
                 "{mode:?} control stroke contrast {ratio} is below 3:1"
+            );
+        }
+    }
+
+    #[test]
+    fn field_strokes_step_from_their_well_to_the_focus_ring() {
+        for dark in [false, true] {
+            let theme = product_theme(dark);
+            let resting = super::field_stroke(&theme);
+            let active = super::field_focus_stroke(&theme);
+            let contrast = |stroke| {
+                [theme.muted, theme.title_bar]
+                    .into_iter()
+                    .map(|surface| contrast_ratio(stroke, surface))
+                    .fold(f32::INFINITY, f32::min)
+            };
+            assert!(
+                contrast(resting) >= super::FIELD_STROKE_CONTRAST_FLOOR,
+                "{dark:?} resting field contrast {} is below its floor",
+                contrast(resting)
+            );
+            assert!(
+                contrast(active) >= super::FIELD_FOCUS_CONTRAST_FLOOR,
+                "{dark:?} active field contrast {} is below its floor",
+                contrast(active)
+            );
+            assert!(
+                contrast(active) < super::RING_CONTRAST_FLOOR,
+                "{dark:?} active field contrast {} competes with the focus ring",
+                contrast(active)
+            );
+            let steps_toward_the_ring = if dark {
+                resting.l > theme.input.l && active.l > resting.l
+            } else {
+                resting.l < theme.input.l && active.l < resting.l
+            };
+            assert!(
+                steps_toward_the_ring,
+                "{dark:?} field outlines must step from input toward the ring"
             );
         }
     }

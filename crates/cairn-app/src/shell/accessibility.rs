@@ -474,6 +474,21 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         named_by: "",
         requirement: "UI-01, DSV-08",
     },
+    // A content query that cannot run offers one state-specific recovery: turn the feature on,
+    // rebuild the index, or re-read the status. Only one label is live at a time.
+    KeyControl {
+        key: "content-search-action",
+        element: "content-search-action",
+        indexed: false,
+        role: Role::Button,
+        messages: &[
+            "index_enable_action",
+            "menu_content_search_retry",
+            "index_status_retry",
+        ],
+        named_by: "",
+        requirement: "CNT-01, UI-01",
+    },
     // The Treemap canvas shows the same centred state band as the table: one
     // sentence for an empty folder or an unavailable tree. The breadcrumb
     // ancestors are one repeated button family, named by their path segment.
@@ -948,6 +963,7 @@ mod tests {
             ("result-row", Role::ListItem),
             ("result-placeholder", Role::ListItem),
             ("result-state", Role::Status),
+            ("content-search-action", Role::Button),
             ("status-bar", Role::Status),
             ("toast", Role::Alert),
             ("toast-dismiss", Role::Button),

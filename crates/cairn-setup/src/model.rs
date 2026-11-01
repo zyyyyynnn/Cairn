@@ -30,6 +30,15 @@ pub enum Screen {
     Uninstalled,
 }
 
+impl Screen {
+    /// Whether Escape may leave this page. The pages that are running the MSI may not: closing
+    /// the window mid-transaction would leave the machine half-installed. The title-bar X uses
+    /// the same busy guard; this method keeps the keyboard path aligned with it.
+    pub fn can_cancel(self) -> bool {
+        !matches!(self, Screen::Installing | Screen::Uninstalling)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stage {
     RemovingOld,
@@ -37,14 +46,6 @@ pub enum Stage {
     Copying,
     Service,
     Finishing,
-}
-
-impl Screen {
-    /// Whether this page offers a Cancel action. The pages that are running the MSI do not:
-    /// closing the window mid-transaction would leave the machine half-installed.
-    pub fn can_cancel(self) -> bool {
-        !matches!(self, Screen::Installing | Screen::Uninstalling)
-    }
 }
 
 impl Stage {

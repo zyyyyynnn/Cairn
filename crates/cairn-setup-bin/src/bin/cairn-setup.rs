@@ -12,7 +12,8 @@ fn main() {
         return;
     }
     if args.iter().any(|arg| is_quiet(arg)) {
-        std::process::exit(cairn_setup::quiet::quiet_setup());
+        let restart_app = args.iter().any(|arg| is_restart_app(arg));
+        std::process::exit(cairn_setup::quiet::quiet_setup(restart_app));
     }
     cairn_setup::run::run_setup();
 }
@@ -21,5 +22,12 @@ fn is_quiet(arg: &str) -> bool {
     matches!(
         arg.to_ascii_lowercase().as_str(),
         "--quiet" | "/quiet" | "-quiet" | "/s" | "-s"
+    )
+}
+
+fn is_restart_app(arg: &str) -> bool {
+    matches!(
+        arg.to_ascii_lowercase().as_str(),
+        "--restart-app" | "/restart-app" | "-restart-app"
     )
 }

@@ -288,10 +288,14 @@ fn temp_path(suffix: &str) -> PathBuf {
     ))
 }
 
-/// Administrator-owned staging root for the extracted MSI and cleanup helper. A user-writable
-/// `%TEMP%` would let a standard user replace the file between extraction and elevated use.
+/// Administrator-owned staging root for the extracted MSI, logs and cleanup helper. A user-writable
+/// `%TEMP%` would let a standard user replace the file between extraction and elevated use. It lives
+/// under ProgramData so setup never appears as a second product directory under Program Files.
 fn staging_root() -> std::io::Result<PathBuf> {
-    let root = crate::model::program_files_root().join("CairnSetup");
+    let root = std::env::var_os("ProgramData")
+        .map(PathBuf::from)
+        .unwrap_or_else(crate::model::program_files_root)
+        .join("CairnSetup");
     if std::fs::create_dir_all(&root).is_ok() {
         sweep_stale_staging(&root);
         return Ok(root);

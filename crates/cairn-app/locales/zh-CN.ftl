@@ -1,8 +1,9 @@
 # Cairn 简体中文界面资源
 #
 # 文案按界面语言规则书写，不做逐词翻译：目的地用名词、命令用动词、状态用形容词。
-# 短控件标签不加句末标点；完整说明与错误句子加句末标点。`…` 只用于"会打开对话框或需要
-# 更多输入"的命令。快捷键写在键表与 AccessKit 的 keyshortcuts 里，不写进标签文字。
+# 短控件标签与单行状态标题不加句末标点；说明句与安装器正文加句末标点。`…` 只用于
+# “会打开对话框或需要更多输入”的命令，以及输入占位符。快捷键写在键表与 AccessKit 的
+# keyshortcuts 里，不写进标签文字。
 
 # 顶栏只写品牌名，产品职责由窗口本身说明。
 app_title = Cairn
@@ -29,7 +30,7 @@ result_table_label = 结果表
 
 toggle_case_label = 区分大小写
 toggle_whole_word_label = 全字匹配
-toggle_match_path_label = 匹配位置
+toggle_match_path_label = 匹配路径
 toggle_regex_label = 正则表达式
 
 filter_all = 所有文件
@@ -62,7 +63,7 @@ sort_reverse = 反向排序
 status_objects_count = { $count } 个项目
 status_objects_summary = { $count } 个项目 { $size }
 
-volume_capsule = { $drive }: { $state }
+volume_capsule = { $drive }：{ $state }
 volume_state_synced = 已同步
 volume_state_catching_up = 同步中 { $percent }%
 volume_state_catching_up_pending = 同步中
@@ -102,12 +103,12 @@ recycle_bin_empty_confirm_description = 回收站中的所有项目都将永久�
 recycle_bin_empty_confirm_action = 清空回收站
 delete_failed_title = 无法删除所选项目
 
-service_not_running_title = 后台服务未运行
-service_not_installed_title = 后台服务未安装，请重新运行安装程序
-service_incompatible_title = 后台服务版本不兼容，请重新安装 Cairn
-service_unauthorized_title = 当前账户无权使用后台服务，请改用授权账户
+service_not_running_title = 后台服务未运行，文件索引和内容搜索暂不可用
+service_not_installed_title = 后台服务未安装，重新运行安装程序
+service_incompatible_title = 后台服务版本不兼容，重新安装 Cairn
+service_unauthorized_title = 当前账户无权使用后台服务，改用授权账户
 # 故障说明都承诺"再试一次"，所以承诺要有一个指针和键盘都能按的按钮。
-service_probe_label = 正在连接后台服务…
+service_probe_label = 正在连接后台服务
 service_retry_button = 重试连接
 # 启动服务是唯一的运行期提权动作，只在用户点击这个明确按钮时发生。
 service_start_button = 启动后台服务
@@ -130,10 +131,38 @@ settings_zoom_relaxed = 宽松
 settings_autostart = 开机自启
 menu_sort = 排序
 menu_startup = 启动
+menu_check_updates = 检查更新
+update_up_to_date_title = Cairn 已是最新版本
+update_up_to_date_body = 当前最新版本为 { $version }。
+update_no_releases_body = 尚无已发布的更新。
+update_available_title = Cairn 有可用更新
+update_available_body = 新版本 { $version }，当前版本为 { $current }。安装完成后 Cairn 会重启。
+update_download_action = 下载并安装
+update_later = 稍后
+update_check_failed_title = 无法检查更新
+update_check_failed_body = 检查网络连接后重试。
+update_incomplete_title = 更新包不完整
+update_incomplete_body = 发布中缺少安装包或校验文件。稍后重试。
+update_retry = 重试
+update_close = 关闭
+update_installing_title = 正在更新 Cairn
+update_installing_body = 正在下载、校验并安装更新。完成后 Cairn 会重启。
+update_verify_failed_title = 无法校验更新
+update_verify_failed_body = 下载的安装包与校验值不符。重试。
+update_download_failed_title = 无法下载更新
+update_download_failed_body = 检查网络连接后重试。
+update_cancelled_title = 更新已取消
+update_cancelled_body = Cairn 未被更改。
+update_install_failed_title = 无法启动更新
+update_install_failed_body = 重试。
+update_success_title = Cairn 已更新
+update_success_body = 已安装版本 { $version }。
+update_interrupted_title = 更新未完成
+update_interrupted_body = 打开“帮助 > 检查更新”重试。
 menu_about = 关于 Cairn
 menu_about_body = 高性能 Windows 文件搜索
 index_clear = 清空内容索引？
-index_clear_description = 已建立的正文索引会被删除，需要重新回填才能再次检索。
+index_clear_description = 内容索引会被删除，必须重新建立后才能再次搜索内容。
 index_clear_confirm_action = 清空
 index_clear_cancel = 取消
 
@@ -146,13 +175,13 @@ window_maximize = 最大化
 window_restore = 还原
 window_close = 关闭
 
-empty_index_empty_title = 索引为空，请确认后台服务已完成扫描
+empty_index_empty_title = 索引为空，确认后台服务已完成扫描
 recycle_bin_empty_title = 回收站为空，删除的文件会先到这里
 recycle_bin_no_matches_title = 回收站中没有匹配的项目，清空搜索查看全部
 recycle_bin_restore_failed = 无法还原所选项目
 recycle_bin_delete_failed = 无法永久删除所选项目
 recycle_bin_empty_failed = 无法清空回收站
-recycle_bin_unavailable_title = 无法读取回收站，请重试
+recycle_bin_unavailable_title = 无法读取回收站，检查访问权限后重试
 recycle_bin_retry = 重试
 status_recycle_bin_unavailable = 回收站不可用
 status_loading = 正在加载
@@ -160,25 +189,27 @@ status_refreshing = 正在刷新
 status_refresh = 刷新
 toast_status = 通知
 toast_dismiss = 关闭通知
-bin_error_access_denied = 拒绝访问
-bin_error_read_only = 原位置为只读
-bin_error_conflict = 原位置已有同名项目
-bin_error_missing_item = 项目已不在回收站中
-bin_error_original_location = 原位置不可用
-bin_error_path_too_long = 原位置路径过长
-bin_error_path_too_deep = 原位置层级过深
-bin_error_no_items = 没有可操作的项目
-bin_error_generic = Windows 未能完成操作
-bin_error_items = { $reason }：{ $items }
-bin_error_more_items = 还有 { $count } 个项目
+toast_retry = 重试
+toast_accessible_name = { $title }。{ $message }
+bin_error_access_denied = 拒绝访问；检查项目权限后重试
+bin_error_read_only = 原位置为只读；清除只读属性后重试
+bin_error_conflict = 原位置已有同名项目；重命名或移除后重试
+bin_error_missing_item = 项目已不在回收站中；刷新列表
+bin_error_original_location = 原位置不可用；重新连接驱动器后重试
+bin_error_path_too_long = 原位置路径过长；缩短原位置路径后重试
+bin_error_path_too_deep = 原位置层级过深；缩短原位置路径后重试
+bin_error_no_items = 没有可操作的项目；刷新列表后重试
+bin_error_generic = Windows 未能完成操作；查看日志后重试
+bin_error_items = { $items }：{ $reason }
+bin_error_more_items = ，还有 { $count } 个项目
 bin_list_separator = 、
-empty_no_matches = 没有匹配的文件或文件夹，请尝试其他关键词或路径
-empty_content_loading_title = 正在读取内容索引状态
-empty_content_disabled_title = 内容索引未启用，请在工具菜单开启
-empty_content_backfilling_title = 内容索引正在回填，完成前不能搜索正文
-empty_content_error_title = 内容索引不可用，请在工具菜单重试
-empty_content_unreadable_title = 无法读取内容索引状态，请在工具菜单重试
-result_content_match = 正文
+empty_no_matches = 没有匹配的文件或文件夹，尝试其他关键词或路径
+empty_content_loading_title = 正在读取内容搜索状态
+empty_content_disabled_title = 内容搜索未开启，开启后可搜索文件正文
+empty_content_backfilling_title = 正在建立内容索引；完成后才能搜索内容
+empty_content_error_title = 内容搜索不可用，文件名搜索仍可使用
+empty_content_unreadable_title = 内容搜索状态不可用，重新读取后再试
+result_content_match = 内容
 row_loading = 正在加载该段结果
 row_not_loaded = 尚未加载的结果
 
@@ -190,15 +221,16 @@ treemap_retry = 重试
 treemap_path_placeholder = C:\Users
 treemap_path_label = 路径
 treemap_path_clear = 清除路径
+treemap_crumb_label = 转到 { $label }（{ $path }）
 treemap_path_invalid_title = 路径格式无法识别
-treemap_path_invalid_hint = 请输入驱动器绝对路径，或相对当前目录的路径。
-treemap_unavailable_service = 无法连接后台服务，请重试
-treemap_unavailable_too_large = 目录过大，无法在 Treemap 中展开；请进入子目录或上一级
-treemap_unavailable_not_directory = 该路径是文件，不是文件夹；请进入文件夹或上一级
-treemap_unavailable_not_indexed = 此路径不在索引中；请检查路径，或稍后重试
+treemap_path_invalid_hint = 输入驱动器绝对路径，或相对当前文件夹的路径。
+treemap_unavailable_service = 无法连接后台服务
+treemap_unavailable_too_large = 文件夹过大，无法在 Treemap 中展开；打开子文件夹或上一级
+treemap_unavailable_not_directory = 该路径是文件，不是文件夹；打开文件夹或上一级
+treemap_unavailable_not_indexed = 此路径不在索引中；检查路径，或稍后重试
 treemap_empty_directory = 此文件夹为空
-treemap_aggregate = { $count } 项
-treemap_status_selected = { $name } · { $path } · { $size } ({ $percent }%) · { $date }
+treemap_aggregate = { $count } 个项目
+treemap_status_selected = { $name }，{ $path }，{ $size }（{ $percent }%），{ $date }
 treemap_status_summary = { $count } 个项目 { $size }
 treemap_zoom_reset = 重置图表缩放
 treemap_zoom_reset_tooltip = 重置图表缩放（当前 { $percent }%）
@@ -216,22 +248,20 @@ treemap_category_other = 其他
 treemap_filter_hide = 隐藏“{ $category }”类别
 treemap_filter_show = 显示“{ $category }”类别
 menu_content_search = 搜索文件内容
-menu_content_search_enable = 搜索文件内容
-menu_content_search_disable = 停止搜索文件内容
 menu_content_search_details = 内容搜索详情
-menu_content_search_off = 未开启内容搜索
-menu_content_search_loading = 正在读取内容索引状态…
-menu_content_search_unavailable = 无法读取内容索引状态
-menu_content_search_unavailable_reason = 无法读取内容索引状态：{ $reason }
+menu_content_search_state = 内容搜索状态
+menu_content_search_off = 内容搜索未开启
+menu_content_search_loading = 正在读取内容搜索状态
+menu_content_search_unavailable = 内容搜索状态不可用
 menu_content_search_backfilling = 正在建立内容索引 { $processed } / { $total }
 menu_content_search_ready = 内容索引已就绪
 menu_content_search_failed = 内容索引失败
-menu_content_search_failed_reason = 内容索引失败：{ $reason }
 menu_content_search_retry = 重建内容索引
 menu_content_search_clear = 清空内容索引…
-menu_content_search_state = 内容搜索状态
+index_enable_action = 开启内容搜索
+index_status_retry = 重试
 menu_content_search_usage = 占用：{ $size }
 menu_content_search_updated = 最近更新：{ $time }
 menu_content_search_usage_unknown = 占用：未知
 menu_content_search_never_updated = 最近更新：尚无记录
-empty_content_scope_line = 没有匹配的文件或文件夹；正文搜索会跳过系统与开发工具目录
+empty_content_scope_line = 没有匹配的文件或文件夹；内容搜索会跳过系统与开发工具文件夹

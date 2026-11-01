@@ -84,7 +84,6 @@ mod tests {
                 "license_title",
                 "location_title",
                 "action_install",
-                "action_cancel",
                 "uninstall_title",
                 "uninstall_files_removed_title",
                 "uninstall_record_remaining",

@@ -15,7 +15,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "xtask", about = "Cairn engineering automation tasks")]
+#[command(name = "CairnXtask", about = "Cairn engineering automation tasks")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,

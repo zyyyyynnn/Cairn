@@ -10,7 +10,7 @@ use crate::shell::accessibility::{self, ControlElement};
 use crate::shell::command_groups::GroupCommand;
 use crate::shell::commands::RESULTS_CONTEXT;
 use crate::shell::menu_rules::IndexMenuState;
-use crate::shell::state_view::render_state_band;
+use crate::shell::state_view::{icon_action, render_state_band};
 use crate::shell::theme::{self, ShellTokens};
 use crate::table::model::{format_timestamp, ColumnBoundary, SortColumn};
 use crate::view::announce_shortcut;
@@ -19,7 +19,7 @@ use cairn_core::treemap::TreemapCategory;
 use cairn_protocol::message::FileRowData;
 use cairn_protocol::status::ContentIndexState;
 use gpui_kit::assets::IconName as AssetIconName;
-use gpui_kit::component::button::Button;
+use gpui_kit::base::Disableable as _;
 use gpui_kit::component::menu::ContextMenuExt;
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_kit::component::tooltip::Tooltip;
@@ -652,11 +652,7 @@ impl CairnApp {
             let message = self.i18n.get_text("recycle_bin_unavailable_title");
             let retry = accessibility::control("recycle-bin-retry");
             let retry_label = accessibility::name(retry, &self.i18n);
-            let action = Button::new(retry.element)
-                .font_weight(FontWeight::MEDIUM)
-                .label(retry_label.clone())
-                .accessibility_label(retry_label)
-                .small()
+            let action = icon_action(retry.element, AssetIconName::RotateCcw, retry_label)
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.open_recycle_bin(window, cx);
                 }))
@@ -765,7 +761,43 @@ impl CairnApp {
             ),
         };
         let message = self.i18n.get_text(message_key);
-        render_state_band(tokens, control, message, icon, None)
+        let action = match notice {
+            Some(ContentQueryNotice::Disabled)
+            | Some(ContentQueryNotice::Error)
+            | Some(ContentQueryNotice::Unreadable) => {
+                let label_key = match notice {
+                    Some(ContentQueryNotice::Disabled) => "index_enable_action",
+                    Some(ContentQueryNotice::Error) => "menu_content_search_retry",
+                    _ => "index_status_retry",
+                };
+                let pending = !matches!(notice, Some(ContentQueryNotice::Unreadable))
+                    && self.service.content_action_pending;
+                let control = accessibility::control("content-search-action");
+                let label = self.i18n.get_text(label_key);
+                let icon = match notice {
+                    Some(ContentQueryNotice::Disabled) => AssetIconName::Play,
+                    _ => AssetIconName::RotateCcw,
+                };
+                Some(
+                    icon_action(control.element, icon, label)
+                        .disabled(pending)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            match notice {
+                                Some(ContentQueryNotice::Unreadable) => {
+                                    this.refresh_content_status(cx)
+                                }
+                                _ => this.set_content_index_enabled(true, cx),
+                            }
+                            this.query.search_focus.focus(window, cx);
+                        }))
+                        .into_any_element(),
+                )
+            }
+            Some(ContentQueryNotice::Loading) | Some(ContentQueryNotice::Backfilling) | None => {
+                None
+            }
+        };
+        render_state_band(tokens, control, message, icon, action)
     }
 
     fn render_service_offline_state(
@@ -803,36 +835,21 @@ impl CairnApp {
         // Starting the service is a UAC action, so it is offered only when SCM says the service
         // exists. A missing service gets install guidance instead of an elevation prompt.
         let can_start = self.service.service_installed && issue == ServiceIssue::NotRunning;
-        let action = h_flex()
-            .items_center()
-            .gap(rems(layout::INNER_SPACING))
-            .when(can_start, |this| {
-                this.child(
-                    Button::new(start.element)
-                        .font_weight(FontWeight::MEDIUM)
-                        .label(start_face.clone())
-                        .accessibility_label(start_face)
-                        .small()
-                        .loading(self.service.is_probing_service)
-                        .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                            this.start_service(cx);
-                        })),
-                )
-            })
-            .when(!can_start, |this| {
-                this.child(
-                    Button::new(retry.element)
-                        .font_weight(FontWeight::MEDIUM)
-                        .label(retry_face.clone())
-                        .accessibility_label(retry_face)
-                        .small()
-                        .loading(self.service.is_probing_service)
-                        .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                            this.retry_service_connection(cx);
-                        })),
-                )
-            })
-            .into_any_element();
+        let action = if can_start {
+            icon_action(start.element, AssetIconName::Play, start_face)
+                .loading(self.service.is_probing_service)
+                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                    this.start_service(cx);
+                }))
+                .into_any_element()
+        } else {
+            icon_action(retry.element, AssetIconName::RotateCcw, retry_face)
+                .loading(self.service.is_probing_service)
+                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                    this.retry_service_connection(cx);
+                }))
+                .into_any_element()
+        };
         render_state_band(
             tokens,
             control,

@@ -27,7 +27,7 @@ pub fn handle_cleanup_helper(args: &[String]) -> bool {
     true
 }
 
-pub fn quiet_setup() -> i32 {
+pub fn quiet_setup(restart_app: bool) -> i32 {
     let installed = installed::installed_product();
     let legacy = installed::legacy_burn_uninstallers();
 
@@ -36,6 +36,9 @@ pub fn quiet_setup() -> i32 {
             && product.product_code.is_some()
             && (product.is_same_as_package() || product.is_newer_than_package())
         {
+            if restart_app {
+                relaunch(&product.install_dir);
+            }
             return EXIT_OK;
         }
     }
@@ -45,6 +48,7 @@ pub fn quiet_setup() -> i32 {
         .map(|product| product.install_dir.clone())
         .filter(|path| validate_install_path(&path.to_string_lossy()).is_ok())
         .unwrap_or_else(default_install_dir);
+    let app_dir = install_dir.clone();
     let log = platform::install_log_path();
     let (msi, payload_dir) = match msi_for_this_build() {
         Ok(value) => value,
@@ -59,7 +63,21 @@ pub fn quiet_setup() -> i32 {
     };
     let result = msi::install_blocking(&request);
     let _ = std::fs::remove_dir_all(&payload_dir);
-    exit_code(result.as_ref().err(), result.as_ref().ok())
+    let code = exit_code(result.as_ref().err(), result.as_ref().ok());
+    if restart_app {
+        relaunch(&app_dir);
+    }
+    code
+}
+
+/// Starts the installed app through the shell so the new process gets the signed-in user's token
+/// instead of this elevated installer's. A failed launch leaves the app closed; the user can start
+/// it from the Start menu, and the pending-version marker still reports the install result.
+fn relaunch(app_dir: &std::path::Path) {
+    let exe = app_dir.join("Cairn.exe");
+    if exe.is_file() {
+        let _ = platform::launch_installed_app(&exe);
+    }
 }
 
 pub fn quiet_uninstall() -> i32 {
