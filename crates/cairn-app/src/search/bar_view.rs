@@ -75,7 +75,7 @@ impl CairnApp {
             .relative()
             .flex_1()
             .min_w_0()
-            .h(rems(layout::SEARCH_INPUT_HEIGHT))
+            .h(rems(layout::ROW_HEIGHT))
             // The band lead plus this inner lead puts the search glyph on the content baseline;
             // the same inner lead on the trailing side keeps the box's text padding symmetric.
             .pl(rems(layout::SEARCH_INPUT_LEAD))
@@ -93,7 +93,7 @@ impl CairnApp {
             .border_color(if is_focused {
                 tokens.ring
             } else {
-                tokens.input
+                tokens.control_stroke
             })
             .text_color(tokens.foreground)
             .cursor(CursorStyle::IBeam)

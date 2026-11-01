@@ -1526,6 +1526,12 @@ impl MultiVolumeEngine {
                 .resolve_path_to_idx(&volume.records, &volume.arena, path)
                 .flatten()?;
             let record = &volume.records[idx as usize];
+            // A file has no Treemap body. Answering with an empty root would
+            // present it as an empty folder; the caller's unavailable state is
+            // the truthful answer.
+            if !record.is_dir() {
+                return None;
+            }
             (
                 Some(idx),
                 volume

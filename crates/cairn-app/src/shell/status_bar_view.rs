@@ -59,7 +59,6 @@ impl CairnApp {
         let mut zoom_percent = None;
         let mut summary: Option<AnyElement> = None;
         let mut summary_aria: Option<String> = None;
-        let mut summary_danger = false;
         let mut summary_loading = false;
         let mut icon_loading = false;
         let mut view_name = "table";
@@ -106,17 +105,8 @@ impl CairnApp {
                     summary_loading = true;
                     icon_loading = true;
                 } else if st.is_unavailable() {
-                    let text = self.i18n.get_text("treemap_unavailable");
-                    summary_aria = Some(text.clone());
-                    summary = Some(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_color(tokens.danger)
-                            .child(text)
-                            .into_any_element(),
-                    );
-                    summary_danger = true;
+                    // The canvas state band owns the sentence and its recovery.
+                    // The status line stays empty instead of repeating it.
                 } else {
                     zoom_percent = st.zoom_percent();
                     let mut args = FluentArgs::new();
@@ -282,14 +272,7 @@ impl CairnApp {
         // The summary is only rendered once there is a completed result set, so the band does not
         // shift when it appears.
         if let Some(summary) = summary {
-            left = left.child(
-                div()
-                    .min_w_0()
-                    .flex_1()
-                    .truncate()
-                    .when(summary_danger, |this| this.text_color(tokens.danger))
-                    .child(summary),
-            );
+            left = left.child(div().min_w_0().flex_1().truncate().child(summary));
         }
         if let Some(percent) = zoom_percent {
             let reset = accessibility::control("treemap-zoom-reset");

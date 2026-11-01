@@ -9,9 +9,10 @@ use std::path::{Component, Path, PathBuf};
 
 /// Resolves `input` against `current` and normalizes it to `D:\dir\dir` form.
 ///
-/// The result is syntactic only: the caller checks that the directory exists
-/// before navigating. Returned `None` means the text cannot name a drive path
-/// at all (empty, a UNC share, a drive-relative `C:dir`, or a bad quote pair).
+/// The result is syntactic only: the service decides whether the path is
+/// indexed, and an uncovered path lands on the canvas's unavailable state.
+/// Returned `None` means the text cannot name a drive path at all (empty, a
+/// UNC share, a drive-relative `C:dir`, or a bad quote pair).
 pub(crate) fn normalize_treemap_path(input: &str, current: &str) -> Option<String> {
     let input = strip_matching_quotes(input.trim());
     if input.is_empty() {

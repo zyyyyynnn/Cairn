@@ -95,6 +95,40 @@ fn sidebar_icon_metrics(window: &Window) -> SidebarIconMetrics {
     }
 }
 
+/// The caption's ink sits a fraction below the centre of its line box.
+/// Centre the line box, then lift the ink by the measured difference so the
+/// label's optical centre lands on the query box's centreline at every zoom.
+fn sidebar_caption_ink_offset(window: &Window, text: &str) -> Pixels {
+    let style = window.text_style();
+    let font = style.font();
+    let font_size = window.rem_size() * theme::SMALL_TEXT_SIZE;
+    let text_system = window.text_system();
+    let Some(glyph) = text.chars().next() else {
+        return Pixels::ZERO;
+    };
+    let layout = text_system.layout_line(
+        text,
+        font_size,
+        &[TextRun {
+            len: text.len(),
+            font,
+            color: style.color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        }],
+        None,
+    );
+    let Some(run) = layout.runs.first() else {
+        return Pixels::ZERO;
+    };
+    let Ok(bounds) = text_system.typographic_bounds(run.font_id, font_size, glyph) else {
+        return Pixels::ZERO;
+    };
+    let ink_center = bounds.origin.y + bounds.size.height / 2.0;
+    text_ink_offset(layout.ascent, layout.descent, ink_center)
+}
+
 /// One fixed leading lane for every sidebar glyph. Keeping the lane fixed means
 /// a larger icon changes the glyph, not the label's shared left edge.
 fn sidebar_icon(icon: IconName, metrics: SidebarIconMetrics) -> Div {
@@ -162,8 +196,10 @@ fn sidebar_row(
 fn sidebar_caption(
     control: &'static accessibility::KeyControl,
     title: String,
+    window: &Window,
     tokens: &ShellTokens,
 ) -> impl IntoElement {
+    let ink_offset = sidebar_caption_ink_offset(window, &title);
     accessibility::element(control)
         .aria_label(title.clone())
         .px(rems(layout::INNER_SPACING))
@@ -174,7 +210,7 @@ fn sidebar_caption(
         .text_sm()
         .font_medium()
         .text_color(tokens.muted_foreground)
-        .child(title)
+        .child(div().relative().top(-ink_offset).child(title))
 }
 
 /// The action a sidebar row runs when the pointer or the keyboard chooses it.
@@ -442,10 +478,10 @@ impl CairnApp {
                     .pr(rems(layout::SIDEBAR_VIEWPORT_LEAD))
                     .py(rems(layout::SPACE_4))
                     .gap_y(rems(layout::SPACE_4))
-                    .child(sidebar_caption(locations, locations_title, tokens))
+                    .child(sidebar_caption(locations, locations_title, window, tokens))
                     .children(quick_access)
                     .child(recycle_entry)
-                    .child(sidebar_caption(drives, drives_title, tokens))
+                    .child(sidebar_caption(drives, drives_title, window, tokens))
                     .children(drive_elements),
             )
             .into_any_element()

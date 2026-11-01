@@ -474,6 +474,45 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         named_by: "",
         requirement: "UI-01, DSV-08",
     },
+    // The Treemap canvas shows the same centred state band as the table: one
+    // sentence for an empty folder or an unavailable tree. The breadcrumb
+    // ancestors are one repeated button family, named by their path segment.
+    KeyControl {
+        key: "treemap-state",
+        element: "treemap-state",
+        indexed: false,
+        role: Role::Status,
+        messages: &["treemap_empty_directory", "treemap_unavailable"],
+        named_by: "",
+        requirement: "DSV-04",
+    },
+    KeyControl {
+        key: "treemap-crumb",
+        element: "treemap-crumb",
+        indexed: true,
+        role: Role::Button,
+        messages: EMPTY,
+        named_by: "path_segments",
+        requirement: "DSV-04",
+    },
+    KeyControl {
+        key: "treemap-path",
+        element: "treemap-path",
+        indexed: false,
+        role: Role::TextInput,
+        messages: &["treemap_path_label"],
+        named_by: "",
+        requirement: "DSV-04",
+    },
+    KeyControl {
+        key: "treemap-retry",
+        element: "treemap-retry",
+        indexed: false,
+        role: Role::Button,
+        messages: &["treemap_retry"],
+        named_by: "",
+        requirement: "DSV-04",
+    },
     // Each service failure is its own entry: the same element has to name the condition it reports,
     // and that one sentence carries the recovery direction (SVC-03, SVC-04).
     KeyControl {
@@ -770,6 +809,7 @@ mod tests {
         include_str!("command_groups.rs"),
         include_str!("../service/config_submission.rs"),
         include_str!("../search/filters.rs"),
+        include_str!("../treemap/view.rs"),
         include_str!("../service/ipc_tasks.rs"),
         include_str!("menu_actions.rs"),
         include_str!("nav_history.rs"),
@@ -1038,7 +1078,6 @@ mod tests {
         let registered_indexed = KEY_CONTROLS.iter().filter(|entry| entry.indexed).count();
         let mut named_controls = 0usize;
         let mut surfaces = 0usize;
-        let mut indexed_controls = 0usize;
 
         for source in RENDERED_SOURCES {
             assert!(
@@ -1071,14 +1110,20 @@ mod tests {
                 fixed_sites + indexed_sites
             );
 
-            indexed_controls += indexed_sites;
             named_controls += fixed_sites + indexed_sites;
             surfaces += source.matches("accessibility::surface(").count();
         }
 
+        // Indexed families can live in a component-heavy view source whose labels are
+        // component calls, so the family count is read from every view source rather than
+        // from the per-surface label count above.
+        let indexed_controls: usize = VIEW_SOURCES
+            .iter()
+            .map(|source| source.matches("accessibility::element_at(").count())
+            .sum();
         assert_eq!(
             indexed_controls, registered_indexed,
-            "the registry indexes {registered_indexed} controls, but the rendered sources build \
+            "the registry indexes {registered_indexed} controls, but the view sources build \
              {indexed_controls} with an element index"
         );
 

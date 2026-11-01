@@ -915,7 +915,7 @@ impl CairnApp {
         cx: &mut Context<Self>,
     ) -> Div {
         if self.drive_view.is_some() {
-            let path_band = self.render_treemap_path_band(tokens, band.view.clone(), cx);
+            let path_band = self.render_treemap_path_band(tokens, band.view.clone(), window, cx);
             let body = self.render_treemap_body(tokens, window, cx);
             // The path band's bottom inset is this panel's top gap, the same
             // relationship the search band has with the result panel.

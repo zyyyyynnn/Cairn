@@ -1100,4 +1100,17 @@ mod tests {
         assert_eq!(state.scanned_item_totals.get(r"C:\"), Some(&5));
         assert_eq!(state.scanned_item_totals.get(r"C:\Users"), Some(&0));
     }
+
+    #[test]
+    fn an_unavailable_load_is_not_an_empty_folder() {
+        let mut state = TreemapViewState::new_for_test('C');
+        state.is_scanning = true;
+        state.mark_unavailable();
+
+        assert!(state.is_unavailable());
+        assert!(!state.is_scanning());
+        assert!(state.content_revealed);
+        assert!(state.layout_nodes.is_empty());
+        assert_eq!(state.total_items(), 0);
+    }
 }

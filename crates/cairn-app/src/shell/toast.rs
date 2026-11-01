@@ -106,6 +106,19 @@ impl CairnApp {
         self.begin_toast_exit(serial, cx);
     }
 
+    /// Removes the current toast only when it is the one `title` names. A
+    /// corrected field must not leave its stale validation card behind, and
+    /// an unrelated operation's error must stay readable.
+    pub(crate) fn dismiss_toast_titled(&mut self, title: &str, cx: &mut Context<Self>) {
+        let matches = self
+            .toast
+            .as_ref()
+            .is_some_and(|toast| toast.title == title);
+        if matches {
+            self.dismiss_toast(cx);
+        }
+    }
+
     /// Keeps the card mounted for one short fade-out, then drops it. A newer toast bumps the
     /// serial, so a stale exit timer can never remove the replacement.
     fn begin_toast_exit(&mut self, serial: u64, cx: &mut Context<Self>) {

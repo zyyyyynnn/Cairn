@@ -16,7 +16,7 @@ pub use cairn_ui::brand::{
     SERIF_LINE_HEIGHT, SMALL_TEXT_SIZE, UI_ICON_SIZE,
 };
 pub use cairn_ui::locale::system_prefers_dark;
-pub use cairn_ui::theme::clamp_zoom;
+pub use cairn_ui::theme::{clamp_zoom, control_stroke, warning_ink};
 
 use crate::shell::settings::AppSettings;
 
@@ -61,7 +61,8 @@ pub struct ShellTokens {
     pub status_bar: Hsla,
     pub table_head: Hsla,
     pub table_head_foreground: Hsla,
-    pub input: Hsla,
+    /// Editable and checkable control outlines, held at 3:1 against the page and muted surfaces.
+    pub control_stroke: Hsla,
     pub skeleton: Hsla,
     // ---- ink ----------------------------------------------------------------------
     pub foreground: Hsla,
@@ -73,7 +74,7 @@ pub struct ShellTokens {
     pub selection: Hsla,
     pub row_hover: Hsla,
     // ---- emphasis, spent sparingly -------------------------------------------------
-    pub warning: Hsla,
+    pub warning_ink: Hsla,
     pub danger: Hsla,
     pub danger_foreground: Hsla,
     // ---- shape --------------------------------------------------------------------
@@ -95,7 +96,7 @@ impl ShellTokens {
             status_bar: theme.status_bar,
             table_head: theme.table_head,
             table_head_foreground: theme.table_head_foreground,
-            input: theme.input,
+            control_stroke: control_stroke(theme),
             skeleton: theme.skeleton,
             foreground: theme.foreground,
             muted_foreground: theme.muted_foreground,
@@ -104,7 +105,7 @@ impl ShellTokens {
             caret: theme.caret,
             selection: theme.selection,
             row_hover: theme.list_hover,
-            warning: theme.warning,
+            warning_ink: warning_ink(theme),
             danger: theme.danger,
             danger_foreground: theme.danger_foreground,
             radius: RADIUS,

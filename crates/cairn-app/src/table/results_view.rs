@@ -10,6 +10,7 @@ use crate::shell::accessibility::{self, ControlElement};
 use crate::shell::command_groups::GroupCommand;
 use crate::shell::commands::RESULTS_CONTEXT;
 use crate::shell::menu_rules::IndexMenuState;
+use crate::shell::state_view::render_state_band;
 use crate::shell::theme::{self, ShellTokens};
 use crate::table::model::{format_timestamp, ColumnBoundary, SortColumn};
 use crate::view::announce_shortcut;
@@ -238,44 +239,6 @@ fn column_label_key(column: SortColumn, in_recycle_bin: bool) -> &'static str {
         column.recycle_bin_label_key()
     } else {
         column.label_key()
-    }
-}
-
-/// Every empty, warning and error band shares this geometry: one centred
-/// icon, one sentence, and the optional recovery action. The sentence carries
-/// the whole message; there is no second description paragraph to drift from it.
-fn render_state_band(
-    tokens: &ShellTokens,
-    control: &'static crate::shell::accessibility::KeyControl,
-    message: String,
-    icon: AnyElement,
-    action: Option<AnyElement>,
-) -> ControlElement {
-    let band = accessibility::element(control)
-        .aria_label(message.clone())
-        .flex()
-        .flex_col()
-        .flex_1()
-        .min_h_0()
-        .items_center()
-        .justify_center()
-        .gap(rems(layout::SPACE_12))
-        .py(rems(layout::SPACE_48))
-        .bg(tokens.background)
-        .child(icon)
-        .child(
-            div()
-                .max_w(rems(layout::MESSAGE_MAX_WIDTH))
-                .text_center()
-                .text_base()
-                .font(theme::serif_font(FontWeight::SEMIBOLD))
-                .line_height(relative(1.4))
-                .text_color(tokens.foreground)
-                .child(theme::heading_text(message, FontWeight::SEMIBOLD)),
-        );
-    match action {
-        Some(action) => band.child(action),
-        None => band,
     }
 }
 
@@ -752,7 +715,7 @@ impl CairnApp {
                 "empty_content_unreadable_title",
                 Icon::new(AssetIconName::TriangleAlert)
                     .size_8()
-                    .text_color(tokens.warning)
+                    .text_color(tokens.warning_ink)
                     .into_any_element(),
             ),
             Some(ContentQueryNotice::Disabled) => (
@@ -766,7 +729,7 @@ impl CairnApp {
                 "empty_content_backfilling_title",
                 Icon::new(AssetIconName::Timer)
                     .size_8()
-                    .text_color(tokens.warning)
+                    .text_color(tokens.warning_ink)
                     .into_any_element(),
             ),
             Some(ContentQueryNotice::Error) => (

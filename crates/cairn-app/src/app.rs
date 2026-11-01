@@ -45,10 +45,10 @@ use std::sync::Arc;
 ///
 /// # The ladder has two rungs
 ///
-/// `CONTROL_HEIGHT` and `ROW_HEIGHT` are the only numbers chosen for themselves. Everything else
-/// is an expression over them so every band scales from the same two density tokens. A band that
-/// wants its own step gets a new named relationship, not a new literal, and the invariant test
-/// below verifies that every band height is derived from `CONTROL_HEIGHT` or `ROW_HEIGHT`:
+/// `CONTROL_HEIGHT` and `ROW_HEIGHT` are the only numbers chosen for themselves. Every band is an
+/// expression over the row step, and taller pointer targets use the control step. A band that wants
+/// its own step gets a new named relationship, not a new literal, and the invariant test below
+/// verifies that every band height is a named step:
 /// `CairnApp::the_band_measures_rows_in_the_same_rem_step_the_row_renders_at` fails the suite when
 /// someone writes a literal where an expression belongs.
 pub mod layout {
@@ -70,8 +70,8 @@ pub mod layout {
     pub const SPACE_48: f32 = 12.0 * STEP;
 
     // ---- the two base steps --------------------------------------------------------
-    /// One interactive control: the query box, the table heading cell, a toolbar trigger. Controls
-    /// are what a pointer aims at, so they get the taller of the two steps.
+    /// One taller interactive control: a toolbar trigger or a table action. The query box and path
+    /// field take the compact row step, so a control never invents a step of its own.
     pub const CONTROL_HEIGHT: f32 = SPACE_32;
     /// One result row: 7 four-pixel steps. Virtualization math requires it to be constant for a
     /// frame. Navigation rows share this step: the sidebar is a list before it is a toolbar.
@@ -83,10 +83,7 @@ pub mod layout {
     /// same distance cannot drift between an inset and a gap.
     pub const INNER_SPACING: f32 = SPACE_8;
     /// The search band: the query box plus the tight inset that keeps it off the band's edges.
-    pub const SEARCH_BAND_HEIGHT: f32 = CONTROL_HEIGHT + 2.0 * TIGHT_LEAD;
-    /// The query box inside the search band. The primary task is a control like any other, so it
-    /// takes the control step rather than a step of its own.
-    pub const SEARCH_INPUT_HEIGHT: f32 = CONTROL_HEIGHT;
+    pub const SEARCH_BAND_HEIGHT: f32 = ROW_HEIGHT + 2.0 * TIGHT_LEAD;
     /// The column-heading row shares the result row's height so it reads as the first row of the
     /// table, not a taller control band above it.
     pub const HEADER_HEIGHT: f32 = ROW_HEIGHT;
@@ -759,7 +756,6 @@ mod tests {
             layout::ROW_HEIGHT,
             layout::INNER_SPACING,
             layout::SEARCH_BAND_HEIGHT,
-            layout::SEARCH_INPUT_HEIGHT,
             layout::HEADER_HEIGHT,
             layout::STATUS_HEIGHT,
             layout::LEGEND_ROW,
@@ -802,14 +798,9 @@ mod tests {
             "the heading row shares the result row's height"
         );
         assert_eq!(
-            layout::SEARCH_INPUT_HEIGHT,
-            layout::CONTROL_HEIGHT,
-            "the query box is a control like any other"
-        );
-        assert_eq!(
             layout::SEARCH_BAND_HEIGHT,
-            layout::CONTROL_HEIGHT + 2.0 * layout::TIGHT_LEAD,
-            "the search band is its control plus one tight inset on each side"
+            layout::ROW_HEIGHT + 2.0 * layout::TIGHT_LEAD,
+            "the search band is the row step plus one tight inset on each side"
         );
         assert!(
             layout::INNER_SPACING > 0.0,
@@ -861,7 +852,7 @@ mod tests {
         let pins = |name: &str| pinned.iter().any(|found| found == name);
 
         // These are rows inside a band, not chrome stacked around the result band.
-        let inside_a_band = ["CONTROL_HEIGHT", "SEARCH_INPUT_HEIGHT", "ROW_HEIGHT"];
+        let inside_a_band = ["CONTROL_HEIGHT", "ROW_HEIGHT"];
         for name in &pinned {
             assert!(
                 bands.contains(&name.as_str()) || inside_a_band.contains(&name.as_str()),

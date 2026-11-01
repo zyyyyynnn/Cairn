@@ -38,7 +38,17 @@ const CONTROL_CONTRAST_FLOOR: f32 = 3.0;
 pub fn control_stroke(theme: &Theme) -> Hsla {
     enforce_contrast_floor(
         theme.border,
-        &[theme.background, theme.muted],
+        &[theme.background, theme.muted, theme.title_bar],
+        CONTROL_CONTRAST_FLOOR,
+    )
+}
+
+/// The warning ink used for a state graphic (not a filled surface). The component's warning
+/// yellow is too light for a 32px icon on white, so this role holds the same hue at 3:1.
+pub fn warning_ink(theme: &Theme) -> Hsla {
+    enforce_contrast_floor(
+        theme.warning,
+        &[theme.background, theme.muted, theme.title_bar],
         CONTROL_CONTRAST_FLOOR,
     )
 }
@@ -710,11 +720,32 @@ mod tests {
                 a: 1.0,
             };
             let stroke = super::control_stroke(&theme);
-            let ratio =
-                contrast_ratio(stroke, theme.background).min(contrast_ratio(stroke, theme.muted));
+            let ratio = [theme.background, theme.muted, theme.title_bar]
+                .into_iter()
+                .map(|surface| contrast_ratio(stroke, surface))
+                .fold(f32::INFINITY, f32::min);
             assert!(
                 ratio >= 3.0,
                 "{mode:?} control stroke contrast {ratio} is below 3:1"
+            );
+        }
+    }
+
+    #[test]
+    fn warning_ink_clears_non_text_contrast() {
+        for mode in [ThemeMode::Light, ThemeMode::Dark] {
+            let theme = Theme {
+                mode,
+                ..Default::default()
+            };
+            let ink = super::warning_ink(&theme);
+            let ratio = [theme.background, theme.muted, theme.title_bar]
+                .into_iter()
+                .map(|surface| contrast_ratio(ink, surface))
+                .fold(f32::INFINITY, f32::min);
+            assert!(
+                ratio >= 3.0,
+                "{mode:?} warning ink contrast {ratio} is below 3:1"
             );
         }
     }

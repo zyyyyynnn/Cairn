@@ -20,6 +20,7 @@ pub(crate) mod recycle_bin;
 pub(crate) mod reveal;
 pub(crate) mod settings;
 pub(crate) mod sidebar_view;
+pub(crate) mod state_view;
 pub(crate) mod status_bar;
 pub(crate) mod status_bar_view;
 pub(crate) mod theme;
