@@ -19,7 +19,6 @@ use cairn_core::treemap::TreemapCategory;
 use cairn_protocol::message::FileRowData;
 use cairn_protocol::status::ContentIndexState;
 use gpui_kit::assets::IconName as AssetIconName;
-use gpui_kit::base::Disableable as _;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::menu::ContextMenuExt;
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
@@ -790,6 +789,17 @@ impl CairnApp {
         let retry_label = accessibility::name(retry, &self.i18n);
         let start = accessibility::control("service-start-button");
         let start_label = accessibility::name(start, &self.i18n);
+        let probe_label = self.i18n.get_text("service_probe_label");
+        let start_face = if self.service.is_probing_service {
+            probe_label.clone()
+        } else {
+            start_label.clone()
+        };
+        let retry_face = if self.service.is_probing_service {
+            probe_label
+        } else {
+            retry_label.clone()
+        };
         // Starting the service is a UAC action, so it is offered only when SCM says the service
         // exists. A missing service gets install guidance instead of an elevation prompt.
         let can_start = self.service.service_installed && issue == ServiceIssue::NotRunning;
@@ -800,11 +810,10 @@ impl CairnApp {
                 this.child(
                     Button::new(start.element)
                         .font_weight(FontWeight::MEDIUM)
-                        .label(start_label.clone())
-                        .accessibility_label(start_label)
+                        .label(start_face.clone())
+                        .accessibility_label(start_face)
                         .small()
                         .loading(self.service.is_probing_service)
-                        .disabled(self.service.is_probing_service)
                         .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
                             this.start_service(cx);
                         })),
@@ -814,11 +823,10 @@ impl CairnApp {
                 this.child(
                     Button::new(retry.element)
                         .font_weight(FontWeight::MEDIUM)
-                        .label(retry_label.clone())
-                        .accessibility_label(retry_label)
+                        .label(retry_face.clone())
+                        .accessibility_label(retry_face)
                         .small()
                         .loading(self.service.is_probing_service)
-                        .disabled(self.service.is_probing_service)
                         .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
                             this.retry_service_connection(cx);
                         })),

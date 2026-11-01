@@ -90,7 +90,7 @@ pub struct TreemapViewState {
     /// Total aggregated size of all items currently displayed in the view
     current_dir_total_size: u64,
     /// Total number of items under the current Treemap root, at every depth.
-    /// Cache loads take it from the index; progressive scans keep it in step
+    /// Cache and service loads take it from the index; a navigation keeps it in step
     /// with the discovered files and directories.
     current_dir_total_items: usize,
     /// Focus handle for keyboard events (Backspace, Enter)
@@ -1164,6 +1164,22 @@ mod tests {
         assert!(TreemapUnavailable::ServiceUnavailable.retryable());
         assert!(!TreemapUnavailable::NotDirectory.retryable());
         assert!(!TreemapUnavailable::TooLarge.retryable());
+        assert_eq!(
+            TreemapUnavailable::NotIndexed.message_key(),
+            "treemap_unavailable_not_indexed"
+        );
+        assert_eq!(
+            TreemapUnavailable::NotDirectory.message_key(),
+            "treemap_unavailable_not_directory"
+        );
+        assert_eq!(
+            TreemapUnavailable::TooLarge.message_key(),
+            "treemap_unavailable_too_large"
+        );
+        assert_eq!(
+            TreemapUnavailable::ServiceUnavailable.message_key(),
+            "treemap_unavailable_service"
+        );
     }
 
     #[test]

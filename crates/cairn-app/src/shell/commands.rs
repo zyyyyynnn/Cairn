@@ -193,6 +193,7 @@ pub fn key_bindings() -> Vec<KeyBindingEntry> {
         bind("alt-right", NavigateForward, WINDOW_CONTEXT),
         bind("alt-up", NavigateUp, WINDOW_CONTEXT),
         bind("enter", CommitTreemapPath, TREEMAP_PATH_CONTEXT),
+        bind("tab", CommitTreemapPath, TREEMAP_PATH_CONTEXT),
         bind("escape", CancelTreemapPath, TREEMAP_PATH_CONTEXT),
         // The four keys the result table answers with, and only while it holds focus. Tab moves it there
         // from the query box (`gpui-base`'s `Root` owns Tab/Shift+Tab and walks the window's tab stops),

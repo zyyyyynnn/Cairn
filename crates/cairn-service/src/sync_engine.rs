@@ -318,10 +318,10 @@ impl VolumeIndex {
         self.status = VolumeState::Rebuilding;
     }
 
-    /// Appends extracted items without discarding what the volume already holds. The user-mode
-    /// directory scan delivers batches while it walks, so the table can show rows before the walk
-    /// finishes; the presorted arrays go stale and queries fall back to their full sort until
-    /// [`Self::finalize_snapshot_scan`] rebuilds them.
+    /// Appends extracted items without discarding what the volume already holds. A scan
+    /// delivers batches while it walks, so the table can show rows before the walk finishes;
+    /// the presorted arrays go stale and queries fall back to their full sort until the caller
+    /// finishes the volume scan.
     ///
     /// Parents must arrive before their children, which is the order the scanner walks a tree in.
     /// A parent that is not present stays `ROOT_PARENT`, exactly as in [`Self::ingest_items`].
@@ -491,22 +491,6 @@ impl VolumeIndex {
         self.records[index as usize].size = new_size;
         self.adjust_record_ancestors(index, delta);
         self.presorted_dirty = true;
-    }
-
-    /// Completes a user-privilege directory scan. There is no change journal behind this data, so
-    /// the volume is a snapshot (IDX-08) rather than a journal-synced index, and an empty store is
-    /// a legitimate result for an account that cannot read anything.
-    pub fn finalize_snapshot_scan(&mut self) {
-        self.recompute_directory_sizes();
-        self.presorted = PresortedIndices::build(
-            &self.records,
-            &self.arena,
-            &self.path_cache,
-            self.drive_letter,
-        );
-        self.presorted_dirty = false;
-        self.usn_enabled = false;
-        self.status = VolumeState::SnapshotMode;
     }
 
     /// `true` when a live record for this `(frn, parent, name)` triple is already indexed.
@@ -1003,8 +987,7 @@ pub struct MultiVolumeEngine {
     /// (handshake, status probes) from waiting behind it. Refreshed on every uncontended read.
     summary_cache: Mutex<Vec<VolumeStatusSummary>>,
     /// Service data is owned by SYSTEM, so its configuration is written with the restricted
-    /// descriptor. A user-mode indexer owns its own settings and writes them as the user.
-    secure_config: bool,
+    /// descriptor.
     /// Whether the configuration on disk was authenticated at startup. A rejected file must not
     /// become trusted merely because a later reload reads it again.
     config_trusted: AtomicBool,
@@ -1418,7 +1401,6 @@ impl MultiVolumeEngine {
             content_cancel: Arc::new(AtomicBool::new(false)),
             content_commands: Mutex::new(None),
             summary_cache: Mutex::new(Vec::new()),
-            secure_config: true,
             config_trusted: AtomicBool::new(true),
         }
     }
@@ -1508,13 +1490,6 @@ impl MultiVolumeEngine {
             let _ = path;
             None
         }
-    }
-
-    /// Persists configuration with the caller's own rights instead of the SYSTEM/Administrators
-    /// descriptor. Only a user-mode indexer may use this: its settings belong to that user.
-    pub fn with_plain_config_persistence(mut self) -> Self {
-        self.secure_config = false;
-        self
     }
 
     /// Returns the current service configuration.
@@ -1692,15 +1667,9 @@ impl MultiVolumeEngine {
         let parsed: ServiceConfig = toml::from_str(config_toml)
             .map_err(|e| format!("invalid service configuration: {e}"))?;
         let path = self.config_path.clone();
-        if self.secure_config {
-            parsed
-                .save_atomic_secure(&path)
-                .map_err(|e| format!("could not persist {}: {e}", path.display()))?;
-        } else {
-            parsed
-                .save_atomic(&path)
-                .map_err(|e| format!("could not persist {}: {e}", path.display()))?;
-        }
+        parsed
+            .save_atomic_secure(&path)
+            .map_err(|e| format!("could not persist {}: {e}", path.display()))?;
         self.config_trusted.store(true, Ordering::SeqCst);
         self.update_config(parsed);
         Ok(())
@@ -2711,7 +2680,7 @@ mod tests {
     }
 
     #[test]
-    fn appended_batches_report_folder_sizes_before_finalize() {
+    fn appended_batches_report_folder_sizes() {
         let mut vol = VolumeIndex::new('C');
         vol.append_items(vec![
             index_item(1, 0, "C:", true),
@@ -2737,16 +2706,6 @@ mod tests {
         assert_eq!(vol.records[record_index(&vol, 4) as usize].size, 50);
         assert_eq!(vol.records[record_index(&vol, 1) as usize].size, 175);
         assert_eq!(vol.records[record_index(&vol, 3) as usize].size, 100);
-
-        vol.finalize_snapshot_scan();
-        assert_eq!(
-            vol.records[record_index(&vol, 2) as usize].size,
-            175,
-            "the authoritative pass must agree with the incremental totals"
-        );
-        assert_eq!(vol.records[record_index(&vol, 4) as usize].size, 50);
-        assert_eq!(vol.records[record_index(&vol, 1) as usize].size, 175);
-        assert!(vol.directory_sizes_valid);
     }
 
     #[test]

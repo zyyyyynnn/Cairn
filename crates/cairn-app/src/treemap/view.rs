@@ -2,8 +2,8 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! GPUI canvas, tile rendering, progressive scan worker orchestration and
-//! pointer/keyboard interaction for the drive Treemap view.
+//! GPUI canvas, tile rendering and pointer/keyboard interaction for the
+//! drive Treemap view.
 
 use crate::app::{element_id, layout, CairnApp};
 use crate::search::filters::FilterCategory;
@@ -55,9 +55,8 @@ const TREEMAP_LABEL_MIN_HEIGHT: f32 = 28.0;
 /// Depth cap for a tree served by the index. Matches the on-disk volume-index
 /// loader, so both service paths present the same hierarchy.
 // The response must fit the protocol's frame budget. Depth 2 is ~47k entries on a 1.4M-index
-// drive and answers in ~160 ms; depth 6 overflows the 16 MiB frame and drops the connection,
-// which forced the six-thread filesystem fallback. Deeper levels are requested per directory as
-// the reader drills in.
+// drive and answers in ~160 ms; depth 6 overflows the 16 MiB frame. Deeper levels are requested
+// per directory as the reader drills in.
 const TREEMAP_SERVICE_DEPTH: usize = 2;
 
 /// Horizontal inset used by headers, leaves and summary labels.
@@ -401,8 +400,8 @@ impl CairnApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Leaving the visualization cancels its progressive scan and releases
-        // the partial tree instead of keeping a hidden worker alive.
+        // Leaving the visualization releases the partial tree instead of keeping
+        // it alive behind the table.
         self.drive_view = None;
         self.treemap_state = None;
         self.query.active_filter = FilterCategory::All;
@@ -441,6 +440,7 @@ impl CairnApp {
 
         let content = if editing {
             Input::new(&self.treemap_path.input)
+                .id(accessibility::control("treemap-path").element)
                 .appearance(false)
                 .bordered(false)
                 .focus_bordered(false)
@@ -509,7 +509,7 @@ impl CairnApp {
                 let crumb_control = accessibility::control("treemap-crumb");
                 breadcrumb = breadcrumb.child(
                     accessibility::element_at_key(crumb_control, &path)
-                        .aria_label(label)
+                        .aria_label(format!("{label}, {path}"))
                         .relative()
                         .flex_shrink(1.0)
                         .min_w_0()
@@ -770,16 +770,21 @@ impl CairnApp {
                     .map(TreemapUnavailable::message_key)
                     .unwrap_or("treemap_empty_directory"),
             );
-            let icon = if unavailable.is_some() {
-                Icon::new(IconName::CircleAlert)
+            let icon = match unavailable {
+                Some(TreemapUnavailable::NotDirectory | TreemapUnavailable::TooLarge) => {
+                    Icon::new(IconName::TriangleAlert)
+                        .size_8()
+                        .text_color(tokens.warning_ink)
+                        .into_any_element()
+                }
+                Some(_) => Icon::new(IconName::CircleAlert)
                     .size_8()
                     .text_color(tokens.danger)
-                    .into_any_element()
-            } else {
-                Icon::new(IconName::Folder)
+                    .into_any_element(),
+                None => Icon::new(IconName::Folder)
                     .size_8()
                     .text_color(tokens.muted_foreground)
-                    .into_any_element()
+                    .into_any_element(),
             };
             let action = unavailable
                 .is_some_and(TreemapUnavailable::retryable)

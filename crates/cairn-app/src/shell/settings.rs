@@ -366,21 +366,4 @@ mod tests {
         let loaded = AppSettings::load_from_path(&path).unwrap();
         assert!(loaded.autostart);
     }
-
-    /// A settings file written before the local fallback was removed still loads: the retired
-    /// `search_scope` key is ignored, and the rest of the preferences survive.
-    #[test]
-    fn a_settings_file_with_a_removed_scope_key_still_loads() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("settings.toml");
-        fs::write(
-            &path,
-            "language = \"en-US\"\nsearch_scope = \"readable-files\"\nautostart = true\n",
-        )
-        .unwrap();
-
-        let loaded = AppSettings::load_from_path(&path).unwrap();
-        assert!(loaded.autostart);
-        assert_eq!(loaded.language, "en-US");
-    }
 }

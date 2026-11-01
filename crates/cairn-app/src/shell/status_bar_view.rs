@@ -228,14 +228,24 @@ impl CairnApp {
         // and takes the component's own loading state: the RefreshCw glyph becomes the spinner,
         // the button dims and stops answering clicks. A second circular mark beside the refresh
         // arrow would read as two loaders.
-        let refresh_label = self.i18n.get_text("status_refresh");
+        let refresh_label = self.i18n.get_text(if icon_loading {
+            "status_refreshing"
+        } else {
+            "status_refresh"
+        });
+        let refresh_unavailable = self.drive_view.is_some()
+            && self
+                .treemap_state
+                .as_ref()
+                .and_then(|state| state.unavailable_reason())
+                .is_some_and(|reason| !reason.retryable());
         let refresh = Button::new("status-refresh")
             .ghost()
             .xsmall()
             .icon(IconName::RefreshCw)
             .loading_icon(IconName::LoaderCircle)
             .loading(icon_loading)
-            .disabled(icon_loading)
+            .disabled(refresh_unavailable)
             .tooltip(refresh_label.clone())
             .accessibility_label(refresh_label)
             .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {

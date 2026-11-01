@@ -109,6 +109,7 @@ service_incompatible_title = The background service version is incompatible; rei
 service_unauthorized_title = This account cannot use the background service; use an authorized account
 # The recovery lines promise another attempt, so the promise needs a button a pointer and a keyboard
 # can both reach.
+service_probe_label = Connecting to the background service…
 service_retry_button = Retry connection
 # Starting the service is the only runtime elevation, and it happens only on this explicit click.
 service_start_button = Start background service
@@ -163,6 +164,7 @@ status_objects_summary = { $count ->
     [one] { $count } item { $size }
    *[other] { $count } items { $size }
 }
+status_refreshing = Refreshing
 status_refresh = Refresh
 toast_status = Notification
 toast_dismiss = Dismiss notification
@@ -199,9 +201,9 @@ treemap_path_clear = Clear path
 treemap_path_invalid_title = Path format not recognized
 treemap_path_invalid_hint = Enter an absolute path such as C:\Users, or a path relative to this folder.
 treemap_unavailable_service = Could not reach the background service. Retry.
-treemap_unavailable_too_large = This folder is too large to open in the Treemap.
-treemap_unavailable_not_directory = That path is a file, not a folder.
-treemap_unavailable_not_indexed = This path is not in the index. Retry later or confirm the background service is running.
+treemap_unavailable_too_large = This folder is too large for the Treemap. Open a subfolder or go up one level.
+treemap_unavailable_not_directory = That path is a file. Open a folder or go up one level.
+treemap_unavailable_not_indexed = This path is not in the index. Check the path, or retry later.
 treemap_empty_directory = This folder is empty
 treemap_aggregate = { $count } items
 treemap_status_selected = { $name } · { $path } · { $size } ({ $percent }%) · { $date }

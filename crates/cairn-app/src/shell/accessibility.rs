@@ -1181,6 +1181,13 @@ mod tests {
         );
     }
 
+    /// Informational toasts are polite status; only failures interrupt.
+    #[test]
+    fn error_and_info_toasts_keep_their_own_live_region_role() {
+        assert_eq!(control("toast").role, Role::Alert);
+        assert_eq!(control("toast-info").role, Role::Status);
+    }
+
     /// Each category entry registers exactly its own wording, so a stray message cannot hide in the
     /// family and a renamed category cannot leave an orphan behind.
     #[test]

@@ -233,12 +233,6 @@ pub(crate) fn treemap_path_clear_button(
         .on_click(on_click)
 }
 
-/// Repaints the four corner crescents a rounded panel cuts out of its rectangle.
-///
-/// GPUI clips children to a rectangle, so the heading and row surfaces inside a panel paint over
-/// its corner radii and square them off. The overlay repaints only the area between each corner's
-/// edge and its arc, in the band colour behind the panel. It takes no part in layout or hit
-/// testing, so the heading stays where the shell's bands put it.
 /// The one rounded content panel used by the result table and the Treemap:
 /// the 4px frame gap, the panel surface and the corner crescent overlay.
 fn content_panel(tokens: &ShellTokens, child: impl IntoElement) -> Div {
@@ -256,6 +250,12 @@ fn content_panel(tokens: &ShellTokens, child: impl IntoElement) -> Div {
         .child(rounded_panel_corners(tokens.radius, tokens.chrome))
 }
 
+/// Repaints the four corner crescents a rounded panel cuts out of its rectangle.
+///
+/// GPUI clips children to a rectangle, so the heading and row surfaces inside a panel paint over
+/// its corner radii and square them off. The overlay repaints only the area between each corner's
+/// edge and its arc, in the band colour behind the panel. It takes no part in layout or hit
+/// testing, so the heading stays where the shell's bands put it.
 fn rounded_panel_corners(radius: Pixels, color: Hsla) -> impl IntoElement {
     canvas(
         |_, _, _| {},

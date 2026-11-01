@@ -150,17 +150,6 @@ fn menu_entries(
 /// near the top, with the standard footer buttons. The labels travel with the variants so a caller
 /// cannot replace the button configuration and lose the danger commit or the secondary cancel:
 /// every confirmation on this helper destroys data.
-/// One dialog title recipe: the heading role, level, serif face and script split.
-fn dialog_title(title: String) -> impl IntoElement {
-    div()
-        .id("dialog-title")
-        .role(Role::Heading)
-        .aria_level(1)
-        .aria_label(title.clone())
-        .font(theme::serif_font(FontWeight::SEMIBOLD))
-        .child(theme::heading_text(title, FontWeight::SEMIBOLD))
-}
-
 fn style_confirmation_alert(
     alert: AlertDialog,
     window: &Window,
@@ -187,6 +176,17 @@ fn style_confirmation_alert(
                 .cancel_variant(ButtonVariant::Secondary)
                 .ok_variant(ButtonVariant::Danger),
         )
+}
+
+/// One dialog title recipe: the heading role, level, serif face and script split.
+fn dialog_title(title: String) -> impl IntoElement {
+    div()
+        .id("dialog-title")
+        .role(Role::Heading)
+        .aria_level(1)
+        .aria_label(title.clone())
+        .font(theme::serif_font(FontWeight::SEMIBOLD))
+        .child(theme::heading_text(title, FontWeight::SEMIBOLD))
 }
 
 /// The shell can report a batch as successful while a progress dialog skipped one item. The
@@ -1090,8 +1090,8 @@ impl CairnApp {
         {
             return;
         }
-        // Leaving the visualization cancels its progressive scan; otherwise the
-        // hidden view keeps a worker and its partial tree alive behind the table.
+        // Leaving the visualization releases its partial tree instead of keeping
+        // it alive behind the table.
         if self.drive_view.take().is_some() {
             self.treemap_state = None;
         }
@@ -1270,8 +1270,8 @@ impl CairnApp {
     /// Opens the Recycle Bin view: the shell reports the bin's contents and
     /// the table renders them. Any query or drive switch leaves the view.
     pub fn open_recycle_bin(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        // Leaving the visualization cancels its progressive scan; the bin is a
-        // location, so a hidden Treemap worker must not keep walking a drive.
+        // Leaving the visualization releases its partial tree; the bin is a
+        // location, so no hidden Treemap state remains behind it.
         if self.drive_view.take().is_some() {
             self.treemap_state = None;
         }
