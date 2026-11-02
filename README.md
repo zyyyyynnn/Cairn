@@ -15,7 +15,7 @@
 
 Cairn 将本地文件检索与磁盘空间占用分析收敛于同一桌面工作台。底层直接解析 NTFS `$MFT` 主文件表并订阅 USN 变更日志，在低内存占用下完成冷启动加载、目录体量聚合与实时增量同步。
 
-桌面端基于 GPUI Kit 构建硬件加速界面，通过异步 Windows Named Pipe 与后台索引服务 `CairnService` 解耦；服务不可用时显示离线态并由用户显式启动或重试。可选全文检索由独立子进程 `CairnWorker.exe` 承担文档提取与 Tantivy 索引写入。
+桌面端基于 GPUI Kit 构建硬件加速界面，通过异步 Windows Named Pipe 与后台索引服务 `CairnService` 解耦；服务不可达时 GUI 先尝试一次免 UAC 的 SCM 静默启动，仍不可用则显示离线态并给出启动或重试入口。可选全文检索由独立子进程 `CairnWorker.exe` 承担文档提取与 Tantivy 索引写入。
 
 ## 核心能力
 
