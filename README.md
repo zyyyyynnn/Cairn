@@ -13,9 +13,9 @@
 
 ## 项目概览
 
-Cairn 将毫秒级本地文件检索与磁盘空间占用分析收敛于同一桌面工作台。底层直接解析 NTFS `$MFT` 主文件表并订阅 USN 变更日志（`FSCTL_READ_USN_JOURNAL`），在保持低内存占用的同时完成百万级文件冷启动加载、目录体量聚合与实时增量同步。
+Cairn 将本地文件检索与磁盘空间占用分析收敛于同一桌面工作台。底层直接解析 NTFS `$MFT` 主文件表并订阅 USN 变更日志，在低内存占用下完成冷启动加载、目录体量聚合与实时增量同步。
 
-桌面端基于 GPUI Kit 0.8 构建硬件加速界面，通过异步 Windows Named Pipe 与后台索引服务 `CairnService` 解耦；服务不可用时显示离线态并由用户显式启动或重试。可选全文检索由独立子进程 `CairnWorker.exe` 承担文档提取与 Tantivy 索引写入，隔离重型解析负载与主服务生命周期。
+桌面端基于 GPUI Kit 构建硬件加速界面，通过异步 Windows Named Pipe 与后台索引服务 `CairnService` 解耦；服务不可用时显示离线态并由用户显式启动或重试。可选全文检索由独立子进程 `CairnWorker.exe` 承担文档提取与 Tantivy 索引写入。
 
 ## 核心能力
 
@@ -25,35 +25,6 @@ Cairn 将毫秒级本地文件检索与磁盘空间占用分析收敛于同一�
 - **Treemap 磁盘空间分析**：基于 Squarified 算法构建交互式矩形树图，支持连续缩放平移、下钻导航与类型色彩映射。
 - **原生 Shell 与回收站集成**：提供虚拟滚动结果表、中英双语切换、Windows 回收站枚举还原与系统原生属性对话框联动。
 - **安全与权限边界**：命名管道拒绝远程客户端，按调用方访问令牌实施鉴权，配置文件与索引存储强制绑定系统级安全描述符。
-
-## 系统架构
-
-```mermaid
-flowchart TB
-    subgraph Clients["客户端与表现层"]
-        APP["cairn-app (Cairn.exe)<br/>GPUI Kit 桌面端、虚拟表格、Treemap"]
-        CLI["cairn-cli<br/>命令行检索、JSON / CSV 导出"]
-    end
-
-    CLIENT["cairn-client<br/>异步 Named Pipe 客户端、协议版本协商"]
-    SERVICE["cairn-service (CairnService.exe)<br/>MultiVolumeEngine、SessionManager、调用方鉴权"]
-    WORKER["cairn-worker<br/>隔离式内容提取、Tantivy 索引写入"]
-
-    subgraph Domain["核心领域与内核解析层"]
-        CORE["cairn-core<br/>查询 AST、预排序与多卷排序、Squarify"]
-        NTFS["cairn-ntfs<br/>$MFT 解析、Runlist、USN Journal"]
-        CONTENT["cairn-content<br/>Tantivy 检索、CJK 分词、文档提取"]
-        PROTO["cairn-protocol<br/>定长帧头、Postcard 编解码"]
-    end
-
-    APP & CLI --> CLIENT
-    CLIENT <== "Named Pipe (\\\\.\\pipe\\Cairn.Service)" ==> SERVICE
-    SERVICE <== "子进程批处理 IPC" ==> WORKER
-    SERVICE --> CORE & NTFS & CONTENT & PROTO
-    WORKER --> CONTENT
-```
-
-12 个 Crate 与 `xtask` 工具 crate 的完整职责划分与依赖边界见[系统架构](docs/engineering/architecture.md)，管道 DACL 与访问控制模型见[IPC 与安全](docs/engineering/ipc-security.md)。
 
 ## 技术栈
 
