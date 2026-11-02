@@ -33,7 +33,7 @@ README 的首句是：“Find what is filling a disk, mark what should go, and r
 | 版本 | workspace `0.11.0`，MIT | [`Cargo.toml#L5-L10`](https://github.com/tobi/disktree/blob/6c8d4ce6211bf135ff4e42890faebff1040e1846/Cargo.toml#L5-L10) |
 | 规模示例 | README 截图显示 881 GiB、3.9M files、499.4K dirs | [`assets/screenshot.png`](https://github.com/tobi/disktree/blob/6c8d4ce6211bf135ff4e42890faebff1040e1846/assets/screenshot.png) |
 
-关键差异：disktree 与 Cairn 同为 Rust + GPUI，但 disktree 用 **gpui-kit 0.6.6 + gpui-omarchy**，Cairn 用 **gpui-kit 0.8.0 + gpui-component Theme**；两者控件 API、主题模型、渲染路径都不同，不能直接移植代码。
+关键差异：disktree 与 Cairn 同为 Rust + GPUI，但 disktree 用 **gpui-kit 0.6.6 + gpui-omarchy**，Cairn 用 **gpui-kit 0.8.1 + gpui-component Theme**；两者控件 API、主题模型、渲染路径都不同，不能直接移植代码。
 
 ### 1.3 目录结构
 

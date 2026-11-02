@@ -8,22 +8,22 @@
 
 | 测试层级 | 工具与方式 | 验证目标与覆盖内容 |
 |:---|:---|:---|
-| **单元测试** | `cargo test` / `cargo nextest` | 覆盖语法解析 AST、运算符优先级、通配符、过滤条件、日期与大小计算 |
-| **属性测试** | `proptest` | 随机生成 10,000 条复杂查询表达式，与朴素参考实现结果集保持 100% 一致 |
-| **NTFS / VHD 集成测试** | `xtask test-ntfs-vhd` | 通过 `diskpart` 挂载测试 VHD，验证真实 MFT 扫描、USN 回放、硬链接、单卷自愈与 10,000 组文件随机操作序列零差异（SM-5） |
-| **安全与权限测试** | `xtask test-security` | 验证标准用户正常连接、远程管道拒绝连接、未授权账户拦截以及配置文件越权写入拦截 |
+| **单元测试** | `cargo test` | 覆盖语法解析 AST、运算符优先级、通配符、过滤条件、日期与大小计算 |
+| **属性测试** | `proptest` | 查询解析不 panic、`NamePool` 插入与取回的性质测试 |
+| **NTFS / 索引集成测试** | `xtask test-ntfs-vhd` | 内存 `VolumeIndex` 上的 MFT/USN、硬链接、单卷自愈与随机操作序列差分（SM-5） |
+| **安全与权限测试** | `xtask test-security` | 校验默认与管理员 SDDL 字符串：SY/BA/IU 授权，NU/WD 拒绝 |
 | **UI 与无障碍测试** | 真实窗口截图/输入 + 控件注册表测试 | 当前未接入无头 UI 测试；验证键盘流转、焦点、AccessKit 角色与可见状态 |
 | **输入法专项测试** | 手工与集成核验清单 | 微软拼音、搜狗拼音、微信输入法三款主流 IME 组合无丢字、不重字、候选窗不遮挡 |
-| **端到端基准对比** | `xtask bench-everything` | 合成语料下对比 Everything 1.4，输出中位延迟、稳态内存与峰值内存对标报告 |
+| **端到端基准** | `xtask bench-query` | 合成语料下测量查询中位/p95 延迟与每条内存占用，对照 SM-1/SM-2 目标；不包含 Everything 对照 |
 
 ### 1.2 静态检查门禁
 代码变更合入与构建交付必须无条件通过：
-1. `cargo fmt --check`
+1. `cargo fmt --all --check`
 2. `cargo clippy --workspace --all-targets -- -D warnings`（零警告）
 3. `cargo run -p xtask -- check-i18n`（`zh-CN.ftl` 与 `en-US.ftl` 翻译键 100% 对齐）
 4. `cargo deny check`（许可证、安全漏洞与 yanked 检查；仓库已提供 `deny.toml`）
 
-文档-only PR 只运行轻量文档门禁（`check-docs`：必需页面与 Markdown 相对链接）；代码变更的检查不被跳过，安装器打包也必须等待质量检查通过。
+文档-only PR 只运行 `check-docs`；逐层测试、Tooling 与 Release job 跳过，Dependency Policy 与 Installer Package 以 no-op 成功结束。代码变更必须通过完整门禁，安装器打包等待质量检查通过。
 
 `deny.toml` 只针对 `x86_64-pc-windows-msvc`；许可证白名单与 4 条 GPUI/font 栈的 unmaintained 例外均有理由记录。漏洞与 yanked 不设全局忽略，新增 ignore 必须附上游依据。
 
@@ -48,26 +48,3 @@
 | Tantivy + CJK bigram 索引 | 中英混排召回完全满足 CNT-03，索引体积控制在预期预算内 |
 | 托盘、全局热键、单实例与事件循环共存 | 三者协同稳定运行，多实例启动正确唤醒前台窗口，无死锁 |
 | Windows 10 (1809+) 与 Windows 11 兼容性 | 两个系统版本下后台服务与桌面端均能顺畅启动并执行各项功能 |
-
----
-
-## 2. 代码检索与影响分析
-
-仓库根目录存在 `.codegraph/` 时，跨模块理解和修改优先使用 CodeGraph；它是符号/调用关系的索引，不替代编译器和测试。
-
-### 2.1 使用场景
-
-- 重命名核心类型、修改跨模块调用链或 IPC 接口前，先用 `codegraph_explore` 查引用点与影响范围。
-- Trait 动态分发、异步流转、回调注册等无法靠纯文本检索确认的场景，用符号拓扑补齐。
-- 大范围重构前先确认调用爆炸半径，再决定修改顺序；不要把 CodeGraph 当成“已证明正确”的替代品。
-
-### 2.2 边界
-
-- CodeGraph 不可用时使用常规 Grep/Read/编译检查，不在仓库里自行建立第二套索引。
-- 索引可能滞后；实际编辑前仍要读取当前文件，修改后用编译器、测试和真实运行验证。
-- 不把 CodeGraph 输出中的大段源码直接当作文档或提交内容；只保留必要的调用链结论。
-
-### 2.3 相关规则
-
-- 全局 `AGENTS.md`：存在 `.codegraph/` 时优先使用。
-- `docs/engineering/architecture.md`：跨模块设计约束。

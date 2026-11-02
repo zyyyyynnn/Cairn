@@ -82,7 +82,7 @@ flowchart TD
 
 ### 1.6 命名管道 IPC 协议与帧封装
 - 管道地址：`\.\pipe\Cairn.Service`，只有已安装的 LocalSystem 服务监听该管道。
-- 协议版本为 `4`；连接必须先完成 `Hello` 握手，版本不匹配时拒绝请求。
+- 协议版本为 `6`；连接必须先完成 `Hello` 握手，版本不匹配时拒绝请求。
 - 帧格式：`[u32: 负载长度][u16: 协议版本][postcard 序列化二进制内容]`。
 - 响应封套：所有服务端响应必须包裹 `Envelope<T>`，强制携带各卷实时状态列表（`VolumeStatusSummary`），确保客户端 UI 每一帧都能明确掌握数据同步状态。
 - 请求包含：`Hello`、`Query`、`Cancel`、`GetRows`、`ReloadConfig`、`ClearContentIndex` 等。
@@ -119,10 +119,10 @@ flowchart TD
 | **子串高速扫描** | `memchr`（`memmem`） | 极致 SIMD 向量化加速子串匹配 |
 | **序列化与配置** | `postcard`（IPC） / `toml`（配置） | 高密度零拷贝二进制通信与易读配置文件格式 |
 | **文本编码自动识别** | `chardetng` + `encoding_rs` | 准确识别 GBK、UTF-16、BOM 等中文编码 |
-| **系统托盘与热键** | `tray-icon` + `global-hotkey` | Windows 系统原生托盘菜单与全局呼出热键 |
+| **系统托盘** | `tray-icon` | Windows 系统原生托盘菜单；全局热键尚未接入 |
 | **界面国际化 (i18n)** | `fluent-bundle` | 现代化多语言文案管理与参数化插值 |
 | **日志与链路追踪** | `tracing` + `tracing-subscriber` | 结构化异步日志输出与性能诊断 |
-| **测试框架** | `cargo-nextest` + `proptest` | 极速多用例并行测试与属性随机测试 |
+| **测试框架** | `cargo test` + `proptest` | 单元测试与属性随机测试 |
 | **发布打包工程** | WiX Toolset（MSI 事务引擎）+ GPUI Setup | 产出单文件安装包 `CairnSetup.exe`（内嵌 MSI 载荷与服务事务） |
 
 ---
