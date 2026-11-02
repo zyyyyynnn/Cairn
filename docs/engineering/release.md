@@ -15,8 +15,6 @@
 | `cairn.ico` | 安装包与应用图标 |
 | `SHA256SUMS.txt` | 发布产物校验和 |
 
-`bundle.wxs`、`theme.xml`、`zh-CN.wxl` 与 `cairn.yaml` 已退役，不再属于发布面。
-
 ## 2. 构建
 
 ```powershell
