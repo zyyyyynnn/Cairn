@@ -929,7 +929,7 @@ impl CairnApp {
                     .absolute()
                     .inset_0()
                     .overflow_hidden()
-                    .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
+                    .on_scroll(cx.listener(|this, event: &ScrollEvent, window, cx| {
                         let delta = event.delta.pixel_delta(window.line_height());
                         if delta.y.is_zero() {
                             // A purely sideways gesture belongs to the viewport below.
