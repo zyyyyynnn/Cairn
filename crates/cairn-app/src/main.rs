@@ -171,6 +171,7 @@ fn main() {
             // `gpui_kit::open_window` so `Root` owns the first level of the window.
             gpui_kit::init(cx);
             cairn_ui::brand::init_fonts(cx);
+            cairn_ui::brand::init_text_rendering(cx);
             shell::commands::init_keymap(cx);
 
             // The persisted appearance is installed before the first frame, so the window opens at

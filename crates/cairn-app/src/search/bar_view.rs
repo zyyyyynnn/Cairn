@@ -37,6 +37,9 @@ impl CairnApp {
             .pl(rems(layout::SEARCH_BAND_LEAD))
             // The box's outer margins are symmetric: the same tight lead on both sides.
             .pr(rems(layout::SEARCH_BAND_LEAD))
+            // The search band is part of the window frame, so the title bar and the query row
+            // read as one toolbar instead of a bright strip between two gray bands.
+            .bg(tokens.chrome)
             .child(self.render_query_box(tokens, is_focused, focus_handle, view, cx))
     }
 
@@ -72,7 +75,7 @@ impl CairnApp {
             .relative()
             .flex_1()
             .min_w_0()
-            .h(rems(layout::SEARCH_INPUT_HEIGHT))
+            .h(rems(layout::ROW_HEIGHT))
             // The band lead plus this inner lead puts the search glyph on the content baseline;
             // the same inner lead on the trailing side keeps the box's text padding symmetric.
             .pl(rems(layout::SEARCH_INPUT_LEAD))
@@ -90,7 +93,7 @@ impl CairnApp {
             .border_color(if is_focused {
                 tokens.ring
             } else {
-                tokens.input
+                tokens.control_stroke
             })
             .text_color(tokens.foreground)
             .cursor(CursorStyle::IBeam)

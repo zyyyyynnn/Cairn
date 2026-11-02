@@ -13,13 +13,17 @@
 
 use crate::app::{layout, CairnApp};
 use crate::shell::accessibility;
+use crate::shell::state_view::icon_action;
 use crate::shell::theme::ShellTokens;
+use fluent_bundle::FluentArgs;
 use gpui_kit::assets::IconName as AssetIconName;
 use gpui_kit::base::StyledExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{h_flex, Icon, Sizable as _};
+use gpui_kit::component::{h_flex, v_flex, Icon, Sizable as _};
+use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::*;
 use gpui_kit::gpui::{ease_out_quint, Animation, AnimationExt};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Informational status is allowed to leave on its own; a failure is not.
@@ -27,6 +31,9 @@ const TOAST_INFO_DURATION: Duration = Duration::from_secs(6);
 /// The toast is a reading surface, not a panel: one short measure, independent
 /// of the result columns underneath it.
 const TOAST_WIDTH_REM: f32 = 24.0;
+/// Every toast shares one compact minimum height; a two-line explanation grows the
+/// card instead of leaving a fixed-height gap under it.
+const TOAST_MIN_HEIGHT_REM: f32 = 5.5;
 /// Enter and exit share one short settle. Reduced motion skips the frames and
 /// removes the card without delay.
 const TOAST_MOTION: Duration = Duration::from_millis(140);
@@ -37,12 +44,37 @@ pub(crate) enum ToastKind {
     Info,
 }
 
-#[derive(Clone, Debug)]
+type ToastRun = Arc<dyn Fn(&mut CairnApp, &mut Window, &mut Context<CairnApp>)>;
+
+#[derive(Clone)]
+pub(crate) struct ToastAction {
+    label: SharedString,
+    run: ToastRun,
+}
+
+impl ToastAction {
+    pub(crate) fn new(
+        label: impl Into<SharedString>,
+        run: impl Fn(&mut CairnApp, &mut Window, &mut Context<CairnApp>) + 'static,
+    ) -> Self {
+        Self {
+            label: label.into(),
+            run: Arc::new(run),
+        }
+    }
+
+    fn label(&self) -> &SharedString {
+        &self.label
+    }
+}
+
+#[derive(Clone)]
 pub(crate) struct ToastState {
     kind: ToastKind,
     title: String,
     message: String,
     closing: bool,
+    action: Option<ToastAction>,
 }
 
 impl CairnApp {
@@ -52,7 +84,23 @@ impl CairnApp {
         message: impl Into<String>,
         cx: &mut Context<Self>,
     ) {
-        self.show_toast(ToastKind::Error, title.into(), message.into(), cx);
+        self.show_toast(ToastKind::Error, title.into(), message.into(), None, cx);
+    }
+
+    pub(crate) fn show_error_toast_with_action(
+        &mut self,
+        title: impl Into<String>,
+        message: impl Into<String>,
+        action: ToastAction,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_toast(
+            ToastKind::Error,
+            title.into(),
+            message.into(),
+            Some(action),
+            cx,
+        );
     }
 
     pub(crate) fn show_info_toast(
@@ -61,7 +109,7 @@ impl CairnApp {
         message: impl Into<String>,
         cx: &mut Context<Self>,
     ) {
-        self.show_toast(ToastKind::Info, title.into(), message.into(), cx);
+        self.show_toast(ToastKind::Info, title.into(), message.into(), None, cx);
     }
 
     fn show_toast(
@@ -69,6 +117,7 @@ impl CairnApp {
         kind: ToastKind,
         title: String,
         message: String,
+        action: Option<ToastAction>,
         cx: &mut Context<Self>,
     ) {
         self.toast_serial = self.toast_serial.wrapping_add(1);
@@ -78,6 +127,7 @@ impl CairnApp {
             title,
             message,
             closing: false,
+            action,
         });
 
         // A newer toast replaces this one before its timer fires; the serial
@@ -101,9 +151,35 @@ impl CairnApp {
         cx.notify();
     }
 
+    /// Runs the action stored on a failure toast. The toast is cleared first, so the retry either
+    /// reports a fresh failure or the result page replaces it without stale copy. Focus stays with
+    /// the action: a retry that returns to its own surface must not be pulled back to search.
+    pub(crate) fn run_toast_action(
+        &mut self,
+        action: ToastAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.dismiss_toast(cx);
+        (action.run)(self, window, cx);
+    }
+
     pub(crate) fn dismiss_toast(&mut self, cx: &mut Context<Self>) {
         let serial = self.toast_serial;
         self.begin_toast_exit(serial, cx);
+    }
+
+    /// Removes the current toast only when it is the one `title` names. A
+    /// corrected field must not leave its stale validation card behind, and
+    /// an unrelated operation's error must stay readable.
+    pub(crate) fn dismiss_toast_titled(&mut self, title: &str, cx: &mut Context<Self>) {
+        let matches = self
+            .toast
+            .as_ref()
+            .is_some_and(|toast| toast.title == title);
+        if matches {
+            self.dismiss_toast(cx);
+        }
     }
 
     /// Keeps the card mounted for one short fade-out, then drops it. A newer toast bumps the
@@ -143,12 +219,17 @@ impl CairnApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let control = accessibility::control("toast");
+        let is_error = toast.kind == ToastKind::Error;
+        let control = if is_error {
+            accessibility::control("toast")
+        } else {
+            accessibility::control("toast-info")
+        };
+        let action = toast.action.clone();
         let dismiss = accessibility::control("toast-dismiss");
         let dismiss_label = accessibility::name(dismiss, &self.i18n);
         let serial = self.toast_serial;
         let closing = toast.closing;
-        let is_error = toast.kind == ToastKind::Error;
         let icon = if is_error {
             AssetIconName::CircleAlert
         } else {
@@ -175,8 +256,16 @@ impl CairnApp {
         } else {
             rems(layout::SPACE_8)
         };
+        let accessible_name = if toast.message.is_empty() {
+            toast.title.clone()
+        } else {
+            let mut args = FluentArgs::new();
+            args.set("title", toast.title.as_str());
+            args.set("message", toast.message.as_str());
+            self.i18n.get_text_with_args("toast_accessible_name", &args)
+        };
         accessibility::element(control)
-            .aria_label(format!("{}. {}", toast.title, toast.message))
+            .aria_label(accessible_name)
             // The shell root paints this after its content, so a click on the
             // card and its close control never falls through to the table.
             .occlude()
@@ -186,53 +275,78 @@ impl CairnApp {
             .bottom(bottom)
             .right(rems(layout::CONTENT_INSET))
             .w(rems(TOAST_WIDTH_REM))
+            .min_h(rems(TOAST_MIN_HEIGHT_REM))
             .p(rems(layout::SPACE_12))
             .flex()
             .flex_col()
             .rounded(tokens.radius)
-            .bg(tokens.background)
+            .bg(tokens.muted)
             .border_1()
             .border_color(tokens.border)
             .child(
-                // Icon, title and close share one centre line: a start-aligned
-                // row would put the 16px icon, 20px title line and 24px close
-                // target on three different vertical centres.
-                h_flex()
+                // One centred content block: the status icon sits on the title
+                // line, the explanation aligns under the title text, and the
+                // recovery icon follows the explanation instead of floating at
+                // the card edge.
+                v_flex()
                     .w_full()
-                    .items_center()
-                    .gap(rems(layout::INNER_SPACING))
+                    .gap(rems(layout::SPACE_4))
                     .child(
-                        Icon::new(icon)
-                            .small()
-                            .flex_shrink_0()
-                            .text_color(icon_color),
+                        h_flex()
+                            .w_full()
+                            .items_center()
+                            .gap(rems(layout::INNER_SPACING))
+                            .child(
+                                Icon::new(icon)
+                                    .small()
+                                    .flex_shrink_0()
+                                    .text_color(icon_color),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_sm()
+                                    .font_medium()
+                                    .text_color(tokens.foreground)
+                                    .child(toast.title),
+                            )
+                            .child(
+                                close
+                                    // An icon-only 24px target keeps a 16px glyph
+                                    // inset by 4px on each side; pull the target
+                                    // toward the card edge so the glyph sits on the
+                                    // same 12px padding spine.
+                                    .mr(rems(-layout::SPACE_4)),
+                            ),
                     )
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_sm()
-                            .font_medium()
-                            .text_color(tokens.foreground)
-                            .child(toast.title),
-                    )
-                    .child(
-                        close
-                            // An icon-only 24px target keeps a 16px glyph
-                            // inset by 4px on each side; pull the target toward
-                            // the card edge so the glyph, not the target, sits
-                            // on the same 12px padding spine as the left icon.
-                            .mr(rems(-layout::SPACE_4)),
+                        h_flex()
+                            .w_full()
+                            .items_center()
+                            .gap(rems(layout::SPACE_4))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_shrink(1.0)
+                                    .text_sm()
+                                    .line_height(relative(1.5))
+                                    .text_color(tokens.muted_foreground)
+                                    .whitespace_normal()
+                                    .child(toast.message),
+                            )
+                            .when_some(action, |this, action| {
+                                let label = action.label().clone();
+                                let retry = accessibility::control("toast-retry");
+                                this.child(
+                                    icon_action(retry, AssetIconName::RotateCcw, label).on_click(
+                                        cx.listener(move |this, _, window, cx| {
+                                            this.run_toast_action(action.clone(), window, cx);
+                                        }),
+                                    ),
+                                )
+                            }),
                     ),
-            )
-            .child(
-                div()
-                    .pl(rems(layout::SPACE_24))
-                    .pt(rems(layout::SPACE_4))
-                    .text_xs()
-                    .text_color(tokens.muted_foreground)
-                    .whitespace_normal()
-                    .child(toast.message),
             )
             .with_animation(
                 if closing {

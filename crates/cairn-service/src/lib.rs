@@ -15,4 +15,3 @@ pub mod service;
 pub mod session;
 pub mod startup;
 pub mod sync_engine;
-pub mod user_mode;

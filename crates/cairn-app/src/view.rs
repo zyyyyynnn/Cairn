@@ -22,9 +22,11 @@ use crate::shell::accessibility::{self, ControlElement, KeyControl};
 use crate::shell::command_groups::{menu_groups, GroupCommand, MenuGroup};
 use crate::shell::commands::{self, WINDOW_CONTEXT, WINDOW_CONTROL_CONTEXT};
 use crate::shell::theme::{self, ShellTokens};
+use gpui_kit::assets::IconName as AssetIconName;
 use gpui_kit::base::Disableable;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
+use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{
     h_flex, v_flex, Icon, IconName, InteractiveElementExt as _, Sizable as _,
 };
@@ -148,6 +150,8 @@ pub struct MenuEntry {
     pub hint: Option<Box<dyn Action>>,
     /// The nested menu a submenu row opens. The entity is built with the bar's menu.
     pub submenu: Option<Entity<PopupMenu>>,
+    /// `true` while an asynchronous command owns this row, so the row draws a loading icon.
+    pub loading: bool,
     /// `true` on the first row of a section after the first, where one separator belongs.
     pub separates: bool,
 }
@@ -167,7 +171,26 @@ pub fn build_menu(
             menu = menu.separator();
         }
         let label = entry.label.clone();
-        menu = if let Some(submenu) = entry.submenu.clone() {
+        menu = if entry.loading {
+            let row_label = label.clone();
+            let entity = view.clone();
+            let command = entry.command.expect("a loading row owns a command");
+            menu.item(
+                PopupMenuItem::element(move |_, _| {
+                    h_flex()
+                        .w_full()
+                        .flex_1()
+                        .items_center()
+                        .justify_between()
+                        .child(row_label.clone())
+                        .child(Spinner::new().icon(IconName::LoaderCircle).xsmall())
+                })
+                .disabled(entry.disabled)
+                .on_click(move |_, window, cx| {
+                    entity.update(cx, |this, cx| this.run_group_command(command, window, cx));
+                }),
+            )
+        } else if let Some(submenu) = entry.submenu.clone() {
             menu.item(PopupMenuItem::submenu(label, submenu).disabled(entry.disabled))
         } else {
             match (&entry.action, entry.command) {
@@ -211,6 +234,112 @@ pub(crate) fn announce_shortcut(element: ControlElement, control: &KeyControl) -
         return element;
     }
     element.aria_keyshortcuts(shortcuts.join(", "))
+}
+
+/// The Treemap address field's clear control.
+///
+/// It belongs to the shell's control registry, so its element, role and name
+/// come from there; the Treemap view supplies only the click.
+pub(crate) fn treemap_path_clear_button(
+    i18n: &crate::shell::i18n::I18nManager,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let control = accessibility::control("treemap-path-clear");
+    Button::new(control.element)
+        .ghost()
+        .small()
+        .min_w(rems(layout::SPACE_24))
+        .min_h(rems(layout::SPACE_24))
+        .icon(AssetIconName::X)
+        .accessibility_label(accessibility::name(control, i18n))
+        .on_click(on_click)
+}
+
+/// The one rounded content panel used by the result table and the Treemap:
+/// the 4px frame gap, the panel surface and the corner crescent overlay.
+fn content_panel(tokens: &ShellTokens, child: impl IntoElement) -> Div {
+    v_flex()
+        .flex_1()
+        .min_w_0()
+        .min_h_0()
+        .relative()
+        .mx(rems(layout::SPACE_4))
+        .mb(rems(layout::SPACE_4))
+        .bg(tokens.background)
+        .rounded(tokens.radius)
+        .overflow_hidden()
+        .child(child)
+        .child(rounded_panel_corners(tokens.radius, tokens.chrome))
+}
+
+/// Repaints the four corner crescents a rounded panel cuts out of its rectangle.
+///
+/// GPUI clips children to a rectangle, so the heading and row surfaces inside a panel paint over
+/// its corner radii and square them off. The overlay repaints only the area between each corner's
+/// edge and its arc, in the band colour behind the panel. It takes no part in layout or hit
+/// testing, so the heading stays where the shell's bands put it.
+fn rounded_panel_corners(radius: Pixels, color: Hsla) -> impl IntoElement {
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            let r = f32::from(radius);
+            if r <= 0.0 {
+                return;
+            }
+            // Control offset that turns a cubic segment into a quarter circle.
+            let k = r * 0.552_284_8;
+            let left = f32::from(bounds.origin.x);
+            let top = f32::from(bounds.origin.y);
+            let right = left + f32::from(bounds.size.width);
+            let bottom = top + f32::from(bounds.size.height);
+            let at = |x: f32, y: f32| point(px(x), px(y));
+
+            let mut path = PathBuilder::fill();
+            // Each crescent runs along the arc between its two tangency points, then back
+            // through the outer corner.
+            path.move_to(at(left + r, top));
+            path.cubic_bezier_to(
+                at(left, top + r),
+                at(left + r - k, top),
+                at(left, top + r - k),
+            );
+            path.line_to(at(left, top));
+            path.close();
+
+            path.move_to(at(right - r, top));
+            path.cubic_bezier_to(
+                at(right, top + r),
+                at(right - r + k, top),
+                at(right, top + r - k),
+            );
+            path.line_to(at(right, top));
+            path.close();
+
+            path.move_to(at(right, bottom - r));
+            path.cubic_bezier_to(
+                at(right - r, bottom),
+                at(right, bottom - r + k),
+                at(right - r + k, bottom),
+            );
+            path.line_to(at(right, bottom));
+            path.close();
+
+            path.move_to(at(left, bottom - r));
+            path.cubic_bezier_to(
+                at(left + r, bottom),
+                at(left, bottom - r + k),
+                at(left + r - k, bottom),
+            );
+            path.line_to(at(left, bottom));
+            path.close();
+
+            if let Ok(path) = path.build() {
+                window.paint_path(path, color);
+            }
+        },
+    )
+    .absolute()
+    .inset_0()
 }
 
 /// The query box and the command bar act through the same window entity and share its focus state,
@@ -362,6 +491,9 @@ impl Render for CairnApp {
                     this.go_forward(window, cx)
                 }),
             )
+            .on_action(
+                cx.listener(|this, _: &commands::NavigateUp, window, cx| this.go_up(window, cx)),
+            )
             .on_action(cx.listener(Self::delete_selected))
             .on_action(cx.listener(Self::restore_selected))
             // Input modality for focus painting. Any key means the keyboard is driving, and any
@@ -510,6 +642,7 @@ impl CairnApp {
         let click_view = view.clone();
 
         let trigger = Button::new(element_id("toolbar-menu", group.key()))
+            .font_weight(FontWeight::MEDIUM)
             .accessibility_label(name)
             .ghost()
             .small()
@@ -578,8 +711,10 @@ impl CairnApp {
         let toggle_view = view.clone();
         let back_view = view.clone();
         let forward_view = view.clone();
+        let up_view = view.clone();
         let can_back = self.can_go_back();
         let can_forward = self.can_go_forward();
+        let can_up = self.can_go_up();
         let is_collapsed = self.sidebar_collapsed;
         let is_maximized = window.is_maximized();
         let minimize_focus = window
@@ -616,7 +751,7 @@ impl CairnApp {
             .h(layout::TITLE_BAR_HEIGHT)
             .border_b_1()
             .border_color(tokens.border)
-            .bg(tokens.background)
+            .bg(tokens.chrome)
             // The left half keeps the sidebar's width, so the brand and navigation controls do not
             // move when the tree collapses. The divider belongs to the sidebar below; it stops at
             // the title bar instead of drawing a line through the window chrome.
@@ -688,6 +823,23 @@ impl CairnApp {
                                     .on_click(move |_, window, cx| {
                                         forward_view
                                             .update(cx, |this, cx| this.go_forward(window, cx));
+                                    }),
+                            )
+                            .child(
+                                Button::new("nav-up")
+                                    .ghost()
+                                    .small()
+                                    .icon(
+                                        Icon::new(IconName::ArrowUp)
+                                            .size(rems(theme::UI_ICON_SIZE)),
+                                    )
+                                    .disabled(!can_up)
+                                    .accessibility_label(accessibility::name(
+                                        accessibility::control("nav-up"),
+                                        &self.i18n,
+                                    ))
+                                    .on_click(move |_, window, cx| {
+                                        up_view.update(cx, |this, cx| this.go_up(window, cx));
                                     }),
                             )
                             .child(
@@ -802,13 +954,18 @@ impl CairnApp {
         cx: &mut Context<Self>,
     ) -> Div {
         if self.drive_view.is_some() {
+            let path_band = self.render_treemap_path_band(tokens, band.view.clone(), window, cx);
             let body = self.render_treemap_body(tokens, window, cx);
+            // The path band's bottom inset is this panel's top gap, the same
+            // relationship the search band has with the result panel.
+            let body_surface = content_panel(tokens, body);
             return v_flex()
                 .flex_1()
                 .min_w_0()
                 .min_h_0()
-                .bg(tokens.background)
-                .child(body);
+                .bg(tokens.chrome)
+                .child(path_band)
+                .child(body_surface);
         }
 
         let QueryBand {
@@ -826,12 +983,15 @@ impl CairnApp {
             cx,
         );
 
+        // The search band's own bottom inset is this panel's top gap. Repeating it as a margin
+        // would space the same boundary twice and push the heading off the row band.
+        let results_surface = content_panel(tokens, results);
         v_flex()
             .flex_1()
             .min_w_0()
             .min_h_0()
-            .bg(tokens.background)
+            .bg(tokens.chrome)
             .child(query)
-            .child(results)
+            .child(results_surface)
     }
 }

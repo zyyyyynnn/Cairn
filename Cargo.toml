@@ -39,6 +39,8 @@ cairn-setup = { path = "crates/cairn-setup" }
 serde = { version = "1.0", features = ["derive"] }
 postcard = { version = "1.1", features = ["alloc"] }
 serde_json = "1.0"
+sha2 = "0.10"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 toml = "1.1"
 
 # Concurrency & Performance

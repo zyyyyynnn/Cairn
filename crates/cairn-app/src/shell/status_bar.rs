@@ -90,6 +90,7 @@ impl StatusBarModel {
     pub fn objects_summary_text(&self, i18n: &I18nManager) -> String {
         let mut args = FluentArgs::new();
         args.set("count", self.objects_count);
+        args.set("count_text", format_count(self.objects_count));
         if self.objects_count == 0 {
             i18n.get_text_with_args("status_objects_count", &args)
         } else {
@@ -112,6 +113,19 @@ impl StatusBarModel {
         args.set("state", state_text);
         i18n.get_text_with_args("volume_capsule", &args)
     }
+}
+
+/// Groups integer digits so million-scale counts remain scannable in both locales.
+pub(crate) fn format_count(count: usize) -> String {
+    let digits = count.to_string();
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    grouped
 }
 
 #[cfg(test)]
@@ -162,6 +176,50 @@ mod tests {
                 "{state:?} capsule lost the drive letter: {text}"
             );
         }
+    }
+
+    #[test]
+    fn treemap_counts_use_the_locale_plural_rule() {
+        fn plain(text: String) -> String {
+            text.replace(['\u{2068}', '\u{2069}'], "")
+        }
+
+        let en = I18nManager::new("en-US");
+        let zh = I18nManager::new("zh-CN");
+        let mut args = FluentArgs::new();
+        args.set("count", 1i64);
+        args.set("count_text", "1");
+        args.set("size", "1 KB");
+        assert_eq!(
+            plain(en.get_text_with_args("treemap_aggregate", &args)),
+            "1 item"
+        );
+        assert_eq!(
+            plain(en.get_text_with_args("treemap_status_summary", &args)),
+            "1 item 1 KB"
+        );
+        assert_eq!(
+            plain(zh.get_text_with_args("treemap_aggregate", &args)),
+            "1 个项目"
+        );
+        args.set("count", 2i64);
+        args.set("count_text", "2");
+        assert_eq!(
+            plain(en.get_text_with_args("treemap_aggregate", &args)),
+            "2 items"
+        );
+        assert_eq!(
+            plain(zh.get_text_with_args("treemap_aggregate", &args)),
+            "2 个项目"
+        );
+    }
+
+    #[test]
+    fn million_scale_counts_are_grouped() {
+        assert_eq!(format_count(0), "0");
+        assert_eq!(format_count(999), "999");
+        assert_eq!(format_count(1000), "1,000");
+        assert_eq!(format_count(1_437_236), "1,437,236");
     }
 
     #[test]

@@ -178,14 +178,6 @@ impl TreemapTreeNode {
         self.category
     }
 
-    /// Finishes a freshly assembled subtree: aggregates sizes, sorts by size
-    /// and resolves content categories, in that order.
-    pub(super) fn finish(&mut self) {
-        self.compute_aggregated_sizes();
-        self.sort_recursive();
-        self.propagate_content_categories();
-    }
-
     /// Recursively searches for a directory by walking name segments from this
     /// root. The path's first segment names the root itself; comparison
     /// ignores empty segments, trailing separators and ASCII case.

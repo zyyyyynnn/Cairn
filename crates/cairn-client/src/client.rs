@@ -274,7 +274,8 @@ impl CairnClient {
     }
 
     /// Reads the directory tree below `path` from the service's volume index.
-    /// Empty entries mean the path is not indexed.
+    /// Uncovered paths arrive as typed tree errors; an empty list is an empty
+    /// directory.
     pub async fn get_tree(
         &mut self,
         path: &str,

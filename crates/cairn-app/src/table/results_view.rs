@@ -10,6 +10,7 @@ use crate::shell::accessibility::{self, ControlElement};
 use crate::shell::command_groups::GroupCommand;
 use crate::shell::commands::RESULTS_CONTEXT;
 use crate::shell::menu_rules::IndexMenuState;
+use crate::shell::state_view::{icon_action, render_state_band};
 use crate::shell::theme::{self, ShellTokens};
 use crate::table::model::{format_timestamp, ColumnBoundary, SortColumn};
 use crate::view::announce_shortcut;
@@ -17,10 +18,8 @@ use cairn_core::format_size_bytes;
 use cairn_core::treemap::TreemapCategory;
 use cairn_protocol::message::FileRowData;
 use cairn_protocol::status::ContentIndexState;
-use fluent_bundle::FluentArgs;
 use gpui_kit::assets::IconName as AssetIconName;
-use gpui_kit::base::StyledExt;
-use gpui_kit::component::button::Button;
+use gpui_kit::base::Disableable as _;
 use gpui_kit::component::menu::ContextMenuExt;
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_kit::component::tooltip::Tooltip;
@@ -41,8 +40,6 @@ use std::time::Duration;
 const SKELETON_DELAY: Duration = Duration::from_millis(180);
 /// One full traversal of the row-to-row pulse.
 const SKELETON_PULSE: Duration = Duration::from_millis(1400);
-/// The pulse is decoration over a static structure; 30 fps is enough and costs half the repaints.
-const SKELETON_MAX_FPS: f32 = 30.0;
 /// How long the first page takes to fade in where the skeleton used to be.
 const ROW_REVEAL: Duration = Duration::from_millis(140);
 /// Placeholder-bar geometry is local to the skeleton: no real control shares this height or width.
@@ -53,19 +50,10 @@ const RESIZE_HIT_WIDTH: Pixels = px(8.0);
 const RESIZE_LINE_OFFSET: Pixels = px(3.0);
 /// Wide enough for the row commands without letting a long path set the menu's width.
 const CONTEXT_MENU_MIN_WIDTH: f32 = 12.0;
-/// A soft shade at the bottom edge, not a background-colored veil. A veil over interactive rows
-/// washes out their hover and selection fills; this only deepens the surface for a few pixels, so
-/// the last row stays legible and its state stays visible.
-const ROWS_EDGE_SHADE_HEIGHT: f32 = 3.0 * layout::STEP;
-const ROWS_EDGE_SHADE_ALPHA: f32 = 0.06;
-/// The shade ramps out over the final row, so reaching the end of the list has no visible step.
-const ROWS_EDGE_SHADE_RAMP_ROWS: f32 = 1.0;
-
 /// Why a `content:` query has no rows to show. Silence would read as "no file matches", which is
 /// only true once the content index is ready.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ContentQueryNotice {
-    Local,
     Loading,
     /// The status read itself failed; the lifecycle is unknown, not `Disabled`.
     Unreadable,
@@ -74,41 +62,17 @@ enum ContentQueryNotice {
     Error,
 }
 
-impl ContentQueryNotice {
-    fn keys(self) -> (&'static str, &'static str) {
-        match self {
-            Self::Local => ("empty_content_local_title", "empty_content_local_hint"),
-            Self::Loading => ("empty_content_loading_title", "empty_content_loading_hint"),
-            Self::Unreadable => (
-                "empty_content_unreadable_title",
-                "empty_content_unreadable_hint",
-            ),
-            Self::Disabled => (
-                "empty_content_disabled_title",
-                "empty_content_disabled_hint",
-            ),
-            Self::Backfilling => (
-                "empty_content_backfilling_title",
-                "empty_content_backfilling_hint",
-            ),
-            Self::Error => ("empty_content_error_title", "empty_content_error_hint"),
-        }
-    }
-}
-
 /// A disconnected service shows its own offline band, so this only explains states where a query
-/// actually reached an indexer. Local fallback is checked first: the user-privilege indexer
-/// carries file names only, even though it is "connected", so a content query can never be
-/// answered there.
+/// actually reached the service.
 fn content_query_notice(state: &IndexMenuState<'_>) -> Option<ContentQueryNotice> {
-    if state.local_mode {
-        return Some(ContentQueryNotice::Local);
-    }
     if !state.service_connected {
         return None;
     }
     if state.content_loading {
         return Some(ContentQueryNotice::Loading);
+    }
+    if state.content_action_failed {
+        return Some(ContentQueryNotice::Error);
     }
     if state.content_failed {
         return Some(ContentQueryNotice::Unreadable);
@@ -203,15 +167,6 @@ fn rows_to_paint(
     }
 }
 
-/// Strength of the bottom edge shade: full while there is more than one row left to scroll,
-/// ramping to nothing at the end so the list never carries a permanent dim band.
-fn rows_edge_opacity(remaining: f32, row_height: f32) -> f32 {
-    if remaining <= 0.0 || row_height <= 0.0 {
-        return 0.0;
-    }
-    (remaining / (row_height * ROWS_EDGE_SHADE_RAMP_ROWS)).clamp(0.0, 1.0)
-}
-
 /// Broad file kind behind a result row's icon, from the taxonomy the Treemap already uses.
 ///
 /// A recovered suffix matters when the display name hides or differs from it. In that case the
@@ -287,51 +242,6 @@ fn column_label_key(column: SortColumn, in_recycle_bin: bool) -> &'static str {
         column.recycle_bin_label_key()
     } else {
         column.label_key()
-    }
-}
-
-/// Every empty, no-match and unavailable band shares this geometry. The icon and
-/// the optional action are supplied by the state; the rhythm, surface, type and
-/// measure are not copied per state.
-fn render_state_band(
-    tokens: &ShellTokens,
-    control: &'static crate::shell::accessibility::KeyControl,
-    aria_label: String,
-    icon: AnyElement,
-    title: String,
-    hint: String,
-    action: Option<AnyElement>,
-) -> ControlElement {
-    let band = accessibility::element(control)
-        .aria_label(aria_label)
-        .flex()
-        .flex_col()
-        .flex_1()
-        .min_h_0()
-        .items_center()
-        .justify_center()
-        .gap(rems(layout::SPACE_8))
-        .py(rems(layout::SPACE_48))
-        .bg(tokens.background)
-        .child(icon)
-        .child(
-            div()
-                .text_sm()
-                .font(theme::serif_font(FontWeight::SEMIBOLD))
-                .text_color(tokens.foreground)
-                .child(title),
-        )
-        .child(
-            div()
-                .max_w(rems(layout::MESSAGE_MAX_WIDTH))
-                .text_center()
-                .text_xs()
-                .text_color(tokens.muted_foreground)
-                .child(hint),
-        );
-    match action {
-        Some(action) => band.child(action),
-        None => band,
     }
 }
 
@@ -440,23 +350,6 @@ impl CairnApp {
             None
         };
         let has_content = rows.is_some();
-        // The edge shade belongs to the result body as a whole, not just the row band: it spans
-        // the row viewport and the vertical scrollbar gutter so the bottom edge is continuous
-        // instead of leaving a bright strip beside the rows. The skeleton and state bands own their
-        // own surfaces and must not take it.
-        let showing_result_rows = self.recycle_bin.error().is_none()
-            && !(first_page_loading || index_loading)
-            && local_location
-            && self.results.table.total_rows() > 0;
-        let row_height_f = f32::from(row_height);
-        let scroll_below = (self.results.table.max_scroll_top(row_height_f)
-            - self.results.table.scroll_top)
-            .max(0.0);
-        let shade = if showing_result_rows {
-            rows_edge_opacity(scroll_below, row_height_f)
-        } else {
-            0.0
-        };
         let state = if has_content {
             None
         } else if local_location {
@@ -571,32 +464,7 @@ impl CairnApp {
                                     )
                                 },
                             )),
-                    )
-                    // The same shade spans the row viewport and the vertical scrollbar gutter,
-                    // so the table's bottom edge stays continuous instead of leaving a bright
-                    // strip beside the rows. It is paint-only; the scrollbar and rows keep their
-                    // hitboxes.
-                    .when(shade > 0.0, |this| {
-                        this.child(
-                            div()
-                                .absolute()
-                                .left_0()
-                                .right_0()
-                                .bottom_0()
-                                .h(rems(ROWS_EDGE_SHADE_HEIGHT))
-                                .opacity(shade)
-                                // 180° puts the transparent stop at the top and the shade at the
-                                // edge; 0° in this renderer runs the other way.
-                                .bg(linear_gradient(
-                                    180.0,
-                                    linear_color_stop(tokens.muted_foreground.opacity(0.0), 0.0),
-                                    linear_color_stop(
-                                        tokens.muted_foreground.opacity(ROWS_EDGE_SHADE_ALPHA),
-                                        1.0,
-                                    ),
-                                )),
-                        )
-                    }),
+                    ),
             )
             .when(overflows_sideways, |this| {
                 this.child(
@@ -618,6 +486,7 @@ impl CairnApp {
                     div()
                         .absolute()
                         .inset_0()
+                        .rounded(tokens.radius)
                         .border_1()
                         .border_color(tokens.ring),
                 )
@@ -676,7 +545,7 @@ impl CairnApp {
                 div()
                     .lane_grow(self.results.column_widths.name)
                     .min_w(rems(layout::NAME_MIN_COLUMN))
-                    .pl(rems(layout::CONTENT_INSET))
+                    .pl(rems(layout::CONTENT_INSET - layout::SPACE_4))
                     .pr(rems(layout::INNER_SPACING))
                     .flex()
                     .items_center()
@@ -751,9 +620,10 @@ impl CairnApp {
             return row.opacity(1.0).into_any_element();
         }
 
-        let pulse = Animation::new(SKELETON_PULSE)
-            .repeat_synced()
-            .with_max_fps(SKELETON_MAX_FPS);
+        // The pulse rides the window's frame clock. A timer cap ran on the platform timer, whose
+        // 15.6ms Windows resolution stepped every row at ~47ms; the rows share the frame the
+        // platform already delivers, and a known-long wait still renders the still skeleton.
+        let pulse = Animation::new(SKELETON_PULSE).repeat_synced();
         // The list length must not change between frames: GPUI persists the active animation index
         // in the element state, and a shorter list makes that index out of bounds. The ordinary
         // first page has a non-zero wait phase; a known-long state never reaches this path.
@@ -782,14 +652,10 @@ impl CairnApp {
     fn render_empty_state(&self, tokens: &ShellTokens, cx: &mut Context<Self>) -> ControlElement {
         if self.recycle_bin.error().is_some() {
             let control = accessibility::control("recycle-bin-error");
-            let title = self.i18n.get_text("recycle_bin_unavailable_title");
-            let hint = self.i18n.get_text("recycle_bin_unavailable_hint");
+            let message = self.i18n.get_text("recycle_bin_unavailable_title");
             let retry = accessibility::control("recycle-bin-retry");
             let retry_label = accessibility::name(retry, &self.i18n);
-            let action = Button::new(retry.element)
-                .label(retry_label.clone())
-                .accessibility_label(retry_label)
-                .mt(rems(layout::SPACE_8))
+            let action = icon_action(retry, AssetIconName::RotateCcw, retry_label)
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.open_recycle_bin(window, cx);
                 }))
@@ -797,13 +663,11 @@ impl CairnApp {
             return render_state_band(
                 tokens,
                 control,
-                format!("{title}. {hint}"),
+                message,
                 Icon::new(IconName::CircleAlert)
                     .size_8()
-                    .text_color(tokens.muted_foreground)
+                    .text_color(tokens.danger)
                     .into_any_element(),
-                title,
-                hint,
                 Some(action),
             );
         }
@@ -811,26 +675,25 @@ impl CairnApp {
         let control = accessibility::control("result-state");
         if self.recycle_bin.is_open() {
             let bin_empty = self.recycle_bin.all().is_empty();
-            let (title_index, hint_index) = if bin_empty { (2, 3) } else { (4, 5) };
-            let title = accessibility::name_at(control, title_index, &self.i18n);
-            let hint = accessibility::name_at(control, hint_index, &self.i18n);
-            let icon = if bin_empty {
-                Icon::new(AssetIconName::Recycle)
+            let (message_key, icon) = if bin_empty {
+                (
+                    "recycle_bin_empty_title",
+                    Icon::new(AssetIconName::Recycle)
+                        .size_8()
+                        .text_color(tokens.muted_foreground)
+                        .into_any_element(),
+                )
             } else {
-                Icon::new(IconName::Search)
-            }
-            .size_8()
-            .text_color(tokens.muted_foreground)
-            .into_any_element();
-            return render_state_band(
-                tokens,
-                control,
-                format!("{title}. {hint}"),
-                icon,
-                title,
-                hint,
-                None,
-            );
+                (
+                    "recycle_bin_no_matches_title",
+                    Icon::new(IconName::Search)
+                        .size_8()
+                        .text_color(tokens.muted_foreground)
+                        .into_any_element(),
+                )
+            };
+            let message = self.i18n.get_text(message_key);
+            return render_state_band(tokens, control, message, icon, None);
         }
 
         let has_query = self.has_query();
@@ -839,47 +702,105 @@ impl CairnApp {
         } else {
             None
         };
-        let notice_keys = notice.map(ContentQueryNotice::keys);
-        let (title_key, hint_key) = match notice_keys {
-            Some(keys) => keys,
+        let (message_key, icon) = match notice {
+            Some(ContentQueryNotice::Loading) => (
+                "empty_content_loading_title",
+                Icon::new(AssetIconName::Timer)
+                    .size_8()
+                    .text_color(tokens.muted_foreground)
+                    .into_any_element(),
+            ),
+            Some(ContentQueryNotice::Unreadable) => (
+                "empty_content_unreadable_title",
+                Icon::new(AssetIconName::TriangleAlert)
+                    .size_8()
+                    .text_color(tokens.warning_ink)
+                    .into_any_element(),
+            ),
+            Some(ContentQueryNotice::Disabled) => (
+                "empty_content_disabled_title",
+                Icon::new(AssetIconName::Info)
+                    .size_8()
+                    .text_color(tokens.muted_foreground)
+                    .into_any_element(),
+            ),
+            Some(ContentQueryNotice::Backfilling) => (
+                "empty_content_backfilling_title",
+                Icon::new(AssetIconName::Timer)
+                    .size_8()
+                    .text_color(tokens.warning_ink)
+                    .into_any_element(),
+            ),
+            Some(ContentQueryNotice::Error) => (
+                "empty_content_error_title",
+                Icon::new(AssetIconName::CircleAlert)
+                    .size_8()
+                    .text_color(tokens.danger)
+                    .into_any_element(),
+            ),
             // A ready content index answering zero rows is a genuine no-match, but it is a
             // no-match inside a scope narrower than "all files". Say that scope once instead of
             // letting a filename-only explanation imply whole-body coverage.
-            None if has_query && self.has_content_query() => {
-                ("empty_no_matches", "empty_content_scope_hint")
+            None if has_query && self.has_content_query() => (
+                "empty_content_scope_line",
+                Icon::new(AssetIconName::Search)
+                    .size_8()
+                    .text_color(tokens.muted_foreground)
+                    .into_any_element(),
+            ),
+            None if has_query => (
+                "empty_no_matches",
+                Icon::new(AssetIconName::Search)
+                    .size_8()
+                    .text_color(tokens.muted_foreground)
+                    .into_any_element(),
+            ),
+            None => (
+                "empty_index_empty_title",
+                Icon::new(AssetIconName::Search)
+                    .size_8()
+                    .text_color(tokens.muted_foreground)
+                    .into_any_element(),
+            ),
+        };
+        let message = self.i18n.get_text(message_key);
+        let action = match notice {
+            Some(ContentQueryNotice::Disabled)
+            | Some(ContentQueryNotice::Error)
+            | Some(ContentQueryNotice::Unreadable) => {
+                let label_key = match notice {
+                    Some(ContentQueryNotice::Disabled) => "index_enable_action",
+                    Some(ContentQueryNotice::Error) => "menu_content_search_retry",
+                    _ => "index_status_retry",
+                };
+                let pending = !matches!(notice, Some(ContentQueryNotice::Unreadable))
+                    && self.service.content_action_pending;
+                let control = accessibility::control("content-search-action");
+                let label = self.i18n.get_text(label_key);
+                let icon = match notice {
+                    Some(ContentQueryNotice::Disabled) => AssetIconName::Play,
+                    _ => AssetIconName::RotateCcw,
+                };
+                Some(
+                    icon_action(control, icon, label)
+                        .disabled(pending)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            match notice {
+                                Some(ContentQueryNotice::Unreadable) => {
+                                    this.refresh_content_status(cx)
+                                }
+                                _ => this.set_content_index_enabled(true, cx),
+                            }
+                            this.query.search_focus.focus(window, cx);
+                        }))
+                        .into_any_element(),
+                )
             }
-            None if has_query => ("empty_no_matches", "empty_no_matches_hint"),
-            None => ("empty_index_empty_title", "empty_index_empty_hint"),
-        };
-        let title = self.i18n.get_text(title_key);
-        let hint = match &self.service.content_status.state {
-            ContentIndexState::Error(reason) if notice == Some(ContentQueryNotice::Error) => {
-                let mut args = FluentArgs::new();
-                args.set("reason", reason.trim());
-                self.i18n.get_text_with_args(hint_key, &args)
+            Some(ContentQueryNotice::Loading) | Some(ContentQueryNotice::Backfilling) | None => {
+                None
             }
-            _ => self.i18n.get_text(hint_key),
         };
-        let message = match notice_keys {
-            Some(_) => format!("{title}. {hint}"),
-            // The scope sentence is part of the answer, so it belongs in the announced message as
-            // well as in the visible hint.
-            None if has_query && self.has_content_query() => format!("{title}. {hint}"),
-            None if has_query => accessibility::name_at(control, 1, &self.i18n),
-            None => accessibility::name_at(control, 0, &self.i18n),
-        };
-        render_state_band(
-            tokens,
-            control,
-            message,
-            Icon::new(IconName::Search)
-                .size_8()
-                .text_color(tokens.muted_foreground)
-                .into_any_element(),
-            title,
-            hint,
-            None,
-        )
+        render_state_band(tokens, control, message, icon, action)
     }
 
     fn render_service_offline_state(
@@ -892,100 +813,58 @@ impl CairnApp {
             .service_issue
             .unwrap_or(ServiceIssue::NotRunning);
         let control = accessibility::control(issue.accessibility_key());
-        let title = accessibility::name_at(control, 0, &self.i18n);
-        let recovery = accessibility::name_at(control, 1, &self.i18n);
+        let message_key = match issue {
+            ServiceIssue::NotRunning => "service_not_running_title",
+            ServiceIssue::NotInstalled => "service_not_installed_title",
+            ServiceIssue::ProtocolIncompatible => "service_incompatible_title",
+            ServiceIssue::Unauthorized => "service_unauthorized_title",
+        };
+        let message = self.i18n.get_text(message_key);
         let retry = accessibility::control("service-retry-button");
         let retry_label = accessibility::name(retry, &self.i18n);
         let start = accessibility::control("service-start-button");
         let start_label = accessibility::name(start, &self.i18n);
+        let probe_label = self.i18n.get_text("service_probe_label");
+        let start_face = if self.service.is_probing_service {
+            probe_label.clone()
+        } else {
+            start_label.clone()
+        };
+        let retry_face = if self.service.is_probing_service {
+            probe_label
+        } else {
+            retry_label.clone()
+        };
         // Starting the service is a UAC action, so it is offered only when SCM says the service
         // exists. A missing service gets install guidance instead of an elevation prompt.
-        let can_start = self.service.service_installed
-            && issue == ServiceIssue::NotRunning
-            && !self.service.search_scope.needs_local_only();
-        // The small line states the outcome or the issue-specific recovery; the button carries
-        // the action. Start and retry states keep the same title + hint + action rhythm.
-        let hint = if can_start {
-            self.i18n.get_text("service_start_hint")
+        let can_start = self.service.service_installed && issue == ServiceIssue::NotRunning;
+        let action = if can_start {
+            icon_action(start, AssetIconName::Play, start_face)
+                .loading(self.service.is_probing_service)
+                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                    this.start_service(cx);
+                }))
+                .into_any_element()
         } else {
-            recovery.clone()
+            icon_action(retry, AssetIconName::RotateCcw, retry_face)
+                .loading(self.service.is_probing_service)
+                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                    this.retry_service_connection(cx);
+                }))
+                .into_any_element()
         };
-        let announcement = format!("{title}. {hint}");
-
-        accessibility::element(control)
-            .aria_label(announcement)
-            .flex_1()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap(rems(layout::SPACE_12))
-            .py(rems(layout::SPACE_48))
-            .bg(tokens.background)
-            .child(
-                Icon::new(IconName::CircleAlert)
-                    .size_8()
-                    .text_color(tokens.muted_foreground),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .font_medium()
-                    .text_color(tokens.foreground)
-                    .child(title),
-            )
-            .child(
-                div()
-                    .max_w(rems(layout::MESSAGE_MAX_WIDTH))
-                    .text_center()
-                    .text_xs()
-                    .text_color(tokens.muted_foreground)
-                    .child(hint),
-            )
-            .child(
-                h_flex()
-                    .items_center()
-                    .gap(rems(layout::INNER_SPACING))
-                    .mt(rems(layout::SPACE_8))
-                    .when(can_start, |this| {
-                        this.child(
-                            Button::new(start.element)
-                                .label(start_label.clone())
-                                .accessibility_label(start_label)
-                                .small()
-                                .loading(self.service.is_probing_service)
-                                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                                    this.start_service(cx);
-                                })),
-                        )
-                    })
-                    .when(!can_start, |this| {
-                        this.child(
-                            Button::new(retry.element)
-                                .label(retry_label.clone())
-                                .accessibility_label(retry_label)
-                                .small()
-                                .loading(self.service.is_probing_service)
-                                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                                    this.retry_service_connection(cx);
-                                })),
-                        )
-                    }),
-            )
+        render_state_band(
+            tokens,
+            control,
+            message,
+            Icon::new(IconName::CircleAlert)
+                .size_8()
+                .text_color(tokens.danger)
+                .into_any_element(),
+            Some(action),
+        )
     }
 
-    /// Scroll owner of the result band. Only `visible` rows are built. The tall spacer underneath
-    /// gives the scrollbar the full result extent, while the rows are painted in a fixed overlay
-    /// whose top is the viewport-local residual: at a full index the absolute row origin is tens of
-    /// millions of pixels, where f32 rounds every row onto a coarser grid and the row rhythm drifts.
-    ///
-    /// This band stays drawn here instead of using `Table` or `VirtualList` for one reason: the
-    /// service reports a total before it has delivered the rows. Both components measure a collection
-    /// they already hold, so an index beyond the fetched window cannot exist in them — the placeholder
-    /// rows would vanish and the scrollbar would shrink to one page the moment a query returned more.
-    /// The row geometry, the cell lanes, the z-free hover and selection fills and every colour below
-    /// come from the same tokens and scale helpers the components use.
     fn render_rows_band(
         &mut self,
         tokens: &ShellTokens,
@@ -1343,7 +1222,7 @@ impl CairnApp {
             .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
             .lane_grow(self.results.column_widths.name)
             .min_w(rems(layout::NAME_MIN_COLUMN))
-            .pl(rems(layout::CONTENT_INSET))
+            .pl(rems(layout::CONTENT_INSET - layout::SPACE_4))
             .pr(rems(layout::INNER_SPACING))
             .flex()
             .items_center()
@@ -1373,7 +1252,7 @@ impl CairnApp {
                         .px(rems(layout::SPACE_4))
                         .rounded(tokens.radius)
                         .bg(tokens.muted)
-                        .text_xs()
+                        .text_sm()
                         .text_color(tokens.muted_foreground)
                         .child(self.i18n.get_text("result_content_match")),
                 )
@@ -1484,7 +1363,7 @@ impl CairnApp {
                 div()
                     .lane_grow(self.results.column_widths.name)
                     .min_w(rems(layout::NAME_MIN_COLUMN))
-                    .pl(rems(layout::CONTENT_INSET))
+                    .pl(rems(layout::CONTENT_INSET - layout::SPACE_4))
                     .pr(rems(layout::INNER_SPACING))
                     .flex()
                     .items_center()
@@ -1704,7 +1583,7 @@ impl CairnApp {
             HeaderLane::Name => cell
                 .lane_grow(self.results.column_widths.name)
                 .min_w(rems(layout::NAME_MIN_COLUMN))
-                .pl(rems(layout::CONTENT_INSET))
+                .pl(rems(layout::CONTENT_INSET - layout::SPACE_4))
                 .pr(rems(layout::INNER_SPACING)),
             HeaderLane::Path => cell
                 .lane_grow(self.results.column_widths.path)
@@ -1783,7 +1662,7 @@ mod tests {
 
     use super::{
         column_label_key, content_query_notice, pulse_opacity, result_command_label_key,
-        rows_band_local_top, rows_edge_opacity, rows_to_paint, ContentQueryNotice,
+        rows_band_local_top, rows_to_paint, ContentQueryNotice,
     };
     use crate::app::CairnApp;
     use crate::shell::command_groups::GroupCommand;
@@ -1885,25 +1764,14 @@ mod tests {
     #[test]
     fn a_content_query_explains_an_index_that_cannot_answer() {
         let mut state = crate::shell::menu_rules::IndexMenuState {
-            scope: crate::service::search_scope::SearchScope::AllFiles,
-            service_installed: true,
             service_connected: true,
-            switching_scope: false,
             content_loading: false,
             content_failed: false,
+            content_action_failed: false,
             content_action_pending: false,
-            local_mode: false,
             content_state: &ContentIndexState::Ready,
         };
 
-        state.local_mode = true;
-        assert_eq!(
-            content_query_notice(&state),
-            Some(ContentQueryNotice::Local),
-            "the user indexer carries file names only, even when connected"
-        );
-
-        state.local_mode = false;
         state.service_connected = false;
         assert_eq!(
             content_query_notice(&state),
@@ -1927,6 +1795,14 @@ mod tests {
         );
 
         state.content_failed = false;
+        state.content_action_failed = true;
+        assert_eq!(
+            content_query_notice(&state),
+            Some(ContentQueryNotice::Error),
+            "an action failure must retry the action, not re-read the status"
+        );
+
+        state.content_action_failed = false;
         state.content_state = &ContentIndexState::Disabled;
         assert_eq!(
             content_query_notice(&state),
@@ -2055,16 +1931,5 @@ mod tests {
         assert_eq!(painted.range, 84..101);
         assert_eq!(painted.top, 84.0 * 28.0 - 2_380.0);
         assert!(!painted.pinned);
-    }
-
-    #[test]
-    fn the_bottom_edge_shade_disappears_before_the_last_row() {
-        let row = 28.0;
-        assert_eq!(rows_edge_opacity(0.0, row), 0.0);
-        assert_eq!(rows_edge_opacity(-5.0, row), 0.0);
-        assert_eq!(rows_edge_opacity(row * 0.5, row), 0.5);
-        assert_eq!(rows_edge_opacity(row, row), 1.0);
-        assert_eq!(rows_edge_opacity(row * 10.0, row), 1.0);
-        assert_eq!(rows_edge_opacity(row, 0.0), 0.0);
     }
 }

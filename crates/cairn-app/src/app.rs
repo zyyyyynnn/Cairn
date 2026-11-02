@@ -18,7 +18,6 @@
 
 use crate::search::filters::FilterCategory;
 use crate::search::input::{QueryTextMetrics, SearchInputState};
-use crate::service::search_scope::SearchScope;
 use crate::shell::command_groups::MenuGroup;
 use crate::shell::i18n::I18nManager;
 use crate::shell::menu_actions::sort_column_from_key;
@@ -26,6 +25,7 @@ use crate::shell::settings::AppSettings;
 use crate::shell::status_bar::StatusBarModel;
 use crate::table::model::{ColumnBoundary, ColumnWidths, TableState};
 use cairn_protocol::status::ContentIndexStatus;
+use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::menu::PopupMenu;
 use gpui_kit::gpui::*;
 use std::cell::RefCell;
@@ -45,10 +45,10 @@ use std::sync::Arc;
 ///
 /// # The ladder has two rungs
 ///
-/// `CONTROL_HEIGHT` and `ROW_HEIGHT` are the only numbers chosen for themselves. Everything else
-/// is an expression over them so every band scales from the same two density tokens. A band that
-/// wants its own step gets a new named relationship, not a new literal, and the invariant test
-/// below verifies that every band height is derived from `CONTROL_HEIGHT` or `ROW_HEIGHT`:
+/// `CONTROL_HEIGHT` and `ROW_HEIGHT` are the only numbers chosen for themselves. Every band is an
+/// expression over the row step, and taller pointer targets use the control step. A band that wants
+/// its own step gets a new named relationship, not a new literal, and the invariant test below
+/// verifies that every band height is a named step:
 /// `CairnApp::the_band_measures_rows_in_the_same_rem_step_the_row_renders_at` fails the suite when
 /// someone writes a literal where an expression belongs.
 pub mod layout {
@@ -70,8 +70,8 @@ pub mod layout {
     pub const SPACE_48: f32 = 12.0 * STEP;
 
     // ---- the two base steps --------------------------------------------------------
-    /// One interactive control: the query box, the table heading cell, a toolbar trigger. Controls
-    /// are what a pointer aims at, so they get the taller of the two steps.
+    /// One taller interactive control: a toolbar trigger or a table action. The query box and path
+    /// field take the compact row step, so a control never invents a step of its own.
     pub const CONTROL_HEIGHT: f32 = SPACE_32;
     /// One result row: 7 four-pixel steps. Virtualization math requires it to be constant for a
     /// frame. Navigation rows share this step: the sidebar is a list before it is a toolbar.
@@ -83,19 +83,16 @@ pub mod layout {
     /// same distance cannot drift between an inset and a gap.
     pub const INNER_SPACING: f32 = SPACE_8;
     /// The search band: the query box plus the tight inset that keeps it off the band's edges.
-    pub const SEARCH_BAND_HEIGHT: f32 = CONTROL_HEIGHT + 2.0 * TIGHT_LEAD;
-    /// The query box inside the search band. The primary task is a control like any other, so it
-    /// takes the control step rather than a step of its own.
-    pub const SEARCH_INPUT_HEIGHT: f32 = CONTROL_HEIGHT;
+    pub const SEARCH_BAND_HEIGHT: f32 = ROW_HEIGHT + 2.0 * TIGHT_LEAD;
     /// The column-heading row shares the result row's height so it reads as the first row of the
     /// table, not a taller control band above it.
     pub const HEADER_HEIGHT: f32 = ROW_HEIGHT;
     /// The status line: the compact data row, so it takes the result-row step. The shell pins it
     /// so its arithmetic and the rendered band cannot drift apart.
     pub const STATUS_HEIGHT: f32 = ROW_HEIGHT;
-    /// The Treemap category legend is a compact status item: one 12px swatch plus a text_xs
-    /// label inside a 20px hit row. Its 2px horizontal inset is an optical exception, like
-    /// `MENU_LEAD`, and stays off the 4px ladder.
+    /// The Treemap category legend is a compact status item: one 12px swatch plus a text_sm
+    /// label inside a 20px hit row. Its 2px horizontal inset is an optical exception and stays
+    /// off the 4px ladder.
     pub const LEGEND_ROW: f32 = 5.0 * STEP;
     pub const LEGEND_SWATCH: f32 = 3.0 * STEP;
     pub const LEGEND_INSET: f32 = 0.5 * STEP;
@@ -125,12 +122,16 @@ pub mod layout {
     /// Widest an explanatory line runs before it wraps: long enough to read as one sentence, short
     /// enough that the message never decides the width of the region holding it.
     pub const MESSAGE_MAX_WIDTH: f32 = 154.0 * STEP; // 616px
-    /// A confirmation asks one short question. 384px at 100% keeps a filename and its explanation
-    /// readable without the half-empty surface the framework's 448px default leaves behind.
-    pub const CONFIRMATION_WIDTH: f32 = 96.0 * STEP; // 384px
-    /// Estimated height used only to seat a short confirmation before GPUI has laid it out. It is a
-    /// rem value so the seat scales with interface zoom instead of drifting at 90/110%.
-    pub const CONFIRMATION_ESTIMATED_HEIGHT: f32 = 150.0 / theme::BASE_FONT_PX; // ~150px at 100%
+    /// The serif sentence's ink centre sits 1.5px below its flex line box at this heading step.
+    /// The state action uses it to keep its 24px icon on the sentence's optical centre; it is a
+    /// correction, not a ladder distance.
+    pub const STATE_ACTION_OPTICAL_OFFSET: f32 = 1.5 / theme::BASE_FONT_PX;
+    /// One dialog surface for every alert: 384px wide at 100%, keeping a filename and its
+    /// explanation readable without the half-empty framework default.
+    pub const DIALOG_WIDTH: f32 = 96.0 * STEP; // 384px
+    /// Where a compact alert is seated in the window before layout. The surface itself grows with
+    /// its copy instead of reserving a fixed height; the viewport cap scrolls a very long body.
+    pub const DIALOG_SEAT_HEIGHT: f32 = 32.0 * STEP; // 128px
 
     // ---- panes ---------------------------------------------------------------------
     /// The sidebar keeps its previous rendered width on the 4px ladder: 208px and 152px at 100%.
@@ -158,13 +159,10 @@ pub mod layout {
     /// inset. A small Ghost Button and a sidebar row both pad by [`INNER_SPACING`], so these sum
     /// back to `CONTENT_INSET` for the visible text or icon.
     pub const TIGHT_LEAD: f32 = SPACE_4;
-    /// Optical correction: 文 carries less left side bearing than 名, so without it the first menu
-    /// character's ink sits just left of the search glyph and the Name heading. This is an optical
-    /// 2px exception to the 4px ladder, like the 1px hairline.
-    const MENU_OPTICAL_LEAD: f32 = 2.0 / theme::BASE_FONT_PX;
-    /// Menu trigger container lead: the content edge minus the small Button's own 8px padding,
-    /// plus the optical correction for the first glyph's side bearing.
-    pub const MENU_LEAD: f32 = CONTENT_INSET - INNER_SPACING + MENU_OPTICAL_LEAD;
+    /// Menu trigger container lead. The small Button's own 8px padding completes the content
+    /// inset, so the trigger's label starts on the content spine and its hover surface shares the
+    /// query box's and result panel's outer edge.
+    pub const MENU_LEAD: f32 = TIGHT_LEAD;
     /// Search band outer lead, followed by the query box's own leading padding.
     pub const SEARCH_BAND_LEAD: f32 = TIGHT_LEAD;
     pub const SEARCH_INPUT_LEAD: f32 = CONTENT_INSET - SEARCH_BAND_LEAD;
@@ -305,13 +303,6 @@ pub struct ResultsDomain {
 /// The indexer this window talks to, and everything it reports back.
 pub struct ServiceDomain {
     pub is_service_connected: bool,
-    /// `true` while the window is served by its own user-privilege indexer instead of the installed
-    /// LocalSystem service. This is a normal mode, not a failure: the local scan sees fewer files,
-    /// but every result view works.
-    pub local_mode: bool,
-    /// The user-mode indexer this window started. It exits with the window through its
-    /// `--parent-pid` monitor; the handle is kept so switching to the service can end it at once.
-    pub(crate) user_indexer: Option<std::process::Child>,
     /// Whether SCM knows `CairnService`. It decides whether the recovery band can offer an elevated
     /// start; opening the window never asks for elevation.
     pub service_installed: bool,
@@ -338,16 +329,15 @@ pub struct ServiceDomain {
     /// A local submission failure (config write/pipe), kept separate from the service's own
     /// content-index error so the page can show both without overwriting one with the other.
     pub content_action_error: Option<String>,
-    /// The scope the window is currently reading from (UI-10). It is the user's choice, so it is
-    /// remembered in the settings and survives a restart.
-    pub search_scope: SearchScope,
-    /// `true` while a scope switch is running. The menu row that started it must not start a
-    /// second one, and the window must not claim the new scope before it is actually in force.
-    pub(crate) is_switching_scope: bool,
-    /// Bumped whenever the window starts reading from a different indexer. A status poll that
-    /// belongs to the previous scope sees the change and stops, so the window never mixes the
-    /// state of two indexers.
-    pub(crate) status_generation: u64,
+}
+
+/// The Treemap address field's retained state. The field is an ecosystem
+/// input; this wrapper owns the entity, the edit mode and the last rejection.
+pub(crate) struct TreemapPathField {
+    pub input: Entity<InputState>,
+    pub editing: bool,
+    pub error: bool,
+    pub _subscription: Subscription,
 }
 
 pub struct CairnApp {
@@ -380,6 +370,7 @@ pub struct CairnApp {
     /// When `Some(drive)`, the main content area renders the disk visualization (Treemap).
     pub drive_view: Option<char>,
     pub treemap_state: Option<crate::treemap::state::TreemapViewState>,
+    pub(crate) treemap_path: TreemapPathField,
     /// The Recycle Bin view. The bin is a location, not a search scope: the view owns its rows,
     /// its selection and its error band together, so any query or drive switch releases the whole
     /// location instead of leaving half of it behind.
@@ -389,6 +380,9 @@ pub struct CairnApp {
     /// The app-owned transient status surface. One at a time; errors persist.
     pub toast: Option<crate::shell::toast::ToastState>,
     pub(crate) toast_serial: u64,
+    /// True while the GitHub release check is in flight. The Help menu trigger carries the
+    /// loading icon; no separate waiting dialog is opened.
+    pub(crate) is_checking_update: bool,
 }
 
 impl CairnApp {
@@ -431,9 +425,19 @@ impl CairnApp {
         });
         let keyboard_modality = cairn_ui::focus::observe_keyboard(cx);
 
-        // The service registration is read once here: it decides both whether the window may
-        // offer the machine-wide scope and which scope a first run opens in.
-        let service_state = crate::service::service_control::service_state();
+        let treemap_path_placeholder = i18n.get_text("treemap_path_placeholder");
+        let treemap_path_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder(treemap_path_placeholder));
+        let treemap_path_subscription = cx.subscribe_in(
+            &treemap_path_input,
+            window,
+            |this, _, event: &InputEvent, window, cx| match event {
+                InputEvent::PressEnter { .. } => this.commit_treemap_path(window, cx),
+                InputEvent::Blur => this.cancel_treemap_path_edit(window, cx),
+                InputEvent::Change => this.treemap_path_changed(cx),
+                InputEvent::Focus => {}
+            },
+        );
 
         let mut app = Self {
             i18n,
@@ -463,8 +467,6 @@ impl CairnApp {
             },
             service: ServiceDomain {
                 is_service_connected: true,
-                local_mode: false,
-                user_indexer: None,
                 // The probe below is already in flight by the time the first frame is drawn.
                 is_probing_service: true,
                 service_issue: None,
@@ -474,20 +476,9 @@ impl CairnApp {
                 content_status_error: None,
                 content_action_pending: false,
                 content_action_error: None,
-                service_installed: crate::service::service_control::service_is_registered(
-                    service_state,
-                ),
+                service_installed: crate::service::service_control::service_is_installed(),
                 has_attempted_silent_start: false,
                 is_refreshing_status: false,
-                // A saved scope is the user's own choice and wins; without one the window follows
-                // the machine: a service that is already running is the answer the window would
-                // otherwise have to ask for, and taking it never prompts for admin rights.
-                search_scope: crate::service::search_scope::initial_scope(
-                    settings.search_scope,
-                    crate::service::service_control::service_is_running(service_state),
-                ),
-                is_switching_scope: false,
-                status_generation: 0,
             },
             root_focus,
             zoom_level: settings.zoom_level,
@@ -508,12 +499,20 @@ impl CairnApp {
             sidebar_scroll: ScrollHandle::default(),
             drive_view: None,
             treemap_state: None,
+            treemap_path: TreemapPathField {
+                input: treemap_path_input,
+                editing: false,
+                error: false,
+                _subscription: treemap_path_subscription,
+            },
             recycle_bin: crate::shell::recycle_bin::RecycleBinView::closed(),
             delete_in_flight: false,
             toast: None,
             toast_serial: 0,
+            is_checking_update: false,
         };
         window.focus(&app.query.search_focus, cx);
+        app.consume_update_notice(cx);
         app.check_service_connection(cx);
         app
     }
@@ -749,9 +748,8 @@ mod tests {
             BASE_FONT_PX, 14.0,
             "the compact type scale anchors the 4px step at 100% zoom"
         );
-        // MENU_LEAD and LEGEND_INSET are excluded: their 2px optical corrections are intentional.
-        // The ratio tokens are not distances. Everything that lays out the shell must be a whole
-        // 4px step.
+        // LEGEND_INSET is excluded: its 2px optical correction is intentional. The ratio tokens
+        // are not distances. Everything that lays out the shell must be a whole 4px step.
         let distances = [
             layout::STEP,
             layout::SPACE_4,
@@ -764,7 +762,6 @@ mod tests {
             layout::ROW_HEIGHT,
             layout::INNER_SPACING,
             layout::SEARCH_BAND_HEIGHT,
-            layout::SEARCH_INPUT_HEIGHT,
             layout::HEADER_HEIGHT,
             layout::STATUS_HEIGHT,
             layout::LEGEND_ROW,
@@ -779,6 +776,7 @@ mod tests {
             layout::SIDEBAR_WIDTH,
             layout::CONTENT_INSET,
             layout::TIGHT_LEAD,
+            layout::MENU_LEAD,
             layout::SEARCH_BAND_LEAD,
             layout::SEARCH_INPUT_LEAD,
             layout::SIDEBAR_VIEWPORT_LEAD,
@@ -806,14 +804,9 @@ mod tests {
             "the heading row shares the result row's height"
         );
         assert_eq!(
-            layout::SEARCH_INPUT_HEIGHT,
-            layout::CONTROL_HEIGHT,
-            "the query box is a control like any other"
-        );
-        assert_eq!(
             layout::SEARCH_BAND_HEIGHT,
-            layout::CONTROL_HEIGHT + 2.0 * layout::TIGHT_LEAD,
-            "the search band is its control plus one tight inset on each side"
+            layout::ROW_HEIGHT + 2.0 * layout::TIGHT_LEAD,
+            "the search band is the row step plus one tight inset on each side"
         );
         assert!(
             layout::INNER_SPACING > 0.0,
@@ -827,6 +820,24 @@ mod tests {
         assert!(
             layout::CONTROL_HEIGHT >= layout::HEADER_HEIGHT,
             "a control may not be shorter than the heading row it acts on"
+        );
+    }
+
+    #[test]
+    fn the_sidebar_caption_centre_matches_the_query_box() {
+        let caption_height = layout::SEARCH_BAND_HEIGHT - 2.0 * layout::SIDEBAR_VIEWPORT_LEAD;
+        let caption_centre = layout::SIDEBAR_VIEWPORT_LEAD + caption_height / 2.0;
+        let field_centre = layout::TIGHT_LEAD + layout::ROW_HEIGHT / 2.0;
+        assert!(
+            (caption_centre - field_centre).abs() < 0.0001,
+            "the section caption and the query box are centred on one line"
+        );
+        assert!(
+            (layout::SIDEBAR_VIEWPORT_LEAD + caption_height + layout::SPACE_4
+                - layout::SEARCH_BAND_HEIGHT)
+                .abs()
+                < 0.0001,
+            "the first sidebar row starts on the search band's lower edge"
         );
     }
 
@@ -865,7 +876,7 @@ mod tests {
         let pins = |name: &str| pinned.iter().any(|found| found == name);
 
         // These are rows inside a band, not chrome stacked around the result band.
-        let inside_a_band = ["CONTROL_HEIGHT", "SEARCH_INPUT_HEIGHT", "ROW_HEIGHT"];
+        let inside_a_band = ["CONTROL_HEIGHT", "ROW_HEIGHT"];
         for name in &pinned {
             assert!(
                 bands.contains(&name.as_str()) || inside_a_band.contains(&name.as_str()),

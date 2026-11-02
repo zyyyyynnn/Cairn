@@ -27,9 +27,17 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 use tracing::{error, info, warn};
 
+/// The wire form of a tree failure: the code chooses the client's copy.
+fn tree_error_payload(reason: crate::sync_engine::TreeUnavailable) -> ResponsePayload {
+    ResponsePayload::Error {
+        code: reason.code(),
+        message: reason.message().to_string(),
+    }
+}
+
 /// The deepest tree a single response may carry. A six-level tree over a million-record volume
-/// overflows the protocol frame budget and drops the connection; the window then falls back to a
-/// full filesystem scan. Deeper levels are requested per directory as the reader drills in.
+/// overflows the protocol frame budget; the window shows its unavailable state. Deeper levels
+/// are requested per directory as the reader drills in.
 const MAX_TREE_DEPTH: usize = 2;
 
 pub struct PipeServer {
@@ -516,10 +524,10 @@ fn process_request(
             status: engine.content_index_status(),
         },
         ClientRequest::GetTree { path, max_depth } => {
-            let entries = engine
-                .treemap_tree(&path, tree_depth(max_depth))
-                .unwrap_or_default();
-            ResponsePayload::TreeResult { path, entries }
+            match engine.treemap_tree(&path, tree_depth(max_depth)) {
+                Ok(entries) => ResponsePayload::TreeResult { path, entries },
+                Err(reason) => tree_error_payload(reason),
+            }
         }
         ClientRequest::CancelContentIndex => ResponsePayload::CancelContentIndexAck {
             success: engine.disable_content_index().is_ok(),
@@ -544,6 +552,32 @@ fn tree_depth(requested: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn tree_failures_carry_distinct_protocol_codes() {
+        use crate::sync_engine::TreeUnavailable;
+        for (reason, expected) in [
+            (
+                TreeUnavailable::NotIndexed,
+                cairn_protocol::message::ERROR_CODE_TREE_NOT_INDEXED,
+            ),
+            (
+                TreeUnavailable::NotDirectory,
+                cairn_protocol::message::ERROR_CODE_TREE_NOT_DIRECTORY,
+            ),
+            (
+                TreeUnavailable::TooLarge,
+                cairn_protocol::message::ERROR_CODE_TREE_TOO_LARGE,
+            ),
+        ] {
+            match tree_error_payload(reason) {
+                cairn_protocol::message::ResponsePayload::Error { code, .. } => {
+                    assert_eq!(code, expected)
+                }
+                other => panic!("a tree failure became {other:?}"),
+            }
+        }
+    }
     use super::*;
     use crate::config::ServiceConfig;
     use cairn_protocol::message::ERROR_CODE_ADMIN_ONLY_QUERY;

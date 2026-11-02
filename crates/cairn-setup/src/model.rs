@@ -30,6 +30,15 @@ pub enum Screen {
     Uninstalled,
 }
 
+impl Screen {
+    /// Whether Escape may leave this page. The pages that are running the MSI may not: closing
+    /// the window mid-transaction would leave the machine half-installed. The title-bar X uses
+    /// the same busy guard; this method keeps the keyboard path aligned with it.
+    pub fn can_cancel(self) -> bool {
+        !matches!(self, Screen::Installing | Screen::Uninstalling)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stage {
     RemovingOld,
@@ -37,14 +46,6 @@ pub enum Stage {
     Copying,
     Service,
     Finishing,
-}
-
-impl Screen {
-    /// Whether this page offers a Cancel action. The pages that are running the MSI do not:
-    /// closing the window mid-transaction would leave the machine half-installed.
-    pub fn can_cancel(self) -> bool {
-        !matches!(self, Screen::Installing | Screen::Uninstalling)
-    }
 }
 
 impl Stage {
@@ -146,6 +147,7 @@ pub fn uninstall_error_key(install_key: &str) -> &'static str {
         "error_msi_invalid" => "error_uninstall_msi_invalid",
         "error_msi_cleanup_failed" => "error_uninstall_cleanup_failed",
         "error_not_installed" => "error_uninstall_not_installed",
+        "error_staging" => "error_uninstall_staging",
         _ => "error_uninstall_msi_unknown",
     }
 }
@@ -357,6 +359,7 @@ mod tests {
             ("error_msi_invalid", "error_uninstall_msi_invalid"),
             ("error_msi_cleanup_failed", "error_uninstall_cleanup_failed"),
             ("error_not_installed", "error_uninstall_not_installed"),
+            ("error_staging", "error_uninstall_staging"),
             ("error_msi_unknown", "error_uninstall_msi_unknown"),
         ] {
             assert_eq!(uninstall_error_key(install_key), uninstall_key);

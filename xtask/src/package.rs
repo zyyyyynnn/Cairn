@@ -699,7 +699,7 @@ fn generate_wix_template(wxs_path: &Path) -> Result<(), Box<dyn Error>> {
          into a user-writable folder. -->
     <CustomAction Id="ValidateInstallFolder"
                   BinaryRef="CairnInstallGuard"
-                  ExeCommand="--install-dir &quot;[INSTALLFOLDER]&quot; --program-files &quot;[ProgramFiles64Folder]&quot;"
+                  ExeCommand="--install-dir &quot;[INSTALLFOLDER]/&quot; --program-files &quot;[ProgramFiles64Folder]/&quot;"
                   Execute="immediate"
                   Return="check" />
     <CustomAction Id="GrantInteractiveServiceStart"
@@ -856,6 +856,16 @@ pub fn sha256_digest(data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_install_guard_command_keeps_quoted_paths_parseable() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("cairn.wxs");
+        generate_wix_template(&path).expect("generate WXS");
+        let wxs = fs::read_to_string(&path).expect("read WXS");
+        assert!(wxs.contains(r#"--install-dir &quot;[INSTALLFOLDER]/&quot;"#));
+        assert!(wxs.contains(r#"--program-files &quot;[ProgramFiles64Folder]/&quot;"#));
+    }
 
     fn write_fake_binaries(bin_dir: &Path) {
         fs::create_dir_all(bin_dir).expect("create bin dir");

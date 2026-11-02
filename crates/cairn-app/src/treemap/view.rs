@@ -2,29 +2,36 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! GPUI canvas, tile rendering, progressive scan worker orchestration and
-//! pointer/keyboard interaction for the drive Treemap view.
+//! GPUI canvas, tile rendering and pointer/keyboard interaction for the
+//! drive Treemap view.
 
 use crate::app::{element_id, layout, CairnApp};
 use crate::search::filters::FilterCategory;
 use crate::service::ipc_tasks::get_tokio_runtime;
+use crate::shell::accessibility;
 use crate::shell::os::{open_file, open_folder_and_select, show_properties_dialog};
+use crate::shell::state_view::{icon_action, render_state_band};
+use crate::shell::status_bar::format_count;
 use crate::shell::theme::{self, ShellTokens};
+use crate::treemap::navigation::path_segments;
 use crate::treemap::paint::{
     paint_rect, snap_rect_to_device_pixels, TREEMAP_RADIUS, TREEMAP_TILE_INSET,
 };
 use crate::treemap::palette::{block_fill_states, TreemapPalette};
-use crate::treemap::state::{next_scan_epoch, TreemapViewState};
+use crate::treemap::path_input::normalize_treemap_path;
+use crate::treemap::state::{
+    next_tree_request_epoch, tree_unavailable_from_code, TreemapUnavailable, TreemapViewState,
+};
 use crate::treemap::zoom::TreemapViewport;
 use cairn_core::format_size_bytes;
 use cairn_core::treemap::{
-    aggregate_parent_path, scan_directory_tree_progressive, NestedTreemapLayoutNode,
-    TreemapCategory, TreemapRect, TreemapScanEvent,
+    aggregate_parent_path, NestedTreemapLayoutNode, TreemapCategory, TreemapRect,
 };
 use cairn_protocol::message::ResponsePayload;
 use fluent_bundle::FluentArgs;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::StyledExt;
+use gpui_kit::component::input::Input;
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{h_flex, v_flex, Icon, Sizable as _};
@@ -32,9 +39,11 @@ use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::*;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::time::Instant;
+
+/// One breadcrumb label never takes more than a readable share of the path band; the
+/// full path remains in the band's tooltip.
+const PATH_SEGMENT_MAX_WIDTH: f32 = 24.0;
 
 /// A readable block uses one standard: a leading 12px icon lane plus a name,
 /// with the size either trailing (headers) or on the second line (blocks).
@@ -46,9 +55,8 @@ const TREEMAP_LABEL_MIN_HEIGHT: f32 = 28.0;
 /// Depth cap for a tree served by the index. Matches the on-disk volume-index
 /// loader, so both service paths present the same hierarchy.
 // The response must fit the protocol's frame budget. Depth 2 is ~47k entries on a 1.4M-index
-// drive and answers in ~160 ms; depth 6 overflows the 16 MiB frame and drops the connection,
-// which forced the six-thread filesystem fallback. Deeper levels are requested per directory as
-// the reader drills in.
+// drive and answers in ~160 ms; depth 6 overflows the 16 MiB frame. Deeper levels are requested
+// per directory as the reader drills in.
 const TREEMAP_SERVICE_DEPTH: usize = 2;
 
 /// Horizontal inset used by headers, leaves and summary labels.
@@ -66,7 +74,7 @@ fn text_width(window: &Window, text: &str, weight: FontWeight) -> f32 {
         return 0.0;
     }
     let mut style = window.text_style();
-    style.font_size = rems(0.75).into();
+    style.font_size = rems(theme::SMALL_TEXT_SIZE).into();
     style.font_weight = weight;
     style.font_features = theme::tabular_figures();
     let font_size = style.font_size.to_pixels(window.rem_size());
@@ -113,6 +121,125 @@ impl CairnApp {
         cx.notify();
     }
 
+    /// Returns keyboard ownership to the canvas after a navigation, commit or
+    /// retry. One method so every path that changes the tree ends the same way.
+    fn focus_treemap_canvas(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(state) = self.treemap_state.as_ref() {
+            state.request_focus(window, cx);
+        }
+    }
+
+    /// Turns the path field into an editable, selected copy of the current
+    /// directory. The path field is the Treemap's address bar.
+    pub(crate) fn begin_treemap_path_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.drive_view.is_none() {
+            return;
+        }
+        let input = self.treemap_path.input.clone();
+        if self.treemap_path.editing {
+            // A second request lands on the text already in the field; replacing
+            // it with the current directory would discard what the person typed.
+            input.update(cx, |input, cx| input.select_all(window, cx));
+            input.read(cx).focus_handle(cx).focus(window, cx);
+            return;
+        }
+        let Some(current) = self
+            .treemap_state
+            .as_ref()
+            .map(|state| state.current_dir().to_string())
+        else {
+            return;
+        };
+        self.treemap_path.editing = true;
+        self.treemap_path.error = false;
+        input.update(cx, |input, cx| {
+            input.set_value(current, window, cx);
+            input.select_all(window, cx);
+        });
+        input.read(cx).focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
+    /// Leaves path editing without navigating. The breadcrumb returns and the
+    /// canvas takes the focus, so the next key still reaches the Treemap.
+    pub(crate) fn cancel_treemap_path_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.treemap_path.editing {
+            return;
+        }
+        self.treemap_path.editing = false;
+        self.treemap_path.error = false;
+        let title = self.i18n.get_text("treemap_path_invalid_title");
+        self.dismiss_toast_titled(&title, cx);
+        self.focus_treemap_canvas(window, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn treemap_path_changed(&mut self, cx: &mut Context<Self>) {
+        self.treemap_path.error = false;
+        let title = self.i18n.get_text("treemap_path_invalid_title");
+        self.dismiss_toast_titled(&title, cx);
+        // The clear control appears and disappears with the text, so the
+        // enclosing view must rebuild on each change.
+        cx.notify();
+    }
+
+    /// Empties the address field and keeps it in edit mode. The button itself
+    /// disappears because the text is now empty.
+    pub(crate) fn clear_treemap_path(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let input = self.treemap_path.input.clone();
+        input.update(cx, |input, cx| input.set_value("", window, cx));
+        input.read(cx).focus_handle(cx).focus(window, cx);
+        self.treemap_path.error = false;
+        cx.notify();
+    }
+
+    /// Opens the directory typed into the address field. Text that cannot name a
+    /// drive path stays in the field with the error frame and a toast; a
+    /// well-formed path the index does not cover opens and shows the canvas's
+    /// unavailable state.
+    pub(crate) fn commit_treemap_path(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.treemap_path.editing {
+            return;
+        }
+        let typed = self.treemap_path.input.read(cx).value().to_string();
+        let Some(current) = self
+            .treemap_state
+            .as_ref()
+            .map(|state| state.current_dir().to_string())
+        else {
+            self.cancel_treemap_path_edit(window, cx);
+            return;
+        };
+        let Some(target) = normalize_treemap_path(&typed, &current) else {
+            // The field action and the input's own Enter can both report the
+            // same rejection; one toast is enough.
+            let first_rejection = !self.treemap_path.error;
+            self.treemap_path.error = true;
+            if first_rejection {
+                let title = self.i18n.get_text("treemap_path_invalid_title");
+                let hint = self.i18n.get_text("treemap_path_invalid_hint");
+                self.show_error_toast(title, hint, cx);
+            }
+            cx.notify();
+            return;
+        };
+        self.treemap_path.editing = false;
+        self.treemap_path.error = false;
+        let rejection = self.i18n.get_text("treemap_path_invalid_title");
+        self.dismiss_toast_titled(&rejection, cx);
+        let drive = target
+            .chars()
+            .next()
+            .map(|letter| letter.to_ascii_uppercase());
+        if let Some(drive) = drive {
+            if self.drive_view != Some(drive) {
+                self.open_drive_visualization(drive, window, cx);
+            }
+        }
+        self.treemap_drill_down(&target, window, cx);
+        self.focus_treemap_canvas(window, cx);
+    }
+
     /// Returns the Treemap to 100% without touching the selected node. The
     /// canvas keeps keyboard focus so a following wheel, arrow or Escape still
     /// drives the visualization.
@@ -124,33 +251,27 @@ impl CairnApp {
         }
     }
 
-    /// Starts loading the Treemap for `scan_path`: the live index answers one
-    /// pipe round-trip when it covers the path, and the progressive
-    /// filesystem scan is the fallback for a closed pipe or an unindexed
-    /// drive.
+    /// Loads the Treemap for `scan_path` from the service's live index.
+    ///
+    /// The cached volume index and the stored drive tree are consulted before
+    /// this call. A path they do not hold is answered by one pipe round-trip;
+    /// when the service cannot answer, the canvas reports the directory as
+    /// unavailable rather than scanning the disk itself.
     pub fn start_treemap_scan(&mut self, scan_path: PathBuf, cx: &mut Context<Self>) {
         let Some(ref mut state) = self.treemap_state else {
             return;
         };
-
-        if let Some(cancel) = state.scan_cancel.take() {
-            cancel.store(true, Ordering::Relaxed);
-        }
-
-        state.scan_generation = next_scan_epoch();
-        let gen = state.scan_generation;
+        state.request_epoch = next_tree_request_epoch();
+        let epoch = state.request_epoch;
         state.is_scanning = true;
         state.content_revealed = false;
-        state.scan_unreadable = false;
+        state.unavailable = None;
         state.layout_nodes.clear();
         state.root_tree = None;
         cx.notify();
 
         let path_for_service = scan_path.to_string_lossy().into_owned();
         cx.spawn(async move |this, cx: &mut AsyncApp| {
-            // One round-trip against whichever indexer is selected. Empty
-            // entries mean "not indexed here"; any other failure (no pipe,
-            // old protocol) lands on the same fallback.
             let (tx, rx) = tokio::sync::oneshot::channel();
             get_tokio_runtime().spawn(async move {
                 let result = async {
@@ -163,132 +284,51 @@ impl CairnApp {
                 let _ = tx.send(result);
             });
 
-            let served = match rx.await {
+            let outcome = match rx.await {
                 Ok(Ok(envelope)) => match envelope.payload {
                     ResponsePayload::TreeResult { entries, .. } if !entries.is_empty() => {
+                        Ok(entries)
+                    }
+                    ResponsePayload::TreeResult { .. } => Err(TreemapUnavailable::NotIndexed),
+                    ResponsePayload::Error { code, .. } => Err(tree_unavailable_from_code(code)),
+                    _ => Err(TreemapUnavailable::ServiceUnavailable),
+                },
+                _ => Err(TreemapUnavailable::ServiceUnavailable),
+            };
+            let _ = this.update(cx, |this, cx| {
+                let Some(ref mut state) = this.treemap_state else {
+                    return;
+                };
+                if state.request_epoch != epoch {
+                    return;
+                }
+                match outcome {
+                    Ok(entries) => {
                         crate::shell::perf::mark(&format!(
                             "treemap tree service entries={}",
                             entries.len()
                         ));
-                        let applied = this.update(cx, |this, cx| {
-                            if let Some(ref mut st) = this.treemap_state {
-                                if st.scan_generation != gen {
-                                    return false;
-                                }
-                                let ok = st.adopt_service_tree(entries);
-                                cx.notify();
-                                ok
-                            } else {
-                                false
-                            }
-                        });
-                        applied.unwrap_or(false)
+                        if !state.adopt_service_tree(entries) {
+                            state.mark_unavailable(TreemapUnavailable::ServiceUnavailable);
+                        }
                     }
-                    _ => false,
-                },
-                _ => false,
-            };
-            if served {
-                return;
-            }
-
-            crate::shell::perf::mark("treemap tree filesystem scan");
-            // Fall back to the progressive filesystem scan.
-            let fallback = this.update(cx, |this, cx| {
-                this.run_treemap_filesystem_scan(scan_path, gen, cx);
+                    Err(reason) => state.mark_unavailable(reason),
+                }
+                cx.notify();
             });
-            if fallback.is_err() {
-                // The view died before the answer arrived; nothing to load.
-            }
         })
         .detach();
     }
 
-    /// The std::fs progressive scan fallback: streams Listing/Progress events
-    /// through a channel and folds them into the view state.
-    fn run_treemap_filesystem_scan(
+    pub fn treemap_drill_down(
         &mut self,
-        scan_path: PathBuf,
-        gen: u64,
+        target_path: &str,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(ref mut state) = self.treemap_state else {
-            return;
-        };
-        if state.scan_generation != gen {
-            return;
-        }
-
-        let cancel = Arc::new(AtomicBool::new(false));
-        state.scan_cancel = Some(cancel.clone());
-        state.is_scanning = true;
-        state.content_revealed = false;
-        state.scan_unreadable = false;
-        state.layout_nodes.clear();
-        cx.notify();
-
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<TreemapScanEvent>();
-        let cancel_worker = cancel.clone();
-        let target_path = scan_path.clone();
-
-        // Spawn heavy recursive scan on dedicated OS worker thread to avoid blocking UI or Tokio
-        std::thread::Builder::new()
-            .name("cairn-treemap-scanner".into())
-            .spawn(move || {
-                scan_directory_tree_progressive(&target_path, 5, cancel_worker, move |evt| {
-                    let _ = tx.send(evt);
-                });
-            })
-            .expect("failed to spawn treemap scanner thread");
-
-        cx.spawn(async move |this, cx: &mut AsyncApp| {
-            while let Some(event) = rx.recv().await {
-                let update_res = this.update(cx, |this: &mut CairnApp, cx| {
-                    if let Some(ref mut st) = this.treemap_state {
-                        if st.scan_generation != gen {
-                            return;
-                        }
-                        // Progress folds the tree in memory; the canvas shows the skeleton
-                        // until the finished event reveals it, and the status band shows no
-                        // counters during the scan. Repainting for each batch would cost a
-                        // full frame per batch for nothing the reader can see.
-                        let finished = event.is_finished;
-                        st.apply_scan_event(event);
-                        if finished {
-                            cx.notify();
-                        }
-                    }
-                });
-                if update_res.is_err() {
-                    break;
-                }
-            }
-
-            // The channel closes either after the terminal event or because the
-            // scanner died. Never leave the current generation stuck on the
-            // loading skeleton: stop the spinner and reveal whatever arrived.
-            let _ = this.update(cx, |this: &mut CairnApp, cx| {
-                if let Some(ref mut st) = this.treemap_state {
-                    if st.scan_generation == gen {
-                        if st.is_scanning {
-                            st.is_scanning = false;
-                            if let Some(tree) = st.root_tree.as_mut() {
-                                let tree = Arc::make_mut(tree);
-                                tree.compute_aggregated_sizes();
-                                tree.sort_recursive();
-                                st.recompute_layout();
-                            }
-                            st.reveal_content();
-                        }
-                        cx.notify();
-                    }
-                }
-            });
-        })
-        .detach();
-    }
-
-    pub fn treemap_drill_down(&mut self, target_path: &str, cx: &mut Context<Self>) {
+        // A navigation step ends address editing: the field describes the
+        // directory the canvas is leaving, not the one it just opened.
+        self.cancel_treemap_path_edit(window, cx);
         // A summary block owned by the current root cannot drill anywhere; the
         // old code reloaded the same directory and flashed the empty state.
         if self
@@ -306,10 +346,14 @@ impl CairnApp {
         if let Some(path) = scan_target {
             self.start_treemap_scan(path, cx);
         }
+        self.focus_treemap_canvas(window, cx);
         cx.notify();
     }
 
-    pub fn treemap_drill_up(&mut self, cx: &mut Context<Self>) {
+    /// Moves to the parent directory as a history step. At the drive root the
+    /// control is disabled and this does nothing.
+    pub fn treemap_drill_up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_treemap_path_edit(window, cx);
         let scan_target = if let Some(ref mut st) = self.treemap_state {
             st.drill_up()
         } else {
@@ -318,10 +362,27 @@ impl CairnApp {
         if let Some(path) = scan_target {
             self.start_treemap_scan(path, cx);
         }
+        self.focus_treemap_canvas(window, cx);
         cx.notify();
     }
 
-    pub fn treemap_drill_forward(&mut self, cx: &mut Context<Self>) {
+    /// Returns to the directory most recently left by any drill step.
+    pub fn treemap_drill_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_treemap_path_edit(window, cx);
+        let scan_target = if let Some(ref mut st) = self.treemap_state {
+            st.drill_back()
+        } else {
+            None
+        };
+        if let Some(path) = scan_target {
+            self.start_treemap_scan(path, cx);
+        }
+        self.focus_treemap_canvas(window, cx);
+        cx.notify();
+    }
+
+    pub fn treemap_drill_forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_treemap_path_edit(window, cx);
         let scan_target = if let Some(ref mut st) = self.treemap_state {
             st.drill_forward()
         } else {
@@ -330,6 +391,7 @@ impl CairnApp {
         if let Some(path) = scan_target {
             self.start_treemap_scan(path, cx);
         }
+        self.focus_treemap_canvas(window, cx);
         cx.notify();
     }
 
@@ -340,8 +402,8 @@ impl CairnApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Leaving the visualization cancels its progressive scan and releases
-        // the partial tree instead of keeping a hidden worker alive.
+        // Leaving the visualization releases the partial tree instead of keeping
+        // it alive behind the table.
         self.drive_view = None;
         self.treemap_state = None;
         self.query.active_filter = FilterCategory::All;
@@ -357,7 +419,238 @@ impl CairnApp {
         cx.notify();
     }
 
-    /// Renders the main Hierarchical Nested Treemap surface.
+    /// The path band above the Treemap panel: the current directory and its
+    /// ancestors inside the same field frame as the table's search box.
+    /// Clicking an ancestor enters that directory; clicking the field (or the
+    /// current directory label) turns it into a path input. Enter opens the
+    /// typed directory; Escape or leaving the field restores the breadcrumb.
+    pub(crate) fn render_treemap_path_band(
+        &self,
+        tokens: &ShellTokens,
+        view: Entity<CairnApp>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let current_dir = self
+            .treemap_state
+            .as_ref()
+            .map(|state| state.current_dir().to_string())
+            .unwrap_or_default();
+        let editing = self.treemap_path.editing;
+        let error = self.treemap_path.error;
+        let show_clear = editing && !self.treemap_path.input.read(cx).value().is_empty();
+
+        let content = if editing {
+            Input::new(&self.treemap_path.input)
+                .id(accessibility::control("treemap-path").element)
+                .appearance(false)
+                .bordered(false)
+                .focus_bordered(false)
+                // The input's Medium step is the small 12.25px text; the path
+                // final state and the search box read at the 14px body step. Its
+                // frame padding is removed too, so editing and breadcrumb text
+                // start on the same left edge inside the field.
+                .text_size(rems(1.0))
+                .p(rems(0.0))
+                .h_full()
+                .flex_1()
+                .min_w_0()
+                .aria_label(accessibility::component_name(
+                    accessibility::control("treemap-path"),
+                    &self.i18n,
+                ))
+                .into_any_element()
+        } else {
+            let segments = path_segments(&current_dir);
+            let last = segments.len().saturating_sub(1);
+            let mut breadcrumb = h_flex()
+                .min_w_0()
+                .overflow_hidden()
+                .justify_start()
+                .items_center()
+                .gap(rems(layout::TIGHT_LEAD))
+                .text_color(tokens.muted_foreground)
+                // The path reads at the search box's body step, so punctuation
+                // and Latin text use the same face and size in both fields.
+                .text_size(rems(1.0));
+            for (ix, (label, path)) in segments.into_iter().enumerate() {
+                if ix > 0 {
+                    breadcrumb = breadcrumb.child(
+                        Icon::new(IconName::ChevronRight)
+                            .size(rems(theme::UI_ICON_SIZE))
+                            .flex_shrink_0()
+                            .text_color(tokens.muted_foreground),
+                    );
+                }
+                let text = div()
+                    .max_w(rems(PATH_SEGMENT_MAX_WIDTH))
+                    .truncate()
+                    .child(label.clone());
+                if ix == last {
+                    breadcrumb = breadcrumb.child(
+                        div()
+                            .flex_shrink_0()
+                            .text_color(tokens.foreground)
+                            .child(text),
+                    );
+                    continue;
+                }
+                // Ancestors are real controls: each is a tab stop with a visible
+                // ring, activated by Enter, Space or a click.
+                let focus = window
+                    .use_keyed_state(element_id("treemap-crumb-focus", &path), cx, |_, cx| {
+                        cx.focus_handle().tab_stop(true)
+                    })
+                    .read(cx)
+                    .clone();
+                let is_focused = focus.contains_focused(window, cx);
+                let target = path.clone();
+                let click_view = view.clone();
+                let key_view = view.clone();
+                let click_focus = focus.clone();
+                let crumb_control = accessibility::control("treemap-crumb");
+                let mut crumb_args = FluentArgs::new();
+                crumb_args.set("label", label.as_str());
+                crumb_args.set("path", path.as_str());
+                let crumb_label = self
+                    .i18n
+                    .get_text_with_args("treemap_crumb_label", &crumb_args);
+                breadcrumb = breadcrumb.child(
+                    accessibility::element_at_key(crumb_control, &path)
+                        .aria_label(crumb_label)
+                        .relative()
+                        .flex_shrink(1.0)
+                        .min_w_0()
+                        .overflow_hidden()
+                        .cursor_pointer()
+                        .rounded(tokens.radius)
+                        .track_focus(&focus)
+                        .hover(|this| this.text_color(tokens.foreground))
+                        .on_click(move |_, window, cx| {
+                            click_focus.focus(window, cx);
+                            click_view.update(cx, |this, cx| {
+                                this.treemap_drill_down(&target, window, cx)
+                            });
+                            cx.stop_propagation();
+                        })
+                        .on_action({
+                            let target = path.clone();
+                            move |_: &crate::shell::commands::OpenSelected,
+                                  window: &mut Window,
+                                  cx: &mut App| {
+                                cx.stop_propagation();
+                                key_view.update(cx, |this, cx| {
+                                    this.treemap_drill_down(&target, window, cx)
+                                });
+                            }
+                        })
+                        .when(is_focused, |this| {
+                            this.child(
+                                div()
+                                    .absolute()
+                                    .inset_0()
+                                    .rounded(tokens.radius)
+                                    .border_1()
+                                    .border_color(tokens.ring),
+                            )
+                        })
+                        .child(text),
+                );
+            }
+            breadcrumb.into_any_element()
+        };
+
+        let full_path = current_dir.clone();
+        let band = h_flex()
+            .h(rems(layout::SEARCH_BAND_HEIGHT))
+            .px(rems(layout::TIGHT_LEAD))
+            .py(rems(layout::TIGHT_LEAD))
+            .bg(tokens.chrome)
+            .child(
+                h_flex()
+                    .id("treemap-path-field")
+                    .flex_1()
+                    .min_w_0()
+                    .h(rems(layout::ROW_HEIGHT))
+                    .px(rems(layout::SEARCH_INPUT_LEAD))
+                    .gap(rems(layout::INNER_SPACING))
+                    .items_center()
+                    .justify_start()
+                    .rounded(tokens.radius)
+                    .bg(if editing {
+                        tokens.background
+                    } else {
+                        tokens.muted
+                    })
+                    .border_1()
+                    .border_color(if error {
+                        tokens.danger
+                    } else if editing {
+                        tokens.ring
+                    } else {
+                        tokens.control_stroke
+                    })
+                    .text_color(tokens.foreground)
+                    .cursor(CursorStyle::IBeam)
+                    // The field owns Enter and Escape only while it is an editor.
+                    // Outside editing, Enter belongs to the focused crumb or the
+                    // canvas, so the address context must not shadow it.
+                    .when(editing, |this| {
+                        this.key_context(crate::shell::commands::TREEMAP_PATH_CONTEXT)
+                    })
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        if !this.treemap_path.editing {
+                            this.begin_treemap_path_edit(window, cx);
+                        }
+                    }))
+                    // The field's own context resolves Enter and Escape before the
+                    // window's OpenSelected/EscapeQuery, which the focused input's
+                    // text handling would otherwise leave unclaimed.
+                    .on_action(cx.listener(
+                        |this, _: &crate::shell::commands::CommitTreemapPath, window, cx| {
+                            this.commit_treemap_path(window, cx);
+                        },
+                    ))
+                    .on_action(cx.listener(
+                        |this, _: &crate::shell::commands::CancelTreemapPath, window, cx| {
+                            this.cancel_treemap_path_edit(window, cx);
+                        },
+                    ))
+                    .when(!editing, |this| {
+                        this.tooltip(move |window, cx| {
+                            Tooltip::new(full_path.clone()).build(window, cx)
+                        })
+                    })
+                    .child(
+                        Icon::new(IconName::Folder)
+                            .small()
+                            .flex_shrink_0()
+                            .text_color(tokens.muted_foreground),
+                    )
+                    // The breadcrumb occupies an explicit full-height lane that starts
+                    // at the icon's text edge and packs its crumbs from the start; the
+                    // field only places the icon, this lane and the clear control.
+                    .child(
+                        h_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .items_center()
+                            .justify_start()
+                            .child(content),
+                    )
+                    .when(show_clear, |this| {
+                        this.child(crate::view::treemap_path_clear_button(
+                            &self.i18n,
+                            cx.listener(|this, _, window, cx| {
+                                this.clear_treemap_path(window, cx);
+                            }),
+                        ))
+                    }),
+            );
+        band
+    }
+
     pub fn render_treemap_body(
         &mut self,
         tokens: &ShellTokens,
@@ -378,13 +671,22 @@ impl CairnApp {
         } else {
             f32::from(theme::rem(window) * layout::SIDEBAR_WIDTH)
         };
-        let avail_w = (f32::from(window_bounds.size.width) - sidebar_w).max(100.0);
+        // The canvas is the content column's panel, below the path band. It keeps the
+        // panel's own margin on the sides and bottom, while the band's bottom inset is
+        // its top gap, mirroring the table panel under the search band. Pointer
+        // coordinates and the tile layout both read this rect.
+        let panel_margin = f32::from(theme::rem(window) * layout::SPACE_4);
+        let band_height = f32::from(theme::rem(window) * layout::SEARCH_BAND_HEIGHT);
+        let avail_w =
+            (f32::from(window_bounds.size.width) - sidebar_w - 2.0 * panel_margin).max(100.0);
         let chrome_h = f32::from(layout::TITLE_BAR_HEIGHT)
-            + f32::from(theme::rem(window) * layout::STATUS_HEIGHT);
-        let avail_h = (f32::from(window_bounds.size.height) - chrome_h).max(100.0);
-        // Canvas-space pointer coordinates start below the title bar and right
-        // of the sidebar; the layout bounds above already use the same box.
-        let canvas_origin = (sidebar_w, f32::from(layout::TITLE_BAR_HEIGHT));
+            + f32::from(theme::rem(window) * layout::STATUS_HEIGHT)
+            + band_height;
+        let avail_h = (f32::from(window_bounds.size.height) - chrome_h - panel_margin).max(100.0);
+        let canvas_origin = (
+            sidebar_w + panel_margin,
+            f32::from(layout::TITLE_BAR_HEIGHT) + band_height,
+        );
         let canvas_size = (avail_w, avail_h);
         state.last_scale_factor = window.scale_factor().max(1.0);
 
@@ -411,47 +713,7 @@ impl CairnApp {
         // The blocks are still. A scan can last minutes, and the design system's Skeleton
         // animates at the display rate; the status band's mark is the one moving element,
         // capped so a long build does not repaint the window at the display rate.
-        if shows_loading_skeleton(state.content_revealed, state.is_scanning) {
-            return v_flex()
-                .id("treemap-loading-skeleton")
-                .size_full()
-                .p(rems(layout::CONTENT_INSET))
-                .child(
-                    h_flex()
-                        .w_full()
-                        .h_full()
-                        .gap_x(rems(layout::SPACE_4))
-                        .child(
-                            div()
-                                .h_full()
-                                .w(relative(0.65))
-                                .flex_shrink_0()
-                                .rounded(px(4.0))
-                                .bg(tokens.skeleton),
-                        )
-                        .child(
-                            v_flex()
-                                .h_full()
-                                .flex_1()
-                                .gap_y(rems(layout::SPACE_4))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .w_full()
-                                        .rounded(px(4.0))
-                                        .bg(tokens.skeleton.opacity(0.5)),
-                                )
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .w_full()
-                                        .rounded(px(4.0))
-                                        .bg(tokens.skeleton.opacity(0.5)),
-                                ),
-                        ),
-                )
-                .into_any_element();
-        }
+        let loading = shows_loading_skeleton(state.content_revealed, state.is_scanning);
 
         let render_cx = TreemapRenderContext {
             tokens,
@@ -466,23 +728,92 @@ impl CairnApp {
 
         // An empty directory is content, not a separate surface: it must keep
         // the canvas focus, Backspace/Enter and wheel zoom.
-        let content = if state.layout_nodes.is_empty() {
-            let empty_text_key = if state.is_unreadable() {
-                "treemap_unreadable"
-            } else {
-                "treemap_empty_directory"
-            };
+        let content = if loading {
             v_flex()
-                .absolute()
-                .left(px(0.0))
-                .top(px(0.0))
+                .id("treemap-loading-skeleton")
                 .size_full()
-                .items_center()
-                .justify_center()
-                .text_color(tokens.muted_foreground)
-                .text_sm()
-                .child(self.i18n.get_text(empty_text_key))
+                // The panel's four-sided frame step, not the content spine: the
+                // skeleton sits inside the same 4px-gap card as the canvas.
+                .p(rems(layout::SPACE_4))
+                .child(
+                    h_flex()
+                        .w_full()
+                        .h_full()
+                        .gap_x(rems(layout::SPACE_4))
+                        .child(
+                            div()
+                                .h_full()
+                                .w(relative(0.65))
+                                .flex_shrink_0()
+                                .rounded(tokens.radius)
+                                .bg(tokens.skeleton),
+                        )
+                        .child(
+                            v_flex()
+                                .h_full()
+                                .flex_1()
+                                .gap_y(rems(layout::SPACE_4))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .w_full()
+                                        .rounded(tokens.radius)
+                                        .bg(tokens.skeleton.opacity(0.5)),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .w_full()
+                                        .rounded(tokens.radius)
+                                        .bg(tokens.skeleton.opacity(0.5)),
+                                ),
+                        ),
+                )
                 .into_any_element()
+        } else if state.layout_nodes.is_empty() {
+            let control = accessibility::control("treemap-state");
+            let unavailable = state.unavailable_reason();
+            let message = self.i18n.get_text(
+                unavailable
+                    .map(TreemapUnavailable::message_key)
+                    .unwrap_or("treemap_empty_directory"),
+            );
+            let icon = match unavailable {
+                Some(TreemapUnavailable::NotDirectory | TreemapUnavailable::TooLarge) => {
+                    Icon::new(IconName::TriangleAlert)
+                        .size_8()
+                        .text_color(tokens.warning_ink)
+                        .into_any_element()
+                }
+                Some(_) => Icon::new(IconName::CircleAlert)
+                    .size_8()
+                    .text_color(tokens.danger)
+                    .into_any_element(),
+                None => Icon::new(IconName::Folder)
+                    .size_8()
+                    .text_color(tokens.muted_foreground)
+                    .into_any_element(),
+            };
+            let retryable = unavailable.is_some_and(TreemapUnavailable::retryable);
+            let action = retryable.then(|| {
+                let retry = accessibility::control("treemap-retry");
+                let label = accessibility::name(retry, &self.i18n);
+                icon_action(retry, IconName::RotateCcw, label)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        if let Some(dir) = this
+                            .treemap_state
+                            .as_ref()
+                            .map(|state| state.current_dir().to_string())
+                        {
+                            this.start_treemap_scan(PathBuf::from(dir), cx);
+                            if let Some(state) = this.treemap_state.as_ref() {
+                                state.request_focus(window, cx);
+                            }
+                        }
+                    }))
+                    .into_any_element()
+            });
+            render_state_band(tokens, control, message, icon, action).into_any_element()
         } else {
             let mut block_elements = Vec::with_capacity(state.layout_nodes.len() * 4);
             for node in &state.layout_nodes {
@@ -567,7 +898,7 @@ impl CairnApp {
                         None
                     };
                     if let Some(path) = enter_path {
-                        this.treemap_drill_down(&path, cx);
+                        this.treemap_drill_down(&path, window, cx);
                     }
                     cx.stop_propagation();
                 }),
@@ -631,7 +962,7 @@ impl CairnApp {
                         cx.stop_propagation();
                     }
                     "backspace" => {
-                        this.treemap_drill_up(cx);
+                        this.treemap_drill_back(window, cx);
                     }
                     "enter" => {
                         let mut drill = None;
@@ -640,14 +971,14 @@ impl CairnApp {
                                 if node.is_aggregate() {
                                     drill = aggregate_parent_path(&node.path).map(str::to_string);
                                 } else if node.item.is_dir {
-                                    this.treemap_drill_down(&node.path, cx);
+                                    this.treemap_drill_down(&node.path, window, cx);
                                 } else {
                                     let _ = open_file(&node.path);
                                 }
                             }
                         }
                         if let Some(parent) = drill {
-                            this.treemap_drill_down(&parent, cx);
+                            this.treemap_drill_down(&parent, window, cx);
                         }
                     }
                     "+" | "=" => {
@@ -844,7 +1175,7 @@ fn label_row(
         .flex_1()
         .min_w_0()
         .truncate()
-        .text_xs()
+        .text_sm()
         .text_color(ink);
     let text = if semibold {
         text.font_semibold()
@@ -892,7 +1223,7 @@ fn compact_block_content(
         content = content.child(
             div()
                 .whitespace_nowrap()
-                .text_xs()
+                .text_sm()
                 .font_features(theme::tabular_figures())
                 .text_color(secondary)
                 .child(size.to_string()),
@@ -968,6 +1299,7 @@ fn render_nested_node(
     if node.is_aggregate() {
         let mut args = FluentArgs::new();
         args.set("count", node.aggregate_count as i64);
+        args.set("count_text", format_count(node.aggregate_count));
         let label = rcx.i18n.get_text_with_args("treemap_aggregate", &args);
         let tooltip = SharedString::from(format!("{label}\n{size_str}"));
         let content = compact_block_content(
@@ -1003,7 +1335,7 @@ fn render_nested_node(
                         }
                     }
                     if let Some(parent) = drill {
-                        this.treemap_drill_down(&parent, cx);
+                        this.treemap_drill_down(&parent, window, cx);
                     }
                     cx.notify();
                     cx.stop_propagation();
@@ -1054,7 +1386,7 @@ fn render_nested_node(
                                 st.selected_path = Some(fp.clone());
                                 st.request_focus(window, cx);
                                 if event.click_count == 2 {
-                                    this.treemap_drill_down(&fp, cx);
+                                    this.treemap_drill_down(&fp, window, cx);
                                 }
                                 cx.notify();
                             }
@@ -1098,7 +1430,7 @@ fn render_nested_node(
                         .flex_1()
                         .min_w_0()
                         .truncate()
-                        .text_xs()
+                        .text_sm()
                         .font_semibold()
                         .text_color(rcx.palette.ink())
                         .child(name),
@@ -1108,7 +1440,7 @@ fn render_nested_node(
                         div()
                             .flex_shrink_0()
                             .whitespace_nowrap()
-                            .text_xs()
+                            .text_sm()
                             .font_features(theme::tabular_figures())
                             .text_color(rcx.palette.ink_secondary())
                             .child(header_size_label),
@@ -1190,7 +1522,7 @@ fn render_nested_node(
                         st.request_focus(window, cx);
                         if event.click_count == 2 {
                             if is_dir {
-                                this.treemap_drill_down(&fp, cx);
+                                this.treemap_drill_down(&fp, window, cx);
                             } else {
                                 let _ = open_file(&fp);
                             }

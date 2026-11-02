@@ -11,10 +11,27 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use windows::core::{BOOL, PCWSTR};
+use windows::core::{BOOL, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
-    CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_ITEMS,
-    ERROR_SUCCESS, HANDLE, LPARAM, WAIT_ABANDONED, WAIT_OBJECT_0, WPARAM,
+    CloseHandle, GetLastError, LocalFree, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND,
+    ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, GENERIC_READ, HANDLE, HLOCAL, LPARAM, WAIT_ABANDONED,
+    WAIT_OBJECT_0, WPARAM,
+};
+use windows::Win32::Security::Authorization::{
+    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+    GetNamedSecurityInfoW, SetSecurityInfo, SE_FILE_OBJECT,
+};
+use windows::Win32::Security::{
+    GetSecurityDescriptorControl, GetSecurityDescriptorDacl, GetSecurityDescriptorOwner, ACL,
+    DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+    PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED,
+};
+use windows::Win32::Storage::FileSystem::{
+    CreateDirectoryW, CreateFileW, FileAttributeTagInfo, GetFileInformationByHandle,
+    GetFileInformationByHandleEx, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY,
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, OPEN_EXISTING, READ_CONTROL, WRITE_DAC,
+    WRITE_OWNER,
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
@@ -187,17 +204,6 @@ pub fn launch_installed_app(exe: &Path) -> Result<(), String> {
         .map_err(|err| err.to_string())
 }
 
-/// Opens a log or another local file through the shell, so the viewer starts with the signed-in
-/// user's token. Calling `ShellExecute` directly from this elevated process would launch Notepad
-/// elevated as well, which its packaged build does not support.
-pub fn open_path(path: &Path) -> Result<(), String> {
-    Command::new(explorer_executable())
-        .arg(path)
-        .spawn()
-        .map(|_| ())
-        .map_err(|err| err.to_string())
-}
-
 /// The shell executable by absolute path. A bare `explorer.exe` is resolved against the directory
 /// of the elevated setup first, which is user-writable when the installer is run from Downloads.
 pub fn explorer_executable() -> PathBuf {
@@ -213,41 +219,31 @@ pub fn explorer_executable() -> PathBuf {
     windows.join("explorer.exe")
 }
 
-pub fn install_log_path() -> PathBuf {
+pub fn install_log_path() -> std::io::Result<PathBuf> {
     log_path("log")
 }
 
-pub fn uninstall_log_path() -> PathBuf {
+pub fn uninstall_log_path() -> std::io::Result<PathBuf> {
     log_path("uninstall.log")
 }
 
-/// A readable diagnostic file for the license viewer. In a release build this lives in the
-/// administrator-owned staging root, so an elevated write never follows a link planted in %TEMP%.
-pub fn license_path() -> PathBuf {
-    log_directory()
-        .map(|dir| dir.join("LICENSE.txt"))
-        .unwrap_or_else(|| temp_path("LICENSE.txt"))
+fn log_path(suffix: &str) -> std::io::Result<PathBuf> {
+    let dir = log_directory()?;
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
+    Ok(dir.join(format!(
+        "CairnSetup-{stamp}-{}.{suffix}",
+        std::process::id()
+    )))
 }
 
-fn log_path(suffix: &str) -> PathBuf {
-    if let Some(dir) = log_directory() {
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|duration| duration.as_secs())
-            .unwrap_or_default();
-        return dir.join(format!(
-            "CairnSetup-{stamp}-{}.{suffix}",
-            std::process::id()
-        ));
-    }
-    temp_path(suffix)
-}
-
-fn log_directory() -> Option<PathBuf> {
-    let dir = staging_root().ok()?.join("logs");
-    std::fs::create_dir_all(&dir).ok()?;
+fn log_directory() -> std::io::Result<PathBuf> {
+    let dir = staging_root()?.join("logs");
+    secure_staging_root(&dir)?;
     sweep_old_logs(&dir);
-    Some(dir)
+    Ok(dir)
 }
 
 fn sweep_old_logs(dir: &Path) {
@@ -277,38 +273,332 @@ fn is_stale_log(name: &str, age: std::time::Duration) -> bool {
     age >= A_WEEK && name.starts_with("CairnSetup-") && name.ends_with(".log")
 }
 
-fn temp_path(suffix: &str) -> PathBuf {
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or_default();
-    std::env::temp_dir().join(format!(
-        "CairnSetup-{stamp}-{}.{suffix}",
-        std::process::id()
+/// A shell known folder, never an environment variable: an elevated installer must not let a
+/// standard account redirect a machine path to a directory it controls.
+fn known_folder(folder: &windows::core::GUID) -> std::io::Result<PathBuf> {
+    use windows::Win32::UI::Shell::{SHGetKnownFolderPath, KF_FLAG_DEFAULT};
+
+    // SAFETY: the shell returns a CoTaskMem-allocated, null-terminated path that is freed below.
+    let path = unsafe { SHGetKnownFolderPath(folder, KF_FLAG_DEFAULT, None) }
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    if path.is_null() {
+        return Err(std::io::Error::other("the known folder has no path"));
+    }
+    // SAFETY: `path` is the null-terminated string returned above.
+    let text = unsafe { path.to_string() };
+    // SAFETY: `path` is the CoTaskMem allocation returned by SHGetKnownFolderPath.
+    unsafe {
+        CoTaskMemFree(Some(path.0 as *const core::ffi::c_void));
+    }
+    Ok(PathBuf::from(text.map_err(|error| {
+        std::io::Error::other(error.to_string())
+    })?))
+}
+
+fn program_data_root() -> std::io::Result<PathBuf> {
+    use windows::Win32::UI::Shell::FOLDERID_ProgramData;
+
+    known_folder(&FOLDERID_ProgramData)
+}
+
+fn public_desktop_root() -> std::io::Result<PathBuf> {
+    use windows::Win32::UI::Shell::FOLDERID_PublicDesktop;
+
+    known_folder(&FOLDERID_PublicDesktop)
+}
+
+/// Administrator-owned staging root for the extracted MSI, logs and cleanup helper. `%ProgramData%`
+/// grants standard users the right to create children, so the root is created with a protected
+/// DACL and an Administrators owner instead of inheriting the parent. An existing root is re-owned
+/// and re-locked; release builds refuse one that cannot be secured. Debug builds fall back to
+/// `%TEMP%` so a non-elevated development run can still exercise the installer.
+fn staging_root() -> std::io::Result<PathBuf> {
+    let root = match program_data_root() {
+        Ok(base) => base.join("CairnSetup"),
+        Err(error) if cfg!(debug_assertions) => {
+            tracing::warn!("ProgramData is unavailable: {error}");
+            let fallback = std::env::temp_dir().join("CairnSetup");
+            std::fs::create_dir_all(&fallback)?;
+            sweep_stale_staging(&fallback);
+            return Ok(fallback);
+        }
+        Err(error) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("could not resolve ProgramData: {error}"),
+            ));
+        }
+    };
+    match secure_staging_root(&root) {
+        Ok(()) => {
+            sweep_stale_staging(&root);
+            return Ok(root);
+        }
+        Err(error) if cfg!(debug_assertions) => {
+            tracing::warn!("installer staging directory is not secure: {error}");
+        }
+        Err(error) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "could not secure the installer staging directory {}: {error}",
+                    root.display()
+                ),
+            ));
+        }
+    }
+    let fallback = std::env::temp_dir().join("CairnSetup");
+    std::fs::create_dir_all(&fallback)?;
+    sweep_stale_staging(&fallback);
+    Ok(fallback)
+}
+
+/// The staging tree holds elevated files before the MSI consumes them. SYSTEM and Administrators
+/// get full control through a protected, inheritable DACL; the owner is Administrators so a
+/// standard user who pre-created the path cannot rewrite it.
+const STAGING_SDDL: &str = "O:BAD:P(A;OICI;GA;;;SY)(A;OICI;GA;;;BA)";
+
+struct OwnedDescriptor(PSECURITY_DESCRIPTOR);
+
+impl Drop for OwnedDescriptor {
+    fn drop(&mut self) {
+        if !self.0 .0.is_null() {
+            // SAFETY: LocalAlloc'd by ConvertStringSecurityDescriptorToSecurityDescriptorW or
+            // GetNamedSecurityInfoW; every pointer derived from it is gone by this point.
+            unsafe {
+                let _ = LocalFree(Some(HLOCAL(self.0 .0)));
+            }
+        }
+    }
+}
+
+fn secure_staging_root(root: &Path) -> std::io::Result<()> {
+    let sddl: Vec<u16> = STAGING_SDDL
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut descriptor = PSECURITY_DESCRIPTOR(std::ptr::null_mut());
+    // SAFETY: `sddl` is a valid null-terminated SDDL string.
+    unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            PCWSTR(sddl.as_ptr()),
+            1,
+            &mut descriptor,
+            None,
+        )
+    }
+    .map_err(|error| std::io::Error::other(error.to_string()))?;
+    let descriptor = OwnedDescriptor(descriptor);
+
+    let mut owner = PSID(std::ptr::null_mut());
+    let mut dacl: *mut ACL = std::ptr::null_mut();
+    let mut present = BOOL::default();
+    let mut defaulted = BOOL::default();
+    // SAFETY: `descriptor` is alive for the whole block, and the out-parameters point at locals.
+    unsafe {
+        GetSecurityDescriptorOwner(descriptor.0, &mut owner, &mut defaulted)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        GetSecurityDescriptorDacl(descriptor.0, &mut present, &mut dacl, &mut defaulted)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+    }
+    if owner.is_invalid() || !present.as_bool() || dacl.is_null() {
+        return Err(std::io::Error::other(
+            "the staging security descriptor is incomplete",
+        ));
+    }
+
+    let path = wide(root.as_os_str());
+    let security = windows::Win32::Security::SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<windows::Win32::Security::SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor.0 .0,
+        bInheritHandle: BOOL(0),
+    };
+    // SAFETY: `path` is null-terminated and `security` stays alive across the call.
+    let created = unsafe { CreateDirectoryW(PCWSTR(path.as_ptr()), Some(&security as *const _)) };
+    if created.is_err() {
+        // SAFETY: reads the error left by the failed CreateDirectoryW.
+        let error = unsafe { GetLastError() };
+        if error != ERROR_ALREADY_EXISTS {
+            return Err(std::io::Error::from_raw_os_error(error.0 as i32));
+        }
+        secure_existing_staging_root(root, owner, dacl)?;
+    }
+
+    verify_staging_root(root)
+}
+
+struct OwnedHandle(HANDLE);
+
+impl Drop for OwnedHandle {
+    fn drop(&mut self) {
+        if !self.0.is_invalid() {
+            // SAFETY: the handle was opened by CreateFileW for this guard alone.
+            unsafe {
+                let _ = CloseHandle(self.0);
+            }
+        }
+    }
+}
+
+fn open_staging_directory(path: &Path, write: bool) -> std::io::Result<OwnedHandle> {
+    let wide_path = wide(path.as_os_str());
+    let access = if write {
+        GENERIC_READ.0 | READ_CONTROL.0 | WRITE_DAC.0 | WRITE_OWNER.0
+    } else {
+        GENERIC_READ.0 | READ_CONTROL.0
+    };
+    // SAFETY: `wide_path` is null-terminated; the returned handle is owned by the guard.
+    let handle = unsafe {
+        CreateFileW(
+            PCWSTR(wide_path.as_ptr()),
+            access,
+            FILE_SHARE_READ,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+    }
+    .map_err(|error| std::io::Error::other(error.to_string()))?;
+    Ok(OwnedHandle(handle))
+}
+
+fn staging_attributes(handle: HANDLE) -> std::io::Result<u32> {
+    let mut info = FILE_ATTRIBUTE_TAG_INFO::default();
+    // SAFETY: the handle is open and `info` is the exact structure the class writes.
+    unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileAttributeTagInfo,
+            &mut info as *mut _ as *mut core::ffi::c_void,
+            std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+        )
+    }
+    .map_err(|error| std::io::Error::other(error.to_string()))?;
+    Ok(info.FileAttributes)
+}
+
+fn file_identity(handle: HANDLE) -> std::io::Result<(u32, u32, u32)> {
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: the handle is open and `info` is the structure the call writes.
+    unsafe { GetFileInformationByHandle(handle, &mut info) }
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    Ok((
+        info.dwVolumeSerialNumber,
+        info.nFileIndexHigh,
+        info.nFileIndexLow,
     ))
 }
 
-/// Administrator-owned staging root for the extracted MSI and cleanup helper. A user-writable
-/// `%TEMP%` would let a standard user replace the file between extraction and elevated use.
-fn staging_root() -> std::io::Result<PathBuf> {
-    let root = crate::model::program_files_root().join("CairnSetup");
-    if std::fs::create_dir_all(&root).is_ok() {
-        sweep_stale_staging(&root);
-        return Ok(root);
+fn secure_existing_staging_root(root: &Path, owner: PSID, dacl: *mut ACL) -> std::io::Result<()> {
+    let handle = open_staging_directory(root, true)?;
+    check_staging_attributes(staging_attributes(handle.0)?)?;
+    // SAFETY: the handle is open with WRITE_DAC/WRITE_OWNER; `owner` and `dacl` belong to the live
+    // descriptor built by `secure_staging_root`. The group is left alone.
+    let error = unsafe {
+        SetSecurityInfo(
+            handle.0,
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION
+                | DACL_SECURITY_INFORMATION
+                | PROTECTED_DACL_SECURITY_INFORMATION,
+            Some(owner),
+            None,
+            Some(dacl as *const ACL),
+            None,
+        )
+    };
+    if error.is_err() {
+        return Err(std::io::Error::from_raw_os_error(error.0 as i32));
     }
-    if cfg!(debug_assertions) {
-        let fallback = std::env::temp_dir().join("CairnSetup");
-        std::fs::create_dir_all(&fallback)?;
-        sweep_stale_staging(&fallback);
-        return Ok(fallback);
+    let secured = file_identity(handle.0)?;
+    // A pre-owned root can be renamed while the ACL is applied. Re-open the name and require the
+    // same file identity, so a junction swapped into its place is never accepted.
+    let named = open_staging_directory(root, false)?;
+    check_staging_attributes(staging_attributes(named.0)?)?;
+    if file_identity(named.0)? != secured {
+        return Err(std::io::Error::other(
+            "the installer staging directory changed while it was secured",
+        ));
     }
-    Err(std::io::Error::new(
-        std::io::ErrorKind::PermissionDenied,
-        format!(
-            "could not create the installer staging directory {}",
-            root.display()
-        ),
-    ))
+    Ok(())
+}
+
+fn check_staging_attributes(attributes: u32) -> std::io::Result<()> {
+    if attributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
+        return Err(std::io::Error::other(
+            "the installer staging directory is a reparse point",
+        ));
+    }
+    if attributes & FILE_ATTRIBUTE_DIRECTORY.0 == 0 {
+        return Err(std::io::Error::other(
+            "the installer staging path is not a directory",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_staging_root(root: &Path) -> std::io::Result<()> {
+    let path = wide(root.as_os_str());
+    let mut descriptor = PSECURITY_DESCRIPTOR(std::ptr::null_mut());
+    // SAFETY: `path` is null-terminated and the descriptor is freed by the guard below.
+    let error = unsafe {
+        GetNamedSecurityInfoW(
+            PCWSTR(path.as_ptr()),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            None,
+            None,
+            None,
+            None,
+            &mut descriptor,
+        )
+    };
+    if error.is_err() {
+        return Err(std::io::Error::from_raw_os_error(error.0 as i32));
+    }
+    let descriptor = OwnedDescriptor(descriptor);
+
+    let mut owner = PSID(std::ptr::null_mut());
+    let mut defaulted = BOOL::default();
+    let mut present = BOOL::default();
+    let mut dacl: *mut ACL = std::ptr::null_mut();
+    let mut control = 0u16;
+    let mut revision = 0u32;
+    // SAFETY: `descriptor` is alive for the whole block; the pointers are read-only views into it.
+    unsafe {
+        GetSecurityDescriptorOwner(descriptor.0, &mut owner, &mut defaulted)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        GetSecurityDescriptorDacl(descriptor.0, &mut present, &mut dacl, &mut defaulted)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        GetSecurityDescriptorControl(descriptor.0, &mut control, &mut revision)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+    }
+    if !present.as_bool() || dacl.is_null() || control & SE_DACL_PROTECTED.0 == 0 {
+        return Err(std::io::Error::other(
+            "the staging directory lost its protected DACL",
+        ));
+    }
+
+    let mut text = PWSTR::null();
+    // SAFETY: `owner` points into `descriptor`; the returned string is released below.
+    unsafe { ConvertSidToStringSidW(owner, &mut text) }
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    if text.is_null() {
+        return Err(std::io::Error::other("the staging owner SID is unreadable"));
+    }
+    // SAFETY: `text` is the null-terminated string returned by ConvertSidToStringSidW above.
+    let owner_text = unsafe { text.to_string() }.unwrap_or_default();
+    // SAFETY: `text` is the LocalAlloc'd string returned by ConvertSidToStringSidW.
+    unsafe {
+        let _ = LocalFree(Some(HLOCAL(text.0 as *mut core::ffi::c_void)));
+    }
+    if owner_text != "S-1-5-32-544" && owner_text != "S-1-5-18" {
+        return Err(std::io::Error::other(format!(
+            "the staging directory is owned by {owner_text}"
+        )));
+    }
+    Ok(())
 }
 
 /// Failed or interrupted transactions can leave a payload directory or helper copy behind. Only
@@ -356,6 +646,7 @@ pub fn create_payload_dir() -> std::io::Result<PathBuf> {
         .unwrap_or_default();
     let dir = staging_root()?.join(format!("payload-{}-{nanos}", std::process::id()));
     std::fs::create_dir(&dir)?;
+    secure_staging_root(&dir)?;
     Ok(dir)
 }
 
@@ -364,16 +655,11 @@ pub fn create_payload_dir() -> std::io::Result<PathBuf> {
 /// account that happened to provide the administrator token.
 pub fn product_data_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    if let Some(base) = std::env::var_os("ProgramData") {
-        push_unique(&mut dirs, PathBuf::from(base).join("Cairn"));
+    if let Ok(base) = program_data_root() {
+        push_unique(&mut dirs, base.join("Cairn"));
     }
     for (_, profile) in user_profiles() {
         push_user_data_dirs(&mut dirs, &profile);
-    }
-    for (variable, suffix) in [("APPDATA", "Cairn"), ("LOCALAPPDATA", "Cairn")] {
-        if let Some(base) = std::env::var_os(variable) {
-            push_unique(&mut dirs, PathBuf::from(base).join(suffix));
-        }
     }
     dirs
 }
@@ -485,7 +771,7 @@ fn user_profiles() -> Vec<(String, PathBuf)> {
             continue;
         };
         let path = PathBuf::from(path);
-        if !path.is_dir() {
+        if !is_local_profile(&path) || !path.is_dir() {
             continue;
         }
         if !profiles
@@ -775,8 +1061,8 @@ fn system32(program: &str) -> PathBuf {
 
 fn remove_orphan_shortcuts() -> Vec<String> {
     let mut failures = Vec::new();
-    if let Some(base) = std::env::var_os("ProgramData") {
-        let dir = PathBuf::from(base)
+    if let Ok(base) = program_data_root() {
+        let dir = base
             .join("Microsoft")
             .join("Windows")
             .join("Start Menu")
@@ -788,8 +1074,8 @@ fn remove_orphan_shortcuts() -> Vec<String> {
             }
         }
     }
-    if let Some(base) = std::env::var_os("PUBLIC") {
-        let shortcut = PathBuf::from(base).join("Desktop").join("Cairn.lnk");
+    if let Ok(desktop) = public_desktop_root() {
+        let shortcut = desktop.join("Cairn.lnk");
         if shortcut.is_file() {
             if let Err(error) = std::fs::remove_file(&shortcut) {
                 failures.push(format!("desktop shortcut: {error}"));
@@ -797,6 +1083,16 @@ fn remove_orphan_shortcuts() -> Vec<String> {
         }
     }
     failures
+}
+
+fn is_local_profile(path: &Path) -> bool {
+    use std::path::{Component, Prefix};
+
+    matches!(
+        path.components().next(),
+        Some(Component::Prefix(prefix))
+            if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
+    )
 }
 
 /// Copies this binary to a temporary helper before the MSI removes it from the install folder.
@@ -914,11 +1210,15 @@ pub fn wide(value: &OsStr) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::{
-        explorer_executable, is_stale_log, is_stale_staging_entry, path_without_entry,
-        push_user_data_dirs,
+        check_staging_attributes, explorer_executable, is_local_profile, is_stale_log,
+        is_stale_staging_entry, path_without_entry, program_data_root, public_desktop_root,
+        push_user_data_dirs, secure_staging_root,
     };
     use std::path::{Path, PathBuf};
     use std::time::Duration;
+    use windows::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+    };
 
     #[test]
     fn the_machine_path_loses_only_the_install_entry() {
@@ -943,13 +1243,13 @@ mod tests {
     }
 
     #[test]
-    fn logs_are_kept_for_a_week_and_license_files_are_not_swept() {
+    fn only_old_installer_logs_are_swept() {
         let old = Duration::from_secs(8 * 24 * 60 * 60);
         let young = Duration::from_secs(6 * 24 * 60 * 60);
         assert!(is_stale_log("CairnSetup-1-2.log", old));
         assert!(is_stale_log("CairnSetup-1-2.uninstall.log", old));
         assert!(!is_stale_log("CairnSetup-1-2.log", young));
-        assert!(!is_stale_log("LICENSE.txt", old));
+        assert!(!is_stale_log("notes.txt", old));
     }
 
     #[test]
@@ -963,6 +1263,112 @@ mod tests {
                 PathBuf::from(r"C:\Users\Alice\AppData\Roaming\Cairn"),
                 PathBuf::from(r"C:\Users\Alice\AppData\Local\Cairn"),
             ]
+        );
+    }
+
+    #[test]
+    fn program_data_comes_from_the_shell_not_the_environment() {
+        let root = program_data_root().expect("the shell resolves ProgramData");
+        assert!(root.is_absolute(), "{} is not absolute", root.display());
+        assert!(root.is_dir(), "{} is not a directory", root.display());
+    }
+
+    #[test]
+    fn public_desktop_comes_from_the_shell() {
+        let desktop = public_desktop_root().expect("the shell resolves the public desktop");
+        assert!(
+            desktop.is_absolute(),
+            "{} is not absolute",
+            desktop.display()
+        );
+        assert!(desktop.is_dir(), "{} is not a directory", desktop.display());
+    }
+
+    #[test]
+    fn only_local_profile_paths_are_accepted() {
+        assert!(is_local_profile(Path::new(r"C:\Users\Alice")));
+        assert!(!is_local_profile(Path::new(
+            r"\\server\share\Profiles\Alice"
+        )));
+        assert!(!is_local_profile(Path::new(r"Profiles\Alice")));
+    }
+
+    #[test]
+    fn staging_attributes_reject_reparse_points_and_files() {
+        assert!(check_staging_attributes(FILE_ATTRIBUTE_DIRECTORY.0).is_ok());
+        assert!(check_staging_attributes(
+            FILE_ATTRIBUTE_DIRECTORY.0 | FILE_ATTRIBUTE_REPARSE_POINT.0
+        )
+        .is_err());
+        assert!(check_staging_attributes(0).is_err());
+    }
+
+    #[test]
+    fn staging_root_is_locked_to_administrators() {
+        for precreated in [false, true] {
+            let temp = tempfile::tempdir().expect("temp dir");
+            let root = temp.path().join("CairnSetup");
+            if precreated {
+                std::fs::create_dir(&root).expect("create root");
+            }
+            match secure_staging_root(&root) {
+                Ok(()) => {
+                    std::fs::write(root.join("probe"), b"ok").expect(
+                        "the elevated process keeps access to a staging root it has secured",
+                    );
+                }
+                Err(error) if matches!(error.raw_os_error(), Some(5) | Some(1307)) => {
+                    eprintln!("staging ACL test skipped: the test process is not elevated");
+                    return;
+                }
+                Err(error) => {
+                    panic!("staging ACL could not be applied (precreated={precreated}): {error}")
+                }
+            }
+
+            for logs_precreated in [false, true] {
+                let logs = root.join(if logs_precreated {
+                    "logs"
+                } else {
+                    "logs-created"
+                });
+                if logs_precreated {
+                    std::fs::create_dir(&logs).expect("create logs");
+                }
+                match secure_staging_root(&logs) {
+                    Ok(()) => {
+                        std::fs::write(logs.join("probe.log"), b"ok").expect(
+                            "the elevated process keeps access to a logs directory it has secured",
+                        );
+                    }
+                    Err(error) => panic!(
+                        "logs ACL could not be applied (root_precreated={precreated}, logs_precreated={logs_precreated}): {error}"
+                    ),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_junction_cannot_be_used_as_a_staging_directory() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let target = temp.path().join("target");
+        std::fs::create_dir(&target).expect("target dir");
+        let link = temp.path().join("CairnSetup");
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&target)
+            .status()
+            .expect("run mklink");
+        if !status.success() {
+            eprintln!("junction test skipped: mklink is unavailable");
+            return;
+        }
+        let error = secure_staging_root(&link).expect_err("a junction must be rejected");
+        assert!(
+            error.to_string().contains("reparse point"),
+            "the junction was not rejected as a reparse point: {error}"
         );
     }
 

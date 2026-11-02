@@ -8,7 +8,7 @@ use crate::app::{element_id, layout, CairnApp};
 use crate::search::filters::FilterCategory;
 use crate::shell::accessibility::{self, ControlElement};
 use crate::shell::commands::OpenSelected;
-use crate::shell::theme::ShellTokens;
+use crate::shell::theme::{self, ShellTokens};
 use fluent_bundle::FluentArgs;
 use gpui_kit::assets::{AllAssets, IconName};
 use gpui_kit::base::StyledExt;
@@ -53,16 +53,17 @@ fn sidebar_icon_svg(icon: IconName) -> Option<Arc<[u8]>> {
     bytes.clone()
 }
 
-/// The 24-grid Lucide stroke is scaled by the larger icon box and reads heavier
-/// than the 0.875rem label. Keep the approved 1rem box and restore the stroke
-/// weight the icon had at 0.875rem. The vertical seat is derived from the
-/// label's font metrics so the icon shares the text's optical centreline.
-fn sidebar_icon_metrics(window: &Window) -> SidebarIconMetrics {
+/// How far the sample glyph's ink centre sits below the centre of a line box at
+/// the sidebar's label size. The line box centres ascent and descent; the ink
+/// sits elsewhere, so every label and caption lifts by this one measurement.
+fn glyph_ink_offset(window: &Window, sample: &str) -> Pixels {
+    let Some(glyph) = sample.chars().next() else {
+        return Pixels::ZERO;
+    };
     let style = window.text_style();
     let font = style.font();
-    let font_size = window.rem_size() * 0.875;
+    let font_size = window.rem_size() * theme::SMALL_TEXT_SIZE;
     let text_system = window.text_system();
-    let sample = "文";
     let layout = text_system.layout_line(
         sample,
         font_size,
@@ -76,23 +77,32 @@ fn sidebar_icon_metrics(window: &Window) -> SidebarIconMetrics {
         }],
         None,
     );
-    let label_offset = layout
-        .runs
-        .first()
-        .and_then(|run| {
-            text_system
-                .typographic_bounds(run.font_id, font_size, '文')
-                .ok()
-        })
-        .map(|bounds| {
-            let ink_center = bounds.origin.y + bounds.size.height / 2.0;
-            -text_ink_offset(layout.ascent, layout.descent, ink_center)
-        })
-        .unwrap_or(Pixels::ZERO);
+    let Some(run) = layout.runs.first() else {
+        return Pixels::ZERO;
+    };
+    let Ok(bounds) = text_system.typographic_bounds(run.font_id, font_size, glyph) else {
+        return Pixels::ZERO;
+    };
+    let ink_center = bounds.origin.y + bounds.size.height / 2.0;
+    text_ink_offset(layout.ascent, layout.descent, ink_center)
+}
+
+/// The 24-grid Lucide stroke is scaled by the larger icon box and reads heavier
+/// than the 0.875rem label. Keep the approved 1rem box and restore the stroke
+/// weight the icon had at 0.875rem. The vertical seat is derived from the
+/// label's font metrics so the icon shares the text's optical centreline.
+fn sidebar_icon_metrics(window: &Window) -> SidebarIconMetrics {
     SidebarIconMetrics {
         size: window.rem_size() * layout::SIDEBAR_ICON,
-        label_offset,
+        label_offset: -glyph_ink_offset(window, "文"),
     }
+}
+
+/// The caption's ink sits a fraction below the centre of its line box.
+/// Centre the line box, then lift the ink by the measured difference so the
+/// label's optical centre lands on the query box's centreline at every zoom.
+fn sidebar_caption_ink_offset(window: &Window, text: &str) -> Pixels {
+    glyph_ink_offset(window, text)
 }
 
 /// One fixed leading lane for every sidebar glyph. Keeping the lane fixed means
@@ -154,6 +164,31 @@ fn sidebar_row(
                 .whitespace_nowrap()
                 .child(label.into()),
         )
+}
+
+/// A group caption: 位置 and 驱动器 share one box, so each label has the same leading above and
+/// below and the groups cannot drift apart. The box fills the search-band height, which puts the
+/// optical centre on the query box's centreline and the first row on the table heading.
+fn sidebar_caption(
+    control: &'static accessibility::KeyControl,
+    title: String,
+    window: &Window,
+    tokens: &ShellTokens,
+) -> impl IntoElement {
+    let ink_offset = sidebar_caption_ink_offset(window, &title);
+    accessibility::element(control)
+        .aria_label(title.clone())
+        .px(rems(layout::INNER_SPACING))
+        .h(rems(
+            layout::SEARCH_BAND_HEIGHT - 2.0 * layout::SIDEBAR_VIEWPORT_LEAD,
+        ))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .text_sm()
+        .font_medium()
+        .text_color(tokens.muted_foreground)
+        .child(div().relative().top(-ink_offset).child(title))
 }
 
 /// The action a sidebar row runs when the pointer or the keyboard chooses it.
@@ -419,32 +454,12 @@ impl CairnApp {
                     // same 4px viewport inset on the right keeps the row fill symmetric.
                     .pl(rems(layout::SIDEBAR_VIEWPORT_LEAD))
                     .pr(rems(layout::SIDEBAR_VIEWPORT_LEAD))
-                    .py(rems(layout::SPACE_4))
+                    .py(rems(layout::SIDEBAR_VIEWPORT_LEAD))
                     .gap_y(rems(layout::SPACE_4))
-                    .child(
-                        accessibility::element(locations)
-                            .aria_label(locations_title.clone())
-                            .px(rems(layout::INNER_SPACING))
-                            .pt(rems(layout::SPACE_4))
-                            .pb(rems(layout::SPACE_4))
-                            .text_xs()
-                            .font_semibold()
-                            .text_color(tokens.muted_foreground)
-                            .child(locations_title),
-                    )
+                    .child(sidebar_caption(locations, locations_title, window, tokens))
                     .children(quick_access)
                     .child(recycle_entry)
-                    .child(
-                        accessibility::element(drives)
-                            .aria_label(drives_title.clone())
-                            .px(rems(layout::INNER_SPACING))
-                            .pt(rems(layout::SPACE_8))
-                            .pb(rems(layout::SPACE_4))
-                            .text_xs()
-                            .font_semibold()
-                            .text_color(tokens.muted_foreground)
-                            .child(drives_title),
-                    )
+                    .child(sidebar_caption(drives, drives_title, window, tokens))
                     .children(drive_elements),
             )
             .into_any_element()

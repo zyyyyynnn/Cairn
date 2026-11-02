@@ -6,16 +6,17 @@
 
 mod bench;
 mod corpus;
+mod docs_check;
 mod i18n_check;
-mod package;
 mod test_security;
 mod test_vhd;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+use xtask::package;
 
 #[derive(Parser)]
-#[command(name = "xtask", about = "Cairn engineering automation tasks")]
+#[command(name = "CairnXtask", about = "Cairn engineering automation tasks")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -26,6 +27,12 @@ enum Commands {
     /// Check that every locale pair is aligned, and that the code reading them agrees
     CheckI18n {
         /// The workspace root that holds the crates.
+        #[arg(default_value = ".")]
+        workspace: PathBuf,
+    },
+    /// Check required documentation pages and Markdown relative links
+    CheckDocs {
+        /// The workspace root that holds the documented crates.
         #[arg(default_value = ".")]
         workspace: PathBuf,
     },
@@ -61,6 +68,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Commands::CheckI18n { workspace } => {
             i18n_check::check_i18n(&workspace)?;
+        }
+        Commands::CheckDocs { workspace } => {
+            docs_check::check_docs(&workspace)?;
         }
         Commands::Package { out_dir } => {
             package::run_package(out_dir)?;

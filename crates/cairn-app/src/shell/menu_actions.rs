@@ -7,15 +7,16 @@
 
 use crate::app::{join_row_path, layout, CairnApp};
 use crate::search::filters::FilterCategory;
-use crate::service::search_scope::SearchScope;
 use crate::shell::command_groups::{group_spec, GroupCommand, MenuGroup, ZoomPreset};
 use crate::shell::commands::*;
+use crate::shell::dialogs;
 use crate::shell::menu_rules::IndexMenuState;
 use crate::shell::os::{
     delete_permanently_from_recycle_bin, delete_to_recycle_bin, empty_recycle_bin, open_file,
     open_folder_and_select, restore_from_recycle_bin, set_clipboard_text, show_properties_dialog,
     BinOperationError, RecycleBinItem,
 };
+use crate::shell::recycle_bin::BinRetry;
 use crate::shell::settings::THEME_SYSTEM;
 use crate::shell::theme;
 use crate::table::model::{format_timestamp, ColumnBoundary, ColumnWidths, SortColumn};
@@ -24,8 +25,9 @@ use cairn_core::format_size_bytes;
 use cairn_protocol::status::ContentIndexState;
 use fluent_bundle::FluentArgs;
 use gpui_kit::component::button::ButtonVariant;
-use gpui_kit::component::dialog::{AlertDialog, DialogButtonProps, DialogEntrance};
+use gpui_kit::component::dialog::AlertDialog;
 use gpui_kit::component::menu::PopupMenu;
+use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::gpui::*;
 use std::ops::Range;
@@ -57,19 +59,6 @@ pub fn copy_lines(lines: &[String]) {
         return;
     }
     let _ = set_clipboard_text(&lines.join("\r\n"));
-}
-
-/// Diagnostic text from the service can be a whole sentence; a menu row stays one line. Trim it
-/// to a readable length on a character boundary so CJK reasons are not cut mid-glyph.
-fn short_reason(reason: &str) -> String {
-    const MAX_CHARS: usize = 120;
-    // One menu row is one line: collapse the diagnostic's own line breaks before truncating.
-    let reason = reason.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut short: String = reason.chars().take(MAX_CHARS).collect();
-    if short.chars().count() < reason.chars().count() {
-        short.push('…');
-    }
-    short
 }
 
 pub fn sort_column_key(col: SortColumn) -> &'static str {
@@ -141,6 +130,7 @@ fn menu_entries(
                 },
                 hint: command.hint_action(),
                 submenu,
+                loading: command == GroupCommand::CheckForUpdates && app.is_checking_update,
                 separates: false,
             }
         })
@@ -153,30 +143,18 @@ fn menu_entries(
 /// every confirmation on this helper destroys data.
 fn style_confirmation_alert(
     alert: AlertDialog,
-    window: &Window,
+    window: &mut Window,
+    cx: &mut App,
     ok_text: impl Into<SharedString>,
     cancel_text: impl Into<SharedString>,
 ) -> AlertDialog {
-    alert
-        .width(window.rem_size() * layout::CONFIRMATION_WIDTH)
-        .margin_top(confirmation_top_offset(window))
-        .min_h(px(0.))
-        // A short settle from just above the resting seat reads calmer than the
-        // legacy slide from the window top, and shares the theme's reduced-motion
-        // policy. gpui-component 0.8 removes a dialog immediately on close and
-        // exposes no closing phase, so only the entrance can be shaped here.
-        .entrance(DialogEntrance::FadeSlide)
-        // Both footer actions use the same borderless medium frame. The default
-        // Cancel border made the filled action read one pixel taller although
-        // their outer bounds were equal. The commit button is danger, not a
-        // neutral primary: every confirmation on this helper destroys data.
-        .button_props(
-            DialogButtonProps::default()
-                .ok_text(ok_text)
-                .cancel_text(cancel_text)
-                .cancel_variant(ButtonVariant::Secondary)
-                .ok_variant(ButtonVariant::Danger),
-        )
+    // Both footer actions keep the same medium frame; the lighter neutral plate is painted
+    // one pixel inside it so the pair reads as one optical size. The commit button is danger,
+    // not a neutral primary: every confirmation on this helper destroys data.
+    let surface = cairn_ui::theme::dialog_surface(cx.theme());
+    let actions =
+        dialogs::DialogActions::new(ok_text, ButtonVariant::Danger).with_cancel(cancel_text);
+    dialogs::alert_surface(alert, window, cx, surface, actions)
 }
 
 /// The shell can report a batch as successful while a progress dialog skipped one item. The
@@ -219,25 +197,6 @@ fn reconcile_empty_bin(
         )),
         (outcome, _) => outcome,
     }
-}
-
-fn confirmation_top_offset(window: &Window) -> Pixels {
-    let estimated_height = window.rem_size() * layout::CONFIRMATION_ESTIMATED_HEIGHT;
-    confirmation_top_offset_for_height(
-        window.viewport_size().height,
-        estimated_height,
-        window.rem_size() * layout::SPACE_24,
-    )
-}
-
-/// A stable upper-middle seat for a short alert. The dialog has no pre-layout height to read, so
-/// this estimates one; wrapped copy grows downward without moving the top edge.
-fn confirmation_top_offset_for_height(
-    viewport_height: Pixels,
-    estimated_height: Pixels,
-    minimum: Pixels,
-) -> Pixels {
-    ((viewport_height - estimated_height) / 2.).max(minimum)
 }
 
 impl CairnApp {
@@ -436,9 +395,10 @@ impl CairnApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // The Treemap replaces the query band; focusing its hidden search box
-        // would take the keyboard away from the visualization.
+        // The Treemap replaces the query band with the path field, which is its
+        // address bar; the same desktop shortcut reaches it.
         if self.drive_view.is_some() {
+            self.begin_treemap_path_edit(window, cx);
             return;
         }
         self.dismiss_result_selection_on_chrome_press(cx);
@@ -492,6 +452,11 @@ impl CairnApp {
     }
 
     pub fn escape_query(&mut self, _: &EscapeQuery, window: &mut Window, cx: &mut Context<Self>) {
+        // The address field is the innermost editing surface while it is open.
+        if self.treemap_path.editing {
+            self.cancel_treemap_path_edit(window, cx);
+            return;
+        }
         // While a dropdown is open the keystroke belongs to it: `Popover` gives its surface focus
         // and handles Escape→Cancel in the bubble phase, where actions stop propagation by default,
         // so this handler is not reached. If focus has not moved into the popover yet, closing the
@@ -697,22 +662,12 @@ impl CairnApp {
     }
 
     fn command_label(&self, command: GroupCommand) -> String {
-        let index = self.index_menu_state();
         match command {
-            // The content-search row names the action it will perform, so the row never reads as
-            // a status line the user cannot act on.
-            GroupCommand::ToggleContentSearch => self.content_search_toggle_label(),
             // The details row reports what the content index holds, in the user's language.
             GroupCommand::ContentSearchDetails => self.content_search_details_label(),
             // The two facts the popup carries beside that state.
             GroupCommand::ContentSearchUsage => self.content_search_usage_label(),
             GroupCommand::ContentSearchUpdated => self.content_search_updated_label(),
-            // "所有文件" needs the background service. Where the service is missing the row is
-            // disabled, and it says why here: the menu has no tooltip channel, so the visible
-            // label is the only place the reason can reach the reader.
-            GroupCommand::SetSearchScope(scope) if index.scope_choice_is_unavailable(scope) => self
-                .i18n
-                .get_text("menu_search_scope_all_files_unavailable"),
             GroupCommand::DeleteSelected if self.recycle_bin.is_open() => {
                 self.i18n.get_text("ctx_delete_permanently")
             }
@@ -731,30 +686,16 @@ impl CairnApp {
     /// the reason the band gives cannot drift apart.
     pub(crate) fn index_menu_state(&self) -> IndexMenuState<'_> {
         IndexMenuState {
-            scope: self.service.search_scope,
-            service_installed: self.service.service_installed,
             service_connected: self.service.is_service_connected,
-            switching_scope: self.service.is_switching_scope,
             content_loading: self.service.content_status_loading,
             content_failed: content_failed(
                 self.service.content_status_error.as_deref(),
                 self.service.content_action_error.as_deref(),
             ),
+            content_action_failed: self.service.content_action_error.is_some(),
             content_action_pending: self.service.content_action_pending,
-            local_mode: self.service.local_mode,
             content_state: &self.service.content_status.state,
         }
-    }
-
-    /// The single content-search switch. Its label names what clicking it will do, so the row is
-    /// an action rather than a status line the user cannot act on (UI-10).
-    fn content_search_toggle_label(&self) -> String {
-        let enabled = self.index_menu_state().content_index_is_on();
-        self.i18n.get_text(if enabled {
-            "menu_content_search_disable"
-        } else {
-            "menu_content_search_enable"
-        })
     }
 
     /// What the content index currently holds, as one line the user can read. A state that could
@@ -764,22 +705,14 @@ impl CairnApp {
         if !self.service.is_service_connected {
             return self.i18n.get_text("menu_content_search_unavailable");
         }
-        if let Some(reason) = &self.service.content_action_error {
-            return self.reason_label(
-                "menu_content_search_failed",
-                "menu_content_search_failed_reason",
-                reason,
-            );
+        if self.service.content_action_error.is_some() {
+            return self.i18n.get_text("menu_content_search_failed");
         }
         if self.service.content_status_loading {
             return self.i18n.get_text("menu_content_search_loading");
         }
-        if let Some(reason) = &self.service.content_status_error {
-            return self.reason_label(
-                "menu_content_search_unavailable",
-                "menu_content_search_unavailable_reason",
-                reason,
-            );
+        if self.service.content_status_error.is_some() {
+            return self.i18n.get_text("menu_content_search_unavailable");
         }
         match &self.service.content_status.state {
             ContentIndexState::Disabled => self.i18n.get_text("menu_content_search_off"),
@@ -791,25 +724,8 @@ impl CairnApp {
                     .get_text_with_args("menu_content_search_backfilling", &args)
             }
             ContentIndexState::Ready => self.i18n.get_text("menu_content_search_ready"),
-            ContentIndexState::Error(reason) => self.reason_label(
-                "menu_content_search_failed",
-                "menu_content_search_failed_reason",
-                reason,
-            ),
+            ContentIndexState::Error(_) => self.i18n.get_text("menu_content_search_failed"),
         }
-    }
-
-    /// Appends a localized reason to a status label, keeping the row short enough to stay one
-    /// menu line. The service's message is diagnostic text, so it is shown as-is rather than
-    /// translated; only the label around it is localized.
-    fn reason_label(&self, plain_key: &str, key_with_reason: &str, reason: &str) -> String {
-        let reason = short_reason(reason);
-        if reason.is_empty() {
-            return self.i18n.get_text(plain_key);
-        }
-        let mut args = FluentArgs::new();
-        args.set("reason", reason);
-        self.i18n.get_text_with_args(key_with_reason, &args)
     }
 
     /// How much space the content index takes, as one line the user can read. A size nobody has
@@ -847,24 +763,6 @@ impl CairnApp {
     /// shown disabled row after row. In particular a failed index offers one retry, not a second
     /// "enable" entry that would quietly mean the same request.
     pub fn command_is_hidden(&self, command: GroupCommand) -> bool {
-        let index = self.index_menu_state();
-        // The content switch and its details only mean something where a content index exists.
-        // In the readable-files scope the user indexer has none, so those rows are absent rather
-        // than promises the window cannot keep (UI-10). The popup that holds them goes with
-        // them: a trigger left behind would open an empty window.
-        let content_row = matches!(
-            command,
-            GroupCommand::ToggleContentSearch
-                | GroupCommand::ContentSearchDetailsMenu
-                | GroupCommand::ContentSearchDetails
-                | GroupCommand::ContentSearchUsage
-                | GroupCommand::ContentSearchUpdated
-                | GroupCommand::RetryContentSearch
-                | GroupCommand::ClearContentSearch
-        );
-        if content_row && index.content_rows_are_hidden() {
-            return true;
-        }
         match command {
             // A retry only exists for an index that failed, and a clear only for one that holds
             // something. Both are shown when they apply and absent otherwise, so the popup never
@@ -910,10 +808,9 @@ impl CairnApp {
             GroupCommand::SetLanguage(code) => self.settings.language == code,
             GroupCommand::SetZoom(preset) => ZoomPreset::nearest(self.zoom_level) == preset,
             GroupCommand::ToggleAutostart => self.settings.autostart,
-            GroupCommand::SetSearchScope(scope) => self.service.search_scope.as_str() == scope,
-            // A backfill in progress has its own progress line; the checkmark appears only once
-            // the index is ready, so the mark never claims a finished index (UI-10).
-            GroupCommand::ToggleContentSearch => index.content_switch_is_checked(),
+            // The checkmark means the switch is on, including while the index is still filling;
+            // the details row carries progress and readiness.
+            GroupCommand::ToggleContentSearch => index.content_index_is_on(),
             _ => false,
         }
     }
@@ -940,12 +837,6 @@ impl CairnApp {
             GroupCommand::CopyPaths | GroupCommand::CopyNames => {
                 self.selection_indices().is_empty()
             }
-            // A scope that is already in force is not a choice the user can make again, and a
-            // switch that is running must not be started a second time. "所有文件" needs the
-            // background service, so it is out of reach where the service is not installed.
-            GroupCommand::SetSearchScope(scope) => index.scope_choice_is_disabled(scope),
-            // A scope switch moves the window between two indexers. The content rows belong to
-            // the one the window is leaving, so they wait until the switch has settled.
             GroupCommand::ToggleContentSearch => index.content_switch_is_disabled(),
             GroupCommand::ContentSearchDetails
             | GroupCommand::ContentSearchUsage
@@ -954,6 +845,7 @@ impl CairnApp {
                 index.content_switch_is_disabled()
             }
             GroupCommand::ClearQuery => !self.can_clear_query(),
+            GroupCommand::CheckForUpdates => self.is_checking_update,
             _ => false,
         }
     }
@@ -1017,13 +909,9 @@ impl CairnApp {
                 let enabled = !self.settings.autostart;
                 self.set_autostart(enabled, cx);
             }
-            GroupCommand::SetSearchScope(scope) => {
-                self.close_group();
-                self.switch_search_scope(SearchScope::from_stored(scope), cx);
-            }
             GroupCommand::ToggleContentSearch => {
-                // The label beside this row promises what the click does, so both read the same
-                // fact about the index.
+                // The stable row label names the feature; the checkmark carries whether it is
+                // on, and the click always flips that same fact.
                 let enabled = !self.index_menu_state().content_index_is_on();
                 self.set_content_index_enabled(enabled, cx);
             }
@@ -1039,14 +927,9 @@ impl CairnApp {
                 let ok = self.i18n.get_text("index_clear_confirm_action");
                 let cancel = self.i18n.get_text("index_clear_cancel");
                 let view = cx.entity();
-                window.open_alert_dialog(cx, move |alert, window, _| {
-                    style_confirmation_alert(alert, window, ok.clone(), cancel.clone())
-                        .title(
-                            div()
-                                .font(theme::serif_font(FontWeight::SEMIBOLD))
-                                .child(title.clone()),
-                        )
-                        .description(description.clone())
+                window.open_alert_dialog(cx, move |alert, window, app| {
+                    style_confirmation_alert(alert, window, app, ok.clone(), cancel.clone())
+                        .child(dialogs::body(title.clone(), description.clone(), window))
                         .confirm()
                         .on_ok({
                             let view = view.clone();
@@ -1055,6 +938,18 @@ impl CairnApp {
                                 true
                             }
                         })
+                });
+            }
+            GroupCommand::CheckForUpdates => {
+                self.close_group();
+                self.start_update_check(window, cx);
+                let view = cx.entity();
+                window.defer(cx, move |window, cx| {
+                    view.update(cx, |this, cx| {
+                        if this.is_checking_update {
+                            this.show_group(MenuGroup::Help, window, cx);
+                        }
+                    });
                 });
             }
             GroupCommand::About => {
@@ -1118,8 +1013,8 @@ impl CairnApp {
         {
             return;
         }
-        // Leaving the visualization cancels its progressive scan; otherwise the
-        // hidden view keeps a worker and its partial tree alive behind the table.
+        // Leaving the visualization releases its partial tree instead of keeping
+        // it alive behind the table.
         if self.drive_view.take().is_some() {
             self.treemap_state = None;
         }
@@ -1216,7 +1111,7 @@ impl CairnApp {
         cx.notify();
     }
 
-    pub fn open_selected(&mut self, _: &OpenSelected, _w: &mut Window, cx: &mut Context<Self>) {
+    pub fn open_selected(&mut self, _: &OpenSelected, window: &mut Window, cx: &mut Context<Self>) {
         // Inside the Recycle Bin view Enter opens the deleted item straight
         // from the bin payload, exactly like opening it in Explorer.
         if self.recycle_bin.is_open() {
@@ -1233,10 +1128,10 @@ impl CairnApp {
                         if let Some(parent) = cairn_core::treemap::aggregate_parent_path(&node.path)
                             .map(str::to_string)
                         {
-                            self.treemap_drill_down(&parent, cx);
+                            self.treemap_drill_down(&parent, window, cx);
                         }
                     } else if node.item.is_dir {
-                        self.treemap_drill_down(&node.path, cx);
+                        self.treemap_drill_down(&node.path, window, cx);
                     } else {
                         let _ = open_file(&node.path);
                     }
@@ -1298,8 +1193,8 @@ impl CairnApp {
     /// Opens the Recycle Bin view: the shell reports the bin's contents and
     /// the table renders them. Any query or drive switch leaves the view.
     pub fn open_recycle_bin(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        // Leaving the visualization cancels its progressive scan; the bin is a
-        // location, so a hidden Treemap worker must not keep walking a drive.
+        // Leaving the visualization releases its partial tree; the bin is a
+        // location, so no hidden Treemap state remains behind it.
         if self.drive_view.take().is_some() {
             self.treemap_state = None;
         }
@@ -1401,14 +1296,9 @@ impl CairnApp {
         let ok = self.i18n.get_text("recycle_bin_delete_confirm_action");
         let cancel = self.i18n.get_text("delete_confirm_cancel");
         let view = cx.entity();
-        window.open_alert_dialog(cx, move |alert, window, _| {
-            style_confirmation_alert(alert, window, ok.clone(), cancel.clone())
-                .title(
-                    div()
-                        .font(theme::serif_font(FontWeight::SEMIBOLD))
-                        .child(title.clone()),
-                )
-                .description(description.clone())
+        window.open_alert_dialog(cx, move |alert, window, app| {
+            style_confirmation_alert(alert, window, app, ok.clone(), cancel.clone())
+                .child(dialogs::body(title.clone(), description.clone(), window))
                 .confirm()
                 .on_ok({
                     let view = view.clone();
@@ -1425,7 +1315,7 @@ impl CairnApp {
 
     /// Runs the confirmed permanent delete on the dedicated COM apartment and
     /// installs the listing that follows it.
-    fn delete_bin_items_permanently(
+    pub(crate) fn delete_bin_items_permanently(
         &mut self,
         items: Vec<std::sync::Arc<RecycleBinItem>>,
         cx: &mut Context<Self>,
@@ -1438,10 +1328,12 @@ impl CairnApp {
             .iter()
             .map(|item| (item.identity_key(), item.name.clone()))
             .collect();
+        let retry = BinRetry::DeletePermanently(items.clone());
         self.spawn_bin_write(
             "recycle_bin_delete_failed",
             names,
             false,
+            retry,
             move |owner| {
                 let outcome = delete_permanently_from_recycle_bin(&items, owner);
                 let listing = crate::shell::os::list_recycle_bin();
@@ -1485,14 +1377,9 @@ impl CairnApp {
         let ok = self.i18n.get_text("delete_confirm_action");
         let cancel = self.i18n.get_text("delete_confirm_cancel");
         let view = cx.entity();
-        window.open_alert_dialog(cx, move |alert, window, _| {
-            style_confirmation_alert(alert, window, ok.clone(), cancel.clone())
-                .title(
-                    div()
-                        .font(theme::serif_font(FontWeight::SEMIBOLD))
-                        .child(title.clone()),
-                )
-                .description(description.clone())
+        window.open_alert_dialog(cx, move |alert, window, app| {
+            style_confirmation_alert(alert, window, app, ok.clone(), cancel.clone())
+                .child(dialogs::body(title.clone(), description.clone(), window))
                 .confirm()
                 .on_ok({
                     let view = view.clone();
@@ -1513,6 +1400,7 @@ impl CairnApp {
         title_key: &'static str,
         fallback_names: Vec<String>,
         reset_scroll: bool,
+        retry: BinRetry,
         task: F,
         cx: &mut Context<Self>,
     ) where
@@ -1546,7 +1434,13 @@ impl CairnApp {
                 this.finish_recycle_bin_load(generation, listing, reset_scroll, anchor, cx);
                 if let Err(failure) = outcome {
                     if !failure.is_cancelled() {
-                        this.notify_bin_operation_error(title_key, &fallback_names, &failure, cx);
+                        this.notify_bin_operation_error(
+                            title_key,
+                            &fallback_names,
+                            &failure,
+                            retry.clone(),
+                            cx,
+                        );
                     }
                 }
                 cx.notify();
@@ -1567,6 +1461,16 @@ impl CairnApp {
         let Some(items) = self.selected_bin_items() else {
             return;
         };
+        self.restore_bin_items(items, cx);
+    }
+
+    /// Restores an explicit set of bin items. The selection path and the retry path share this
+    /// implementation so the retry always targets the same identities the failed batch covered.
+    pub(crate) fn restore_bin_items(
+        &mut self,
+        items: Vec<std::sync::Arc<RecycleBinItem>>,
+        cx: &mut Context<Self>,
+    ) {
         if items.is_empty() {
             return;
         }
@@ -1575,10 +1479,12 @@ impl CairnApp {
             .iter()
             .map(|item| (item.identity_key(), item.name.clone()))
             .collect();
+        let retry = BinRetry::RestoreItems(items.clone());
         self.spawn_bin_write(
             "recycle_bin_restore_failed",
             names,
             false,
+            retry,
             move |owner| {
                 let outcome = restore_from_recycle_bin(&items, owner);
                 let listing = crate::shell::os::list_recycle_bin();
@@ -1604,14 +1510,9 @@ impl CairnApp {
         let ok = self.i18n.get_text("recycle_bin_empty_confirm_action");
         let cancel = self.i18n.get_text("delete_confirm_cancel");
         let view = cx.entity();
-        window.open_alert_dialog(cx, move |alert, window, _| {
-            style_confirmation_alert(alert, window, ok.clone(), cancel.clone())
-                .title(
-                    div()
-                        .font(theme::serif_font(FontWeight::SEMIBOLD))
-                        .child(title.clone()),
-                )
-                .description(description.clone())
+        window.open_alert_dialog(cx, move |alert, window, app| {
+            style_confirmation_alert(alert, window, app, ok.clone(), cancel.clone())
+                .child(dialogs::body(title.clone(), description.clone(), window))
                 .confirm()
                 .on_ok({
                     let view = view.clone();
@@ -1634,6 +1535,7 @@ impl CairnApp {
             "recycle_bin_empty_failed",
             Vec::new(),
             true,
+            BinRetry::EmptyBin,
             |owner| {
                 let outcome = empty_recycle_bin(owner);
                 let listing = crate::shell::os::list_recycle_bin();
@@ -1662,6 +1564,7 @@ impl CairnApp {
             })
             .collect();
         let task_paths = paths.clone();
+        let retry_paths = paths.clone();
         let task_names = names.clone();
         let owner = crate::shell::os::active_window_handle();
         self.delete_in_flight = true;
@@ -1716,6 +1619,7 @@ impl CairnApp {
                                 "delete_failed_title",
                                 &names,
                                 failure,
+                                BinRetry::DeletePaths(retry_paths.clone()),
                                 cx,
                             );
                         }
@@ -2068,16 +1972,10 @@ fn content_failed(status_error: Option<&str>, action_error: Option<&str>) -> boo
 
 #[cfg(test)]
 mod confirmation_tests {
-    use super::{
-        confirmation_top_offset_for_height, content_failed, reconcile_bin_items,
-        reconcile_empty_bin,
-    };
-    use crate::app::layout;
+    use super::{content_failed, reconcile_bin_items, reconcile_empty_bin};
     use crate::shell::i18n::I18nManager;
     use crate::shell::os::{BinOperationError, RecycleBinItem};
-    use crate::shell::theme;
     use fluent_bundle::FluentArgs;
-    use gpui_kit::gpui::px;
 
     fn item(name: &str) -> RecycleBinItem {
         RecycleBinItem {
@@ -2184,25 +2082,5 @@ mod confirmation_tests {
         assert!(content_failed(Some("status"), None));
         assert!(content_failed(None, Some("action")));
         assert!(content_failed(Some("status"), Some("action")));
-    }
-
-    #[test]
-    fn confirmation_geometry_is_a_short_centered_surface() {
-        assert!((layout::CONFIRMATION_WIDTH * theme::BASE_FONT_PX - 384.0).abs() < 0.001);
-        assert!(
-            (layout::CONFIRMATION_ESTIMATED_HEIGHT * theme::BASE_FONT_PX - 150.0).abs() < 0.001
-        );
-        assert_eq!(
-            confirmation_top_offset_for_height(px(800.), px(150.), px(24.)),
-            px(325.)
-        );
-        assert_eq!(
-            confirmation_top_offset_for_height(px(350.), px(150.), px(24.)),
-            px(100.)
-        );
-        assert_eq!(
-            confirmation_top_offset_for_height(px(100.), px(150.), px(24.)),
-            px(24.)
-        );
     }
 }

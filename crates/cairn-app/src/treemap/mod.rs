@@ -9,6 +9,7 @@
 pub(crate) mod navigation;
 pub(crate) mod paint;
 pub(crate) mod palette;
+pub(crate) mod path_input;
 pub(crate) mod state;
 pub(crate) mod view;
 pub(crate) mod volume_index;

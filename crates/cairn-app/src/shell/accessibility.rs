@@ -18,7 +18,9 @@
 
 use crate::shell::i18n::I18nManager;
 use gpui_kit::base::{ObservedElement, TestSupportExt};
-use gpui_kit::gpui::{div, Div, InteractiveElement, Role, Stateful, StatefulInteractiveElement};
+use gpui_kit::gpui::{
+    div, Div, InteractiveElement, Role, SharedString, Stateful, StatefulInteractiveElement,
+};
 
 /// One key control as assistive technology must see it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,7 +79,7 @@ const EMPTY: &[&str] = &[];
 /// below reject a row the render path does not build.
 pub const KEY_CONTROLS: &[KeyControl] = &[
     // ---- locations sidebar: the file-type rows, and the column that holds them (UI-01, QRY-06) ----
-    // ---- title bar: sidebar toggle, back/forward navigation (UI-01) --------------
+    // ---- title bar: sidebar toggle, back/forward/up navigation (UI-01) -----------
     KeyControl {
         key: "sidebar-toggle",
         element: "sidebar-toggle",
@@ -102,6 +104,15 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         indexed: false,
         role: Role::Button,
         messages: &["nav_forward"],
+        named_by: "",
+        requirement: "UI-01",
+    },
+    KeyControl {
+        key: "nav-up",
+        element: "nav-up",
+        indexed: false,
+        role: Role::Button,
+        messages: &["nav_up"],
         named_by: "",
         requirement: "UI-01",
     },
@@ -269,6 +280,15 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         messages: &["query_clear"],
         named_by: "",
         requirement: "UI-01, UI-03",
+    },
+    KeyControl {
+        key: "treemap-path-clear",
+        element: "treemap-path-clear",
+        indexed: false,
+        role: Role::Button,
+        messages: &["treemap_path_clear"],
+        named_by: "",
+        requirement: "DSV-04",
     },
     // ---- title-bar menu bar: the six top-level menus (UI-01, UI-03) ----------------
     // Each trigger is a `Button` carrying the element id the view builds, so `element` is exactly what
@@ -444,22 +464,86 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         messages: &[
             "empty_index_empty_title",
             "empty_no_matches",
+            "empty_content_scope_line",
+            "empty_content_loading_title",
+            "empty_content_unreadable_title",
+            "empty_content_disabled_title",
+            "empty_content_backfilling_title",
+            "empty_content_error_title",
             "recycle_bin_empty_title",
-            "recycle_bin_empty_hint",
             "recycle_bin_no_matches_title",
-            "recycle_bin_no_matches_hint",
         ],
         named_by: "",
         requirement: "UI-01, DSV-08",
     },
+    // A content query that cannot run offers one state-specific recovery: turn the feature on,
+    // rebuild the index, or re-read the status. Only one label is live at a time.
+    KeyControl {
+        key: "content-search-action",
+        element: "content-search-action",
+        indexed: false,
+        role: Role::Button,
+        messages: &[
+            "index_enable_action",
+            "menu_content_search_retry",
+            "index_status_retry",
+        ],
+        named_by: "",
+        requirement: "CNT-01, UI-01",
+    },
+    // The Treemap canvas shows the same centred state band as the table: one
+    // sentence for an empty folder or an unavailable tree. The breadcrumb
+    // ancestors are one repeated button family, named by their path segment.
+    KeyControl {
+        key: "treemap-state",
+        element: "treemap-state",
+        indexed: false,
+        role: Role::Status,
+        messages: &[
+            "treemap_empty_directory",
+            "treemap_unavailable_not_indexed",
+            "treemap_unavailable_not_directory",
+            "treemap_unavailable_too_large",
+            "treemap_unavailable_service",
+        ],
+        named_by: "",
+        requirement: "DSV-04",
+    },
+    KeyControl {
+        key: "treemap-crumb",
+        element: "treemap-crumb",
+        indexed: true,
+        role: Role::Button,
+        messages: EMPTY,
+        named_by: "path_segments",
+        requirement: "DSV-04",
+    },
+    KeyControl {
+        key: "treemap-path",
+        element: "treemap-path",
+        indexed: false,
+        role: Role::TextInput,
+        messages: &["treemap_path_label"],
+        named_by: "",
+        requirement: "DSV-04",
+    },
+    KeyControl {
+        key: "treemap-retry",
+        element: "treemap-retry",
+        indexed: false,
+        role: Role::Button,
+        messages: &["treemap_retry"],
+        named_by: "",
+        requirement: "DSV-04",
+    },
     // Each service failure is its own entry: the same element has to name the condition it reports,
-    // so the title and the recovery message are registered per issue (SVC-03, SVC-04).
+    // and that one sentence carries the recovery direction (SVC-03, SVC-04).
     KeyControl {
         key: "service-issue-not-running",
         element: "service-issue",
         indexed: false,
         role: Role::Alert,
-        messages: &["service_not_running_title", "service_not_running_desc"],
+        messages: &["service_not_running_title"],
         named_by: "",
         requirement: "SVC-03, SVC-04",
     },
@@ -468,7 +552,7 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         element: "service-issue",
         indexed: false,
         role: Role::Alert,
-        messages: &["service_not_installed_title", "service_not_installed_desc"],
+        messages: &["service_not_installed_title"],
         named_by: "",
         requirement: "SVC-03, SVC-04",
     },
@@ -477,7 +561,7 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         element: "service-issue",
         indexed: false,
         role: Role::Alert,
-        messages: &["service_incompatible_title", "service_incompatible_desc"],
+        messages: &["service_incompatible_title"],
         named_by: "",
         requirement: "SVC-03, SVC-04",
     },
@@ -486,7 +570,7 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         element: "service-issue",
         indexed: false,
         role: Role::Alert,
-        messages: &["service_unauthorized_title", "service_unauthorized_desc"],
+        messages: &["service_unauthorized_title"],
         named_by: "",
         requirement: "SVC-03, SVC-04",
     },
@@ -546,6 +630,15 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         requirement: "UI-03",
     },
     KeyControl {
+        key: "toast-info",
+        element: "toast-info",
+        indexed: false,
+        role: Role::Status,
+        messages: &["toast_status"],
+        named_by: "",
+        requirement: "UI-03",
+    },
+    KeyControl {
         key: "toast-dismiss",
         element: "toast-dismiss",
         indexed: false,
@@ -555,14 +648,20 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         requirement: "UI-03",
     },
     KeyControl {
+        key: "toast-retry",
+        element: "toast-retry",
+        indexed: false,
+        role: Role::Button,
+        messages: &["toast_retry"],
+        named_by: "",
+        requirement: "UI-03",
+    },
+    KeyControl {
         key: "recycle-bin-error",
         element: "recycle-bin-error",
         indexed: false,
         role: Role::Alert,
-        messages: &[
-            "recycle_bin_unavailable_title",
-            "recycle_bin_unavailable_hint",
-        ],
+        messages: &["recycle_bin_unavailable_title"],
         named_by: "",
         requirement: "DSV-08",
     },
@@ -633,6 +732,30 @@ pub type ControlElement = ObservedElement<Stateful<Div>>;
 /// accessible name and its own styling.
 pub fn element(control: &KeyControl) -> ControlElement {
     div().id(control.element).role(control.role).test_support()
+}
+
+/// One modal title: a level-one heading named by the title the caller just localized. It is not a
+/// control, so it has no registry row; keeping its role here still leaves one place that decides it.
+pub(crate) fn heading(element: Stateful<Div>, label: impl Into<SharedString>) -> Stateful<Div> {
+    element.role(Role::Heading).aria_level(1).aria_label(label)
+}
+
+/// [`element_at`] for a repeated family whose member is named by a model key
+/// (a path segment, a setting id) rather than by a row index. The key is part
+/// of the element identity, so a changed path cannot inherit another member's
+/// focus or hover state.
+pub fn element_at_key(control: &KeyControl, key: &str) -> ControlElement {
+    div()
+        .id(format!("{}:{key}", control.element))
+        .role(control.role)
+        .test_support()
+}
+
+/// The accessible name for a component-owned control (an Input, a picker) whose
+/// role and element come from the component. The registry still supplies the
+/// words, and the static source check can tell this label from an element label.
+pub fn component_name(control: &KeyControl, i18n: &I18nManager) -> String {
+    name(control, i18n)
 }
 
 /// [`element`] for a control the view repeats inside one parent, where GPUI needs the registered id
@@ -745,12 +868,15 @@ mod tests {
         include_str!("../search/bar_view.rs"),
         include_str!("sidebar_view.rs"),
         include_str!("status_bar_view.rs"),
+        include_str!("state_view.rs"),
+        include_str!("dialogs.rs"),
         include_str!("../table/results_view.rs"),
         include_str!("../app.rs"),
         include_str!("commands.rs"),
         include_str!("command_groups.rs"),
         include_str!("../service/config_submission.rs"),
         include_str!("../search/filters.rs"),
+        include_str!("../treemap/view.rs"),
         include_str!("../service/ipc_tasks.rs"),
         include_str!("menu_actions.rs"),
         include_str!("nav_history.rs"),
@@ -767,8 +893,11 @@ mod tests {
         include_str!("../search/bar_view.rs"),
         include_str!("sidebar_view.rs"),
         include_str!("status_bar_view.rs"),
+        include_str!("state_view.rs"),
+        include_str!("dialogs.rs"),
         include_str!("toast.rs"),
         include_str!("../table/results_view.rs"),
+        include_str!("../treemap/view.rs"),
     ];
 
     fn zh() -> I18nManager {
@@ -855,9 +984,11 @@ mod tests {
             ("result-row", Role::ListItem),
             ("result-placeholder", Role::ListItem),
             ("result-state", Role::Status),
+            ("content-search-action", Role::Button),
             ("status-bar", Role::Status),
             ("toast", Role::Alert),
             ("toast-dismiss", Role::Button),
+            ("toast-retry", Role::Button),
             ("recycle-bin-error", Role::Alert),
             ("recycle-bin-retry", Role::Button),
             ("empty-recycle-bin", Role::Button),
@@ -1019,7 +1150,6 @@ mod tests {
         let registered_indexed = KEY_CONTROLS.iter().filter(|entry| entry.indexed).count();
         let mut named_controls = 0usize;
         let mut surfaces = 0usize;
-        let mut indexed_controls = 0usize;
 
         for source in RENDERED_SOURCES {
             assert!(
@@ -1042,24 +1172,34 @@ mod tests {
             );
 
             let fixed_sites = source.matches("accessibility::element(").count();
-            let indexed_sites = source.matches("accessibility::element_at(").count();
+            let indexed_sites = source.matches("accessibility::element_at(").count()
+                + source.matches("accessibility::element_at_key(").count();
+            let component_named_sites = source
+                .matches(".aria_label(accessibility::component_name(")
+                .count();
             let label_sites = source.matches(".aria_label(").count();
 
             assert_eq!(
                 label_sites,
-                fixed_sites + indexed_sites,
+                fixed_sites + indexed_sites + component_named_sites,
                 "a source builds {} controls but names only {label_sites}",
-                fixed_sites + indexed_sites
+                fixed_sites + indexed_sites + component_named_sites
             );
 
-            indexed_controls += indexed_sites;
             named_controls += fixed_sites + indexed_sites;
             surfaces += source.matches("accessibility::surface(").count();
         }
 
+        let indexed_controls: usize = RENDERED_SOURCES
+            .iter()
+            .map(|source| {
+                source.matches("accessibility::element_at(").count()
+                    + source.matches("accessibility::element_at_key(").count()
+            })
+            .sum();
         assert_eq!(
             indexed_controls, registered_indexed,
-            "the registry indexes {registered_indexed} controls, but the rendered sources build \
+            "the registry indexes {registered_indexed} controls, but the view sources build \
              {indexed_controls} with an element index"
         );
 
@@ -1077,6 +1217,13 @@ mod tests {
             "the view builds only {named_controls} named controls; a shell this size registers more \
              than that"
         );
+    }
+
+    /// Informational toasts are polite status; only failures interrupt.
+    #[test]
+    fn error_and_info_toasts_keep_their_own_live_region_role() {
+        assert_eq!(control("toast").role, Role::Alert);
+        assert_eq!(control("toast-info").role, Role::Status);
     }
 
     /// Each category entry registers exactly its own wording, so a stray message cannot hide in the
@@ -1116,9 +1263,9 @@ mod tests {
     }
 
     /// The window reports one element for every service failure. Each entry
-    /// must carry its own distinct pair of messages — title first, recovery
-    /// second — so one condition can never hide behind another's wording
-    /// (SVC-03, SVC-04).
+    /// carries its own single sentence, which names the condition and the
+    /// recovery direction, so one condition can never hide behind another's
+    /// wording (SVC-03, SVC-04).
     #[test]
     fn each_service_failure_registers_its_own_condition_and_recovery() {
         let issues = [
@@ -1130,7 +1277,7 @@ mod tests {
             ),
             (ServiceIssue::Unauthorized, "service-issue-unauthorized"),
         ];
-        let mut pairs = HashSet::new();
+        let mut messages = HashSet::new();
         for (_issue, key) in issues {
             let entry = control(key);
             assert_eq!(entry.element, "service-issue");
@@ -1141,12 +1288,12 @@ mod tests {
             );
             assert_eq!(
                 entry.messages.len(),
-                2,
-                "{key} needs a title and a recovery text"
+                1,
+                "{key} carries one sentence, not a title and a description"
             );
             assert!(
-                pairs.insert((entry.message_at(0), entry.message_at(1))),
-                "{key} reuses another failure's message pair"
+                messages.insert(entry.message_at(0)),
+                "{key} reuses another failure's message"
             );
         }
     }

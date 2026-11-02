@@ -38,7 +38,17 @@ const CONTROL_CONTRAST_FLOOR: f32 = 3.0;
 pub fn control_stroke(theme: &Theme) -> Hsla {
     enforce_contrast_floor(
         theme.border,
-        &[theme.background, theme.muted],
+        &[theme.background, theme.muted, theme.title_bar],
+        CONTROL_CONTRAST_FLOOR,
+    )
+}
+
+/// The warning ink used for a state graphic (not a filled surface). The component's warning
+/// yellow is too light for a 32px icon on white, so this role holds the same hue at 3:1.
+pub fn warning_ink(theme: &Theme) -> Hsla {
+    enforce_contrast_floor(
+        theme.warning,
+        &[theme.background, theme.muted, theme.title_bar],
         CONTROL_CONTRAST_FLOOR,
     )
 }
@@ -113,104 +123,102 @@ fn enforce_contrast_floor(ink: Hsla, surfaces: &[Hsla], floor: f32) -> Hsla {
     best
 }
 
-/// Enforces pure grayscale tokens and raises the ink roles that render below [`INK_CONTRAST_FLOOR`]
-/// on the surfaces this product actually draws them on.
-fn repair_ink_contrast(theme: &mut Theme) {
-    if theme.mode == ThemeMode::Dark {
-        theme.background = Hsla {
-            h: 0.0,
-            s: 0.0,
-            l: 0.0627,
-            a: 1.0,
-        };
-        theme.foreground = Hsla {
-            h: 0.0,
-            s: 0.0,
-            l: 0.90,
-            a: 1.0,
-        };
-        theme.selection = Hsla {
-            h: 0.0,
-            s: 0.0,
-            l: 0.22,
-            a: 1.0,
-        };
-        theme.list_hover = Hsla {
-            h: 0.0,
-            s: 0.0,
-            l: 0.14,
-            a: 1.0,
-        };
-        theme.sidebar_foreground = Hsla {
-            h: 0.0,
-            s: 0.0,
-            l: 0.90,
-            a: 1.0,
-        };
-        theme.sidebar_accent_foreground = Hsla {
-            h: 0.0,
-            s: 0.0,
-            l: 0.90,
-            a: 1.0,
-        };
-        theme.popover_foreground = Hsla {
-            h: 0.0,
-            s: 0.0,
-            l: 0.90,
-            a: 1.0,
-        };
-        theme.skeleton = Hsla {
-            h: 0.0,
-            s: 0.0,
-            l: 0.20,
-            a: 1.0,
-        };
+/// The product's gray-scale surface ramp: content, inset and frame steps plus one interaction
+/// fill. The three surface steps carry the window hierarchy instead of heavier borders.
+struct SurfaceRamp {
+    content: f32,
+    inset: f32,
+    frame: f32,
+    interaction: f32,
+    border: f32,
+    skeleton: f32,
+    foreground: f32,
+    muted_foreground: f32,
+    input: f32,
+    selection: f32,
+    ring: f32,
+}
+
+fn surface_ramp(dark: bool) -> SurfaceRamp {
+    if dark {
+        SurfaceRamp {
+            content: 0.078431,
+            inset: 0.105882,
+            frame: 0.137255,
+            interaction: 0.172549,
+            border: 0.207843,
+            skeleton: 0.149020,
+            foreground: 0.901961,
+            muted_foreground: 0.600000,
+            input: 0.227451,
+            selection: 0.227451,
+            ring: 0.450980,
+        }
     } else {
-        theme.background = Hsla {
-            h: 0.0,
-            s: 0.0,
-            l: 0.9765,
-            a: 1.0,
-        };
-        theme.foreground = Hsla {
-            h: 0.0,
-            s: 0.0,
-            l: 0.0627,
-            a: 1.0,
-        };
-        theme.selection = Hsla {
-            h: 0.0,
-            s: 0.0,
-            l: 0.85,
-            a: 1.0,
-        };
-        theme.list_hover = Hsla {
-            h: 0.0,
-            s: 0.0,
-            l: 0.90,
-            a: 1.0,
-        };
-        theme.sidebar_accent_foreground = Hsla {
-            h: 0.0,
-            s: 0.0,
-            l: 0.06,
-            a: 1.0,
-        };
-        theme.skeleton = Hsla {
-            h: 0.0,
-            s: 0.0,
-            l: 0.80,
-            a: 1.0,
-        };
+        SurfaceRamp {
+            content: 1.0,
+            inset: 0.964706,
+            frame: 0.949020,
+            interaction: 0.870588,
+            border: 0.886275,
+            skeleton: 0.905882,
+            foreground: 0.090196,
+            muted_foreground: 0.372549,
+            input: 0.862745,
+            selection: 0.850980,
+            ring: 0.639216,
+        }
     }
+}
+
+fn gray(l: f32) -> Hsla {
+    Hsla {
+        h: 0.0,
+        s: 0.0,
+        l,
+        a: 1.0,
+    }
+}
+
+fn apply_surface_ramp(theme: &mut Theme) {
+    let ramp = surface_ramp(theme.mode == ThemeMode::Dark);
+    theme.background = gray(ramp.content);
+    theme.muted = gray(ramp.inset);
+    theme.table_head = gray(ramp.content);
+    theme.sidebar = gray(ramp.frame);
+    theme.status_bar = gray(ramp.frame);
+    theme.title_bar = gray(ramp.frame);
+    theme.border = gray(ramp.border);
+    theme.title_bar_border = gray(ramp.border);
+    theme.sidebar_border = gray(ramp.border);
+    theme.status_bar_border = gray(ramp.border);
+    theme.input = gray(ramp.input);
+    theme.list_hover = gray(ramp.interaction);
+    theme.list_active = gray(ramp.interaction);
+    theme.sidebar_accent = gray(ramp.interaction);
+    theme.selection = gray(ramp.selection);
+    theme.skeleton = gray(ramp.skeleton);
+    theme.foreground = gray(ramp.foreground);
+    theme.muted_foreground = gray(ramp.muted_foreground);
+    theme.table_head_foreground = gray(ramp.muted_foreground);
+    theme.sidebar_foreground = gray(ramp.foreground);
+    theme.sidebar_accent_foreground = gray(ramp.foreground);
+    theme.popover_foreground = gray(ramp.foreground);
+    theme.ring = gray(ramp.ring);
+}
+
+/// Applies the gray-scale surface ramp and raises the ink roles that render below
+/// [`INK_CONTRAST_FLOOR`] on the surfaces this product actually draws them on.
+fn repair_ink_contrast(theme: &mut Theme) {
+    apply_surface_ramp(theme);
 
     let secondary_surfaces = [
         theme.background,
         theme.muted,
-        theme.input,
-        theme.status_bar,
         theme.table_head,
         theme.sidebar,
+        theme.status_bar,
+        theme.title_bar,
     ];
     theme.muted_foreground = enforce_contrast_floor(
         theme.muted_foreground,
@@ -229,7 +237,14 @@ fn repair_ink_contrast(theme: &mut Theme) {
     );
     theme.ring = enforce_contrast_floor(
         theme.ring,
-        &[theme.background, theme.table_head, theme.muted],
+        &[
+            theme.background,
+            theme.table_head,
+            theme.muted,
+            theme.sidebar,
+            theme.status_bar,
+            theme.title_bar,
+        ],
         RING_CONTRAST_FLOOR,
     );
     theme.danger = enforce_contrast_floor(
@@ -333,6 +348,7 @@ pub fn apply_appearance(dark: bool, zoom: f32, cx: &mut App) {
         theme.radius_lg = RADIUS;
     });
     raise_failing_ink(cx);
+    paint_secondary_action(cx);
     strengthen_ghost_hover(cx);
     paint_danger_button(cx);
 }
@@ -342,16 +358,31 @@ pub fn set_dark_mode(dark: bool, cx: &mut App) -> bool {
     set_mode(dark, cx);
     settle_overlay(dark, cx);
     raise_failing_ink(cx);
+    paint_secondary_action(cx);
     strengthen_ghost_hover(cx);
     paint_danger_button(cx);
     dark
+}
+
+/// The dialog's raised surface. Light keeps the page white; dark uses the frame step so the modal
+/// is not the same color as the page it covers.
+pub fn dialog_surface(theme: &Theme) -> Hsla {
+    if theme.mode == ThemeMode::Dark {
+        theme.title_bar
+    } else {
+        theme.background
+    }
+}
+
+fn overlay_color(dark: bool) -> Hsla {
+    hsla(0., 0., 0., if dark { 0.55 } else { 0.18 })
 }
 
 /// The component palette's light overlay is 5% black; on this product's surfaces that reads as a
 /// detached card rather than a modal. Deepen the scrim in both modes.
 fn settle_overlay(dark: bool, cx: &mut App) {
     Theme::update(cx, move |theme| {
-        theme.overlay = hsla(0., 0., 0., if dark { 0.38 } else { 0.18 });
+        theme.overlay = overlay_color(dark);
     });
 }
 
@@ -374,6 +405,19 @@ fn raise_failing_ink(cx: &mut App) {
 
 fn strengthen_ghost_hover(cx: &mut App) {
     Theme::update(cx, apply_unified_interaction_fill);
+}
+
+fn paint_secondary_action(cx: &mut App) {
+    Theme::update(cx, apply_secondary_action);
+}
+
+/// A filled secondary button is painted with its own token, and the dark palette's neutral-800
+/// is the dialog surface itself. Take the product's raised control step instead, so the action
+/// keeps a visible boundary on every dark surface.
+fn apply_secondary_action(theme: &mut Theme) {
+    if theme.mode == ThemeMode::Dark {
+        theme.tokens.button_secondary = theme.input.into();
+    }
 }
 
 fn paint_danger_button(cx: &mut App) {
@@ -423,9 +467,10 @@ mod tests {
     use core::prelude::rust_2021::test;
 
     use super::{
-        apply_danger_button_palette, apply_unified_interaction_fill, clamp_zoom, contrast_ratio,
-        enforce_contrast_floor, relative_luminance, repair_ink_contrast, INK_CONTRAST_FLOOR,
-        MAX_ZOOM, MIN_ZOOM, SURFACE_CONTRAST_FLOOR,
+        apply_danger_button_palette, apply_secondary_action, apply_unified_interaction_fill,
+        clamp_zoom, contrast_ratio, dialog_surface, enforce_contrast_floor, overlay_color,
+        relative_luminance, repair_ink_contrast, INK_CONTRAST_FLOOR, MAX_ZOOM, MIN_ZOOM,
+        SURFACE_CONTRAST_FLOOR,
     };
     use crate::brand::{BASE_FONT_PX, HAIRLINE};
     use gpui_kit::component::{Theme, ThemeMode};
@@ -448,6 +493,7 @@ mod tests {
             rgb(0xF8F8F8).into()
         };
         repair_ink_contrast(&mut theme);
+        apply_secondary_action(&mut theme);
         apply_unified_interaction_fill(&mut theme);
         apply_danger_button_palette(&mut theme);
         theme
@@ -647,6 +693,25 @@ mod tests {
     }
 
     #[test]
+    fn the_dark_secondary_action_clears_the_dialog_surface() {
+        let theme = product_theme(true);
+        let dialog = dialog_surface(&theme);
+        let fill = theme.tokens.button_secondary.color;
+        assert_eq!(
+            fill, theme.input,
+            "the filled action should take the raised control step"
+        );
+        assert_ne!(
+            fill, dialog,
+            "the filled action is painted in the dialog's own surface color"
+        );
+        println!(
+            "dark secondary action on the dialog: {:.2}",
+            contrast_ratio(fill, dialog)
+        );
+    }
+
+    #[test]
     fn ring_clears_non_text_contrast_on_card_surfaces() {
         for (mode, background, muted, ring) in [
             (ThemeMode::Light, 0.9765, 0.961, 0.639),
@@ -674,6 +739,40 @@ mod tests {
             let ratio = contrast_ratio(stroke, bg).min(contrast_ratio(stroke, card));
             assert!(ratio >= 3.0, "{mode:?} ring contrast {ratio} is below 3:1");
         }
+    }
+
+    #[test]
+    fn the_dark_dialog_uses_a_raised_surface_and_a_stronger_scrim() {
+        let mut dark = Theme {
+            mode: ThemeMode::Dark,
+            ..Default::default()
+        };
+        dark.background = Hsla {
+            h: 0.0,
+            s: 0.0,
+            l: 0.078431,
+            a: 1.0,
+        };
+        dark.title_bar = Hsla {
+            h: 0.0,
+            s: 0.0,
+            l: 0.137255,
+            a: 1.0,
+        };
+        assert_eq!(dialog_surface(&dark), dark.title_bar);
+
+        let scrim = overlay_color(true);
+        assert_eq!(scrim.h, 0.0);
+        assert_eq!(scrim.s, 0.0);
+        assert_eq!(scrim.l, 0.0);
+        assert!((scrim.a - 0.55).abs() < f32::EPSILON);
+
+        let light = Theme {
+            mode: ThemeMode::Light,
+            ..Default::default()
+        };
+        assert_eq!(dialog_surface(&light), light.background);
+        assert!((overlay_color(false).a - 0.18).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -705,8 +804,10 @@ mod tests {
                 a: 1.0,
             };
             let stroke = super::control_stroke(&theme);
-            let ratio =
-                contrast_ratio(stroke, theme.background).min(contrast_ratio(stroke, theme.muted));
+            let ratio = [theme.background, theme.muted, theme.title_bar]
+                .into_iter()
+                .map(|surface| contrast_ratio(stroke, surface))
+                .fold(f32::INFINITY, f32::min);
             assert!(
                 ratio >= 3.0,
                 "{mode:?} control stroke contrast {ratio} is below 3:1"
@@ -715,34 +816,113 @@ mod tests {
     }
 
     #[test]
-    fn repair_ink_contrast_sets_grayscale_tokens() {
+    fn warning_ink_clears_non_text_contrast() {
+        for mode in [ThemeMode::Light, ThemeMode::Dark] {
+            let theme = Theme {
+                mode,
+                ..Default::default()
+            };
+            let ink = super::warning_ink(&theme);
+            let ratio = [theme.background, theme.muted, theme.title_bar]
+                .into_iter()
+                .map(|surface| contrast_ratio(ink, surface))
+                .fold(f32::INFINITY, f32::min);
+            assert!(
+                ratio >= 3.0,
+                "{mode:?} warning ink contrast {ratio} is below 3:1"
+            );
+        }
+    }
+
+    #[test]
+    fn the_product_ring_clears_every_ramp_surface() {
+        for dark in [false, true] {
+            let theme = product_theme(dark);
+            for surface in [
+                theme.background,
+                theme.muted,
+                theme.table_head,
+                theme.sidebar,
+                theme.status_bar,
+                theme.title_bar,
+            ] {
+                let ratio = contrast_ratio(theme.ring, surface);
+                assert!(
+                    ratio >= super::RING_CONTRAST_FLOOR,
+                    "{dark:?} ring contrast {ratio} on {surface:?} is below 3:1"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn repair_ink_contrast_sets_the_gray_ramp() {
         let mut theme = Theme {
             mode: ThemeMode::Light,
             ..Default::default()
         };
         repair_ink_contrast(&mut theme);
         assert_eq!(theme.background.s, 0.0);
-        assert_eq!(theme.background.l, 0.9765);
+        assert_eq!(theme.background.l, 1.0);
+        assert_eq!(theme.muted.l, 0.964706);
+        assert_eq!(theme.sidebar.l, 0.949020);
+        assert_eq!(theme.title_bar.l, theme.sidebar.l);
+        assert_eq!(theme.status_bar.l, theme.sidebar.l);
+        assert_eq!(theme.list_hover.l, 0.870588);
         assert_eq!(theme.foreground.s, 0.0);
-        assert_eq!(theme.foreground.l, 0.0627);
+        assert_eq!(theme.foreground.l, 0.090196);
         assert_eq!(theme.skeleton.s, 0.0);
-        assert_eq!(theme.skeleton.l, 0.80);
+        assert_eq!(theme.skeleton.l, 0.905882);
         assert_eq!(theme.selection.s, 0.0);
-        assert_eq!(theme.list_hover.s, 0.0);
 
         theme.mode = ThemeMode::Dark;
         repair_ink_contrast(&mut theme);
         assert_eq!(theme.background.s, 0.0);
-        assert_eq!(theme.background.l, 0.0627);
+        assert_eq!(theme.background.l, 0.078431);
+        assert_eq!(theme.muted.l, 0.105882);
+        assert_eq!(theme.sidebar.l, 0.137255);
+        assert_eq!(theme.title_bar.l, theme.sidebar.l);
+        assert_eq!(theme.status_bar.l, theme.sidebar.l);
+        assert_eq!(theme.list_hover.l, 0.172549);
         assert_eq!(theme.foreground.s, 0.0);
-        assert_eq!(theme.foreground.l, 0.90);
-        assert_eq!(theme.sidebar_foreground.l, 0.90);
-        assert_eq!(theme.sidebar_accent_foreground.l, 0.90);
-        assert_eq!(theme.popover_foreground.l, 0.90);
+        assert_eq!(theme.foreground.l, 0.901961);
+        assert_eq!(theme.sidebar_foreground.l, 0.901961);
+        assert_eq!(theme.sidebar_accent_foreground.l, 0.901961);
+        assert_eq!(theme.popover_foreground.l, 0.901961);
         assert_eq!(theme.skeleton.s, 0.0);
-        assert_eq!(theme.skeleton.l, 0.20);
+        assert_eq!(theme.skeleton.l, 0.149020);
         assert_eq!(theme.selection.s, 0.0);
-        assert_eq!(theme.list_hover.s, 0.0);
+    }
+
+    #[test]
+    fn the_surface_ramp_separates_content_inset_and_frame() {
+        let light = product_theme(false);
+        assert!(light.background.l > light.muted.l);
+        assert!(light.muted.l > light.sidebar.l);
+        assert_eq!(light.title_bar.l, light.sidebar.l);
+        assert_eq!(light.status_bar.l, light.sidebar.l);
+        assert!(light.list_hover.l < light.sidebar.l);
+
+        let dark = product_theme(true);
+        assert!(dark.background.l < dark.muted.l);
+        assert!(dark.muted.l < dark.sidebar.l);
+        assert_eq!(dark.title_bar.l, dark.sidebar.l);
+        assert_eq!(dark.status_bar.l, dark.sidebar.l);
+        assert!(dark.list_hover.l > dark.sidebar.l);
+    }
+
+    #[test]
+    fn muted_ink_stays_readable_on_the_interaction_fill() {
+        for dark in [false, true] {
+            let theme = product_theme(dark);
+            for surface in [theme.list_hover, theme.sidebar, theme.title_bar] {
+                let ratio = contrast_ratio(theme.muted_foreground, surface);
+                assert!(
+                    ratio >= INK_CONTRAST_FLOOR,
+                    "{dark:?} muted ink contrast {ratio} on {surface:?} is below 4.5:1"
+                );
+            }
+        }
     }
 
     #[test]

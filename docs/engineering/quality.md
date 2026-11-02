@@ -17,11 +17,13 @@
 | **端到端基准对比** | `xtask bench-everything` | 合成语料下对比 Everything 1.4，输出中位延迟、稳态内存与峰值内存对标报告 |
 
 ### 1.2 静态检查门禁
-合入与构建交付必须无条件通过：
+代码变更合入与构建交付必须无条件通过：
 1. `cargo fmt --check`
 2. `cargo clippy --workspace --all-targets -- -D warnings`（零警告）
 3. `cargo run -p xtask -- check-i18n`（`zh-CN.ftl` 与 `en-US.ftl` 翻译键 100% 对齐）
 4. `cargo deny check`（许可证、安全漏洞与 yanked 检查；仓库已提供 `deny.toml`）
+
+文档-only PR 只运行轻量文档门禁（`check-docs`：必需页面与 Markdown 相对链接）；代码变更的检查不被跳过，安装器打包也必须等待质量检查通过。
 
 `deny.toml` 只针对 `x86_64-pc-windows-msvc`；许可证白名单与 4 条 GPUI/font 栈的 unmaintained 例外均有理由记录。漏洞与 yanked 不设全局忽略，新增 ignore 必须附上游依据。
 

@@ -1,6 +1,6 @@
 # Everything（voidtools）深度调研：1.5 索引平台全档案
 
-> 研究对象：Everything 1.5 线，当前版本 1.5.0.1424b Beta。Cairn 的规范以 [SPEC.md](../SPEC.md) 与 [product/](../product/) 为准；横向竞品对比见 [competitive-landscape.md](competitive-landscape.md)。
+> 研究对象：Everything 1.5 线，当前版本 1.5.0.1424b Beta。Cairn 的规范以 [SPEC.md](../SPEC.md) 与 [product/](../product/) 为准；横向竞品对比见 [cross-form.md](cross-form.md)。
 
 ---
 

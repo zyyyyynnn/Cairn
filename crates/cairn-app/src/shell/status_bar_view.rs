@@ -7,12 +7,14 @@
 
 use crate::app::{layout, CairnApp};
 use crate::shell::accessibility::{self, ControlElement};
+use crate::shell::status_bar::format_count;
 use crate::shell::theme::{self, ShellTokens};
 use crate::treemap::palette::TreemapPalette;
 use cairn_core::format_size_bytes;
 use cairn_core::treemap::TreemapCategory;
 use fluent_bundle::FluentArgs;
 use gpui_kit::assets::IconName;
+use gpui_kit::base::Disableable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::status_bar::StatusBar;
 use gpui_kit::component::tooltip::Tooltip;
@@ -35,6 +37,19 @@ fn treemap_category_key(category: TreemapCategory) -> &'static str {
     }
 }
 
+/// The band marks a loading state only while the current view has nothing to show.
+///
+/// A volume that is still catching up does not blank a table that already has rows: that
+/// progress belongs to the sidebar's drive row, and the band keeps showing the result summary.
+fn status_waiting(
+    awaiting_results: bool,
+    index_loading: bool,
+    searching: bool,
+    probing: bool,
+) -> bool {
+    awaiting_results && (index_loading || searching || probing)
+}
+
 impl CairnApp {
     pub(crate) fn render_status_line(
         &self,
@@ -46,7 +61,6 @@ impl CairnApp {
         let mut zoom_percent = None;
         let mut summary: Option<AnyElement> = None;
         let mut summary_aria: Option<String> = None;
-        let mut summary_danger = false;
         let mut summary_loading = false;
         let mut icon_loading = false;
         let mut view_name = "table";
@@ -59,6 +73,7 @@ impl CairnApp {
                 div()
                     .min_w_0()
                     .truncate()
+                    .text_sm()
                     .font_features(theme::tabular_figures())
                     .child(text)
                     .into_any_element(),
@@ -72,6 +87,7 @@ impl CairnApp {
                 let count_text = {
                     let mut args = FluentArgs::new();
                     args.set("count", items.len() as i64);
+                    args.set("count_text", format_count(items.len()));
                     self.i18n.get_text_with_args("status_objects_count", &args)
                 };
                 summary_aria = Some(count_text.clone());
@@ -91,22 +107,14 @@ impl CairnApp {
                     // No counts or bytes are published until the scan has a complete tree.
                     summary_loading = true;
                     icon_loading = true;
-                } else if st.is_unreadable() {
-                    let text = self.i18n.get_text("treemap_unreadable");
-                    summary_aria = Some(text.clone());
-                    summary = Some(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_color(tokens.danger)
-                            .child(text)
-                            .into_any_element(),
-                    );
-                    summary_danger = true;
+                } else if st.is_unavailable() {
+                    // The canvas state band owns the sentence and its recovery.
+                    // The status line stays empty instead of repeating it.
                 } else {
                     zoom_percent = st.zoom_percent();
                     let mut args = FluentArgs::new();
                     args.set("count", st.total_items() as i64);
+                    args.set("count_text", format_count(st.total_items()));
                     args.set("size", format_size_bytes(st.total_size()));
                     let totals_text = self
                         .i18n
@@ -117,6 +125,7 @@ impl CairnApp {
                         let name = if is_aggregate {
                             let mut args = FluentArgs::new();
                             args.set("count", node.aggregate_count as i64);
+                            args.set("count_text", format_count(node.aggregate_count));
                             self.i18n.get_text_with_args("treemap_aggregate", &args)
                         } else {
                             node.item.name.clone()
@@ -157,12 +166,14 @@ impl CairnApp {
                                     div()
                                         .min_w_0()
                                         .truncate()
+                                        .text_sm()
                                         .font_features(theme::tabular_figures())
                                         .child(name),
                                 )
                                 .child(
                                     div()
                                         .flex_shrink_0()
+                                        .text_sm()
                                         .font_features(theme::tabular_figures())
                                         .child(size),
                                 )
@@ -186,15 +197,16 @@ impl CairnApp {
         } else {
             let index_loading = self.service.status.is_any_loading();
             let awaiting_results = self.results.table.total_rows() == 0;
-            // A total can only be final once the index has settled. While volumes are still
-            // building, a completed query describes a partial index, so its number would climb in
-            // steps as batches land. The band shows the loading indicator alone until the status
-            // poll asks for the result set of the completed index.
-            summary_loading = index_loading
-                || (awaiting_results
-                    && (self.query.is_searching || self.service.is_probing_service));
-            // Paging lazy rows during scrollbar dragging must not flicker the status refresh control.
-            // Only genuine searches, index builds, or connection probes show the loading indicator.
+            // The band marks only a wait that blocks what the view can show. Once rows are on
+            // screen the table is usable while a volume catches up; that volume state belongs to
+            // the sidebar's drive row, not here.
+            summary_loading = status_waiting(
+                awaiting_results,
+                index_loading,
+                self.query.is_searching,
+                self.service.is_probing_service,
+            );
+            // Paging keeps the refresh control: rows already on screen are not a first-page wait.
             icon_loading = summary_loading;
             if !summary_loading
                 && self.service.is_service_connected
@@ -213,38 +225,36 @@ impl CairnApp {
             }
         }
 
-        // Keep the native xsmall button body (20px). A forced 24px minimum made the hover
-        // surface extend a row above/below the status line.
+        // The native xsmall body is 20px; a 24px minimum would let the hover surface
+        // extend a row above/below the status line.
         //
-        // While the window waits, the control is replaced by the single loading indicator: a
-        // second circular mark beside the refresh arrow reads as two loaders. The indicator turns
-        // at 30 FPS, and it is not interactive; refreshing is the idle control's job.
-        let refresh_control: AnyElement = if icon_loading {
-            div()
-                .flex()
-                .items_center()
-                .justify_center()
-                // The slot is the xsmall icon-only button's own footprint (size_5 = 1.25rem),
-                // so swapping the refresh glyph for the loader cannot move or resize the band.
-                .w(rems(1.25))
-                .h(rems(1.25))
-                .child(crate::shell::loading_indicator::loading_indicator(
-                    !cx.reduce_motion(),
-                ))
-                .into_any_element()
+        // While the current view waits for its own data, the refresh button keeps its footprint
+        // and takes the component's own loading state: the RefreshCw glyph becomes the spinner,
+        // the button dims and stops answering clicks. A second circular mark beside the refresh
+        // arrow would read as two loaders.
+        let refresh_label = self.i18n.get_text(if icon_loading {
+            "status_refreshing"
         } else {
-            let refresh_label = self.i18n.get_text("status_refresh");
-            Button::new("status-refresh")
-                .ghost()
-                .xsmall()
-                .icon(IconName::RefreshCw)
-                .tooltip(refresh_label.clone())
-                .accessibility_label(refresh_label)
-                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                    this.refresh_current_view(cx);
-                }))
-                .into_any_element()
-        };
+            "status_refresh"
+        });
+        let refresh_unavailable = self.drive_view.is_some()
+            && self
+                .treemap_state
+                .as_ref()
+                .and_then(|state| state.unavailable_reason())
+                .is_some_and(|reason| !reason.retryable());
+        let refresh = Button::new("status-refresh")
+            .ghost()
+            .xsmall()
+            .icon(IconName::RefreshCw)
+            .loading_icon(IconName::LoaderCircle)
+            .loading(icon_loading)
+            .disabled(refresh_unavailable)
+            .tooltip(refresh_label.clone())
+            .accessibility_label(refresh_label)
+            .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                this.refresh_current_view(cx);
+            }));
         let refresh_slot = div()
             .flex_shrink_0()
             // The window root clears selection on every left press; the idle refresh is a control,
@@ -252,7 +262,7 @@ impl CairnApp {
             .on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, _, cx| {
                 cx.stop_propagation()
             })
-            .child(refresh_control);
+            .child(refresh);
 
         // Opt-in acceptance trace (`CAIRN_PERF_LOG`): the visible summary and the loading state,
         // never a hidden animated value.
@@ -278,14 +288,7 @@ impl CairnApp {
         // The summary is only rendered once there is a completed result set, so the band does not
         // shift when it appears.
         if let Some(summary) = summary {
-            left = left.child(
-                div()
-                    .min_w_0()
-                    .flex_1()
-                    .truncate()
-                    .when(summary_danger, |this| this.text_color(tokens.danger))
-                    .child(summary),
-            );
+            left = left.child(div().min_w_0().flex_1().truncate().child(summary));
         }
         if let Some(percent) = zoom_percent {
             let reset = accessibility::control("treemap-zoom-reset");
@@ -307,7 +310,8 @@ impl CairnApp {
                     .child(
                         Button::new("treemap-zoom-reset")
                             .ghost()
-                            .xsmall()
+                            .small()
+                            .font_weight(FontWeight::MEDIUM)
                             .min_h(rems(layout::SPACE_24))
                             .label(format!("{percent}%"))
                             .tooltip(reset_tooltip)
@@ -327,6 +331,7 @@ impl CairnApp {
             .border_color(tokens.border)
             // The count is a live value; its digits must not reflow as results arrive.
             .font_features(theme::tabular_figures())
+            .text_sm()
             .bg(tokens.status_bar)
             .text_color(tokens.muted_foreground)
             // The summary can carry a full path; let it ellipsize before it
@@ -367,7 +372,8 @@ impl CairnApp {
         let label = accessibility::name(control, &self.i18n);
         Some(
             Button::new(control.element)
-                .xsmall()
+                .small()
+                .font_weight(FontWeight::MEDIUM)
                 .ghost()
                 .min_h(rems(layout::SPACE_24))
                 .label(label.clone())
@@ -441,6 +447,7 @@ impl CairnApp {
                     .border_1()
                     .border_color(tokens.border.opacity(0.0))
                     .focus_visible(move |style| style.border_color(tokens.ring))
+                    .text_sm()
                     .text_color(tokens.muted_foreground)
                     .hover(move |this| this.bg(tokens.row_hover).text_color(tokens.foreground))
                     .when(!visible, |this| this.opacity(0.35))
@@ -522,5 +529,26 @@ impl CairnApp {
             return;
         }
         self.trigger_search(cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::status_waiting;
+
+    #[test]
+    fn a_loaded_table_is_not_waiting_on_a_background_index() {
+        assert!(
+            !status_waiting(false, true, false, false),
+            "a volume catching up must not keep the status mark turning over visible rows"
+        );
+    }
+
+    #[test]
+    fn an_empty_table_waits_for_its_first_results() {
+        assert!(status_waiting(true, true, false, false));
+        assert!(status_waiting(true, false, true, false));
+        assert!(status_waiting(true, false, false, true));
+        assert!(!status_waiting(true, false, false, false));
     }
 }

@@ -14,10 +14,6 @@ use serde::{Deserialize, Serialize};
 /// requires a coordinated client+service bump.
 pub const PROTOCOL_VERSION: u16 = 6;
 pub const PIPE_NAME: &str = r"\\.\pipe\Cairn.Service";
-/// The pipe of a user-privilege indexer started by the desktop app when the installed LocalSystem
-/// service is not available. It is a separate name so the two indexers never compete for the same
-/// pipe, and so a running service is always preferred over a local scan.
-pub const USER_PIPE_NAME: &str = r"\\.\pipe\Cairn.User";
 
 /// Machine-readable `ResponsePayload::Error` codes. Text stays in English and technical:
 /// localizing it is the presentation layer's responsibility (SPEC UI-07).
@@ -31,6 +27,12 @@ pub const ERROR_CODE_ADMIN_ONLY_QUERY: u32 = 401;
 pub const ERROR_CODE_HANDSHAKE_REQUIRED: u32 = 400;
 /// The requested query session does not exist or has expired (e.g. invalidation, reload, or compaction).
 pub const ERROR_CODE_SESSION_EXPIRED: u32 = 410;
+/// The Treemap path is not covered by the service's live volume index.
+pub const ERROR_CODE_TREE_NOT_INDEXED: u32 = 413;
+/// The Treemap path resolves to a file, not a directory.
+pub const ERROR_CODE_TREE_NOT_DIRECTORY: u32 = 414;
+/// The directory tree exceeds the one-response entry or payload budget.
+pub const ERROR_CODE_TREE_TOO_LARGE: u32 = 415;
 
 /// Requests accepted from a pipe client.
 ///
@@ -76,9 +78,8 @@ pub enum ClientRequest {
     CancelContentIndex,
     ClearContentIndex,
     /// The directory tree below `path` (drive root when it names a drive),
-    /// aggregated and sorted, from the service's volume index. Empty entries
-    /// mean the path is not indexed; the caller then falls back to its own
-    /// scan.
+    /// aggregated and sorted, from the service's volume index. Uncovered paths
+    /// are reported through the tree error codes.
     GetTree {
         path: String,
         max_depth: usize,
@@ -151,7 +152,8 @@ pub enum ResponsePayload {
     TreeResult {
         path: String,
         /// Pre-order entries, parent before children; `depth` 0 is the root.
-        /// Empty when the service does not index `path`.
+        /// Uncovered paths are reported through `Error` codes; an empty list
+        /// describes an empty directory.
         entries: Vec<TreeEntryData>,
     },
     Error {

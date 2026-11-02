@@ -12,7 +12,10 @@ use cairn_core::path_cache::DirectoryPathCache;
 use cairn_core::sort::{PresortedIndices, SortColumn, SortDirection};
 use cairn_core::syntax::{parse_query_with, QueryDefaults, QueryExpr};
 use cairn_core::treemap::DirectorySizeIndex;
-use cairn_protocol::message::TreeEntryData;
+use cairn_protocol::message::{
+    TreeEntryData, ERROR_CODE_TREE_NOT_DIRECTORY, ERROR_CODE_TREE_NOT_INDEXED,
+    ERROR_CODE_TREE_TOO_LARGE,
+};
 use rayon::prelude::*;
 
 /// Flattens a finished tree pre-order (parent before children) for the wire.
@@ -315,10 +318,10 @@ impl VolumeIndex {
         self.status = VolumeState::Rebuilding;
     }
 
-    /// Appends extracted items without discarding what the volume already holds. The user-mode
-    /// directory scan delivers batches while it walks, so the table can show rows before the walk
-    /// finishes; the presorted arrays go stale and queries fall back to their full sort until
-    /// [`Self::finalize_snapshot_scan`] rebuilds them.
+    /// Appends extracted items without discarding what the volume already holds. A scan
+    /// delivers batches while it walks, so the table can show rows before the walk finishes;
+    /// the presorted arrays go stale and queries fall back to their full sort until the caller
+    /// finishes the volume scan.
     ///
     /// Parents must arrive before their children, which is the order the scanner walks a tree in.
     /// A parent that is not present stays `ROOT_PARENT`, exactly as in [`Self::ingest_items`].
@@ -488,22 +491,6 @@ impl VolumeIndex {
         self.records[index as usize].size = new_size;
         self.adjust_record_ancestors(index, delta);
         self.presorted_dirty = true;
-    }
-
-    /// Completes a user-privilege directory scan. There is no change journal behind this data, so
-    /// the volume is a snapshot (IDX-08) rather than a journal-synced index, and an empty store is
-    /// a legitimate result for an account that cannot read anything.
-    pub fn finalize_snapshot_scan(&mut self) {
-        self.recompute_directory_sizes();
-        self.presorted = PresortedIndices::build(
-            &self.records,
-            &self.arena,
-            &self.path_cache,
-            self.drive_letter,
-        );
-        self.presorted_dirty = false;
-        self.usn_enabled = false;
-        self.status = VolumeState::SnapshotMode;
     }
 
     /// `true` when a live record for this `(frn, parent, name)` triple is already indexed.
@@ -1000,8 +987,7 @@ pub struct MultiVolumeEngine {
     /// (handshake, status probes) from waiting behind it. Refreshed on every uncontended read.
     summary_cache: Mutex<Vec<VolumeStatusSummary>>,
     /// Service data is owned by SYSTEM, so its configuration is written with the restricted
-    /// descriptor. A user-mode indexer owns its own settings and writes them as the user.
-    secure_config: bool,
+    /// descriptor.
     /// Whether the configuration on disk was authenticated at startup. A rejected file must not
     /// become trusted merely because a later reload reads it again.
     config_trusted: AtomicBool,
@@ -1040,6 +1026,31 @@ pub type MultiSearchResult = (
     HashMap<(char, u64), String>,
     u64,
 );
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TreeUnavailable {
+    NotIndexed,
+    NotDirectory,
+    TooLarge,
+}
+
+impl TreeUnavailable {
+    pub const fn code(self) -> u32 {
+        match self {
+            Self::NotIndexed => ERROR_CODE_TREE_NOT_INDEXED,
+            Self::NotDirectory => ERROR_CODE_TREE_NOT_DIRECTORY,
+            Self::TooLarge => ERROR_CODE_TREE_TOO_LARGE,
+        }
+    }
+
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::NotIndexed => "the path is not covered by the volume index",
+            Self::NotDirectory => "the path is not a directory",
+            Self::TooLarge => "the directory tree exceeds the one-response budget",
+        }
+    }
+}
 
 impl MultiVolumeEngine {
     pub fn new() -> Self {
@@ -1390,7 +1401,6 @@ impl MultiVolumeEngine {
             content_cancel: Arc::new(AtomicBool::new(false)),
             content_commands: Mutex::new(None),
             summary_cache: Mutex::new(Vec::new()),
-            secure_config: true,
             config_trusted: AtomicBool::new(true),
         }
     }
@@ -1482,13 +1492,6 @@ impl MultiVolumeEngine {
         }
     }
 
-    /// Persists configuration with the caller's own rights instead of the SYSTEM/Administrators
-    /// descriptor. Only a user-mode indexer may use this: its settings belong to that user.
-    pub fn with_plain_config_persistence(mut self) -> Self {
-        self.secure_config = false;
-        self
-    }
-
     /// Returns the current service configuration.
     pub fn get_config(&self) -> ServiceConfig {
         self.config.read().unwrap().clone()
@@ -1504,16 +1507,23 @@ impl MultiVolumeEngine {
     const TREE_ENTRY_OVERHEAD: usize = 64;
 
     /// Reads the directory tree below `path` from the owning volume's index,
-    /// flattened pre-order for the wire. `None` when no loaded volume covers
-    /// the drive in `path` (the caller then answers with empty entries).
+    /// flattened pre-order for the wire.
     ///
     /// The size index is built per request: it is an O(records) pass the
     /// Treemap only asks for when it opens a drive, and keeping it resident
     /// for one view would tax every query in between.
-    pub fn treemap_tree(&self, path: &str, max_depth: usize) -> Option<Vec<TreeEntryData>> {
-        let drive = path.chars().next()?.to_ascii_uppercase();
+    pub fn treemap_tree(
+        &self,
+        path: &str,
+        max_depth: usize,
+    ) -> Result<Vec<TreeEntryData>, TreeUnavailable> {
+        let drive = path
+            .chars()
+            .next()
+            .map(|letter| letter.to_ascii_uppercase())
+            .ok_or(TreeUnavailable::NotIndexed)?;
         let volumes = self.volumes.read().unwrap();
-        let volume = volumes.get(&drive)?;
+        let volume = volumes.get(&drive).ok_or(TreeUnavailable::NotIndexed)?;
         let dir_index = DirectorySizeIndex::build(&volume.records, &volume.arena);
 
         let is_root = path
@@ -1524,8 +1534,12 @@ impl MultiVolumeEngine {
         } else {
             let idx = dir_index
                 .resolve_path_to_idx(&volume.records, &volume.arena, path)
-                .flatten()?;
+                .flatten()
+                .ok_or(TreeUnavailable::NotIndexed)?;
             let record = &volume.records[idx as usize];
+            if !record.is_dir() {
+                return Err(TreeUnavailable::NotDirectory);
+            }
             (
                 Some(idx),
                 volume
@@ -1537,7 +1551,7 @@ impl MultiVolumeEngine {
 
         let entry_count = dir_index.subtree_entry_count(dir_idx, max_depth);
         if entry_count > Self::MAX_TREE_ENTRIES {
-            return None;
+            return Err(TreeUnavailable::TooLarge);
         }
         let tree = dir_index.build_tree_node(
             &volume.records,
@@ -1548,18 +1562,17 @@ impl MultiVolumeEngine {
         );
         let mut entries = Vec::with_capacity(entry_count);
         flatten_tree(&tree, 0, &mut entries);
-        // A path above either budget cannot be answered in one response; returning None makes the
-        // caller report "not indexed here" and use its own scan instead of dropping the pipe.
+        // A path above either budget cannot be answered in one response.
         if entries.len() > Self::MAX_TREE_ENTRIES {
-            return None;
+            return Err(TreeUnavailable::TooLarge);
         }
         let estimated_bytes = entries.iter().fold(0usize, |total, entry| {
             total.saturating_add(entry.name.len().saturating_add(Self::TREE_ENTRY_OVERHEAD))
         });
         if estimated_bytes > Self::MAX_TREE_PAYLOAD_BYTES {
-            return None;
+            return Err(TreeUnavailable::TooLarge);
         }
-        Some(entries)
+        Ok(entries)
     }
 
     /// `true` when the service must answer queries from administrators only (SPEC SVC-02, SVC-05).
@@ -1654,15 +1667,9 @@ impl MultiVolumeEngine {
         let parsed: ServiceConfig = toml::from_str(config_toml)
             .map_err(|e| format!("invalid service configuration: {e}"))?;
         let path = self.config_path.clone();
-        if self.secure_config {
-            parsed
-                .save_atomic_secure(&path)
-                .map_err(|e| format!("could not persist {}: {e}", path.display()))?;
-        } else {
-            parsed
-                .save_atomic(&path)
-                .map_err(|e| format!("could not persist {}: {e}", path.display()))?;
-        }
+        parsed
+            .save_atomic_secure(&path)
+            .map_err(|e| format!("could not persist {}: {e}", path.display()))?;
         self.config_trusted.store(true, Ordering::SeqCst);
         self.update_config(parsed);
         Ok(())
@@ -2673,7 +2680,7 @@ mod tests {
     }
 
     #[test]
-    fn appended_batches_report_folder_sizes_before_finalize() {
+    fn appended_batches_report_folder_sizes() {
         let mut vol = VolumeIndex::new('C');
         vol.append_items(vec![
             index_item(1, 0, "C:", true),
@@ -2699,16 +2706,6 @@ mod tests {
         assert_eq!(vol.records[record_index(&vol, 4) as usize].size, 50);
         assert_eq!(vol.records[record_index(&vol, 1) as usize].size, 175);
         assert_eq!(vol.records[record_index(&vol, 3) as usize].size, 100);
-
-        vol.finalize_snapshot_scan();
-        assert_eq!(
-            vol.records[record_index(&vol, 2) as usize].size,
-            175,
-            "the authoritative pass must agree with the incremental totals"
-        );
-        assert_eq!(vol.records[record_index(&vol, 4) as usize].size, 50);
-        assert_eq!(vol.records[record_index(&vol, 1) as usize].size, 175);
-        assert!(vol.directory_sizes_valid);
     }
 
     #[test]

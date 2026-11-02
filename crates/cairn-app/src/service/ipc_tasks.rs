@@ -9,8 +9,6 @@ use crate::app::CairnApp;
 use crate::service::config_submission::{
     self, IndexScopeChange, SubmissionOutcome, SubmissionState,
 };
-use crate::service::scope_switch::{ScopeSwitchFailure, ScopeSwitchResult};
-use crate::service::search_scope::SearchScope;
 use crate::service::service_issue::{should_try_silent_start, ServiceIssue};
 use cairn_protocol::status::VolumeStatusSummary;
 use gpui_kit::gpui::{AsyncApp, Context};
@@ -101,13 +99,6 @@ impl CairnApp {
     /// service-issue band both go through here, so a retry cannot speak a different protocol from the
     /// startup check.
     pub fn check_service_connection(&mut self, cx: &mut Context<Self>) {
-        // The scope the user chose decides which indexer answers, not only which registration the
-        // service carries: a window that remembers "readable files" must read from the user
-        // indexer even when the service is running (UI-10).
-        if self.service.search_scope.needs_local_only() {
-            self.start_local_indexer(cx);
-            return;
-        }
         let runtime = get_tokio_runtime();
         self.service.is_probing_service = true;
         cx.spawn(async move |this, cx: &mut AsyncApp| {
@@ -176,10 +167,6 @@ impl CairnApp {
             return;
         }
         self.service.is_refreshing_status = true;
-        // The poll belongs to the indexer that is answering now. When the scope changes, the
-        // generation changes with it and this poll ends rather than reporting the old scope's
-        // state into the new one.
-        let generation = self.service.status_generation;
         let runtime = get_tokio_runtime();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let status_task = runtime.spawn(async move {
@@ -237,9 +224,6 @@ impl CairnApp {
                         if !this.service.is_service_connected {
                             return false;
                         }
-                        if this.service.status_generation != generation {
-                            return false;
-                        }
                         match outcome {
                             Ok(envelope) => {
                                 // Only a sample that changes what the window shows is worth a
@@ -288,9 +272,7 @@ impl CairnApp {
             }
             status_task.abort();
             let _ = this.update(cx, |this: &mut CairnApp, _| {
-                if this.service.status_generation == generation {
-                    this.service.is_refreshing_status = false;
-                }
+                this.service.is_refreshing_status = false;
             });
         })
         .detach();
@@ -307,8 +289,7 @@ impl CairnApp {
 
     /// Records a failed probe. When the service is installed but stopped, one silent SCM start is
     /// attempted first so a normal non-administrator launch recovers without a UAC prompt. If the
-    /// pipe still does not answer, AllFiles shows the service issue and the user indexer is offered
-    /// through the ReadableFiles scope; ReadableFiles starts that indexer directly.
+    /// pipe still does not answer, the window shows the service issue and its recovery.
     fn handle_probe_failure(&mut self, issue: ServiceIssue, cx: &mut Context<Self>) {
         let issue = if issue == ServiceIssue::NotRunning {
             self.service_issue_after_probe()
@@ -322,108 +303,8 @@ impl CairnApp {
                 return;
             }
         }
-        // A service that answered and refused this account is a policy decision. Falling back to a
-        // local index would quietly bypass it, so that issue stays visible instead.
-        if issue == ServiceIssue::Unauthorized {
-            self.service.service_issue = Some(issue);
-            return;
-        }
-        // The all-files scope promises the machine-wide index. A user index is a different source,
-        // so show the service issue and its recovery instead of silently claiming the same scope.
-        if self.service.search_scope.needs_service() {
-            self.service.service_issue = Some(issue);
-            return;
-        }
-        self.start_local_indexer(cx);
-    }
-
-    /// Starts the bundled user-privilege indexer and connects to its pipe. This is the normal
-    /// non-administrator path; it never requests elevation.
-    fn start_local_indexer(&mut self, cx: &mut Context<Self>) {
-        if let Some(child) = self.service.user_indexer.as_mut() {
-            // A previous local indexer is still serving (the service was just probed again):
-            // reuse it instead of starting a second scan of the same tree.
-            if matches!(child.try_wait(), Ok(None)) {
-                self.poll_user_pipe(cx);
-                return;
-            }
-            self.service.user_indexer = None;
-        }
-
-        match crate::shell::os::spawn_user_indexer(std::process::id()) {
-            Ok(child) => {
-                self.service.user_indexer = Some(child);
-                self.poll_user_pipe(cx);
-            }
-            Err(error) => {
-                tracing::warn!("the local indexer could not start: {error}");
-                self.service.is_service_connected = false;
-                self.service.service_issue = Some(
-                    self.service
-                        .service_issue
-                        .unwrap_or(ServiceIssue::NotRunning),
-                );
-                cx.notify();
-            }
-        }
-    }
-
-    /// Polls the user pipe while the freshly started indexer binds it and opens its first volumes.
-    fn poll_user_pipe(&mut self, cx: &mut Context<Self>) {
-        self.service.is_probing_service = true;
+        self.service.service_issue = Some(issue);
         cx.notify();
-
-        let runtime = get_tokio_runtime();
-        cx.spawn(async move |this, cx: &mut AsyncApp| {
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            runtime.spawn(async move {
-                let mut last_error = None;
-                for attempt in 0..3 {
-                    if attempt > 0 {
-                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                    }
-                    match crate::service::ipc_channel::connect_user().await {
-                        Ok(mut client) => {
-                            let _ = tx.send(client.get_status().await);
-                            return;
-                        }
-                        Err(error) => last_error = Some(error),
-                    }
-                }
-                let _ = tx.send(Err(last_error.unwrap_or(
-                    cairn_client::client::ClientError::ConnectFailed(std::io::Error::new(
-                        std::io::ErrorKind::NotConnected,
-                        "the user-mode indexer did not answer",
-                    )),
-                )));
-            });
-
-            let outcome = rx.await;
-            let _ = this.update(cx, |this: &mut CairnApp, cx| {
-                this.service.is_probing_service = false;
-                match outcome {
-                    Ok(Ok(envelope)) => {
-                        crate::service::ipc_channel::use_local_indexer();
-                        this.service.local_mode = true;
-                        this.service.is_service_connected = true;
-                        this.service.service_issue = None;
-                        this.service.status.update_volumes(envelope.volumes);
-                        this.start_status_refresh(cx);
-                        if !this.recycle_bin.is_open() {
-                            this.trigger_search(cx);
-                        }
-                    }
-                    _ => {
-                        crate::service::ipc_channel::use_service();
-                        this.service.local_mode = false;
-                        this.service.is_service_connected = false;
-                        this.service.service_issue = Some(ServiceIssue::NotRunning);
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
     }
 
     /// The retry path the service-issue band offers (SVC-03). While a probe is already in flight the
@@ -502,14 +383,6 @@ impl CairnApp {
             let _ = this.update(cx, |this: &mut CairnApp, cx| {
                 this.service.is_probing_service = false;
                 if let Ok(Ok(envelope)) = outcome {
-                    // The service is authoritative; stop the local scan so two indexers do not
-                    // walk the same volumes and the window cannot mix their results.
-                    if let Some(mut child) = this.service.user_indexer.take() {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                    }
-                    crate::service::ipc_channel::use_service();
-                    this.service.local_mode = false;
                     this.service.is_service_connected = true;
                     this.service.service_issue = None;
                     this.service.service_installed = true;
@@ -520,10 +393,6 @@ impl CairnApp {
                         this.trigger_search(cx);
                     }
                     this.refresh_content_status(cx);
-                } else if let Some(child) = this.service.user_indexer.as_mut() {
-                    // The explicit start was cancelled or refused while a local index already
-                    // serves the window: stay usable, and leave the service for the next launch.
-                    let _ = child.try_wait();
                 } else {
                     this.service.is_service_connected = false;
                     this.service.service_installed =
@@ -534,140 +403,17 @@ impl CairnApp {
                         ServiceIssue::NotInstalled
                     };
                     this.service.service_issue = Some(issue);
-                    this.start_local_indexer(cx);
                 }
                 cx.notify();
             });
         })
         .detach();
-    }
-
-    /// Switches the window between the two search scopes (UI-10).
-    ///
-    /// The scope that needs the service may have to change the service's start type, which needs
-    /// an administrator. The elevation runs on a worker thread because UAC and `sc.exe` block.
-    /// A refused elevation keeps the previous scope: the window does not claim the new scope
-    /// before it is actually in force, and it does not half-apply one.
-    pub fn switch_search_scope(&mut self, target: SearchScope, cx: &mut Context<Self>) {
-        if self.service.is_switching_scope || target == self.service.search_scope {
-            return;
-        }
-        let previous = self.service.search_scope;
-        self.service.is_switching_scope = true;
-        cx.notify();
-
-        let runtime = get_tokio_runtime();
-        cx.spawn(async move |this, cx: &mut AsyncApp| {
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            runtime.spawn(async move {
-                let result = tokio::task::spawn_blocking(move || {
-                    crate::service::scope_switch::switch_to(target, previous)
-                })
-                .await;
-                let _ = tx.send(result);
-            });
-
-            let outcome = rx.await;
-            let _ = this.update(cx, |this: &mut CairnApp, cx| {
-                this.service.is_switching_scope = false;
-                match outcome {
-                    Ok(Ok(result)) => {
-                        // The result carries the scope that is in force. Only an applied switch
-                        // moves the window; every other outcome leaves it where it was, which is
-                        // what keeps a refused switch from half-applying.
-                        this.service.search_scope = result.scope_in_force();
-                        match result {
-                            ScopeSwitchResult::Applied { scope } => {
-                                this.apply_search_scope(scope, cx);
-                            }
-                            ScopeSwitchResult::Cancelled { .. } => {
-                                // The user dismissed the prompt. The window stays usable and
-                                // nothing on the machine changed, so this is a note rather than an
-                                // error.
-                                let message = this.i18n.get_text("menu_search_scope_cancelled");
-                                this.show_info_toast(
-                                    this.i18n.get_text("menu_search_scope"),
-                                    message,
-                                    cx,
-                                );
-                            }
-                            ScopeSwitchResult::Failed { reason, detail, .. } => {
-                                // The technical detail belongs in the log. The page gets one
-                                // sentence in the user's language.
-                                tracing::warn!("the scope switch failed: {reason:?} ({detail})");
-                                let title = this.i18n.get_text("menu_search_scope");
-                                let message = this.i18n.get_text(scope_switch_failure_key(reason));
-                                this.show_error_toast(title, message, cx);
-                            }
-                            ScopeSwitchResult::NotInstalled { .. } => {
-                                let message = this.i18n.get_text("menu_search_scope_not_installed");
-                                this.show_error_toast(
-                                    this.i18n.get_text("menu_search_scope"),
-                                    message,
-                                    cx,
-                                );
-                            }
-                        }
-                    }
-                    // The worker thread panicked or the channel closed: the switch did not happen,
-                    // so the previous scope stays in force.
-                    Ok(Err(join_error)) => {
-                        tracing::warn!("the scope switch task stopped: {join_error}");
-                        let title = this.i18n.get_text("menu_search_scope");
-                        let message = this.i18n.get_text("menu_search_scope_change_failed");
-                        this.show_error_toast(title, message, cx);
-                    }
-                    Err(_) => {
-                        let title = this.i18n.get_text("menu_search_scope");
-                        let message = this.i18n.get_text("menu_search_scope_cancelled");
-                        this.show_info_toast(title, message, cx);
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    /// Puts the window on `scope`: it routes every later IPC call to the matching indexer and
-    /// re-reads what that indexer knows.
-    fn apply_search_scope(&mut self, scope: SearchScope, cx: &mut Context<Self>) {
-        // A response from the previous indexer must not install rows or counts under the new one.
-        self.query.query_id = self.query.query_id.wrapping_add(1);
-        self.query.is_searching = false;
-        self.query.active_session_id = None;
-        self.results.table.set_rows(Vec::new(), 0);
-        self.service.status.clear_objects_count();
-        self.service.search_scope = scope;
-        self.settings.search_scope = Some(scope);
-        let _ = self.settings.save();
-        // A different indexer answers from now on, so the status poll of the previous one ends.
-        self.service.status_generation = self.service.status_generation.wrapping_add(1);
-        self.service.is_refreshing_status = false;
-
-        match scope {
-            SearchScope::AllFiles => {
-                // The service is the source of truth for the whole machine; the local indexer is
-                // ended so two indexers never walk the same volumes.
-                if let Some(mut child) = self.service.user_indexer.take() {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                }
-                crate::service::ipc_channel::use_service();
-                self.service.local_mode = false;
-                self.check_service_connection(cx);
-            }
-            SearchScope::ReadableFiles => {
-                crate::service::ipc_channel::use_local_indexer();
-                self.start_local_indexer(cx);
-            }
-        }
     }
 
     /// Reads the service's content-index lifecycle. While a backfill is running, one delayed
     /// follow-up keeps the progress fresh without a permanent polling loop.
     pub fn refresh_content_status(&mut self, cx: &mut Context<Self>) {
-        if self.service.local_mode || self.service.content_status_loading {
+        if self.service.content_status_loading {
             return;
         }
         self.service.content_status_loading = true;
@@ -694,12 +440,19 @@ impl CairnApp {
                         {
                             this.service.content_status = status;
                         } else {
+                            tracing::warn!(
+                                "content index status: the service answered with a different payload"
+                            );
                             this.service.content_status_error =
                                 Some("the service answered with a different payload".to_string());
                         }
                     }
-                    Ok(Err(err)) => this.service.content_status_error = Some(err.to_string()),
+                    Ok(Err(err)) => {
+                        tracing::warn!("content index status read failed: {err}");
+                        this.service.content_status_error = Some(err.to_string());
+                    }
                     Err(panic) => {
+                        tracing::warn!("content index status task stopped: {panic}");
                         this.service.content_status_error =
                             Some(format!("the content-index status task stopped: {panic}"));
                     }
@@ -741,7 +494,7 @@ impl CairnApp {
     }
 
     fn run_content_action(&mut self, action: ContentAction, cx: &mut Context<Self>) {
-        if self.service.local_mode || self.service.content_action_pending {
+        if self.service.content_action_pending {
             return;
         }
         self.service.content_action_pending = true;
@@ -797,8 +550,12 @@ impl CairnApp {
                         this.service.content_action_error = None;
                         this.refresh_content_status(cx);
                     }
-                    Ok(Err(err)) => this.service.content_action_error = Some(err),
+                    Ok(Err(err)) => {
+                        tracing::warn!("content index action failed: {err}");
+                        this.service.content_action_error = Some(err);
+                    }
                     Err(panic) => {
+                        tracing::warn!("content index action task stopped: {panic}");
                         this.service.content_action_error =
                             Some(format!("the content-index action task stopped: {panic}"));
                     }
@@ -811,19 +568,6 @@ impl CairnApp {
     }
 }
 
-/// The i18n key that explains a scope switch failure in the user's language.
-///
-/// The switch reports *what* went wrong; the window decides how to say it. The technical detail
-/// behind the failure belongs in the log, not on the page.
-fn scope_switch_failure_key(reason: ScopeSwitchFailure) -> &'static str {
-    match reason {
-        ScopeSwitchFailure::RegistrationUnreadable => "menu_search_scope_unreadable",
-        ScopeSwitchFailure::ChangeFailed => "menu_search_scope_change_failed",
-        ScopeSwitchFailure::NotInEffect => "menu_search_scope_not_in_effect",
-        ScopeSwitchFailure::Restricted => "menu_search_scope_restricted",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use core::prelude::rust_2021::test;
@@ -832,7 +576,6 @@ mod tests {
         status_failure_is_terminal, status_refresh_decision, volume_status_visibility_changed,
         StatusRefreshDecision,
     };
-    use crate::shell::i18n::I18nManager;
     use cairn_protocol::status::{VolumeState, VolumeStatusSummary};
 
     #[test]
@@ -915,29 +658,5 @@ mod tests {
             StatusRefreshDecision::Stop,
             "a hidden table has nothing to refresh when loading ends"
         );
-    }
-
-    /// The copy that called a working local index a dead background service, and sent the user to
-    /// the installer for a missing service, was the visible half of the bug. It cannot come back.
-    #[test]
-    fn unavailable_copy_names_recovery_without_a_blocking_service_card() {
-        for locale in ["zh-CN", "en-US"] {
-            let i18n = I18nManager::new(locale);
-            for key in [
-                "service_not_running_title",
-                "service_not_running_desc",
-                "service_not_installed_title",
-                "service_not_installed_desc",
-            ] {
-                let text = i18n.get_text(key);
-                assert!(!text.trim().is_empty() && text != key, "{key} in {locale}");
-                for forbidden in ["后台服务未运行", "isn’t running", "isn't running"] {
-                    assert!(
-                        !text.contains(forbidden),
-                        "{key} ({locale}) still reports a dead background service: {text}"
-                    );
-                }
-            }
-        }
     }
 }

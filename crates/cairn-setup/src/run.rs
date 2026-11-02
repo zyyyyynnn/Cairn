@@ -53,6 +53,7 @@ fn run(launch: Launch) {
         .run(move |cx: &mut App| {
             gpui_kit::init(cx);
             cairn_ui::brand::init_fonts(cx);
+            cairn_ui::brand::init_text_rendering(cx);
             let dark = cairn_ui::locale::system_prefers_dark();
             cairn_ui::theme::apply_appearance(dark, 1.0, cx);
 
