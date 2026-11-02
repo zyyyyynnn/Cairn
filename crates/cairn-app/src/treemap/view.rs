@@ -865,44 +865,42 @@ impl CairnApp {
                     cx.stop_propagation();
                 }),
             )
-            .on_scroll_wheel(
-                cx.listener(move |this, event: &ScrollWheelEvent, window, cx| {
-                    let lines = wheel_zoom_lines(event.delta);
-                    let enter_path = if let Some(ref mut st) = this.treemap_state {
-                        if lines == 0.0 {
-                            None
-                        } else {
-                            let cursor = (
-                                f32::from(event.position.x) - canvas_origin.0,
-                                f32::from(event.position.y) - canvas_origin.1,
-                            );
-                            let outcome = st.zoom.wheel(
-                                &st.layout_nodes,
-                                lines,
-                                cursor,
-                                canvas_size,
-                                TREEMAP_TILE_INSET,
-                                Instant::now(),
-                            );
-                            // Any vertical wheel claims the canvas focus so a
-                            // following Backspace/Enter acts on what was just
-                            // inspected.
-                            st.request_focus(window, cx);
-                            let enter_path = outcome.enter_path().map(str::to_string);
-                            if enter_path.is_none() && outcome.changed() {
-                                cx.notify();
-                            }
-                            enter_path
-                        }
-                    } else {
+            .on_scroll(cx.listener(move |this, event: &ScrollEvent, window, cx| {
+                let lines = wheel_zoom_lines(event.delta);
+                let enter_path = if let Some(ref mut st) = this.treemap_state {
+                    if lines == 0.0 {
                         None
-                    };
-                    if let Some(path) = enter_path {
-                        this.treemap_drill_down(&path, window, cx);
+                    } else {
+                        let cursor = (
+                            f32::from(event.position.x) - canvas_origin.0,
+                            f32::from(event.position.y) - canvas_origin.1,
+                        );
+                        let outcome = st.zoom.wheel(
+                            &st.layout_nodes,
+                            lines,
+                            cursor,
+                            canvas_size,
+                            TREEMAP_TILE_INSET,
+                            Instant::now(),
+                        );
+                        // Any vertical wheel claims the canvas focus so a
+                        // following Backspace/Enter acts on what was just
+                        // inspected.
+                        st.request_focus(window, cx);
+                        let enter_path = outcome.enter_path().map(str::to_string);
+                        if enter_path.is_none() && outcome.changed() {
+                            cx.notify();
+                        }
+                        enter_path
                     }
-                    cx.stop_propagation();
-                }),
-            )
+                } else {
+                    None
+                };
+                if let Some(path) = enter_path {
+                    this.treemap_drill_down(&path, window, cx);
+                }
+                cx.stop_propagation();
+            }))
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.modifiers.control {
                     match event.keystroke.key.as_str() {
