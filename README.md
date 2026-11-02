@@ -13,9 +13,9 @@
 
 ## 项目概览
 
-Cairn 将毫秒级本地文件检索与磁盘空间占用分析收敛于同一桌面工作台。底层直接解析 NTFS `$MFT` 主文件表并订阅 USN 变更日志（`FSCTL_READ_USN_JOURNAL`），在保持低内存占用的同时完成百万级文件冷启动加载、目录体量聚合与实时增量同步。
+Cairn 将本地文件检索与磁盘空间占用分析收敛于同一桌面工作台。底层直接解析 NTFS `$MFT` 主文件表并订阅 USN 变更日志，在低内存占用下完成冷启动加载、目录体量聚合与实时增量同步。
 
-桌面端基于 GPUI Kit 0.8 构建硬件加速界面，通过异步 Windows Named Pipe 与后台索引服务 `cairnd` 解耦；未安装服务时自动回退至标准用户模式本地索引器。可选全文检索由独立子进程 `cairn-worker` 承担文档提取与 Tantivy 索引写入，隔离重型解析负载与主服务生命周期。
+桌面端基于 GPUI Kit 构建硬件加速界面，通过异步 Windows Named Pipe 与后台索引服务 `CairnService` 解耦；服务不可达时 GUI 先尝试一次免 UAC 的 SCM 静默启动，仍不可用则显示离线态并给出启动或重试入口。可选全文检索由独立子进程 `CairnWorker.exe` 承担文档提取与 Tantivy 索引写入。
 
 ## 核心能力
 
@@ -24,36 +24,7 @@ Cairn 将毫秒级本地文件检索与磁盘空间占用分析收敛于同一�
 - **进程隔离全文检索**：内置 CJK 双字与拉丁混合分词器，支持纯文本、代码、PDF 与 DOCX 内容提取及高亮摘要。
 - **Treemap 磁盘空间分析**：基于 Squarified 算法构建交互式矩形树图，支持连续缩放平移、下钻导航与类型色彩映射。
 - **原生 Shell 与回收站集成**：提供虚拟滚动结果表、中英双语切换、Windows 回收站枚举还原与系统原生属性对话框联动。
-- **双模式与权限边界**：命名管道拒绝远程客户端，按调用方访问令牌实施鉴权，配置文件与索引存储强制绑定系统级安全描述符。
-
-## 系统架构
-
-```mermaid
-flowchart TB
-    subgraph Clients["客户端与表现层"]
-        APP["cairn-app (Cairn.exe)<br/>GPUI Kit 桌面端 · 虚拟表格 · Treemap"]
-        CLI["cairn-cli<br/>命令行检索 · JSON / CSV 导出"]
-    end
-
-    CLIENT["cairn-client<br/>异步 Named Pipe 客户端 · 协议版本协商"]
-    SERVICE["cairn-service (CairnService.exe)<br/>MultiVolumeEngine · SessionManager · 调用方鉴权"]
-    WORKER["cairn-worker<br/>隔离式内容提取 · Tantivy 索引写入"]
-
-    subgraph Domain["核心领域与内核解析层"]
-        CORE["cairn-core<br/>查询 AST · 预排序与多卷排序 · Squarify"]
-        NTFS["cairn-ntfs<br/>$MFT 解析 · Runlist · USN Journal"]
-        CONTENT["cairn-content<br/>Tantivy 检索 · CJK 分词 · 文档提取"]
-        PROTO["cairn-protocol<br/>定长帧头 · Postcard 编解码"]
-    end
-
-    APP & CLI --> CLIENT
-    CLIENT <== "Named Pipe (\\\\.\\pipe\\Cairn.Service)" ==> SERVICE
-    SERVICE <== "子进程批处理 IPC" ==> WORKER
-    SERVICE --> CORE & NTFS & CONTENT & PROTO
-    WORKER --> CONTENT
-```
-
-10 个 Crate 的完整职责划分与依赖边界见[系统架构](docs/engineering/architecture.md)，管道 DACL 与访问控制模型见[IPC 与安全](docs/engineering/ipc-security.md)。
+- **安全与权限边界**：命名管道拒绝远程客户端，按调用方访问令牌实施鉴权，配置文件与索引存储强制绑定系统级安全描述符。
 
 ## 技术栈
 
@@ -71,7 +42,7 @@ flowchart TB
 ### 环境要求
 
 - Windows 10 / 11（x64）与 PowerShell 7+
-- Rust 1.85+（`x86_64-pc-windows-msvc`）
+- Rust stable（见 `rust-toolchain.toml`；`x86_64-pc-windows-msvc`）
 - WiX Toolset v5（仅构建 MSI 与 `CairnSetup.exe` 安装包时需要）
 
 ### 本地开发与运行
@@ -101,11 +72,12 @@ cargo run -p xtask -- package
 
 ```powershell
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 $env:RUSTDOCFLAGS="-D warnings"; cargo doc --workspace --no-deps
 cargo test --workspace
 cargo deny check
 cargo run -p xtask -- check-i18n
+cargo run -p xtask -- check-docs
 ```
 
 ## 仓库结构
@@ -117,10 +89,13 @@ crates/
   cairn-ntfs/      NTFS 引导扇区、$MFT 记录、Runlist 与 USN 日志解析
   cairn-content/   Tantivy 全文索引、CJK 分词器与文档内容提取器
   cairn-client/    异步 Named Pipe 客户端、版本握手与错误分类
-  cairn-service/   cairnd 系统服务、多卷同步引擎、会话缓存与调用方鉴权
+  cairn-service/   CairnService 系统服务、多卷同步引擎、会话缓存与调用方鉴权
   cairn-worker/    全文索引提取与合并隔离子进程
   cairn-app/       GPUI Kit 桌面客户端、虚拟表格、Treemap 与 Shell 集成
   cairn-cli/       命令行检索与 CSV / JSON 导出工具
+  cairn-ui/        共享品牌、主题令牌与组件主题适配
+  cairn-setup/     GPUI 安装/卸载前端与 MSI 载荷
+  cairn-setup-bin/ CairnSetup.exe 入口
 xtask/             国际化对齐校验、基准测试与 WiX 安装包构建自动化
 assets/icons/      应用 SVG 母版与固定阶梯光栅图标资产
 docs/              产品规格、工程架构与外部调研文档
@@ -137,9 +112,13 @@ docs/              产品规格、工程架构与外部调研文档
 | [品牌资产](docs/product/brand.md) | 图标母版、光栅尺寸阶梯与使用位置 |
 | [系统架构](docs/engineering/architecture.md) | Crate 边界、进程拓扑与模块职责 |
 | [索引与同步](docs/engineering/indexing.md) | `$MFT` 扫描、USN 对齐、缓存持久化与内容索引流水线 |
+| [前端与 GPUI](docs/engineering/frontend.md) | 布局、焦点、IME 与窗口行为 |
 | [IPC 与安全](docs/engineering/ipc-security.md) | 协议帧限制、管道 ACL、调用方令牌鉴权与配置保护 |
-| [性能与质量](docs/engineering/quality.md) | 性能基线、测试分层与 CI 质量门禁 |
+| [性能](docs/engineering/performance.md) | 性能目标、内存与 Treemap 预算 |
+| [质量](docs/engineering/quality.md) | 测试分层与 CI 质量门禁 |
 | [打包与发布](docs/engineering/release.md) | GPUI Setup、WiX MSI、校验清单与发布门禁 |
+| [研究与竞品](docs/research/README.md) | 外部产品调研与证据索引 |
+| [贡献指南](CONTRIBUTING.md) | 开发环境、工程规范与 PR 流程 |
 
 ## 许可证
 
