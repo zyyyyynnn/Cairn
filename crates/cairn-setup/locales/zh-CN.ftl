@@ -8,7 +8,6 @@ license_title = 许可协议
 license_name = Apache License 2.0
 action_view_license = 查看完整许可
 error_license_required = 接受许可条款后继续。
-error_open_license = 无法打开许可协议。重试。
 
 license_accept = 我接受这些条款
 
@@ -34,7 +33,7 @@ uninstall_missing_title = 未找到 Cairn
 uninstall_missing_body = 这台电脑上没有安装 Cairn，因此无需卸载。
 
 error_uninstall_title = 卸载未完成
-error_uninstall_msi_unknown = 卸载未完成，Cairn 仍在这台电脑上。查看日志了解原因，然后重试。
+error_uninstall_msi_unknown = Cairn 仍在这台电脑上。查看日志了解原因，然后重试。
 error_uninstall_msi_cancelled = 卸载已取消，Cairn 仍在这台电脑上。
 error_uninstall_msi_busy = 另一个安装或卸载程序正在运行。等待其完成后重试。
 error_uninstall_not_installed = 没有找到 Cairn 的安装记录。
@@ -44,8 +43,10 @@ error_uninstall_msi_invalid = Windows 安装程序无法读取 Cairn 的安装�
 error_uninstall_cleanup_failed = 部分 Cairn 文件未能移除。查看日志了解原因。
 
 error_title = 安装未完成
-error_msi_unknown = 安装未完成，现有文件没有被删除。查看日志了解原因，然后重试。
+error_msi_unknown = 现有文件没有被删除。查看日志了解原因，然后重试。
 error_no_payload = 安装包缺少必要文件。重新下载 CairnSetup.exe。
+error_staging = 安装程序无法准备临时文件。请关闭安装程序后重试。
+error_uninstall_staging = 卸载程序无法准备临时文件。请关闭此窗口后重试。
 error_msi_cancelled = 安装已取消。
 error_msi_busy = 另一个安装程序正在运行。等待其完成后重试。
 error_msi_invalid = 安装包不完整或已损坏。重新下载安装程序。
@@ -84,9 +85,11 @@ action_continue = 继续
 action_back = 上一步
 action_install = 安装
 action_close = 关闭
+action_cancel = 取消
 action_retry = 重试
 action_uninstall = 卸载
 action_remove_remaining = 移除剩余文件
 action_open_app = 打开 Cairn
 action_finish = 完成
 action_view_log = 查看日志
+log_viewer_title = 安装日志

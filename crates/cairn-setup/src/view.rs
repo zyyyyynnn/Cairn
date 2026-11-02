@@ -71,6 +71,8 @@ fn failure_offers_retry(error_key: &str) -> bool {
         error_key,
         "error_not_installed"
             | "error_no_payload"
+            | "error_staging"
+            | "error_uninstall_staging"
             | "error_msi_platform"
             | "error_msi_invalid"
             | "error_msi_cleanup_failed"
@@ -109,7 +111,6 @@ struct Tokens {
     muted_foreground: Hsla,
     border: Hsla,
     control_stroke: Hsla,
-    input_stroke: Hsla,
     danger: Hsla,
     danger_fill: Hsla,
     danger_hover: Hsla,
@@ -139,7 +140,6 @@ impl Tokens {
             muted_foreground: theme.muted_foreground,
             border: theme.border,
             control_stroke: cairn_ui::theme::control_stroke(theme),
-            input_stroke: theme.input,
             danger: theme.danger,
             danger_fill: theme.tokens.button_danger.color,
             danger_hover: theme.tokens.button_danger_hover.color,
@@ -254,7 +254,9 @@ impl SetupApp {
         // The caption buttons are the window's only minimize and close, so they are Tab stops like
         // any other control: a handle passed to `track_focus` carries its own tab-stop flag.
         let focus = window
-            .use_keyed_state(id, cx, move |_, cx| cx.focus_handle().tab_stop(!disabled))
+            .use_keyed_state((id, disabled as usize), cx, move |_, cx| {
+                cx.focus_handle().tab_stop(!disabled)
+            })
             .read(cx)
             .clone();
 
@@ -526,7 +528,7 @@ impl SetupApp {
                     .font_weight(FontWeight::MEDIUM)
                     .small()
                     .label(self.i18n.get("action_view_license"))
-                    .on_click(cx.listener(|this, _, _, cx| this.view_license(cx))),
+                    .on_click(cx.listener(|this, _, window, cx| this.view_license(window, cx))),
             );
 
         v_flex()
@@ -598,7 +600,7 @@ impl SetupApp {
                                         } else if path_focused {
                                             tokens.ring
                                         } else {
-                                            tokens.input_stroke
+                                            tokens.control_stroke
                                         })
                                         .w_full(),
                                 ),
@@ -901,7 +903,8 @@ impl SetupApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         // Only progress/status text stays on the leading edge. Footer actions sit at the trailing
-        // edge; the title bar owns the window's close control, so no page repeats it as Cancel.
+        // edge. The uninstall confirmation also carries a secondary Cancel, because its primary
+        // action is destructive; other pages leave closing to the title-bar control.
         let mut leading: Vec<AnyElement> = Vec::new();
         let mut actions: Vec<AnyElement> = Vec::new();
 
@@ -1035,6 +1038,7 @@ impl SetupApp {
                 }
             }
             Screen::Uninstall => {
+                actions.push(self.cancel_button(cx));
                 actions.push(self.uninstall_button(tokens, window, cx));
             }
             Screen::Uninstalled => {
@@ -1067,12 +1071,21 @@ impl SetupApp {
             .child(h_flex().gap(GROUP_GAP).items_center().children(actions))
     }
 
+    fn cancel_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        Button::new("setup-cancel")
+            .font_weight(FontWeight::MEDIUM)
+            .ghost()
+            .label(self.i18n.get("action_cancel"))
+            .on_click(cx.listener(|this, _, window, cx| this.close_window(window, cx)))
+            .into_any_element()
+    }
+
     fn log_button(&self, cx: &mut Context<Self>) -> AnyElement {
         Button::new("setup-log")
             .font_weight(FontWeight::MEDIUM)
             .ghost()
             .label(self.i18n.get("action_view_log"))
-            .on_click(cx.listener(|this, _, _, cx| this.open_log(cx)))
+            .on_click(cx.listener(|this, _, window, cx| this.open_log(window, cx)))
             .into_any_element()
     }
 
@@ -1312,6 +1325,8 @@ mod tests {
         for key in [
             "error_not_installed",
             "error_no_payload",
+            "error_staging",
+            "error_uninstall_staging",
             "error_msi_platform",
             "error_msi_invalid",
             "error_msi_cleanup_failed",

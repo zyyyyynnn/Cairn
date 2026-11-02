@@ -65,7 +65,7 @@
 | 优先级 | 范围与包含特性 |
 |:---|:---|
 | **P0 (核心基础)** | 本地固定 NTFS 卷 `$MFT` 流式索引、USN 增量同步与故障重建、Everything 核心语法（与或非/引号/通配符/大小写/全字/匹配路径/正则）、四段式现代高密度灰阶 GUI、后台 Windows 服务（`cairnd`）、中英双语（`fluent-bundle`）、中文输入法（IME）四大缺陷根治、纯文本内容检索 |
-| **P1 (完善增强)** | 富文档（`docx`/`xlsx`/`pptx`/`pdf`）抽取与 Worker 进程隔离、命中片段切片高亮渲染、快速过滤器内置宏、系统托盘与全局热键唤起、免提权 CLI 查询工具（`cairn-cli`）、WiX Burn 单文件安装包（`CairnSetup.exe`）工程与构建溯源 |
+| **P1 (完善增强)** | 富文档（`docx`/`xlsx`/`pptx`/`pdf`）抽取与 Worker 进程隔离、命中片段切片高亮渲染、快速过滤器内置宏、系统托盘与全局热键唤起、免提权 CLI 查询工具（`cairn-cli`）、GPUI Setup + WiX MSI 单文件安装包（`CairnSetup.exe`）工程与构建溯源 |
 | **P2 (生态演进)** | Everything IPC / `es.exe` 兼容适配层、FAT32 / exFAT 卷轮询扫描、ReFS 卷支持、中文拼音与首字母搜索（`py:`）、Windows 系统 IFilter 原生接入、系统级文件预览窗格、ARM64 架构构建支持 |
 
 ### 2.3 边界与非目标（Non-Goals）
@@ -142,7 +142,7 @@
 ### 3.8 系统与平台集成（System Integration）
 - **同类基线**：后台 Windows 服务（LocalSystem）常驻维护多卷索引，免提权 GUI 客户端通过安全 IPC 通信。
 - **Cairn 闭环现状**：
-  - `cairnd.exe` 服务具备 Win32 DACL 严格安全描述符与 `PIPE_REJECT_REMOTE_CLIENTS`，仅允许本地交互用户连接（达标）。
+  - `CairnService.exe` 服务具备 Win32 DACL 严格安全描述符与 `PIPE_REJECT_REMOTE_CLIENTS`，仅允许本地交互用户连接（达标）。
   - 管道显式校验协议版本号，防止反序列化漏洞（达标）。
   - 索引配置由本地已认证用户经管道提交（`SetConfig`/`Rescan`/`ReloadConfig`/`ClearContentIndex`），服务校验后以 SYSTEM/Administrators 描述符原子持久化并即时应用（达标）；`admin_only_query` 只能由管理员修改（达标）。
 
@@ -230,7 +230,7 @@
 
 | 编号 | 优先级 | 需求描述 | 量化验收标准 |
 |:---|:---|:---|:---|
-| **SVC-01** | P0 | Windows 服务宿主 `cairnd.exe`（`LocalSystem`）：由 MSI 注册为自启动服务，读取裸盘 `$MFT` 与 USN，维护多卷索引并响应管道查询 | 安装后立即运行、开机自启、崩溃自动重启；支持控制台调试模式 `--console` |
+| **SVC-01** | P0 | Windows 服务宿主 `CairnService.exe`（`LocalSystem`）：由 MSI 注册为自启动服务，读取裸盘 `$MFT` 与 USN，维护多卷索引并响应管道查询 | 安装后立即运行、开机自启、崩溃自动重启；支持控制台调试模式 `--console` |
 | **SVC-02** | P0 | 命名管道通信 `\\.\pipe\Cairn.Service`，指定 `PIPE_REJECT_REMOTE_CLIENTS` 拒绝一切网络与远程 SMB 访问；配置严格的 Win32 DACL 安全描述符 | 仅允许 SYSTEM、管理员组与本地交互式登录用户（IU）读写；未授权连接直接被拒 |
 | **SVC-03** | P0 | 协议帧携带显式协议版本号（`PROTOCOL_VERSION`）；客户端连接 `hello()` 握手校验，版本不兼容时阻止连接并提示升级 | 协议版本不匹配时安全拦截，不发生反序列化崩溃 |
 | **SVC-04** | P0 | 管理员服务随安装包默认安装并由 SCM 自动运行，非管理员双击 `cairn.exe` 直接显示“所有文件”表格。服务不可达时，GUI 先尝试一次免 UAC 的 SCM 静默启动；仍不可用时保留表头与工作区，结果区显示“后台服务未运行”或“后台服务未安装”的单行离线态，并提供启动、重试或重新安装指引。服务已安装但未运行时提供显式启动恢复；未安装服务时不提供无法执行的启动命令 | 非管理员双击启动即可查询；服务未运行、未安装、协议不兼容或被拒绝启动时显示离线态且不误报为无匹配；启动成功后自动恢复查询；索引来源只有后台服务 |
@@ -257,9 +257,8 @@
 
 | 编号 | 优先级 | 需求描述 | 交付产物与验证标准 |
 |:---|:---|:---|:---|
-| **REL-01** | P1 | 基于 WiX Burn 的单文件安装包（`CairnSetup.exe`）：内置系统服务（`cairnd`）自动注册与启动、配置 SYSTEM/Administrators 权限、创建桌面与开始菜单快捷方式，底层由 MSI 事务引擎保证安装与卸载完整性；同步输出 WiX 配置文件（`cairn.wxs` 与 `bundle.wxs`） | 产出 `CairnSetup.exe`、WiX 模板与 SHA256 校验清单，严禁输出无系统服务权限的便携版 ZIP |
+| **REL-01** | P1 | 基于 GPUI Setup + WiX MSI 的单文件安装包（`CairnSetup.exe`）：前置界面负责许可、路径与进度，MSI 负责系统服务（`CairnService`）注册、SYSTEM/Administrators 权限、快捷方式与安装/卸载事务；Setup 内嵌 MSI 并输出 `cairn.wxs` 源 | 产出 `CairnSetup.exe`、`cairn.msi`、WiX 模板与 SHA256 校验清单，严禁输出无系统服务权限的便携版 ZIP |
 | **REL-02** | P1 | 官方发布产物均经过 Authenticode 代码签名（或本地测试证书签名） | 签名证书链合规有效 |
-| **REL-03** | P1 | 提供自动化生成的 `winget` 软件清单文件（`cairn.yaml`） | 符合 Windows Package Manager 提交流水线标准 |
 | **REL-04** | P1 | 构建流水线自动产出全部二进制产物的 `SHA256SUMS.txt` 校验和文件，并附带与 Everything 1.4 对标的自动化基准评测报告 | 校验和精确匹配，报告包含中位延迟与常驻内存对比 |
 
 ### 4.9 磁盘空间可视化（DSV）

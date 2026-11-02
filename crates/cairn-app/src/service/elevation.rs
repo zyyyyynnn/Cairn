@@ -133,11 +133,59 @@ pub fn run_elevated(_program: &str, _parameters: &str) -> Result<u32, ElevationE
     })
 }
 
-/// Starts a downloaded Cairn installer with the silent, restart-on-finish contract. The caller
-/// exits after this returns `Ok`; the installer launches the installed app when its transaction
-/// succeeds or fails, and the pending-version marker tells the next app launch which happened.
+/// Holds the verified installer with write and delete denied, so the same-user process that
+/// requested the update cannot replace it between the checksum and the UAC prompt.
 #[cfg(windows)]
-pub fn launch_elevated_installer(installer: &Path) -> Result<(), ElevationError> {
+pub fn lock_verified_installer(
+    installer: &Path,
+    expected_sha256: &str,
+) -> Result<std::fs::File, String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows::Win32::Storage::FileSystem::FILE_SHARE_READ;
+
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ.0)
+        .open(installer)
+        .map_err(|error| error.to_string())?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(|error| error.to_string())?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let actual = format!("{:x}", hasher.finalize());
+    if !actual.eq_ignore_ascii_case(expected_sha256) {
+        return Err("the installer changed after verification".to_string());
+    }
+    Ok(file)
+}
+
+#[cfg(not(windows))]
+pub fn lock_verified_installer(
+    _installer: &Path,
+    _expected_sha256: &str,
+) -> Result<std::fs::File, String> {
+    Err("locking an installer is only available on Windows".to_string())
+}
+
+fn installer_parameters(expected_sha256: &str) -> String {
+    format!("/quiet /restart-app /expected-sha256 {expected_sha256}")
+}
+
+/// Starts a downloaded Cairn installer with the silent, restart-on-finish contract. The caller
+/// holds the verified file handle through this call, so the UAC prompt cannot be raced. The setup
+/// then verifies its own hash and extracts from a handle that denies replacement.
+#[cfg(windows)]
+pub fn launch_elevated_installer(
+    installer: &Path,
+    expected_sha256: &str,
+) -> Result<(), ElevationError> {
     use windows::core::PCWSTR;
     use windows::Win32::UI::Shell::{ShellExecuteExW, SHELLEXECUTEINFOW};
     use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
@@ -153,7 +201,7 @@ pub fn launch_elevated_installer(installer: &Path) -> Result<(), ElevationError>
     }
 
     let wide_file = to_wide_literal(&installer.to_string_lossy());
-    let wide_parameters = to_wide_literal("/quiet /restart-app");
+    let wide_parameters = to_wide_literal(&installer_parameters(expected_sha256));
     let wide_verb = to_wide_literal("runas");
     let mut exec_info = SHELLEXECUTEINFOW {
         cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
@@ -182,7 +230,10 @@ pub fn launch_elevated_installer(installer: &Path) -> Result<(), ElevationError>
 }
 
 #[cfg(not(windows))]
-pub fn launch_elevated_installer(_installer: &Path) -> Result<(), ElevationError> {
+pub fn launch_elevated_installer(
+    _installer: &Path,
+    _expected_sha256: &str,
+) -> Result<(), ElevationError> {
     Err(ElevationError::Failed {
         os_error: None,
         message: "starting the installer is only available on Windows".to_string(),
@@ -226,5 +277,24 @@ mod tests {
         );
         assert!(path.is_absolute());
         assert!(path.is_file(), "{path:?}");
+    }
+
+    #[test]
+    fn the_installer_handoff_passes_the_verified_hash() {
+        assert_eq!(
+            installer_parameters("abc123"),
+            "/quiet /restart-app /expected-sha256 abc123"
+        );
+    }
+
+    #[test]
+    fn a_locked_installer_must_still_match_its_hash() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let installer = temp.path().join("CairnSetup.exe");
+        std::fs::write(&installer, b"abc").expect("installer");
+        let known = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        let file = lock_verified_installer(&installer, known).expect("matching hash");
+        drop(file);
+        assert!(lock_verified_installer(&installer, &"0".repeat(64)).is_err());
     }
 }

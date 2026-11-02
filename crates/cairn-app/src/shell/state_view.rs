@@ -15,12 +15,12 @@ use gpui_kit::gpui::*;
 /// One recovery action in a state surface or toast: a 24px semantic icon whose tooltip and
 /// accessible name carry the full phrase, so the action never takes a row of its own.
 pub(crate) fn icon_action(
-    id: &'static str,
+    control: &'static KeyControl,
     icon: IconName,
     label: impl Into<SharedString>,
 ) -> Button {
     let label = label.into();
-    Button::new(id)
+    Button::new(control.element)
         .ghost()
         .small()
         .flex_shrink_0()

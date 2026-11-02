@@ -31,12 +31,12 @@ Cairn 将毫秒级本地文件检索与磁盘空间占用分析收敛于同一�
 ```mermaid
 flowchart TB
     subgraph Clients["客户端与表现层"]
-        APP["cairn-app (cairn.exe)<br/>GPUI Kit 桌面端 · 虚拟表格 · Treemap"]
+        APP["cairn-app (Cairn.exe)<br/>GPUI Kit 桌面端 · 虚拟表格 · Treemap"]
         CLI["cairn-cli<br/>命令行检索 · JSON / CSV 导出"]
     end
 
     CLIENT["cairn-client<br/>异步 Named Pipe 客户端 · 协议版本协商"]
-    SERVICE["cairn-service (cairnd.exe)<br/>MultiVolumeEngine · SessionManager · 调用方鉴权"]
+    SERVICE["cairn-service (CairnService.exe)<br/>MultiVolumeEngine · SessionManager · 调用方鉴权"]
     WORKER["cairn-worker<br/>隔离式内容提取 · Tantivy 索引写入"]
 
     subgraph Domain["核心领域与内核解析层"]
@@ -64,7 +64,7 @@ flowchart TB
 | 文件系统 | Win32 Storage / IO API、`cairn-ntfs` | `$MFT` 扇区流式解析、USN 变更日志轮询与目录大小聚合 |
 | 全文索引 | Tantivy 0.27、lopdf、quick-xml、zip | CJK 双字分词、多格式文本提取、倒排索引构建与匹配摘要生成 |
 | 系统服务 | `windows-service`、Win32 Security / Shell COM | SCM 服务托管、客户端令牌鉴权、SDDL 权限加固与回收站操作 |
-| 分发打包 | `xtask`、WiX Toolset v5、Winget | MSI 安装包、Burn 引导安装器（`CairnSetup.exe`）、校验清单与构建门禁 |
+| 分发打包 | `xtask`、WiX Toolset v5 | MSI 安装包、GPUI 安装程序（`CairnSetup.exe`）、校验清单与构建门禁 |
 
 ## 快速开始
 
@@ -77,7 +77,7 @@ flowchart TB
 ### 本地开发与运行
 
 ```powershell
-# 启动用户态控制台索引服务（或直接启动桌面端自动回退本地索引）
+# 以控制台模式启动后台索引服务（开发调试；索引来源只有该服务）
 cargo run -p cairn-service -- --console
 
 # 启动桌面客户端
@@ -95,7 +95,7 @@ cargo build --workspace --release
 cargo run -p xtask -- package
 ```
 
-打包产物输出至 `dist/`（含 `CairnSetup.exe`、`cairn.msi`、`cairn.yaml` 与 `SHA256SUMS.txt`）。完整发布规程见[打包与发布](docs/engineering/release.md)。
+打包产物输出至 `dist/`（含 `CairnSetup.exe`、`cairn.msi` 与 `SHA256SUMS.txt`）。完整发布规程见[打包与发布](docs/engineering/release.md)。
 
 ## 验证
 
@@ -139,7 +139,7 @@ docs/              产品规格、工程架构与外部调研文档
 | [索引与同步](docs/engineering/indexing.md) | `$MFT` 扫描、USN 对齐、缓存持久化与内容索引流水线 |
 | [IPC 与安全](docs/engineering/ipc-security.md) | 协议帧限制、管道 ACL、调用方令牌鉴权与配置保护 |
 | [性能与质量](docs/engineering/quality.md) | 性能基线、测试分层与 CI 质量门禁 |
-| [打包与发布](docs/engineering/release.md) | WiX MSI、Burn 引导程序与 Winget 清单生成 |
+| [打包与发布](docs/engineering/release.md) | GPUI Setup、WiX MSI、校验清单与发布门禁 |
 
 ## 许可证
 

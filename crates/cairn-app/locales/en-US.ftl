@@ -60,8 +60,8 @@ query_clear = Clear search
 sort_reverse = Reverse order
 
 status_objects_count = { $count ->
-    [one] { $count } item
-   *[other] { $count } items
+    [one] { $count_text } item
+   *[other] { $count_text } items
 }
 
 volume_capsule = { $drive }: { $state }
@@ -141,7 +141,7 @@ update_up_to_date_body = Version { $version } is the latest available.
 update_no_releases_body = No published updates are available yet.
 update_available_title = A Cairn update is available
 update_available_body = Version { $version } is available. You have { $current }. Cairn restarts when the installation finishes.
-update_download_action = Download and install
+update_download_action = Update
 update_later = Later
 update_check_failed_title = Could not check for updates
 update_check_failed_body = Check your connection, then try again.
@@ -190,8 +190,8 @@ recycle_bin_retry = Retry
 status_recycle_bin_unavailable = Recycle Bin unavailable
 status_loading = Loading
 status_objects_summary = { $count ->
-    [one] { $count } item { $size }
-   *[other] { $count } items { $size }
+    [one] { $count_text } item { $size }
+   *[other] { $count_text } items { $size }
 }
 status_refreshing = Refreshing
 status_refresh = Refresh
@@ -202,12 +202,12 @@ toast_accessible_name = { $title }. { $message }
 bin_error_access_denied = Access denied; check the item's permissions, then retry
 bin_error_read_only = The original location is read-only; clear the read-only attribute, then retry
 bin_error_conflict = An item with that name already exists; rename or remove it, then retry
-bin_error_missing_item = The item is no longer in the Recycle Bin; refresh the list
+bin_error_missing_item = The item is no longer in the Recycle Bin; close this message and refresh the list
 bin_error_original_location = The original location is unavailable; reconnect the drive, then retry
 bin_error_path_too_long = The original location path is too long; shorten the path, then retry
 bin_error_path_too_deep = The original location is nested too deeply; shorten the path, then retry
-bin_error_no_items = No item could be processed; refresh the list and try again
-bin_error_generic = Windows could not complete the operation; check the log, then retry
+bin_error_no_items = No item could be processed; close this message and refresh the list
+bin_error_generic = Windows could not complete the operation; try again
 bin_error_items = { $items }: { $reason }
 bin_error_more_items = , and { $count } more
 bin_list_separator = ", "
@@ -238,13 +238,13 @@ treemap_unavailable_not_directory = That path is a file; open a folder or go up 
 treemap_unavailable_not_indexed = This path is not in the index; check the path or retry later
 treemap_empty_directory = This folder is empty
 treemap_aggregate = { $count ->
-    [one] { $count } item
-   *[other] { $count } items
+    [one] { $count_text } item
+   *[other] { $count_text } items
 }
 treemap_status_selected = { $name }, { $path }, { $size } ({ $percent }%), { $date }
 treemap_status_summary = { $count ->
-    [one] { $count } item { $size }
-   *[other] { $count } items { $size }
+    [one] { $count_text } item { $size }
+   *[other] { $count_text } items { $size }
 }
 treemap_zoom_reset = Reset chart zoom
 treemap_zoom_reset_tooltip = Reset chart zoom (currently { $percent }%)

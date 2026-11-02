@@ -8,9 +8,13 @@ use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
 
+use cairn_ui::brand::heading_text;
+use cairn_ui::theme::dialog_surface;
 use gpui_kit::component::input::{InputEvent, InputState};
+use gpui_kit::component::{v_flex, ActiveTheme as _, WindowExt as _};
 use gpui_kit::gpui::{
-    AppContext as _, Context, Entity, FocusHandle, KeyBinding, Subscription, WeakEntity, Window,
+    div, relative, AppContext as _, Context, Entity, FocusHandle, FontWeight, KeyBinding,
+    ParentElement as _, Styled as _, Subscription, WeakEntity, Window,
 };
 use gpui_kit::Focusable;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -63,7 +67,9 @@ impl SetupError {
             PayloadError::Missing | PayloadError::TooLarge | PayloadError::AlreadyEmbedded => {
                 "error_no_payload"
             }
-            PayloadError::CorruptFooter | PayloadError::Checksum => "error_msi_invalid",
+            PayloadError::CorruptFooter | PayloadError::Checksum | PayloadError::SetupHash => {
+                "error_msi_invalid"
+            }
             PayloadError::Io(_) => "error_msi_fatal",
         };
         Self::simple(key)
@@ -384,6 +390,15 @@ impl SetupApp {
         cx.notify();
     }
 
+    fn fail_staging(&mut self, error: std::io::Error, cx: &mut Context<Self>) {
+        tracing::warn!("installer staging root is unavailable: {error}");
+        self.log = None;
+        self.error = Some(SetupError::simple("error_staging"));
+        self.screen = Screen::Failed;
+        self.installing.set(false);
+        cx.notify();
+    }
+
     pub(crate) fn start_install(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.launch != Launch::Setup || self.is_busy() {
             return;
@@ -401,7 +416,7 @@ impl SetupApp {
             }
         };
 
-        let (msi, payload_dir) = match quiet::msi_for_this_build() {
+        let (msi, payload_dir) = match quiet::msi_for_this_build(None) {
             Ok(value) => value,
             Err(error) => {
                 self.error = Some(SetupError::from_payload(&error));
@@ -411,7 +426,14 @@ impl SetupApp {
             }
         };
 
-        let log = platform::install_log_path();
+        let log = match platform::install_log_path() {
+            Ok(log) => log,
+            Err(error) => {
+                let _ = std::fs::remove_dir_all(&payload_dir);
+                self.fail_staging(error, cx);
+                return;
+            }
+        };
         // Re-scan at the moment of install: the window may have been open across an external
         // uninstall, and a stale boolean must not leave an old Burn entry behind.
         let legacy = installed::legacy_burn_uninstallers();
@@ -462,9 +484,19 @@ impl SetupApp {
         let product_codes = match installed::find_product_codes_checked() {
             Ok(codes) => codes,
             Err(error) => {
-                let log = platform::uninstall_log_path();
-                let _ = std::fs::write(&log, format!("MSI product enumeration failed: {error}\n"));
-                self.log = Some(log);
+                match platform::uninstall_log_path() {
+                    Ok(log) => {
+                        let _ = std::fs::write(
+                            &log,
+                            format!("MSI product enumeration failed: {error}\n"),
+                        );
+                        self.log = Some(log);
+                    }
+                    Err(log_error) => {
+                        self.log = None;
+                        tracing::warn!("uninstall log is unavailable: {log_error}");
+                    }
+                }
                 self.error = Some(SetupError::simple("error_msi_unknown"));
                 self.screen = Screen::Failed;
                 cx.notify();
@@ -477,7 +509,13 @@ impl SetupApp {
             return;
         }
 
-        let log = platform::uninstall_log_path();
+        let log = match platform::uninstall_log_path() {
+            Ok(log) => log,
+            Err(error) => {
+                self.fail_staging(error, cx);
+                return;
+            }
+        };
         let helper = platform::prepare_install_dir_cleanup();
         let install_dir = product.install_dir.clone();
         let cleanup_dir = install_dir.clone();
@@ -507,7 +545,13 @@ impl SetupApp {
     }
 
     fn start_orphan_uninstall(&mut self, product: InstalledProduct, cx: &mut Context<Self>) {
-        let log = platform::uninstall_log_path();
+        let log = match platform::uninstall_log_path() {
+            Ok(log) => log,
+            Err(error) => {
+                self.fail_staging(error, cx);
+                return;
+            }
+        };
         let helper = platform::prepare_install_dir_cleanup();
         let install_dir = product.install_dir;
         let cleanup_dir = install_dir.clone();
@@ -567,10 +611,16 @@ impl SetupApp {
             cx.notify();
             return;
         };
-        let log = self
-            .log
-            .clone()
-            .unwrap_or_else(platform::uninstall_log_path);
+        let log = match self.log.clone() {
+            Some(log) => log,
+            None => match platform::uninstall_log_path() {
+                Ok(log) => log,
+                Err(error) => {
+                    self.fail_staging(error, cx);
+                    return;
+                }
+            },
+        };
         let helper = platform::prepare_install_dir_cleanup();
         let expected = self.active_product_codes.clone();
         let session = msi::start_cleanup(
@@ -728,26 +778,32 @@ impl SetupApp {
         }
     }
 
-    pub(crate) fn open_log(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn open_log(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(log) = self.log.clone() else {
             return;
         };
-        if !log.is_file() || platform::open_path(&log).is_err() {
-            self.notice = Some("error_open_log");
-            cx.notify();
-        }
+        let text = match std::fs::read(&log) {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+            Err(error) => {
+                tracing::warn!("could not read the log: {error}");
+                self.notice = Some("error_open_log");
+                cx.notify();
+                return;
+            }
+        };
+        let title = self.i18n.get("log_viewer_title");
+        show_text_dialog(window, cx, title, text, TextDialogKind::Log);
     }
 
-    pub(crate) fn view_license(&mut self, cx: &mut Context<Self>) {
-        let path = platform::license_path();
-        let opened = std::fs::write(&path, crate::LICENSE_TEXT)
-            .map_err(|error| error.to_string())
-            .and_then(|()| platform::open_path(&path));
-        if let Err(error) = opened {
-            tracing::warn!("could not open the license: {error}");
-            self.notice = Some("error_open_license");
-            cx.notify();
-        }
+    pub(crate) fn view_license(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let title = self.i18n.get("license_title");
+        show_text_dialog(
+            window,
+            cx,
+            title,
+            crate::LICENSE_TEXT.to_string(),
+            TextDialogKind::License,
+        );
     }
 
     pub(crate) fn retry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -759,10 +815,109 @@ impl SetupApp {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LicenseLine {
+    text: String,
+    centered: bool,
+}
+
+fn license_lines(text: &str) -> Vec<LicenseLine> {
+    let raw: Vec<&str> = text.lines().collect();
+    let headers: Vec<usize> = raw
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| !line.trim().is_empty())
+        .map(|(index, _)| index)
+        .take(3)
+        .collect();
+    let page_margin = raw
+        .iter()
+        .enumerate()
+        .filter(|(index, line)| !headers.contains(index) && !line.trim().is_empty())
+        .map(|(_, line)| line.chars().take_while(|ch| *ch == ' ').count())
+        .min()
+        .unwrap_or(0);
+    raw.into_iter()
+        .enumerate()
+        .map(|(index, line)| {
+            if headers.contains(&index) {
+                LicenseLine {
+                    text: line.trim().to_string(),
+                    centered: true,
+                }
+            } else {
+                let leading = line.chars().take_while(|ch| *ch == ' ').count();
+                LicenseLine {
+                    text: line[leading.min(page_margin)..].to_string(),
+                    centered: false,
+                }
+            }
+        })
+        .collect()
+}
+
+#[derive(Clone, Copy)]
+enum TextDialogKind {
+    License,
+    Log,
+}
+
+/// One scrollable read-only surface for the embedded license and the installer log. The text is
+/// already in memory, so opening it never touches a user-readable file or the shell's viewer.
+fn show_text_dialog(
+    window: &mut Window,
+    cx: &mut Context<SetupApp>,
+    title: String,
+    text: String,
+    kind: TextDialogKind,
+) {
+    let surface = dialog_surface(cx.theme());
+    window.open_dialog(cx, move |dialog, window, _| {
+        let body = match kind {
+            TextDialogKind::License => license_lines(&text).into_iter().fold(
+                v_flex().w_full().text_sm().line_height(relative(1.5)),
+                |body, line| {
+                    let LicenseLine { text, centered } = line;
+                    let content = if text.is_empty() {
+                        " ".to_string()
+                    } else {
+                        text
+                    };
+                    let line = if centered {
+                        div().w_full().text_center()
+                    } else {
+                        div().w_full()
+                    };
+                    body.child(line.child(content))
+                },
+            ),
+            TextDialogKind::Log => {
+                let body = v_flex()
+                    .w_full()
+                    .text_sm()
+                    .line_height(relative(1.5))
+                    .font_family("Consolas");
+                text.lines().fold(body, |body, line| {
+                    body.child(div().w_full().child(if line.is_empty() {
+                        " ".to_string()
+                    } else {
+                        line.to_string()
+                    }))
+                })
+            }
+        };
+        dialog
+            .width(window.rem_size() * 36.0)
+            .bg(surface)
+            .title(heading_text(title.clone(), FontWeight::SEMIBOLD))
+            .child(body)
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        force_cleanup_allowed, progress_percent, record_remaining_after_cleanup,
+        force_cleanup_allowed, license_lines, progress_percent, record_remaining_after_cleanup,
         uninstall_can_fall_back_to_cleanup, visible_progress,
     };
     use crate::model::Screen;
@@ -813,6 +968,38 @@ mod tests {
             "a normal uninstall reports its own state, not the forced cleanup's"
         );
     }
+    #[test]
+    fn the_license_header_is_centered_and_the_page_margin_is_removed() {
+        let lines = license_lines(crate::LICENSE_TEXT);
+        assert!(lines[0].centered && lines[1].centered && lines[2].centered);
+        assert_eq!(lines[0].text, "Apache License");
+        assert_eq!(lines[1].text, "Version 2.0, January 2004");
+        assert_eq!(lines[2].text, "http://www.apache.org/licenses/");
+
+        let terms = lines
+            .iter()
+            .find(|line| {
+                line.text == "TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION"
+            })
+            .expect("the license body");
+        assert!(!terms.centered);
+        let definitions = lines
+            .iter()
+            .find(|line| line.text == "1. Definitions.")
+            .expect("the first numbered section");
+        assert!(!definitions.centered);
+
+        let definition = lines
+            .iter()
+            .find(|line| line.text.trim_start().starts_with("\"License\" shall mean"))
+            .expect("an indented definition");
+        assert!(
+            definition.text.starts_with("   \"License\""),
+            "the relative list indent must remain: {:?}",
+            definition.text
+        );
+    }
+
     #[test]
     fn progress_never_moves_backwards_when_msi_resets_an_action() {
         assert_eq!(progress_percent(None, 0, 100), Some(0.0));

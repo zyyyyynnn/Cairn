@@ -71,6 +71,9 @@ fn content_query_notice(state: &IndexMenuState<'_>) -> Option<ContentQueryNotice
     if state.content_loading {
         return Some(ContentQueryNotice::Loading);
     }
+    if state.content_action_failed {
+        return Some(ContentQueryNotice::Error);
+    }
     if state.content_failed {
         return Some(ContentQueryNotice::Unreadable);
     }
@@ -652,7 +655,7 @@ impl CairnApp {
             let message = self.i18n.get_text("recycle_bin_unavailable_title");
             let retry = accessibility::control("recycle-bin-retry");
             let retry_label = accessibility::name(retry, &self.i18n);
-            let action = icon_action(retry.element, AssetIconName::RotateCcw, retry_label)
+            let action = icon_action(retry, AssetIconName::RotateCcw, retry_label)
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.open_recycle_bin(window, cx);
                 }))
@@ -779,7 +782,7 @@ impl CairnApp {
                     _ => AssetIconName::RotateCcw,
                 };
                 Some(
-                    icon_action(control.element, icon, label)
+                    icon_action(control, icon, label)
                         .disabled(pending)
                         .on_click(cx.listener(move |this, _, window, cx| {
                             match notice {
@@ -836,14 +839,14 @@ impl CairnApp {
         // exists. A missing service gets install guidance instead of an elevation prompt.
         let can_start = self.service.service_installed && issue == ServiceIssue::NotRunning;
         let action = if can_start {
-            icon_action(start.element, AssetIconName::Play, start_face)
+            icon_action(start, AssetIconName::Play, start_face)
                 .loading(self.service.is_probing_service)
                 .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
                     this.start_service(cx);
                 }))
                 .into_any_element()
         } else {
-            icon_action(retry.element, AssetIconName::RotateCcw, retry_face)
+            icon_action(retry, AssetIconName::RotateCcw, retry_face)
                 .loading(self.service.is_probing_service)
                 .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
                     this.retry_service_connection(cx);
@@ -1764,6 +1767,7 @@ mod tests {
             service_connected: true,
             content_loading: false,
             content_failed: false,
+            content_action_failed: false,
             content_action_pending: false,
             content_state: &ContentIndexState::Ready,
         };
@@ -1791,6 +1795,14 @@ mod tests {
         );
 
         state.content_failed = false;
+        state.content_action_failed = true;
+        assert_eq!(
+            content_query_notice(&state),
+            Some(ContentQueryNotice::Error),
+            "an action failure must retry the action, not re-read the status"
+        );
+
+        state.content_action_failed = false;
         state.content_state = &ContentIndexState::Disabled;
         assert_eq!(
             content_query_notice(&state),

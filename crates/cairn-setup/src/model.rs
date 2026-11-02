@@ -147,6 +147,7 @@ pub fn uninstall_error_key(install_key: &str) -> &'static str {
         "error_msi_invalid" => "error_uninstall_msi_invalid",
         "error_msi_cleanup_failed" => "error_uninstall_cleanup_failed",
         "error_not_installed" => "error_uninstall_not_installed",
+        "error_staging" => "error_uninstall_staging",
         _ => "error_uninstall_msi_unknown",
     }
 }
@@ -358,6 +359,7 @@ mod tests {
             ("error_msi_invalid", "error_uninstall_msi_invalid"),
             ("error_msi_cleanup_failed", "error_uninstall_cleanup_failed"),
             ("error_not_installed", "error_uninstall_not_installed"),
+            ("error_staging", "error_uninstall_staging"),
             ("error_msi_unknown", "error_uninstall_msi_unknown"),
         ] {
             assert_eq!(uninstall_error_key(install_key), uninstall_key);

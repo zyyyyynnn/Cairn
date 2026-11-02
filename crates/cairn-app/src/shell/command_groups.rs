@@ -183,8 +183,8 @@ pub enum GroupCommand {
     /// Removes the indexed contents without touching the file-name index.
     ClearContentSearch,
     // ---- help -----------------------------------------------------------------------
-    /// Opens the public release page in the default browser; the app never downloads or runs an
-    /// installer itself.
+    /// Checks the latest stable release, downloads and verifies the installer, then hands the
+    /// verified installer to the elevated setup flow.
     CheckForUpdates,
     About,
 }

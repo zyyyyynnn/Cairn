@@ -53,19 +53,13 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
-      - name: Documentation-only change
-        if: needs.changes.outputs.docs_only == 'true'
-        run: echo "Documentation-only change; static analysis is not required."
       - name: Checkout repository
-        if: needs.changes.outputs.docs_only != 'true'
         uses: actions/checkout@v7
       - name: Install Rust toolchain
-        if: needs.changes.outputs.docs_only != 'true'
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - name: Rust cache
-        if: needs.changes.outputs.docs_only != 'true'
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: windows-debug
@@ -74,7 +68,7 @@ jobs:
       - name: Clippy lint
         if: needs.changes.outputs.docs_only != 'true'
         run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: Documentation check
+      - name: Rust documentation
         if: needs.changes.outputs.docs_only != 'true'
         run: cargo doc --workspace --no-deps
         env:
@@ -82,6 +76,8 @@ jobs:
       - name: Internationalization check
         if: needs.changes.outputs.docs_only != 'true'
         run: cargo run -p xtask -- check-i18n
+      - name: Documentation links
+        run: cargo run -p xtask -- check-docs
 
   deny:
     name: Dependency Policy
@@ -163,7 +159,7 @@ jobs:
       - name: Locate installer test binary
         shell: pwsh
         run: |
-          $binary = Get-ChildItem -Path target\debug\deps -Filter "CairnXtask-*.exe" |
+          $binary = Get-ChildItem -Path target\debug\deps -Filter "xtask-*.exe" |
             Sort-Object LastWriteTime -Descending |
             Select-Object -First 1
           if (-not $binary) { throw "The installer test binary was not produced." }
@@ -260,8 +256,8 @@ jobs:
 
   package:
     name: Installer Package
-    needs: [changes, release_runtime, release_installer, tooling]
-    if: always() && (needs.changes.outputs.docs_only == 'true' || (needs.release_runtime.result == 'success' && needs.release_installer.result == 'success' && needs.tooling.result == 'success'))
+    needs: [changes, deny, quality, release_runtime, release_installer, tooling]
+    if: always() && (needs.changes.outputs.docs_only == 'true' || (needs.deny.result == 'success' && needs.quality.result == 'success' && needs.release_runtime.result == 'success' && needs.release_installer.result == 'success' && needs.tooling.result == 'success'))
     runs-on: windows-latest
     timeout-minutes: 20
     steps:

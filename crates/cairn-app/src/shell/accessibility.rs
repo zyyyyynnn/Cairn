@@ -18,7 +18,9 @@
 
 use crate::shell::i18n::I18nManager;
 use gpui_kit::base::{ObservedElement, TestSupportExt};
-use gpui_kit::gpui::{div, Div, InteractiveElement, Role, Stateful, StatefulInteractiveElement};
+use gpui_kit::gpui::{
+    div, Div, InteractiveElement, Role, SharedString, Stateful, StatefulInteractiveElement,
+};
 
 /// One key control as assistive technology must see it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -646,6 +648,15 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         requirement: "UI-03",
     },
     KeyControl {
+        key: "toast-retry",
+        element: "toast-retry",
+        indexed: false,
+        role: Role::Button,
+        messages: &["toast_retry"],
+        named_by: "",
+        requirement: "UI-03",
+    },
+    KeyControl {
         key: "recycle-bin-error",
         element: "recycle-bin-error",
         indexed: false,
@@ -721,6 +732,12 @@ pub type ControlElement = ObservedElement<Stateful<Div>>;
 /// accessible name and its own styling.
 pub fn element(control: &KeyControl) -> ControlElement {
     div().id(control.element).role(control.role).test_support()
+}
+
+/// One modal title: a level-one heading named by the title the caller just localized. It is not a
+/// control, so it has no registry row; keeping its role here still leaves one place that decides it.
+pub(crate) fn heading(element: Stateful<Div>, label: impl Into<SharedString>) -> Stateful<Div> {
+    element.role(Role::Heading).aria_level(1).aria_label(label)
 }
 
 /// [`element_at`] for a repeated family whose member is named by a model key
@@ -851,6 +868,8 @@ mod tests {
         include_str!("../search/bar_view.rs"),
         include_str!("sidebar_view.rs"),
         include_str!("status_bar_view.rs"),
+        include_str!("state_view.rs"),
+        include_str!("dialogs.rs"),
         include_str!("../table/results_view.rs"),
         include_str!("../app.rs"),
         include_str!("commands.rs"),
@@ -874,6 +893,8 @@ mod tests {
         include_str!("../search/bar_view.rs"),
         include_str!("sidebar_view.rs"),
         include_str!("status_bar_view.rs"),
+        include_str!("state_view.rs"),
+        include_str!("dialogs.rs"),
         include_str!("toast.rs"),
         include_str!("../table/results_view.rs"),
         include_str!("../treemap/view.rs"),
@@ -967,6 +988,7 @@ mod tests {
             ("status-bar", Role::Status),
             ("toast", Role::Alert),
             ("toast-dismiss", Role::Button),
+            ("toast-retry", Role::Button),
             ("recycle-bin-error", Role::Alert),
             ("recycle-bin-retry", Role::Button),
             ("empty-recycle-bin", Role::Button),

@@ -13,7 +13,6 @@
 
 use crate::app::{layout, CairnApp};
 use crate::shell::accessibility;
-use crate::shell::recycle_bin::BinRetry;
 use crate::shell::state_view::icon_action;
 use crate::shell::theme::ShellTokens;
 use fluent_bundle::FluentArgs;
@@ -24,6 +23,7 @@ use gpui_kit::component::{h_flex, v_flex, Icon, Sizable as _};
 use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::*;
 use gpui_kit::gpui::{ease_out_quint, Animation, AnimationExt};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Informational status is allowed to leave on its own; a failure is not.
@@ -44,30 +44,31 @@ pub(crate) enum ToastKind {
     Info,
 }
 
-#[derive(Clone, Debug)]
+type ToastRun = Arc<dyn Fn(&mut CairnApp, &mut Window, &mut Context<CairnApp>)>;
+
+#[derive(Clone)]
 pub(crate) struct ToastAction {
     label: SharedString,
-    retry: BinRetry,
+    run: ToastRun,
 }
 
 impl ToastAction {
-    pub(crate) fn retry(label: impl Into<SharedString>, retry: BinRetry) -> Self {
+    pub(crate) fn new(
+        label: impl Into<SharedString>,
+        run: impl Fn(&mut CairnApp, &mut Window, &mut Context<CairnApp>) + 'static,
+    ) -> Self {
         Self {
             label: label.into(),
-            retry,
+            run: Arc::new(run),
         }
     }
 
     fn label(&self) -> &SharedString {
         &self.label
     }
-
-    pub(crate) fn retry_kind(&self) -> BinRetry {
-        self.retry.clone()
-    }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct ToastState {
     kind: ToastKind,
     title: String,
@@ -86,19 +87,18 @@ impl CairnApp {
         self.show_toast(ToastKind::Error, title.into(), message.into(), None, cx);
     }
 
-    pub(crate) fn show_error_toast_with_retry(
+    pub(crate) fn show_error_toast_with_action(
         &mut self,
         title: impl Into<String>,
         message: impl Into<String>,
-        retry: BinRetry,
+        action: ToastAction,
         cx: &mut Context<Self>,
     ) {
-        let label = self.i18n.get_text("toast_retry");
         self.show_toast(
             ToastKind::Error,
             title.into(),
             message.into(),
-            Some(ToastAction::retry(label, retry)),
+            Some(action),
             cx,
         );
     }
@@ -149,6 +149,19 @@ impl CairnApp {
             .detach();
         }
         cx.notify();
+    }
+
+    /// Runs the action stored on a failure toast. The toast is cleared first, so the retry either
+    /// reports a fresh failure or the result page replaces it without stale copy. Focus stays with
+    /// the action: a retry that returns to its own surface must not be pulled back to search.
+    pub(crate) fn run_toast_action(
+        &mut self,
+        action: ToastAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.dismiss_toast(cx);
+        (action.run)(self, window, cx);
     }
 
     pub(crate) fn dismiss_toast(&mut self, cx: &mut Context<Self>) {
@@ -324,11 +337,13 @@ impl CairnApp {
                             )
                             .when_some(action, |this, action| {
                                 let label = action.label().clone();
+                                let retry = accessibility::control("toast-retry");
                                 this.child(
-                                    icon_action("toast-retry", AssetIconName::RotateCcw, label)
-                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                    icon_action(retry, AssetIconName::RotateCcw, label).on_click(
+                                        cx.listener(move |this, _, window, cx| {
                                             this.run_toast_action(action.clone(), window, cx);
-                                        })),
+                                        }),
+                                    ),
                                 )
                             }),
                     ),

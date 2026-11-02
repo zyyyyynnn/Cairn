@@ -13,12 +13,12 @@ graph TD
     CLI[cairn-cli 免提权命令行] --> Client
     Client --> Protocol[cairn-protocol 消息与编解码]
 
-    Service[cairnd.exe Windows服务] --> Core[cairn-core 紧凑索引与引擎]
+    Service[CairnService.exe Windows服务] --> Core[cairn-core 紧凑索引与引擎]
     Service --> NTFS[cairn-ntfs 裸卷MFT与USN]
     Service --> Content[cairn-content Tantivy全文检索]
     Service --> Protocol
 
-    Worker[cairn-worker.exe 抽取进程] --> Content
+    Worker[CairnWorker.exe 抽取进程] --> Content
     Worker --> Protocol
 
     NTFS --> Core
@@ -29,8 +29,8 @@ graph TD
 ```mermaid
 flowchart TD
     subgraph NonElevated [免提权标准用户空间]
-        UI["cairn.exe (GUI 交互端)"]
-        CLI_Proc["cairn-cli.exe (CLI 查询工具)"]
+        UI["Cairn.exe (GUI 交互端)"]
+        CLI_Proc["CairnCli.exe (CLI 查询工具)"]
         Win32_Op["Win32 IFileOperation / SHEmptyRecycleBin（删除、还原、永久删除、清空回收站）"]
         UI -.调用.-> Win32_Op
     end
@@ -40,9 +40,9 @@ flowchart TD
     end
 
     subgraph Elevated [提权服务空间 (LocalSystem)]
-        ServiceHost["cairnd.exe (后台服务)"]
+        ServiceHost["CairnService.exe (后台服务)"]
         MFT_Engine["NTFS MFT/USN 增量引擎"]
-        WorkerProc["cairn-worker.exe (低优先级内容抽取子进程)"]
+        WorkerProc["CairnWorker.exe (低优先级内容抽取子进程)"]
         DiskVol["\\.\\X: 原始 NTFS 磁盘设备句柄 (100% 只读)"]
 
         ServiceHost --> MFT_Engine
@@ -55,8 +55,8 @@ flowchart TD
     NamedPipe === ServiceHost
 ```
 
-- **服务只读权限收敛**：`cairnd.exe` 以 `LocalSystem` 启动，仅持裸盘读取权限。其管道通信层完全不提供任何写磁盘、删文件或改文件名的接口。
-- **免提权文件写操作**：用户在 GUI 执行的删除到回收站、从回收站还原、永久删除与清空回收站，由 `cairn.exe` 直接向系统 Shell COM 发起 `IFileOperation` / `SHEmptyRecycleBin`，自然承接操作系统的回收站安全策略、撤销列表与原生进度/错误 UI。日常删除与永久删除先经过项目统一确认框；清空回收站保留原生警告；`F2` 重命名尚未实现。
+- **服务只读权限收敛**：`CairnService.exe` 以 `LocalSystem` 启动，仅持裸盘读取权限。其管道通信层完全不提供任何写磁盘、删文件或改文件名的接口。
+- **免提权文件写操作**：用户在 GUI 执行的删除到回收站、从回收站还原、永久删除与清空回收站，由 `Cairn.exe` 直接向系统 Shell COM 发起 `IFileOperation` / `SHEmptyRecycleBin`，自然承接操作系统的回收站安全策略、撤销列表与原生进度/错误 UI。日常删除与永久删除先经过项目统一确认框；清空回收站保留原生警告；`F2` 重命名尚未实现。
 
 ### 1.3 紧凑内存索引模型（≤ 125 Bytes/条）
 - **定长文件记录（`FileRecord`，紧凑对齐，约 40 字节）**：
@@ -123,7 +123,7 @@ flowchart TD
 | **界面国际化 (i18n)** | `fluent-bundle` | 现代化多语言文案管理与参数化插值 |
 | **日志与链路追踪** | `tracing` + `tracing-subscriber` | 结构化异步日志输出与性能诊断 |
 | **测试框架** | `cargo-nextest` + `proptest` | 极速多用例并行测试与属性随机测试 |
-| **发布打包工程** | WiX Toolset（Burn Bootstrapper + MSI 事务引擎） | 产出合规的单文件安装包 `CairnSetup.exe`（内置系统服务与 MSI 引擎） |
+| **发布打包工程** | WiX Toolset（MSI 事务引擎）+ GPUI Setup | 产出单文件安装包 `CairnSetup.exe`（内嵌 MSI 载荷与服务事务） |
 
 ---
 

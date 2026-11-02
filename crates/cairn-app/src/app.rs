@@ -425,9 +425,6 @@ impl CairnApp {
         });
         let keyboard_modality = cairn_ui::focus::observe_keyboard(cx);
 
-        // The service registration is read once here: it decides both whether the window may
-        // offer the machine-wide scope and which scope a first run opens in.
-
         let treemap_path_placeholder = i18n.get_text("treemap_path_placeholder");
         let treemap_path_input =
             cx.new(|cx| InputState::new(window, cx).placeholder(treemap_path_placeholder));

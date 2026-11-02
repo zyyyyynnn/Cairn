@@ -25,8 +25,9 @@ use cairn_core::format_size_bytes;
 use cairn_protocol::status::ContentIndexState;
 use fluent_bundle::FluentArgs;
 use gpui_kit::component::button::ButtonVariant;
-use gpui_kit::component::dialog::{AlertDialog, DialogButtonProps, DialogEntrance};
+use gpui_kit::component::dialog::AlertDialog;
 use gpui_kit::component::menu::PopupMenu;
+use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::gpui::*;
 use std::ops::Range;
@@ -142,29 +143,18 @@ fn menu_entries(
 /// every confirmation on this helper destroys data.
 fn style_confirmation_alert(
     alert: AlertDialog,
-    window: &Window,
+    window: &mut Window,
+    cx: &mut App,
     ok_text: impl Into<SharedString>,
     cancel_text: impl Into<SharedString>,
 ) -> AlertDialog {
-    alert
-        .width(window.rem_size() * layout::DIALOG_WIDTH)
-        .margin_top(dialogs::top_offset(window))
-        // A short settle from just above the resting seat reads calmer than the
-        // legacy slide from the window top, and shares the theme's reduced-motion
-        // policy. gpui-component 0.8 removes a dialog immediately on close and
-        // exposes no closing phase, so only the entrance can be shaped here.
-        .entrance(DialogEntrance::FadeSlide)
-        // Both footer actions use the same borderless medium frame. The default
-        // Cancel border made the filled action read one pixel taller although
-        // their outer bounds were equal. The commit button is danger, not a
-        // neutral primary: every confirmation on this helper destroys data.
-        .button_props(
-            DialogButtonProps::default()
-                .ok_text(ok_text)
-                .cancel_text(cancel_text)
-                .cancel_variant(ButtonVariant::Secondary)
-                .ok_variant(ButtonVariant::Danger),
-        )
+    // Both footer actions keep the same medium frame; the lighter neutral plate is painted
+    // one pixel inside it so the pair reads as one optical size. The commit button is danger,
+    // not a neutral primary: every confirmation on this helper destroys data.
+    let surface = cairn_ui::theme::dialog_surface(cx.theme());
+    let actions =
+        dialogs::DialogActions::new(ok_text, ButtonVariant::Danger).with_cancel(cancel_text);
+    dialogs::alert_surface(alert, window, cx, surface, actions)
 }
 
 /// The shell can report a batch as successful while a progress dialog skipped one item. The
@@ -702,6 +692,7 @@ impl CairnApp {
                 self.service.content_status_error.as_deref(),
                 self.service.content_action_error.as_deref(),
             ),
+            content_action_failed: self.service.content_action_error.is_some(),
             content_action_pending: self.service.content_action_pending,
             content_state: &self.service.content_status.state,
         }
@@ -715,7 +706,7 @@ impl CairnApp {
             return self.i18n.get_text("menu_content_search_unavailable");
         }
         if self.service.content_action_error.is_some() {
-            return self.i18n.get_text("menu_content_search_unavailable");
+            return self.i18n.get_text("menu_content_search_failed");
         }
         if self.service.content_status_loading {
             return self.i18n.get_text("menu_content_search_loading");
@@ -936,8 +927,8 @@ impl CairnApp {
                 let ok = self.i18n.get_text("index_clear_confirm_action");
                 let cancel = self.i18n.get_text("index_clear_cancel");
                 let view = cx.entity();
-                window.open_alert_dialog(cx, move |alert, window, _| {
-                    style_confirmation_alert(alert, window, ok.clone(), cancel.clone())
+                window.open_alert_dialog(cx, move |alert, window, app| {
+                    style_confirmation_alert(alert, window, app, ok.clone(), cancel.clone())
                         .child(dialogs::body(title.clone(), description.clone(), window))
                         .confirm()
                         .on_ok({
@@ -1305,8 +1296,8 @@ impl CairnApp {
         let ok = self.i18n.get_text("recycle_bin_delete_confirm_action");
         let cancel = self.i18n.get_text("delete_confirm_cancel");
         let view = cx.entity();
-        window.open_alert_dialog(cx, move |alert, window, _| {
-            style_confirmation_alert(alert, window, ok.clone(), cancel.clone())
+        window.open_alert_dialog(cx, move |alert, window, app| {
+            style_confirmation_alert(alert, window, app, ok.clone(), cancel.clone())
                 .child(dialogs::body(title.clone(), description.clone(), window))
                 .confirm()
                 .on_ok({
@@ -1386,8 +1377,8 @@ impl CairnApp {
         let ok = self.i18n.get_text("delete_confirm_action");
         let cancel = self.i18n.get_text("delete_confirm_cancel");
         let view = cx.entity();
-        window.open_alert_dialog(cx, move |alert, window, _| {
-            style_confirmation_alert(alert, window, ok.clone(), cancel.clone())
+        window.open_alert_dialog(cx, move |alert, window, app| {
+            style_confirmation_alert(alert, window, app, ok.clone(), cancel.clone())
                 .child(dialogs::body(title.clone(), description.clone(), window))
                 .confirm()
                 .on_ok({
@@ -1519,8 +1510,8 @@ impl CairnApp {
         let ok = self.i18n.get_text("recycle_bin_empty_confirm_action");
         let cancel = self.i18n.get_text("delete_confirm_cancel");
         let view = cx.entity();
-        window.open_alert_dialog(cx, move |alert, window, _| {
-            style_confirmation_alert(alert, window, ok.clone(), cancel.clone())
+        window.open_alert_dialog(cx, move |alert, window, app| {
+            style_confirmation_alert(alert, window, app, ok.clone(), cancel.clone())
                 .child(dialogs::body(title.clone(), description.clone(), window))
                 .confirm()
                 .on_ok({

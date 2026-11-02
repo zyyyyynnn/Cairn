@@ -19,6 +19,8 @@ pub struct IndexMenuState<'a> {
     pub content_loading: bool,
     /// Whether the last content index status read failed.
     pub content_failed: bool,
+    /// Whether the last content index action itself failed.
+    pub content_action_failed: bool,
     /// Whether a content index action is in flight.
     pub content_action_pending: bool,
     /// The content index's own state.
@@ -66,6 +68,7 @@ mod tests {
             service_connected: true,
             content_loading: false,
             content_failed: false,
+            content_action_failed: false,
             content_action_pending: false,
             content_state: &ContentIndexState::Ready,
         }

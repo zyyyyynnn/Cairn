@@ -79,8 +79,7 @@ pub enum ClientRequest {
     ClearContentIndex,
     /// The directory tree below `path` (drive root when it names a drive),
     /// aggregated and sorted, from the service's volume index. Uncovered paths
-    /// are reported through the tree error codes; an empty list is a legacy
-    /// answer for an uncovered path.
+    /// are reported through the tree error codes.
     GetTree {
         path: String,
         max_depth: usize,
@@ -153,9 +152,8 @@ pub enum ResponsePayload {
     TreeResult {
         path: String,
         /// Pre-order entries, parent before children; `depth` 0 is the root.
-        /// An empty list is a legacy answer for an uncovered path; the current
-        /// service reports not-indexed, not-a-directory and over-budget trees
-        /// through `Error` codes instead.
+        /// Uncovered paths are reported through `Error` codes; an empty list
+        /// describes an empty directory.
         entries: Vec<TreeEntryData>,
     },
     Error {

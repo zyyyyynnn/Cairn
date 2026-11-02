@@ -6,10 +6,10 @@
 
 | 进程 | 权限 | 职责 |
 | --- | --- | --- |
-| `cairn.exe` | 标准用户 | GPUI 界面、结果渲染、用户交互；不直接读取 `$MFT` |
-| `cairnd.exe`（服务） | LocalSystem | 后台索引、NTFS `$MFT`/USN Journal 读取、服务数据目录维护 |
+| `Cairn.exe` | 标准用户 | GPUI 界面、结果渲染、用户交互；不直接读取 `$MFT` |
+| `CairnService.exe`（服务） | LocalSystem | 后台索引、NTFS `$MFT`/USN Journal 读取、服务数据目录维护 |
 
-- `cairnd --console` 只用于开发/测试；生产必须由 Windows 服务承载。
+- `CairnService --console` 只用于开发/测试；生产必须由 Windows 服务承载。
 - 服务名：`CairnService`。
 
 ## 2. 命名管道

@@ -11,6 +11,7 @@ use crate::service::ipc_tasks::get_tokio_runtime;
 use crate::shell::accessibility;
 use crate::shell::os::{open_file, open_folder_and_select, show_properties_dialog};
 use crate::shell::state_view::{icon_action, render_state_band};
+use crate::shell::status_bar::format_count;
 use crate::shell::theme::{self, ShellTokens};
 use crate::treemap::navigation::path_segments;
 use crate::treemap::paint::{
@@ -167,6 +168,8 @@ impl CairnApp {
         }
         self.treemap_path.editing = false;
         self.treemap_path.error = false;
+        let title = self.i18n.get_text("treemap_path_invalid_title");
+        self.dismiss_toast_titled(&title, cx);
         self.focus_treemap_canvas(window, cx);
         cx.notify();
     }
@@ -583,9 +586,9 @@ impl CairnApp {
                     .border_color(if error {
                         tokens.danger
                     } else if editing {
-                        tokens.field_focus_stroke
+                        tokens.ring
                     } else {
-                        tokens.field_stroke
+                        tokens.control_stroke
                     })
                     .text_color(tokens.foreground)
                     .cursor(CursorStyle::IBeam)
@@ -795,7 +798,7 @@ impl CairnApp {
             let action = retryable.then(|| {
                 let retry = accessibility::control("treemap-retry");
                 let label = accessibility::name(retry, &self.i18n);
-                icon_action(retry.element, IconName::RotateCcw, label)
+                icon_action(retry, IconName::RotateCcw, label)
                     .on_click(cx.listener(|this, _, window, cx| {
                         if let Some(dir) = this
                             .treemap_state
@@ -1296,6 +1299,7 @@ fn render_nested_node(
     if node.is_aggregate() {
         let mut args = FluentArgs::new();
         args.set("count", node.aggregate_count as i64);
+        args.set("count_text", format_count(node.aggregate_count));
         let label = rcx.i18n.get_text_with_args("treemap_aggregate", &args);
         let tooltip = SharedString::from(format!("{label}\n{size_str}"));
         let content = compact_block_content(

@@ -11,6 +11,7 @@
 
 use crate::app::{layout, CairnApp};
 use crate::shell::os::RecycleBinItem;
+use crate::shell::toast::ToastAction;
 use crate::table::model::SortColumn;
 use cairn_protocol::message::FileRowData;
 use gpui_kit::gpui::{px, Context, Pixels, Point, Window};
@@ -656,25 +657,21 @@ impl CairnApp {
             args.set("items", item_names_summary(&self.i18n, item_names));
             self.i18n.get_text_with_args("bin_error_items", &args)
         };
-        self.show_error_toast_with_retry(title, message, retry, cx);
+        let label = self.i18n.get_text("toast_retry");
+        let action = ToastAction::new(label, move |this, window, cx| {
+            this.run_bin_retry(retry.clone(), cx);
+            this.query.search_focus.focus(window, cx);
+        });
+        self.show_error_toast_with_action(title, message, action, cx);
     }
 
-    /// Runs the action stored on a failure toast. The toast is cleared first, so the retry either
-    /// reports a fresh failure or the result page replaces it without stale copy.
-    pub(crate) fn run_toast_action(
-        &mut self,
-        action: crate::shell::toast::ToastAction,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.dismiss_toast(cx);
-        match action.retry_kind() {
+    fn run_bin_retry(&mut self, retry: BinRetry, cx: &mut Context<Self>) {
+        match retry {
             BinRetry::DeletePaths(paths) => self.delete_paths(paths, cx),
             BinRetry::DeletePermanently(items) => self.delete_bin_items_permanently(items, cx),
             BinRetry::RestoreItems(items) => self.restore_bin_items(items, cx),
             BinRetry::EmptyBin => self.execute_empty_bin(cx),
         }
-        self.query.search_focus.focus(window, cx);
     }
 
     fn shell_reason_text(&self, reason: &str) -> String {

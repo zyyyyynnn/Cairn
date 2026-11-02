@@ -8,7 +8,6 @@ license_title = License
 license_name = Apache License 2.0
 action_view_license = View full license
 error_license_required = Accept the license terms to continue.
-error_open_license = The license could not be opened. Try again.
 
 license_accept = I accept these terms
 
@@ -34,7 +33,7 @@ uninstall_missing_title = Cairn was not found
 uninstall_missing_body = Cairn is not installed on this PC, so there is nothing to remove.
 
 error_uninstall_title = Uninstall did not finish
-error_uninstall_msi_unknown = The uninstall did not finish, so Cairn is still installed. Check the log for the reason, then try again.
+error_uninstall_msi_unknown = Cairn is still installed. Check the log for the reason, then try again.
 error_uninstall_msi_cancelled = The uninstall was cancelled, so Cairn is still installed.
 error_uninstall_msi_busy = Another installer or uninstaller is already running. Wait for it to complete and try again.
 error_uninstall_not_installed = No Cairn installation was found.
@@ -44,8 +43,10 @@ error_uninstall_msi_invalid = Windows Installer could not read Cairn’s install
 error_uninstall_cleanup_failed = Some Cairn files could not be removed. Check the log for the reason.
 
 error_title = The installation did not finish
-error_msi_unknown = The installation did not finish, so existing files were not removed. Check the log for the reason, then try again.
+error_msi_unknown = Existing files were not removed. Check the log for the reason, then try again.
 error_no_payload = Installer files are missing. Download CairnSetup.exe again.
+error_staging = The installer could not prepare its temporary files. Close the installer and try again.
+error_uninstall_staging = The uninstaller could not prepare its temporary files. Close this window and try again.
 error_msi_cancelled = Setup was cancelled.
 error_msi_busy = Another installer is already running. Wait for it to complete and try again.
 error_msi_invalid = The installer is damaged. Download it again.
@@ -84,9 +85,11 @@ action_continue = Continue
 action_back = Back
 action_install = Install
 action_close = Close
+action_cancel = Cancel
 action_retry = Retry
 action_uninstall = Uninstall
 action_remove_remaining = Remove remaining files
 action_open_app = Open Cairn
 action_finish = Done
 action_view_log = View log
+log_viewer_title = Installation log

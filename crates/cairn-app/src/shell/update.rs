@@ -10,16 +10,20 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::app::{layout, CairnApp};
-use crate::service::elevation::{launch_elevated_installer, ElevationError};
+use crate::service::elevation::{
+    launch_elevated_installer, lock_verified_installer, ElevationError,
+};
 use crate::service::ipc_tasks::get_tokio_runtime;
 use crate::shell::dialogs;
 use crate::shell::theme::ShellTokens;
+use cairn_ui::theme::dialog_surface;
 use fluent_bundle::FluentArgs;
 use gpui_kit::assets::IconName as AssetIconName;
 use gpui_kit::component::button::ButtonVariant;
-use gpui_kit::component::dialog::{AlertDialog, DialogButtonProps, DialogEntrance};
+use gpui_kit::component::dialog::DialogEntrance;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::v_flex;
+use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::Sizable as _;
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::gpui::*;
@@ -30,6 +34,19 @@ const RELEASES_API: &str = "https://api.github.com/repos/zyyyyynnn/Cairn/release
 const SETUP_ASSET: &str = "CairnSetup.exe";
 const SUMS_ASSET: &str = "SHA256SUMS.txt";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Debug builds may resolve a lower current version, so the available-update dialog can be
+/// inspected without publishing a test release. Release builds always use the package version.
+fn current_version() -> String {
+    #[cfg(debug_assertions)]
+    if let Ok(version) = std::env::var("CAIRN_UPDATE_FAKE_VERSION") {
+        let version = version.trim();
+        if !version.is_empty() {
+            return version.to_string();
+        }
+    }
+    CURRENT_VERSION.to_string()
+}
 const CHECK_TIMEOUT: Duration = Duration::from_secs(20);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
 const PENDING_VERSION_FILE: &str = "update-target.txt";
@@ -53,6 +70,14 @@ struct ReleaseInfo {
     sums_url: String,
 }
 
+#[derive(Clone)]
+enum UpdateAlertAction {
+    Close,
+    CheckAgain,
+    Download(ReleaseInfo),
+    Install(ReleaseInfo, PathBuf, String),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum UpdateError {
     Network,
@@ -65,7 +90,7 @@ enum UpdateError {
 
 fn client_with_timeout(timeout: Duration) -> Result<reqwest::Client, UpdateError> {
     reqwest::Client::builder()
-        .user_agent(format!("Cairn/{CURRENT_VERSION}"))
+        .user_agent(format!("Cairn/{}", current_version()))
         .timeout(timeout)
         .build()
         .map_err(|_| UpdateError::Network)
@@ -112,7 +137,7 @@ async fn check_latest() -> Result<Option<ReleaseInfo>, UpdateError> {
     }))
 }
 
-async fn download_and_verify(release: &ReleaseInfo) -> Result<PathBuf, UpdateError> {
+async fn download_and_verify(release: &ReleaseInfo) -> Result<(PathBuf, String), UpdateError> {
     let client = client_with_timeout(DOWNLOAD_TIMEOUT)?;
     let sums = client
         .get(&release.sums_url)
@@ -167,7 +192,7 @@ async fn download_and_verify(release: &ReleaseInfo) -> Result<PathBuf, UpdateErr
     if result.is_err() {
         let _ = std::fs::remove_file(&setup_path);
     }
-    result.map(|()| setup_path)
+    result.map(|()| (setup_path, expected))
 }
 
 fn normalize_version(tag: &str) -> String {
@@ -258,7 +283,7 @@ impl CairnApp {
         if target.is_empty() {
             return;
         }
-        if is_newer(&target, CURRENT_VERSION) {
+        if is_newer(&target, &current_version()) {
             let title = self.i18n.get_text("update_interrupted_title");
             let body = self.i18n.get_text("update_interrupted_body");
             self.show_error_toast(title, body, cx);
@@ -304,79 +329,126 @@ impl CairnApp {
         result: Result<Option<ReleaseInfo>, UpdateError>,
     ) {
         self.is_checking_update = false;
-        self.close_group();
+        if self.open_group == Some(crate::shell::command_groups::MenuGroup::Help) {
+            self.close_group();
+        }
         cx.notify();
         match result {
             Err(UpdateError::Incomplete) => {
                 let title = self.i18n.get_text("update_incomplete_title");
                 let body = self.i18n.get_text("update_incomplete_body");
-                self.open_update_error_alert(window, cx, title, body);
+                self.open_update_alert(
+                    window,
+                    cx,
+                    title,
+                    body,
+                    self.i18n.get_text("update_retry"),
+                    Some(self.i18n.get_text("update_close")),
+                    UpdateAlertAction::CheckAgain,
+                );
             }
             Err(_) => {
                 let title = self.i18n.get_text("update_check_failed_title");
                 let body = self.i18n.get_text("update_check_failed_body");
-                self.open_update_error_alert(window, cx, title, body);
+                self.open_update_alert(
+                    window,
+                    cx,
+                    title,
+                    body,
+                    self.i18n.get_text("update_retry"),
+                    Some(self.i18n.get_text("update_close")),
+                    UpdateAlertAction::CheckAgain,
+                );
             }
             Ok(None) => {
                 let title = self.i18n.get_text("update_up_to_date_title");
                 let body = self.i18n.get_text("update_no_releases_body");
-                self.open_update_info_alert(window, cx, title, body);
+                self.open_update_alert(
+                    window,
+                    cx,
+                    title,
+                    body,
+                    self.i18n.get_text("update_close"),
+                    None,
+                    UpdateAlertAction::Close,
+                );
             }
-            Ok(Some(release)) if is_newer(&release.version, CURRENT_VERSION) => {
+            Ok(Some(release)) if is_newer(&release.version, &current_version()) => {
                 let title = self.i18n.get_text("update_available_title");
+                let current = current_version();
                 let mut body_args = version_args(&release.version);
-                body_args.set("current", CURRENT_VERSION);
+                body_args.set("current", current.as_str());
                 let body = self
                     .i18n
                     .get_text_with_args("update_available_body", &body_args);
-                self.open_update_available_alert(window, cx, title, body, release);
+                self.open_update_alert(
+                    window,
+                    cx,
+                    title,
+                    body,
+                    self.i18n.get_text("update_download_action"),
+                    Some(self.i18n.get_text("update_later")),
+                    UpdateAlertAction::Download(release),
+                );
             }
             Ok(Some(release)) => {
+                let current = current_version();
                 let mut args = version_args(&release.version);
-                args.set("current", CURRENT_VERSION);
+                args.set("current", current.as_str());
                 let title = self.i18n.get_text("update_up_to_date_title");
                 let body = self
                     .i18n
                     .get_text_with_args("update_up_to_date_body", &args);
-                self.open_update_info_alert(window, cx, title, body);
+                self.open_update_alert(
+                    window,
+                    cx,
+                    title,
+                    body,
+                    self.i18n.get_text("update_close"),
+                    None,
+                    UpdateAlertAction::Close,
+                );
             }
         }
     }
 
-    fn open_update_info_alert(
+    #[allow(clippy::too_many_arguments)]
+    fn open_update_alert(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
         title: String,
         body: String,
+        ok: String,
+        cancel: Option<String>,
+        action: UpdateAlertAction,
     ) {
-        let ok = self.i18n.get_text("update_close");
-        window.open_alert_dialog(cx, move |alert, window, _| {
-            style_update_alert(alert, window, ok.clone(), None)
-                .child(dialogs::body(title.clone(), body.clone(), window))
-                .on_ok(|_, _, _| true)
-        });
-    }
-
-    fn open_update_available_alert(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-        title: String,
-        body: String,
-        release: ReleaseInfo,
-    ) {
-        let ok = self.i18n.get_text("update_download_action");
-        let cancel = self.i18n.get_text("update_later");
         let view = cx.entity();
-        window.open_alert_dialog(cx, move |alert, window, _| {
-            style_update_alert(alert, window, ok.clone(), Some(cancel.clone().into()))
-                .child(dialogs::body(title.clone(), body.clone(), window))
-                .confirm()
-                .on_ok({
-                    let view = view.clone();
-                    let release = release.clone();
-                    move |_, window, cx| {
+        window.open_alert_dialog(cx, move |alert, window, app| {
+            let actions = dialogs::DialogActions::new(ok.clone(), ButtonVariant::Primary);
+            let actions = match cancel.clone() {
+                Some(cancel) => actions.with_cancel(cancel),
+                None => actions,
+            };
+            let surface = dialog_surface(app.theme());
+            let alert = dialogs::alert_surface(alert, window, app, surface, actions)
+                .child(dialogs::body(title.clone(), body.clone(), window));
+            let view = view.clone();
+            match action.clone() {
+                UpdateAlertAction::Close => alert.on_ok(|_, _, _| true),
+                UpdateAlertAction::CheckAgain => alert
+                    .confirm()
+                    .on_ok(move |_, window, cx| {
+                        let view = view.clone();
+                        window.defer(cx, move |window, cx| {
+                            view.update(cx, |this, cx| this.start_update_check(window, cx));
+                        });
+                        true
+                    })
+                    .on_cancel(|_, _, _| true),
+                UpdateAlertAction::Download(release) => alert
+                    .confirm()
+                    .on_ok(move |_, window, cx| {
                         let view = view.clone();
                         let release = release.clone();
                         window.defer(cx, move |window, cx| {
@@ -385,37 +457,30 @@ impl CairnApp {
                             });
                         });
                         true
-                    }
-                })
-                .on_cancel(|_, _, _| true)
-        });
-    }
-
-    fn open_update_error_alert(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-        title: String,
-        body: String,
-    ) {
-        let ok = self.i18n.get_text("update_retry");
-        let cancel = self.i18n.get_text("update_close");
-        let view = cx.entity();
-        window.open_alert_dialog(cx, move |alert, window, _| {
-            style_update_alert(alert, window, ok.clone(), Some(cancel.clone().into()))
-                .child(dialogs::body(title.clone(), body.clone(), window))
-                .confirm()
-                .on_ok({
-                    let view = view.clone();
-                    move |_, window, cx| {
+                    })
+                    .on_cancel(|_, _, _| true),
+                UpdateAlertAction::Install(release, path, expected) => alert
+                    .confirm()
+                    .on_ok(move |_, window, cx| {
                         let view = view.clone();
+                        let release = release.clone();
+                        let path = path.clone();
+                        let expected = expected.clone();
                         window.defer(cx, move |window, cx| {
-                            view.update(cx, |this, cx| this.start_update_check(window, cx));
+                            view.update(cx, |this, cx| {
+                                this.install_downloaded(
+                                    window,
+                                    cx,
+                                    release.clone(),
+                                    path.clone(),
+                                    expected.clone(),
+                                );
+                            });
                         });
                         true
-                    }
-                })
-                .on_cancel(|_, _, _| true)
+                    })
+                    .on_cancel(|_, _, _| true),
+            }
         });
     }
 
@@ -454,56 +519,43 @@ impl CairnApp {
         window: &mut Window,
         cx: &mut Context<Self>,
         release: ReleaseInfo,
-        result: Result<PathBuf, UpdateError>,
+        result: Result<(PathBuf, String), UpdateError>,
     ) {
         match result {
-            Ok(path) => self.install_downloaded(window, cx, release, path),
+            Ok((path, expected)) => self.install_downloaded(window, cx, release, path, expected),
             Err(UpdateError::Verify) => {
                 window.close_dialog(cx);
                 let title = self.i18n.get_text("update_verify_failed_title");
                 let body = self.i18n.get_text("update_verify_failed_body");
-                self.open_update_download_error_alert(window, cx, title, body, release);
+                let ok = self.i18n.get_text("update_retry");
+                let cancel = self.i18n.get_text("update_close");
+                self.open_update_alert(
+                    window,
+                    cx,
+                    title,
+                    body,
+                    ok,
+                    Some(cancel),
+                    UpdateAlertAction::Download(release),
+                );
             }
             Err(_) => {
                 window.close_dialog(cx);
                 let title = self.i18n.get_text("update_download_failed_title");
                 let body = self.i18n.get_text("update_download_failed_body");
-                self.open_update_download_error_alert(window, cx, title, body, release);
+                let ok = self.i18n.get_text("update_retry");
+                let cancel = self.i18n.get_text("update_close");
+                self.open_update_alert(
+                    window,
+                    cx,
+                    title,
+                    body,
+                    ok,
+                    Some(cancel),
+                    UpdateAlertAction::Download(release),
+                );
             }
         }
-    }
-
-    fn open_update_download_error_alert(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-        title: String,
-        body: String,
-        release: ReleaseInfo,
-    ) {
-        let ok = self.i18n.get_text("update_retry");
-        let cancel = self.i18n.get_text("update_close");
-        let view = cx.entity();
-        window.open_alert_dialog(cx, move |alert, window, _| {
-            style_update_alert(alert, window, ok.clone(), Some(cancel.clone().into()))
-                .child(dialogs::body(title.clone(), body.clone(), window))
-                .confirm()
-                .on_ok({
-                    let view = view.clone();
-                    let release = release.clone();
-                    move |_, window, cx| {
-                        let view = view.clone();
-                        let release = release.clone();
-                        window.defer(cx, move |window, cx| {
-                            view.update(cx, |this, cx| {
-                                this.start_update_download(window, cx, release.clone());
-                            });
-                        });
-                        true
-                    }
-                })
-                .on_cancel(|_, _, _| true)
-        });
     }
 
     fn install_downloaded(
@@ -512,64 +564,74 @@ impl CairnApp {
         cx: &mut Context<Self>,
         release: ReleaseInfo,
         path: PathBuf,
+        expected_sha256: String,
     ) {
+        let installer = match lock_verified_installer(&path, &expected_sha256) {
+            Ok(installer) => installer,
+            Err(error) => {
+                tracing::warn!("downloaded installer changed after verification: {error}");
+                let _ = std::fs::remove_file(&path);
+                window.close_dialog(cx);
+                let title = self.i18n.get_text("update_verify_failed_title");
+                let body = self.i18n.get_text("update_verify_failed_body");
+                let ok = self.i18n.get_text("update_retry");
+                let cancel = self.i18n.get_text("update_close");
+                self.open_update_alert(
+                    window,
+                    cx,
+                    title,
+                    body,
+                    ok,
+                    Some(cancel),
+                    UpdateAlertAction::Download(release),
+                );
+                return;
+            }
+        };
         write_pending_version(&release.version);
-        match launch_elevated_installer(&path) {
+        match launch_elevated_installer(&path, &expected_sha256) {
             Ok(()) => {
+                drop(installer);
                 std::process::exit(0);
             }
             Err(ElevationError::Cancelled) => {
+                drop(installer);
                 remove_pending_version();
                 window.close_dialog(cx);
                 let title = self.i18n.get_text("update_cancelled_title");
                 let body = self.i18n.get_text("update_cancelled_body");
-                self.open_update_install_error_alert(window, cx, title, body, release, path);
+                let ok = self.i18n.get_text("update_retry");
+                let cancel = self.i18n.get_text("update_close");
+                self.open_update_alert(
+                    window,
+                    cx,
+                    title,
+                    body,
+                    ok,
+                    Some(cancel),
+                    UpdateAlertAction::Install(release, path, expected_sha256),
+                );
             }
             Err(ElevationError::Failed { message, .. }) => {
                 tracing::warn!("update installer could not start: {message}");
+                drop(installer);
                 remove_pending_version();
                 window.close_dialog(cx);
                 let title = self.i18n.get_text("update_install_failed_title");
                 let body = self.i18n.get_text("update_install_failed_body");
-                self.open_update_install_error_alert(window, cx, title, body, release, path);
+                let ok = self.i18n.get_text("update_retry");
+                let cancel = self.i18n.get_text("update_close");
+                self.open_update_alert(
+                    window,
+                    cx,
+                    title,
+                    body,
+                    ok,
+                    Some(cancel),
+                    UpdateAlertAction::Install(release, path, expected_sha256),
+                );
             }
         }
-    }
-
-    fn open_update_install_error_alert(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-        title: String,
-        body: String,
-        release: ReleaseInfo,
-        path: PathBuf,
-    ) {
-        let ok = self.i18n.get_text("update_retry");
-        let cancel = self.i18n.get_text("update_close");
-        let view = cx.entity();
-        window.open_alert_dialog(cx, move |alert, window, _| {
-            style_update_alert(alert, window, ok.clone(), Some(cancel.clone().into()))
-                .child(dialogs::body(title.clone(), body.clone(), window))
-                .confirm()
-                .on_ok({
-                    let view = view.clone();
-                    let release = release.clone();
-                    let path = path.clone();
-                    move |_, window, cx| {
-                        let view = view.clone();
-                        let release = release.clone();
-                        let path = path.clone();
-                        window.defer(cx, move |window, cx| {
-                            view.update(cx, |this, cx| {
-                                this.install_downloaded(window, cx, release.clone(), path.clone());
-                            });
-                        });
-                        true
-                    }
-                })
-                .on_cancel(|_, _, _| true)
-        });
     }
 }
 
@@ -579,35 +641,13 @@ fn version_args(version: &str) -> FluentArgs<'_> {
     args
 }
 
-fn style_update_alert(
-    alert: AlertDialog,
-    window: &Window,
-    ok_text: impl Into<SharedString>,
-    cancel_text: Option<SharedString>,
-) -> AlertDialog {
-    let mut props = DialogButtonProps::default()
-        .ok_text(ok_text)
-        .ok_variant(ButtonVariant::Primary);
-    props = match cancel_text {
-        Some(cancel_text) => props
-            .cancel_text(cancel_text)
-            .cancel_variant(ButtonVariant::Secondary)
-            .show_cancel(true),
-        None => props.show_cancel(false),
-    };
-    alert
-        .width(window.rem_size() * layout::DIALOG_WIDTH)
-        .margin_top(dialogs::top_offset(window))
-        .entrance(DialogEntrance::FadeSlide)
-        .button_props(props)
-}
-
 fn show_busy_dialog(window: &mut Window, cx: &mut App, title: String, body: String) {
     window.open_dialog(cx, move |dialog, window, cx| {
         let tokens = ShellTokens::current(cx);
         dialog
             .w(window.rem_size() * layout::DIALOG_WIDTH)
             .margin_top(dialogs::top_offset(window))
+            .bg(dialog_surface(cx.theme()))
             .overlay_closable(false)
             .close_button(false)
             .keyboard(false)

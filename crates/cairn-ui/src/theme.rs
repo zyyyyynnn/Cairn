@@ -32,14 +32,6 @@ const RING_CONTRAST_FLOOR: f32 = 3.0;
 /// The floor for a control's own boundary against the page (WCAG 1.4.11).
 const CONTROL_CONTRAST_FLOOR: f32 = 3.0;
 
-/// The resting outline of an editable field. It carries the field's boundary without the weight
-/// of the focus ring, which stays at [`RING_CONTRAST_FLOOR`].
-const FIELD_STROKE_CONTRAST_FLOOR: f32 = 1.8;
-
-/// The active outline of an editable field. It steps above the resting outline, below the focus
-/// ring; the field's own fill and caret carry the rest of the focus state.
-const FIELD_FOCUS_CONTRAST_FLOOR: f32 = 2.2;
-
 /// A neutral stroke for form-control boundaries that clears 3:1 against the page.
 /// Structural hairlines keep the lighter `border` token; only the outline of an editable
 /// or checkable control uses this role.
@@ -48,25 +40,6 @@ pub fn control_stroke(theme: &Theme) -> Hsla {
         theme.border,
         &[theme.background, theme.muted, theme.title_bar],
         CONTROL_CONTRAST_FLOOR,
-    )
-}
-
-/// The resting outline of an editable field. It sits above the field's own well and the band it
-/// rests on, and below the focus ring that replaces it while the field is active.
-pub fn field_stroke(theme: &Theme) -> Hsla {
-    enforce_contrast_floor(
-        theme.input,
-        &[theme.muted, theme.title_bar],
-        FIELD_STROKE_CONTRAST_FLOOR,
-    )
-}
-
-/// The active outline of an editable field, one step above [`field_stroke`].
-pub fn field_focus_stroke(theme: &Theme) -> Hsla {
-    enforce_contrast_floor(
-        field_stroke(theme),
-        &[theme.background, theme.muted, theme.title_bar],
-        FIELD_FOCUS_CONTRAST_FLOOR,
     )
 }
 
@@ -375,6 +348,7 @@ pub fn apply_appearance(dark: bool, zoom: f32, cx: &mut App) {
         theme.radius_lg = RADIUS;
     });
     raise_failing_ink(cx);
+    paint_secondary_action(cx);
     strengthen_ghost_hover(cx);
     paint_danger_button(cx);
 }
@@ -384,16 +358,31 @@ pub fn set_dark_mode(dark: bool, cx: &mut App) -> bool {
     set_mode(dark, cx);
     settle_overlay(dark, cx);
     raise_failing_ink(cx);
+    paint_secondary_action(cx);
     strengthen_ghost_hover(cx);
     paint_danger_button(cx);
     dark
+}
+
+/// The dialog's raised surface. Light keeps the page white; dark uses the frame step so the modal
+/// is not the same color as the page it covers.
+pub fn dialog_surface(theme: &Theme) -> Hsla {
+    if theme.mode == ThemeMode::Dark {
+        theme.title_bar
+    } else {
+        theme.background
+    }
+}
+
+fn overlay_color(dark: bool) -> Hsla {
+    hsla(0., 0., 0., if dark { 0.55 } else { 0.18 })
 }
 
 /// The component palette's light overlay is 5% black; on this product's surfaces that reads as a
 /// detached card rather than a modal. Deepen the scrim in both modes.
 fn settle_overlay(dark: bool, cx: &mut App) {
     Theme::update(cx, move |theme| {
-        theme.overlay = hsla(0., 0., 0., if dark { 0.38 } else { 0.18 });
+        theme.overlay = overlay_color(dark);
     });
 }
 
@@ -416,6 +405,19 @@ fn raise_failing_ink(cx: &mut App) {
 
 fn strengthen_ghost_hover(cx: &mut App) {
     Theme::update(cx, apply_unified_interaction_fill);
+}
+
+fn paint_secondary_action(cx: &mut App) {
+    Theme::update(cx, apply_secondary_action);
+}
+
+/// A filled secondary button is painted with its own token, and the dark palette's neutral-800
+/// is the dialog surface itself. Take the product's raised control step instead, so the action
+/// keeps a visible boundary on every dark surface.
+fn apply_secondary_action(theme: &mut Theme) {
+    if theme.mode == ThemeMode::Dark {
+        theme.tokens.button_secondary = theme.input.into();
+    }
 }
 
 fn paint_danger_button(cx: &mut App) {
@@ -465,9 +467,10 @@ mod tests {
     use core::prelude::rust_2021::test;
 
     use super::{
-        apply_danger_button_palette, apply_unified_interaction_fill, clamp_zoom, contrast_ratio,
-        enforce_contrast_floor, relative_luminance, repair_ink_contrast, INK_CONTRAST_FLOOR,
-        MAX_ZOOM, MIN_ZOOM, SURFACE_CONTRAST_FLOOR,
+        apply_danger_button_palette, apply_secondary_action, apply_unified_interaction_fill,
+        clamp_zoom, contrast_ratio, dialog_surface, enforce_contrast_floor, overlay_color,
+        relative_luminance, repair_ink_contrast, INK_CONTRAST_FLOOR, MAX_ZOOM, MIN_ZOOM,
+        SURFACE_CONTRAST_FLOOR,
     };
     use crate::brand::{BASE_FONT_PX, HAIRLINE};
     use gpui_kit::component::{Theme, ThemeMode};
@@ -490,6 +493,7 @@ mod tests {
             rgb(0xF8F8F8).into()
         };
         repair_ink_contrast(&mut theme);
+        apply_secondary_action(&mut theme);
         apply_unified_interaction_fill(&mut theme);
         apply_danger_button_palette(&mut theme);
         theme
@@ -689,6 +693,25 @@ mod tests {
     }
 
     #[test]
+    fn the_dark_secondary_action_clears_the_dialog_surface() {
+        let theme = product_theme(true);
+        let dialog = dialog_surface(&theme);
+        let fill = theme.tokens.button_secondary.color;
+        assert_eq!(
+            fill, theme.input,
+            "the filled action should take the raised control step"
+        );
+        assert_ne!(
+            fill, dialog,
+            "the filled action is painted in the dialog's own surface color"
+        );
+        println!(
+            "dark secondary action on the dialog: {:.2}",
+            contrast_ratio(fill, dialog)
+        );
+    }
+
+    #[test]
     fn ring_clears_non_text_contrast_on_card_surfaces() {
         for (mode, background, muted, ring) in [
             (ThemeMode::Light, 0.9765, 0.961, 0.639),
@@ -716,6 +739,40 @@ mod tests {
             let ratio = contrast_ratio(stroke, bg).min(contrast_ratio(stroke, card));
             assert!(ratio >= 3.0, "{mode:?} ring contrast {ratio} is below 3:1");
         }
+    }
+
+    #[test]
+    fn the_dark_dialog_uses_a_raised_surface_and_a_stronger_scrim() {
+        let mut dark = Theme {
+            mode: ThemeMode::Dark,
+            ..Default::default()
+        };
+        dark.background = Hsla {
+            h: 0.0,
+            s: 0.0,
+            l: 0.078431,
+            a: 1.0,
+        };
+        dark.title_bar = Hsla {
+            h: 0.0,
+            s: 0.0,
+            l: 0.137255,
+            a: 1.0,
+        };
+        assert_eq!(dialog_surface(&dark), dark.title_bar);
+
+        let scrim = overlay_color(true);
+        assert_eq!(scrim.h, 0.0);
+        assert_eq!(scrim.s, 0.0);
+        assert_eq!(scrim.l, 0.0);
+        assert!((scrim.a - 0.55).abs() < f32::EPSILON);
+
+        let light = Theme {
+            mode: ThemeMode::Light,
+            ..Default::default()
+        };
+        assert_eq!(dialog_surface(&light), light.background);
+        assert!((overlay_color(false).a - 0.18).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -754,45 +811,6 @@ mod tests {
             assert!(
                 ratio >= 3.0,
                 "{mode:?} control stroke contrast {ratio} is below 3:1"
-            );
-        }
-    }
-
-    #[test]
-    fn field_strokes_step_from_their_well_to_the_focus_ring() {
-        for dark in [false, true] {
-            let theme = product_theme(dark);
-            let resting = super::field_stroke(&theme);
-            let active = super::field_focus_stroke(&theme);
-            let contrast = |stroke| {
-                [theme.muted, theme.title_bar]
-                    .into_iter()
-                    .map(|surface| contrast_ratio(stroke, surface))
-                    .fold(f32::INFINITY, f32::min)
-            };
-            assert!(
-                contrast(resting) >= super::FIELD_STROKE_CONTRAST_FLOOR,
-                "{dark:?} resting field contrast {} is below its floor",
-                contrast(resting)
-            );
-            assert!(
-                contrast(active) >= super::FIELD_FOCUS_CONTRAST_FLOOR,
-                "{dark:?} active field contrast {} is below its floor",
-                contrast(active)
-            );
-            assert!(
-                contrast(active) < super::RING_CONTRAST_FLOOR,
-                "{dark:?} active field contrast {} competes with the focus ring",
-                contrast(active)
-            );
-            let steps_toward_the_ring = if dark {
-                resting.l > theme.input.l && active.l > resting.l
-            } else {
-                resting.l < theme.input.l && active.l < resting.l
-            };
-            assert!(
-                steps_toward_the_ring,
-                "{dark:?} field outlines must step from input toward the ring"
             );
         }
     }

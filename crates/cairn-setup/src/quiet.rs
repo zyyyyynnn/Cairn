@@ -27,7 +27,7 @@ pub fn handle_cleanup_helper(args: &[String]) -> bool {
     true
 }
 
-pub fn quiet_setup(restart_app: bool) -> i32 {
+pub fn quiet_setup(restart_app: bool, expected_sha256: Option<String>) -> i32 {
     let installed = installed::installed_product();
     let legacy = installed::legacy_burn_uninstallers();
 
@@ -49,8 +49,11 @@ pub fn quiet_setup(restart_app: bool) -> i32 {
         .filter(|path| validate_install_path(&path.to_string_lossy()).is_ok())
         .unwrap_or_else(default_install_dir);
     let app_dir = install_dir.clone();
-    let log = platform::install_log_path();
-    let (msi, payload_dir) = match msi_for_this_build() {
+    let log = match platform::install_log_path() {
+        Ok(log) => log,
+        Err(_) => return EXIT_ERROR,
+    };
+    let (msi, payload_dir) = match msi_for_this_build(expected_sha256.as_deref()) {
         Ok(value) => value,
         Err(_) => return EXIT_ERROR,
     };
@@ -88,7 +91,10 @@ pub fn quiet_uninstall() -> i32 {
         return EXIT_OK;
     };
 
-    let log = platform::uninstall_log_path();
+    let log = match platform::uninstall_log_path() {
+        Ok(log) => log,
+        Err(_) => return EXIT_ERROR,
+    };
     let cleanup_helper = platform::prepare_install_dir_cleanup();
     let product_codes = match installed::find_product_codes_checked() {
         Ok(codes) => codes,
@@ -154,25 +160,28 @@ fn finish_with_cleanup(
     }
 }
 
-pub(crate) fn msi_for_this_build() -> Result<(PathBuf, PathBuf), payload::PayloadError> {
+pub(crate) fn msi_for_this_build(
+    expected_sha256: Option<&str>,
+) -> Result<(PathBuf, PathBuf), payload::PayloadError> {
     let payload_dir = platform::create_payload_dir().map_err(payload::PayloadError::Io)?;
     let msi = payload_dir.join("cairn.msi");
 
     let prepared = (|| -> Result<(), payload::PayloadError> {
         // A debug build is allowed to point at a freshly built MSI for UI and integration work.
         // Release builds always use the payload appended to this executable; an elevated process
-        // never installs an arbitrary user-writable path.
+        // never installs an arbitrary user-writable path. An update handoff is never overridden.
         #[cfg(debug_assertions)]
-        if let Some(path) = std::env::var_os("CAIRN_SETUP_MSI_PATH") {
-            let path = PathBuf::from(path);
-            if path.is_file() {
-                std::fs::copy(&path, &msi).map_err(payload::PayloadError::Io)?;
-                return Ok(());
+        if expected_sha256.is_none() {
+            if let Some(path) = std::env::var_os("CAIRN_SETUP_MSI_PATH") {
+                let path = PathBuf::from(path);
+                if path.is_file() {
+                    std::fs::copy(&path, &msi).map_err(payload::PayloadError::Io)?;
+                    return Ok(());
+                }
             }
         }
 
-        let current = std::env::current_exe().map_err(payload::PayloadError::Io)?;
-        payload::extract_payload(&current, &msi)?;
+        payload::extract_payload_locked(expected_sha256, &msi)?;
         Ok(())
     })();
 

@@ -7,6 +7,7 @@
 
 use crate::app::{layout, CairnApp};
 use crate::shell::accessibility::{self, ControlElement};
+use crate::shell::status_bar::format_count;
 use crate::shell::theme::{self, ShellTokens};
 use crate::treemap::palette::TreemapPalette;
 use cairn_core::format_size_bytes;
@@ -86,6 +87,7 @@ impl CairnApp {
                 let count_text = {
                     let mut args = FluentArgs::new();
                     args.set("count", items.len() as i64);
+                    args.set("count_text", format_count(items.len()));
                     self.i18n.get_text_with_args("status_objects_count", &args)
                 };
                 summary_aria = Some(count_text.clone());
@@ -112,6 +114,7 @@ impl CairnApp {
                     zoom_percent = st.zoom_percent();
                     let mut args = FluentArgs::new();
                     args.set("count", st.total_items() as i64);
+                    args.set("count_text", format_count(st.total_items()));
                     args.set("size", format_size_bytes(st.total_size()));
                     let totals_text = self
                         .i18n
@@ -122,6 +125,7 @@ impl CairnApp {
                         let name = if is_aggregate {
                             let mut args = FluentArgs::new();
                             args.set("count", node.aggregate_count as i64);
+                            args.set("count_text", format_count(node.aggregate_count));
                             self.i18n.get_text_with_args("treemap_aggregate", &args)
                         } else {
                             node.item.name.clone()
