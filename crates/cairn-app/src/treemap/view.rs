@@ -647,7 +647,7 @@ impl CairnApp {
         }
     }
 
-/// The path band above the Treemap panel: the current directory and its
+    /// The path band above the Treemap panel: the current directory and its
     /// ancestors inside the same field frame as the table's search box.
     /// Clicking an ancestor enters that directory; clicking the field (or the
     /// current directory label) turns it into a path input. Enter opens the
@@ -2046,7 +2046,10 @@ mod tests {
             CairnApp::parent_query("C:\\Windows\\WinSxS"),
             "parent:\"C:\\Windows\\WinSxS\""
         );
-        assert_eq!(CairnApp::parent_query("C:\\Windows\\"), "parent:\"C:\\Windows\"");
+        assert_eq!(
+            CairnApp::parent_query("C:\\Windows\\"),
+            "parent:\"C:\\Windows\""
+        );
         assert_eq!(CairnApp::parent_query("C:"), "parent:\"C:\\\"");
         assert_eq!(CairnApp::parent_query("C:\\"), "parent:\"C:\\\"");
     }

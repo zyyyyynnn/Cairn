@@ -2652,7 +2652,12 @@ mod tests {
             index_item(4, 2, "Small", true),
         ];
         for offset in 0..deep {
-            items.push(index_item(5 + offset as u64, 3, &format!("f{offset}"), false));
+            items.push(index_item(
+                5 + offset as u64,
+                3,
+                &format!("f{offset}"),
+                false,
+            ));
         }
         let mut vol = VolumeIndex::new('C');
         vol.ingest_items(items);

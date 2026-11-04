@@ -466,11 +466,8 @@ pub fn package_product_code(package: &std::path::Path) -> Option<String> {
     // alive for the calls that read them.
     unsafe {
         let mut database = MSIHANDLE(0);
-        if MsiOpenDatabaseW(
-            PCWSTR(path.as_ptr()),
-            MSIDBOPEN_READONLY,
-            &mut database,
-        ) != ERROR_SUCCESS
+        if MsiOpenDatabaseW(PCWSTR(path.as_ptr()), MSIDBOPEN_READONLY, &mut database)
+            != ERROR_SUCCESS
         {
             return None;
         }

@@ -188,8 +188,14 @@ mod tests {
         };
         assert!(is_start_service_request(&argv(&[START_SERVICE_FLAG])));
         assert!(!is_start_service_request(&argv(&[])));
-        assert!(!is_start_service_request(&argv(&[START_SERVICE_FLAG, r"C:\Windows"])));
-        assert!(!is_start_service_request(&argv(&["--collapsed", START_SERVICE_FLAG])));
+        assert!(!is_start_service_request(&argv(&[
+            START_SERVICE_FLAG,
+            r"C:\Windows"
+        ])));
+        assert!(!is_start_service_request(&argv(&[
+            "--collapsed",
+            START_SERVICE_FLAG
+        ])));
     }
 
     /// A stray argument beside the flag is refused rather than dropped: falling through would spend
