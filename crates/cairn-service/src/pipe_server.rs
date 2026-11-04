@@ -35,10 +35,11 @@ fn tree_error_payload(reason: crate::sync_engine::TreeUnavailable) -> ResponsePa
     }
 }
 
-/// The deepest tree a single response may carry. A six-level tree over a million-record volume
-/// overflows the protocol frame budget; the window shows its unavailable state. Deeper levels
-/// are requested per directory as the reader drills in.
-const MAX_TREE_DEPTH: usize = 2;
+/// The deepest tree a single response may carry. Three levels stay inside the entry and frame
+/// budgets on a full drive (about 42k entries on a 1.8M-record index); a subtree that still
+/// overflows is answered one level shallower, and deeper levels are requested per directory as the
+/// reader drills in.
+const MAX_TREE_DEPTH: usize = 3;
 
 pub struct PipeServer {
     engine: Arc<MultiVolumeEngine>,
