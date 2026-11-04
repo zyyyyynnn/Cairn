@@ -76,7 +76,7 @@ impl ServiceRuntime {
 
         // 1. Background USN polling task. A volume that is still replaying a backlog is polled at
         //    50ms so a cold start drains in seconds; once every volume is Synced the normal 500ms
-        //    cadence resumes. The table skeleton stays visible until this reaches Synced, so the
+        //    cadence resumes. The sync state stays CatchingUp until this reaches Synced, so the
         //    fast path is what keeps "loading" from meaning "stuck".
         let engine_usn = engine.clone();
         let usn_task = tokio::spawn(async move {

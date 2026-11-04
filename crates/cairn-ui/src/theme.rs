@@ -131,7 +131,6 @@ struct SurfaceRamp {
     frame: f32,
     interaction: f32,
     border: f32,
-    skeleton: f32,
     foreground: f32,
     muted_foreground: f32,
     input: f32,
@@ -147,7 +146,6 @@ fn surface_ramp(dark: bool) -> SurfaceRamp {
             frame: 0.137255,
             interaction: 0.172549,
             border: 0.207843,
-            skeleton: 0.149020,
             foreground: 0.901961,
             muted_foreground: 0.600000,
             input: 0.227451,
@@ -161,7 +159,6 @@ fn surface_ramp(dark: bool) -> SurfaceRamp {
             frame: 0.949020,
             interaction: 0.870588,
             border: 0.886275,
-            skeleton: 0.905882,
             foreground: 0.090196,
             muted_foreground: 0.372549,
             input: 0.862745,
@@ -197,7 +194,6 @@ fn apply_surface_ramp(theme: &mut Theme) {
     theme.list_active = gray(ramp.interaction);
     theme.sidebar_accent = gray(ramp.interaction);
     theme.selection = gray(ramp.selection);
-    theme.skeleton = gray(ramp.skeleton);
     theme.foreground = gray(ramp.foreground);
     theme.muted_foreground = gray(ramp.muted_foreground);
     theme.table_head_foreground = gray(ramp.muted_foreground);
@@ -479,13 +475,11 @@ mod tests {
     /// A theme built the way the product builds it: the mode's surfaces, the ink floor, the
     /// interaction fills, and the danger button's own palette.
     fn product_theme(dark: bool) -> Theme {
-        let mut theme = Theme {
-            mode: if dark {
-                ThemeMode::Dark
-            } else {
-                ThemeMode::Light
-            },
-            ..Default::default()
+        let mut theme = Theme::default();
+        theme.mode = if dark {
+            ThemeMode::Dark
+        } else {
+            ThemeMode::Light
         };
         theme.colors.status_bar = if dark {
             rgb(0x171717).into()
@@ -641,10 +635,8 @@ mod tests {
 
     #[test]
     fn secondary_hover_and_pressed_move_toward_the_label_ink() {
-        let mut dark = Theme {
-            mode: ThemeMode::Dark,
-            ..Default::default()
-        };
+        let mut dark = Theme::default();
+        dark.mode = ThemeMode::Dark;
         dark.tokens.button_secondary = Hsla {
             h: 0.0,
             s: 0.0,
@@ -666,10 +658,8 @@ mod tests {
         assert!(hover > rest);
         assert!(active > hover);
 
-        let mut light = Theme {
-            mode: ThemeMode::Light,
-            ..Default::default()
-        };
+        let mut light = Theme::default();
+        light.mode = ThemeMode::Light;
         light.tokens.button_secondary = Hsla {
             h: 0.0,
             s: 0.0,
@@ -743,10 +733,8 @@ mod tests {
 
     #[test]
     fn the_dark_dialog_uses_a_raised_surface_and_a_stronger_scrim() {
-        let mut dark = Theme {
-            mode: ThemeMode::Dark,
-            ..Default::default()
-        };
+        let mut dark = Theme::default();
+        dark.mode = ThemeMode::Dark;
         dark.background = Hsla {
             h: 0.0,
             s: 0.0,
@@ -767,10 +755,8 @@ mod tests {
         assert_eq!(scrim.l, 0.0);
         assert!((scrim.a - 0.55).abs() < f32::EPSILON);
 
-        let light = Theme {
-            mode: ThemeMode::Light,
-            ..Default::default()
-        };
+        let mut light = Theme::default();
+        light.mode = ThemeMode::Light;
         assert_eq!(dialog_surface(&light), light.background);
         assert!((overlay_color(false).a - 0.18).abs() < f32::EPSILON);
     }
@@ -781,10 +767,8 @@ mod tests {
             (ThemeMode::Light, 0.9765, 0.961, 0.898),
             (ThemeMode::Dark, 0.0627, 0.149, 0.149),
         ] {
-            let mut theme = Theme {
-                mode,
-                ..Default::default()
-            };
+            let mut theme = Theme::default();
+            theme.mode = mode;
             theme.background = Hsla {
                 h: 0.0,
                 s: 0.0,
@@ -818,10 +802,8 @@ mod tests {
     #[test]
     fn warning_ink_clears_non_text_contrast() {
         for mode in [ThemeMode::Light, ThemeMode::Dark] {
-            let theme = Theme {
-                mode,
-                ..Default::default()
-            };
+            let mut theme = Theme::default();
+            theme.mode = mode;
             let ink = super::warning_ink(&theme);
             let ratio = [theme.background, theme.muted, theme.title_bar]
                 .into_iter()
@@ -857,10 +839,8 @@ mod tests {
 
     #[test]
     fn repair_ink_contrast_sets_the_gray_ramp() {
-        let mut theme = Theme {
-            mode: ThemeMode::Light,
-            ..Default::default()
-        };
+        let mut theme = Theme::default();
+        theme.mode = ThemeMode::Light;
         repair_ink_contrast(&mut theme);
         assert_eq!(theme.background.s, 0.0);
         assert_eq!(theme.background.l, 1.0);
@@ -871,8 +851,6 @@ mod tests {
         assert_eq!(theme.list_hover.l, 0.870588);
         assert_eq!(theme.foreground.s, 0.0);
         assert_eq!(theme.foreground.l, 0.090196);
-        assert_eq!(theme.skeleton.s, 0.0);
-        assert_eq!(theme.skeleton.l, 0.905882);
         assert_eq!(theme.selection.s, 0.0);
 
         theme.mode = ThemeMode::Dark;
@@ -889,8 +867,6 @@ mod tests {
         assert_eq!(theme.sidebar_foreground.l, 0.901961);
         assert_eq!(theme.sidebar_accent_foreground.l, 0.901961);
         assert_eq!(theme.popover_foreground.l, 0.901961);
-        assert_eq!(theme.skeleton.s, 0.0);
-        assert_eq!(theme.skeleton.l, 0.149020);
         assert_eq!(theme.selection.s, 0.0);
     }
 

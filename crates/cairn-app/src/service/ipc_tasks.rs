@@ -161,7 +161,7 @@ impl CairnApp {
     /// Opening the window only asks this question; starting the service is an explicit action.
     /// Polls the service while any volume is building or catching up. The probe's first answer can
     /// be `CatchingUp(0)`, and without this loop the GUI would keep that stale snapshot forever:
-    /// the skeleton would never clear and the capsule would freeze at "synchronizing".
+    /// the capsule would freeze at "synchronizing".
     pub(crate) fn start_status_refresh(&mut self, cx: &mut Context<Self>) {
         if self.service.is_refreshing_status || !self.service.status.is_any_loading() {
             return;
