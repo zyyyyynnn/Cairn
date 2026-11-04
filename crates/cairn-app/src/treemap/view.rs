@@ -52,6 +52,12 @@ const PATH_MENU_LIMIT: usize = 100;
 /// from stretching the menu across the window.
 const MENU_MIN_WIDTH: f32 = 16.0;
 const MENU_MAX_WIDTH: f32 = 24.0;
+/// The share of the widest menu a single folder name may take. A label is given
+/// this as a definite width, because `truncate` only draws an ellipsis when the
+/// text box is narrower than the text: left to size itself the label pushes the
+/// row past the menu's ceiling and the menu clips it without one. The tooltip
+/// carries the rest of the path.
+const MENU_LABEL_MAX_WIDTH: f32 = 20.0;
 /// One screen-half cap for every path menu, so a long list scrolls instead of
 /// running past the window.
 const MENU_MAX_HEIGHT: f32 = 20.0;
@@ -115,7 +121,12 @@ fn menu_directory(entry: &std::fs::DirEntry) -> bool {
 /// whole path in its tooltip. The row takes the shared menu step and the shared
 /// icon-to-label distance, and it names itself to assistive technology by the
 /// folder it opens.
-fn path_menu_option(name: String, path: String, view: Entity<CairnApp>) -> PopupMenuItem {
+fn path_menu_option(
+    name: String,
+    path: String,
+    label_width: Pixels,
+    view: Entity<CairnApp>,
+) -> PopupMenuItem {
     let control = accessibility::control("treemap-path-menu-row");
     let row_path = path.clone();
     let tooltip_path = path.clone();
@@ -131,7 +142,7 @@ fn path_menu_option(name: String, path: String, view: Entity<CairnApp>) -> Popup
             .gap(rems(layout::INNER_SPACING))
             .cursor_pointer()
             .child(Icon::new(IconName::Folder).xsmall().flex_shrink_0())
-            .child(div().flex_1().min_w_0().truncate().child(name.clone()))
+            .child(div().w(label_width).truncate().child(name.clone()))
             .tooltip(move |window, cx| Tooltip::new(tooltip_text.clone()).build(window, cx))
     })
     .on_click(move |_, window, cx| {
@@ -347,6 +358,14 @@ impl CairnApp {
         });
         let menu_width = window.rem_size() * MENU_MIN_WIDTH;
         let menu_max_width = window.rem_size() * MENU_MAX_WIDTH;
+        // The widest name the menu will show, shaped rather than estimated, so
+        // the label gets a definite width and the menu sizes to its content.
+        let label_width = directories
+            .iter()
+            .take(PATH_MENU_LIMIT)
+            .map(|(name, _)| px(text_width(window, name, FontWeight::default())))
+            .fold(px(0.0), |widest, width| widest.max(width))
+            .min(window.rem_size() * MENU_LABEL_MAX_WIDTH);
         let menu = PopupMenu::build(window, cx, move |menu, window, _cx| {
             let mut menu = menu
                 .min_w(menu_width)
@@ -357,7 +376,12 @@ impl CairnApp {
                 return menu.item(path_menu_note("empty", empty_label));
             }
             for (name, path) in directories.iter().take(PATH_MENU_LIMIT) {
-                menu = menu.item(path_menu_option(name.clone(), path.clone(), view.clone()));
+                menu = menu.item(path_menu_option(
+                    name.clone(),
+                    path.clone(),
+                    label_width,
+                    view.clone(),
+                ));
             }
             if let Some(label) = truncated_label {
                 menu = menu.item(path_menu_note("truncated", label));
