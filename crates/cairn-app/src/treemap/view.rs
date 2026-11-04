@@ -15,7 +15,8 @@ use crate::shell::status_bar::format_count;
 use crate::shell::theme::{self, ShellTokens};
 use crate::treemap::navigation::path_segments;
 use crate::treemap::paint::{
-    paint_rect, snap_rect_to_device_pixels, TREEMAP_RADIUS, TREEMAP_TILE_INSET,
+    inset_device_pixels, painted_gutter_device, snap_rect_to_device_pixels, TREEMAP_RADIUS,
+    TREEMAP_TILE_INSET,
 };
 use crate::treemap::palette::{block_fill_states, TreemapPalette};
 use crate::treemap::path_input::normalize_treemap_path;
@@ -179,15 +180,16 @@ fn path_menu_note(key: &'static str, label: String) -> PopupMenuItem {
 const TREEMAP_LABEL_MIN_WIDTH: f32 = 44.0;
 const TREEMAP_LABEL_MIN_HEIGHT: f32 = 28.0;
 
-/// Depth cap for a tree served by the index. Matches the on-disk volume-index
-/// loader, so both service paths present the same hierarchy.
-// The response must fit the protocol's frame budget. Depth 2 is ~47k entries on a 1.4M-index
-// drive and answers in ~160 ms; depth 6 overflows the 16 MiB frame. Deeper levels are requested
-// per directory as the reader drills in.
-const TREEMAP_SERVICE_DEPTH: usize = 2;
+/// Depth cap for a tree served by the index. A subtree that still overflows the response budget
+/// comes back one level shallower with exact totals on the capped nodes, and deeper levels are
+/// requested per directory as the reader drills in.
+const TREEMAP_SERVICE_DEPTH: usize = 3;
 
 /// Horizontal inset used by headers, leaves and summary labels.
 const TREEMAP_TEXT_PADDING: f32 = 4.0;
+/// The one gutter used between a block's own parts (icon and name, name and size) and between
+/// header elements, so no block mixes two spacing steps.
+const TREEMAP_BLOCK_GAP: f32 = 2.0;
 /// Leading icon (12px) plus its 2px gap.
 const TREEMAP_ICON_SPACE: f32 = 14.0;
 /// The header hides its size rather than squeezing the name below this width.
@@ -626,19 +628,26 @@ impl CairnApp {
         // it alive behind the table, and starts a fresh table entrance.
         self.leave_drive_view();
         self.query.active_filter = FilterCategory::All;
-        let trimmed = path.trim_end_matches('\\');
-        let query_path = if trimmed.len() <= 2 && trimmed.ends_with(':') {
-            format!("parent:\"{}:\\\"", trimmed.chars().next().unwrap())
-        } else {
-            format!("parent:\"{}\"", trimmed)
-        };
-        self.query.search_input.set_text(&query_path);
+        self.query.search_input.set_text(&Self::parent_query(path));
         self.trigger_search(cx);
         self.query.search_focus.focus(window, cx);
         cx.notify();
     }
 
-    /// The path band above the Treemap panel: the current directory and its
+    /// The search that lists a directory's own children, used by the table hand-off.
+    fn parent_query(path: &str) -> String {
+        let trimmed = path.trim_end_matches(['\\', '/']);
+        // A drive root must keep its separator: `parent:"C"` matches nothing, `parent:"C:\"`
+        // lists the root's children. Both `C:` and `C:\` name the same root.
+        let is_drive_root = (trimmed.len() == 2 && trimmed.ends_with(':')) || trimmed.len() == 1;
+        if is_drive_root {
+            format!("parent:\"{}:\\\"", trimmed.trim_end_matches(':'))
+        } else {
+            format!("parent:\"{trimmed}\"")
+        }
+    }
+
+/// The path band above the Treemap panel: the current directory and its
     /// ancestors inside the same field frame as the table's search box.
     /// Clicking an ancestor enters that directory; clicking the field (or the
     /// current directory label) turns it into a path input. Enter opens the
@@ -1290,11 +1299,14 @@ impl CairnApp {
                         this.treemap_drill_back(window, cx);
                     }
                     "enter" => {
-                        let mut drill = None;
+                        let mut table_dir = None;
                         if let Some(ref st) = this.treemap_state {
                             if let Some(node) = st.selected_node().cloned() {
                                 if node.is_aggregate() {
-                                    drill = aggregate_parent_path(&node.path).map(str::to_string);
+                                    // Folded siblings stay in this directory; the table is where
+                                    // they can be listed, the canvas cannot lay them out.
+                                    table_dir =
+                                        aggregate_parent_path(&node.path).map(str::to_string);
                                 } else if node.item.is_dir {
                                     this.treemap_drill_down(&node.path, window, cx);
                                 } else {
@@ -1302,8 +1314,8 @@ impl CairnApp {
                                 }
                             }
                         }
-                        if let Some(parent) = drill {
-                            this.treemap_drill_down(&parent, window, cx);
+                        if let Some(dir) = table_dir {
+                            this.switch_to_table_with_path(&dir, window, cx);
                         }
                     }
                     "+" | "=" => {
@@ -1526,7 +1538,7 @@ fn label_row(
     };
     h_flex()
         .w_full()
-        .gap_x(px(2.0))
+        .gap_x(px(TREEMAP_BLOCK_GAP))
         .items_center()
         .overflow_hidden()
         // The glyph is part of the title, not secondary metadata: both read at
@@ -1555,7 +1567,7 @@ fn compact_block_content(
     let mut content = v_flex()
         .size_full()
         .p(px(2.0))
-        .gap_y(px(1.0))
+        .gap_y(px(TREEMAP_BLOCK_GAP))
         .justify_between()
         .overflow_hidden()
         .child(label_row(icon, name, ink, semibold));
@@ -1591,7 +1603,11 @@ fn render_nested_node(
     // Paint geometry is the single source for painting, hit surfaces, tooltips
     // and the selection ring. The project step is the only difference between
     // the identity view and a zoomed one.
-    let paint = viewport.project(paint_rect(node.rect));
+    let scale = rcx.window.scale_factor().max(1.0);
+    let paint = inset_device_pixels(
+        snap_rect_to_device_pixels(viewport.project(node.rect), scale),
+        scale,
+    );
     if paint.width < 1.0 || paint.height < 1.0 {
         return;
     }
@@ -1668,16 +1684,16 @@ fn render_nested_node(
             })
             .on_mouse_down(MouseButton::Left, move |event, window, cx| {
                 aggregate_view.update(cx, |this, cx| {
-                    let mut drill = None;
+                    let mut table_dir = None;
                     if let Some(ref mut st) = this.treemap_state {
                         st.selected_path = Some(aggregate_path.clone());
                         st.request_focus(window, cx);
                         if event.click_count == 2 {
-                            drill = aggregate_parent.clone();
+                            table_dir = aggregate_parent.clone();
                         }
                     }
-                    if let Some(parent) = drill {
-                        this.treemap_drill_down(&parent, window, cx);
+                    if let Some(dir) = table_dir {
+                        this.switch_to_table_with_path(&dir, window, cx);
                     }
                     cx.notify();
                     cx.stop_propagation();
@@ -1693,10 +1709,13 @@ fn render_nested_node(
     }
     if is_dir {
         if let Some(header) = node.header_rect {
-            // The layout band is 20px; the visible header is 18px and the
-            // remaining 2px becomes the gap above the first content row. The
-            // inset is applied in base space, then the band is projected.
-            let header_height = (header.height - 2.0).max(12.0) * viewport.scale();
+            // The layout band is 20px; the header stops one painted gutter above the first content
+            // row, so the band's gap is the same even device-pixel gutter as every other seam.
+            // The gutter is a device quantity, so it is converted back to view pixels here.
+            let scale_factor = rcx.window.scale_factor();
+            let header_height = (header.height * viewport.scale()
+                - painted_gutter_device(scale_factor) / scale_factor.max(1.0))
+            .max(12.0 * viewport.scale());
             let header_view = rcx.view.clone();
             let full_path_drill = full_path.clone();
             let header_size_label = size_str.clone();
@@ -1753,7 +1772,7 @@ fn render_nested_node(
                 .h(px(header_height))
                 .px(px(2.0))
                 .items_center()
-                .gap_x(px(2.0))
+                .gap_x(px(TREEMAP_BLOCK_GAP))
                 .bg(header_bg)
                 .overflow_hidden()
                 .cursor_pointer()
@@ -2018,6 +2037,19 @@ mod tests {
     use core::prelude::rust_2021::test;
 
     use super::*;
+
+    /// The table hand-off must search the directory's own children. A drive root keeps the
+    /// separator the query syntax needs; a nested path is used as written.
+    #[test]
+    fn the_table_hand_off_queries_the_directory_children() {
+        assert_eq!(
+            CairnApp::parent_query("C:\\Windows\\WinSxS"),
+            "parent:\"C:\\Windows\\WinSxS\""
+        );
+        assert_eq!(CairnApp::parent_query("C:\\Windows\\"), "parent:\"C:\\Windows\"");
+        assert_eq!(CairnApp::parent_query("C:"), "parent:\"C:\\\"");
+        assert_eq!(CairnApp::parent_query("C:\\"), "parent:\"C:\\\"");
+    }
 
     /// The path menu reads the directory as it stands on disk: child folders
     /// only, in display order, each joined to an absolute path the Treemap can

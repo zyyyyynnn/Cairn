@@ -1181,10 +1181,11 @@ impl CairnApp {
             if let Some(ref st) = self.treemap_state {
                 if let Some(node) = st.selected_node().cloned() {
                     if node.is_aggregate() {
+                        // A summary block folds siblings of this same directory, so there is no
+                        // level to enter. The table lists the directory's children instead.
                         if let Some(parent) = cairn_core::treemap::aggregate_parent_path(&node.path)
-                            .map(str::to_string)
                         {
-                            self.treemap_drill_down(&parent, window, cx);
+                            self.switch_to_table_with_path(parent, window, cx);
                         }
                     } else if node.item.is_dir {
                         self.treemap_drill_down(&node.path, window, cx);

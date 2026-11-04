@@ -5,7 +5,7 @@
 //! State, directory navigation and layout recomputation for the drive Treemap view.
 
 use crate::treemap::navigation::TreemapNavigation;
-use crate::treemap::paint::TREEMAP_CANVAS_INSET;
+use crate::treemap::paint::painted_gutter_device;
 use crate::treemap::volume_index::{try_load_index_for_drive, VolumeTreemapIndex};
 use crate::treemap::zoom::TreemapZoom;
 use cairn_core::treemap::{
@@ -381,7 +381,11 @@ impl TreemapViewState {
     /// Recomputes Treemap nested layout nodes according to current bounds and detail level.
     pub(super) fn recompute_layout(&mut self) {
         let (w, h) = self.last_bounds;
-        let inset = TREEMAP_CANVAS_INSET;
+        // The gutter is a device-pixel quantity, so the canvas edge is inset by half of it in the
+        // same units the tiles use; a logical inset here would leave that one margin a pixel
+        // thinner than every seam inside the canvas.
+        let scale = self.last_scale_factor.max(1.0);
+        let inset = painted_gutter_device(scale) / (2.0 * scale);
         let bounds = TreemapRect::new(
             inset,
             inset,
