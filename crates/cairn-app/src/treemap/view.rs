@@ -34,7 +34,7 @@ use gpui_kit::base::StyledExt;
 use gpui_kit::component::input::Input;
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{h_flex, v_flex, Icon, Sizable as _};
+use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, Icon, Sizable as _};
 use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::*;
 use std::path::{Path, PathBuf};
@@ -44,6 +44,122 @@ use std::time::Instant;
 /// One breadcrumb label never takes more than a readable share of the path band; the
 /// full path remains in the band's tooltip.
 const PATH_SEGMENT_MAX_WIDTH: f32 = 24.0;
+/// One dropdown row never builds an unbounded menu; the Treemap remains the
+/// route to folders past this cap.
+const PATH_MENU_LIMIT: usize = 100;
+/// A path menu is as wide as its longest readable name, inside this band: the
+/// floor keeps a short list from collapsing, the ceiling keeps one long folder
+/// from stretching the menu across the window.
+const MENU_MIN_WIDTH: f32 = 16.0;
+const MENU_MAX_WIDTH: f32 = 24.0;
+/// One screen-half cap for every path menu, so a long list scrolls instead of
+/// running past the window.
+const MENU_MAX_HEIGHT: f32 = 20.0;
+
+/// Child folders of `directory` as the filesystem holds them now. The Treemap tree can lag
+/// deletions and a breadcrumb segment can name an ancestor the current tree does not hold, so
+/// the menu reads the directory itself.
+///
+/// The scan stops once the menu holds more than its cap: a directory can carry tens of
+/// thousands of children, and enumerating, stat-ing and sorting all of them to display a
+/// hundred costs about a second on the UI thread. The listed set is therefore the eligible
+/// folders found first in directory order, sorted for display afterwards.
+fn path_menu_directories(directory: &str) -> Vec<(String, String)> {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return Vec::new();
+    };
+    let base = directory.trim_end_matches(['\\', '/']);
+    let mut directories = Vec::with_capacity(PATH_MENU_LIMIT + 1);
+    for entry in entries.flatten() {
+        if directories.len() > PATH_MENU_LIMIT {
+            break;
+        }
+        if !menu_directory(&entry) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        directories.push((name.clone(), format!("{base}\\{name}")));
+    }
+    directories.sort_by(|a, b| cairn_core::sort::natural_cmp(&a.0, &b.0));
+    directories
+}
+
+/// A path menu offers real switch destinations only: the entry must be a directory, and
+/// Explorer's default hides the system attribute pair. The attributes come from the
+/// enumeration's own find data, so no second filesystem call is made and the link itself is
+/// read — a junction such as "Documents and Settings" points at an ordinary directory but is
+/// still a system entry.
+#[cfg(windows)]
+fn menu_directory(entry: &std::fs::DirEntry) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+    const FILE_ATTRIBUTE_SYSTEM: u32 = 0x4;
+    const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+    entry
+        .metadata()
+        .map(|metadata| {
+            let attributes = metadata.file_attributes();
+            attributes & FILE_ATTRIBUTE_DIRECTORY != 0
+                && attributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM) == 0
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(not(windows))]
+fn menu_directory(entry: &std::fs::DirEntry) -> bool {
+    entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false)
+}
+
+/// One folder option built here rather than by the menu component's intrinsic
+/// row because the name has to ellipsize at the menu's width and carry the
+/// whole path in its tooltip. The row takes the shared menu step and the shared
+/// icon-to-label distance, and it names itself to assistive technology by the
+/// folder it opens.
+fn path_menu_option(name: String, path: String, view: Entity<CairnApp>) -> PopupMenuItem {
+    let control = accessibility::control("treemap-path-menu-row");
+    let row_path = path.clone();
+    let tooltip_path = path.clone();
+    let item_path = path;
+    PopupMenuItem::element(move |_, _| {
+        let tooltip_text = tooltip_path.clone();
+        accessibility::element_at_key(control, &row_path)
+            .aria_label(name.clone())
+            .h(layout::MENU_ROW_HEIGHT)
+            .w_full()
+            .flex()
+            .items_center()
+            .gap(rems(layout::INNER_SPACING))
+            .cursor_pointer()
+            .child(Icon::new(IconName::Folder).xsmall().flex_shrink_0())
+            .child(div().flex_1().min_w_0().truncate().child(name.clone()))
+            .tooltip(move |window, cx| Tooltip::new(tooltip_text.clone()).build(window, cx))
+    })
+    .on_click(move |_, window, cx| {
+        view.update(cx, |this, cx| {
+            this.clear_treemap_path_menu();
+            this.treemap_drill_down(&item_path, window, cx);
+        });
+    })
+}
+
+/// The menu's foot note: the same row step as the options above it, flush with
+/// the menu's leading edge instead of the icon lane its siblings reserve.
+fn path_menu_note(key: &'static str, label: String) -> PopupMenuItem {
+    let control = accessibility::control("treemap-path-menu-note");
+    PopupMenuItem::element(move |_, cx| {
+        let text = label.clone();
+        accessibility::element_at_key(control, key)
+            .aria_label(label.clone())
+            .h(layout::MENU_ROW_HEIGHT)
+            .w_full()
+            .flex()
+            .items_center()
+            .text_sm()
+            .text_color(cx.theme().muted_foreground)
+            .child(text)
+    })
+    .disabled(true)
+}
 
 /// A readable block uses one standard: a leading 12px icon lane plus a name,
 /// with the size either trailing (headers) or on the second line (blocks).
@@ -110,6 +226,7 @@ impl CairnApp {
             // A bin filter is a location-local search, not a query to carry into the drive view.
             self.query.search_input.clear();
         }
+        self.clear_treemap_path_menu();
         self.drive_view = Some(drive_upper);
         self.query.scope_drive = Some(drive_upper);
         let (state, scan_target) = TreemapViewState::new(drive_upper, cx.focus_handle());
@@ -135,6 +252,7 @@ impl CairnApp {
         if self.drive_view.is_none() {
             return;
         }
+        self.clear_treemap_path_menu();
         let input = self.treemap_path.input.clone();
         if self.treemap_path.editing {
             // A second request lands on the text already in the field; replacing
@@ -190,6 +308,82 @@ impl CairnApp {
         input.update(cx, |input, cx| input.set_value("", window, cx));
         input.read(cx).focus_handle(cx).focus(window, cx);
         self.treemap_path.error = false;
+        cx.notify();
+    }
+
+    pub(crate) fn clear_treemap_path_menu(&mut self) {
+        self.treemap_path_menu_dismiss = None;
+        self.treemap_path_menu = None;
+        self.treemap_path_menu_for = None;
+        self.treemap_path_menu_press = None;
+    }
+
+    /// Opens the child-folder menu under one breadcrumb segment. The menu
+    /// belongs to the segment it was opened from; asking for it again closes
+    /// it, and asking for another segment replaces it.
+    pub(crate) fn toggle_treemap_path_menu(
+        &mut self,
+        segment: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.treemap_path_menu_press = None;
+        let same_segment = self.treemap_path_menu_for.as_deref() == Some(segment);
+        if same_segment {
+            self.clear_treemap_path_menu();
+            cx.notify();
+            return;
+        }
+        self.clear_treemap_path_menu();
+        let directories = path_menu_directories(segment);
+        let view = cx.entity();
+        let empty_label = self.i18n.get_text("treemap_path_menu_empty");
+        let truncated = directories.len() > PATH_MENU_LIMIT;
+        let truncated_label = (truncated && !directories.is_empty()).then(|| {
+            let mut args = FluentArgs::new();
+            args.set("count", directories.len().min(PATH_MENU_LIMIT) as i64);
+            self.i18n
+                .get_text_with_args("treemap_path_menu_truncated", &args)
+        });
+        let menu_width = window.rem_size() * MENU_MIN_WIDTH;
+        let menu_max_width = window.rem_size() * MENU_MAX_WIDTH;
+        let menu = PopupMenu::build(window, cx, move |menu, window, _cx| {
+            let mut menu = menu
+                .min_w(menu_width)
+                .max_w(menu_max_width)
+                .max_h(window.rem_size() * MENU_MAX_HEIGHT)
+                .scrollable(true);
+            if directories.is_empty() {
+                return menu.item(path_menu_note("empty", empty_label));
+            }
+            for (name, path) in directories.iter().take(PATH_MENU_LIMIT) {
+                menu = menu.item(path_menu_option(name.clone(), path.clone(), view.clone()));
+            }
+            if let Some(label) = truncated_label {
+                menu = menu.item(path_menu_note("truncated", label));
+            }
+            menu
+        });
+        let subscription = cx.subscribe_in(
+            &menu,
+            window,
+            |this, _menu, _: &DismissEvent, window, cx| {
+                let triggered_by_arrow = this.treemap_path_menu_press.take().is_some();
+                this.treemap_path_menu_dismiss = None;
+                this.treemap_path_menu = None;
+                if !triggered_by_arrow {
+                    this.treemap_path_menu_for = None;
+                }
+                if let Some(state) = this.treemap_state.as_ref() {
+                    state.request_focus(window, cx);
+                }
+                cx.notify();
+            },
+        );
+        menu.focus_handle(cx).focus(window, cx);
+        self.treemap_path_menu = Some(menu);
+        self.treemap_path_menu_for = Some(segment.to_string());
+        self.treemap_path_menu_dismiss = Some(subscription);
         cx.notify();
     }
 
@@ -258,6 +452,7 @@ impl CairnApp {
     /// when the service cannot answer, the canvas reports the directory as
     /// unavailable rather than scanning the disk itself.
     pub fn start_treemap_scan(&mut self, scan_path: PathBuf, cx: &mut Context<Self>) {
+        self.clear_treemap_path_menu();
         let Some(ref mut state) = self.treemap_state else {
             return;
         };
@@ -326,6 +521,7 @@ impl CairnApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.clear_treemap_path_menu();
         // A navigation step ends address editing: the field describes the
         // directory the canvas is leaving, not the one it just opened.
         self.cancel_treemap_path_edit(window, cx);
@@ -403,9 +599,8 @@ impl CairnApp {
         cx: &mut Context<Self>,
     ) {
         // Leaving the visualization releases the partial tree instead of keeping
-        // it alive behind the table.
-        self.drive_view = None;
-        self.treemap_state = None;
+        // it alive behind the table, and starts a fresh table entrance.
+        self.leave_drive_view();
         self.query.active_filter = FilterCategory::All;
         let trimmed = path.trim_end_matches('\\');
         let query_path = if trimmed.len() <= 2 && trimmed.ends_with(':') {
@@ -439,18 +634,22 @@ impl CairnApp {
         let editing = self.treemap_path.editing;
         let error = self.treemap_path.error;
         let show_clear = editing && !self.treemap_path.input.read(cx).value().is_empty();
+        let snap_margin = window.rem_size() * layout::SPACE_8;
 
         let content = if editing {
             Input::new(&self.treemap_path.input)
                 .id(accessibility::control("treemap-path").element)
+                .xsmall()
                 .appearance(false)
                 .bordered(false)
                 .focus_bordered(false)
-                // The input's Medium step is the small 12.25px text; the path
-                // final state and the search box read at the 14px body step. Its
-                // frame padding is removed too, so editing and breadcrumb text
-                // start on the same left edge inside the field.
+                // Both states of this field are one text: the 14px body step inside the
+                // shell's default line box. The component's own 1.25rem box is shorter, and
+                // a shorter box centred in the same field rounds its baseline to a different
+                // device pixel, so editing sat one pixel above the address it replaced. The
+                // frame padding is removed too, so both states share the field's left edge.
                 .text_size(rems(1.0))
+                .line_height(phi())
                 .p(rems(0.0))
                 .h_full()
                 .flex_1()
@@ -463,59 +662,70 @@ impl CairnApp {
         } else {
             let segments = path_segments(&current_dir);
             let last = segments.len().saturating_sub(1);
+            let menu_for = self.treemap_path_menu_for.clone();
+            let menu = self.treemap_path_menu.clone();
+            // The product's focus frame belongs to the keyboard. A pointer click
+            // lands on these controls without painting a second outline.
+            let keyboard_navigation = cairn_ui::focus::keyboard_navigation(cx);
+            // A tooltip that appears over the open menu reads as a stray label,
+            // so the band stays quiet while one of its menus is up.
+            let menu_open = self.treemap_path_menu.is_some();
             let mut breadcrumb = h_flex()
                 .min_w_0()
                 .overflow_hidden()
                 .justify_start()
                 .items_center()
-                .gap(rems(layout::TIGHT_LEAD))
+                // No gap of its own: the arrow's 24px plate centres a 14px
+                // glyph, and that padding alone is the distance to the label on
+                // either side, so the separator's ink sits equidistant from both
+                // by construction.
                 .text_color(tokens.muted_foreground)
                 // The path reads at the search box's body step, so punctuation
                 // and Latin text use the same face and size in both fields.
                 .text_size(rems(1.0));
             for (ix, (label, path)) in segments.into_iter().enumerate() {
-                if ix > 0 {
-                    breadcrumb = breadcrumb.child(
-                        Icon::new(IconName::ChevronRight)
-                            .size(rems(theme::UI_ICON_SIZE))
-                            .flex_shrink_0()
-                            .text_color(tokens.muted_foreground),
-                    );
-                }
                 let text = div()
                     .max_w(rems(PATH_SEGMENT_MAX_WIDTH))
                     .truncate()
                     .child(label.clone());
-                if ix == last {
-                    breadcrumb = breadcrumb.child(
-                        div()
-                            .flex_shrink_0()
-                            .text_color(tokens.foreground)
-                            .child(text),
-                    );
-                    continue;
-                }
-                // Ancestors are real controls: each is a tab stop with a visible
-                // ring, activated by Enter, Space or a click.
-                let focus = window
-                    .use_keyed_state(element_id("treemap-crumb-focus", &path), cx, |_, cx| {
-                        cx.focus_handle().tab_stop(true)
-                    })
-                    .read(cx)
-                    .clone();
-                let is_focused = focus.contains_focused(window, cx);
-                let target = path.clone();
-                let click_view = view.clone();
-                let key_view = view.clone();
-                let click_focus = focus.clone();
-                let crumb_control = accessibility::control("treemap-crumb");
-                let mut crumb_args = FluentArgs::new();
-                crumb_args.set("label", label.as_str());
-                crumb_args.set("path", path.as_str());
-                let crumb_label = self
-                    .i18n
-                    .get_text_with_args("treemap_crumb_label", &crumb_args);
-                breadcrumb = breadcrumb.child(
+                let is_current = ix == last;
+                let segment: AnyElement = if is_current {
+                    let tip = path.clone();
+                    div()
+                        .id(element_id("treemap-path-current", &path))
+                        .flex_shrink_0()
+                        .text_color(tokens.foreground)
+                        // The address the truncated label stands for, anchored to
+                        // the label the pointer is on rather than to the whole
+                        // field, which is a thousand pixels wide.
+                        .when(!menu_open, move |this| {
+                            this.tooltip(move |window, cx| {
+                                Tooltip::new(tip.clone()).build(window, cx)
+                            })
+                        })
+                        .child(text)
+                        .into_any_element()
+                } else {
+                    // Ancestors are real controls: each is a tab stop, activated
+                    // by Enter, Space or a click, and framed only while the
+                    // keyboard drives focus.
+                    let focus = window
+                        .use_keyed_state(element_id("treemap-crumb-focus", &path), cx, |_, cx| {
+                            cx.focus_handle().tab_stop(true)
+                        })
+                        .read(cx)
+                        .clone();
+                    let target = path.clone();
+                    let click_view = view.clone();
+                    let key_view = view.clone();
+                    let click_focus = focus.clone();
+                    let crumb_control = accessibility::control("treemap-crumb");
+                    let mut crumb_args = FluentArgs::new();
+                    crumb_args.set("label", label.as_str());
+                    crumb_args.set("path", path.as_str());
+                    let crumb_label = self
+                        .i18n
+                        .get_text_with_args("treemap_crumb_label", &crumb_args);
                     accessibility::element_at_key(crumb_control, &path)
                         .aria_label(crumb_label)
                         .relative()
@@ -544,23 +754,149 @@ impl CairnApp {
                                 });
                             }
                         })
-                        .when(is_focused, |this| {
-                            this.child(
-                                div()
-                                    .absolute()
-                                    .inset_0()
-                                    .rounded(tokens.radius)
-                                    .border_1()
-                                    .border_color(tokens.ring),
-                            )
+                        .children(cairn_ui::focus::edge(
+                            &focus,
+                            tokens.ring,
+                            tokens.radius,
+                            keyboard_navigation,
+                            window,
+                            cx,
+                        ))
+                        .when(!menu_open, {
+                            let tip = path.clone();
+                            move |this| {
+                                this.tooltip(move |window, cx| {
+                                    Tooltip::new(tip.clone()).build(window, cx)
+                                })
+                            }
                         })
-                        .child(text),
-                );
+                        .child(text)
+                        .into_any_element()
+                };
+
+                // Each segment owns the menu of its own child folders. The arrow
+                // is a tab stop of its own, so the crumb still only navigates.
+                let menu_focus = window
+                    .use_keyed_state(element_id("treemap-path-menu-focus", &path), cx, |_, cx| {
+                        cx.focus_handle().tab_stop(true)
+                    })
+                    .read(cx)
+                    .clone();
+                let open = menu_for.as_deref() == Some(path.as_str());
+                let menu_control = accessibility::control("treemap-path-menu");
+                let mut menu_args = FluentArgs::new();
+                menu_args.set("label", label.as_str());
+                let menu_label = self
+                    .i18n
+                    .get_text_with_args("treemap_path_menu_for", &menu_args);
+                let down_focus = menu_focus.clone();
+                let down_view = view.clone();
+                let down_path = path.clone();
+                let click_view = view.clone();
+                let click_path = path.clone();
+                let key_view = view.clone();
+                let key_path = path.clone();
+                let toggle_label = menu_label.clone();
+                let open_menu = menu.clone().filter(|_| open);
+                let arrow = div()
+                    .relative()
+                    .flex_shrink_0()
+                    .child(
+                        accessibility::element_at_key(menu_control, &path)
+                            .aria_label(menu_label)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .w(rems(layout::SPACE_24))
+                            .h(rems(layout::SPACE_24))
+                            .rounded(tokens.radius)
+                            .cursor_pointer()
+                            .track_focus(&menu_focus)
+                            .text_color(if open {
+                                tokens.foreground
+                            } else {
+                                tokens.muted_foreground
+                            })
+                            .hover(|this| this.bg(tokens.row_hover).text_color(tokens.foreground))
+                            .when(open, |this| this.bg(tokens.row_hover))
+                            .children(cairn_ui::focus::edge(
+                                &menu_focus,
+                                tokens.ring,
+                                tokens.radius,
+                                keyboard_navigation,
+                                window,
+                                cx,
+                            ))
+                            // Toggling on mouse-down lets the open menu close
+                            // before its own outside-press dismissal clears the
+                            // state; a click handler would reopen it instead.
+                            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                                window.prevent_default();
+                                cx.stop_propagation();
+                                down_focus.focus(window, cx);
+                                down_view.update(cx, |this, cx| {
+                                    this.treemap_path_menu_press = Some(down_path.clone());
+                                    this.toggle_treemap_path_menu(&down_path, window, cx)
+                                });
+                            })
+                            .on_click(move |event: &ClickEvent, window, cx| {
+                                cx.stop_propagation();
+                                // Mouse activation already ran on mouse-down.
+                                if matches!(event, ClickEvent::Mouse(_)) {
+                                    return;
+                                }
+                                click_view.update(cx, |this, cx| {
+                                    this.toggle_treemap_path_menu(&click_path, window, cx)
+                                });
+                            })
+                            .on_action(
+                                move |_: &crate::shell::commands::OpenSelected,
+                                      window: &mut Window,
+                                      cx: &mut App| {
+                                    cx.stop_propagation();
+                                    key_view.update(cx, |this, cx| {
+                                        this.toggle_treemap_path_menu(&key_path, window, cx)
+                                    });
+                                },
+                            )
+                            // The tooltip would sit on top of the menu the same
+                            // press just opened, so it belongs to the quiet state.
+                            .when(!menu_open, |this| {
+                                this.tooltip(move |window, cx| {
+                                    Tooltip::new(toggle_label.clone()).build(window, cx)
+                                })
+                            })
+                            // The separator and the menu trigger are one control:
+                            // it points at the next path step while closed and
+                            // turns down while its menu is open.
+                            .child(
+                                Icon::new(if open {
+                                    IconName::ChevronDown
+                                } else {
+                                    IconName::ChevronRight
+                                })
+                                .size(rems(theme::UI_ICON_SIZE)),
+                            ),
+                    )
+                    .when_some(open_menu, |this, menu| {
+                        this.child(deferred(
+                            anchored()
+                                .anchor(Anchor::TopLeft)
+                                .snap_to_window_with_margin(snap_margin)
+                                .child(
+                                    div()
+                                        .id(element_id("treemap-path-menu-pop", &path))
+                                        .occlude()
+                                        .top(rems(layout::TIGHT_LEAD))
+                                        .child(menu),
+                                ),
+                        ))
+                    });
+                breadcrumb = breadcrumb.child(segment).child(arrow);
             }
             breadcrumb.into_any_element()
         };
 
-        let full_path = current_dir.clone();
         let band = h_flex()
             .h(rems(layout::SEARCH_BAND_HEIGHT))
             .px(rems(layout::TIGHT_LEAD))
@@ -616,11 +952,6 @@ impl CairnApp {
                             this.cancel_treemap_path_edit(window, cx);
                         },
                     ))
-                    .when(!editing, |this| {
-                        this.tooltip(move |window, cx| {
-                            Tooltip::new(full_path.clone()).build(window, cx)
-                        })
-                    })
                     .child(
                         Icon::new(IconName::Folder)
                             .small()
@@ -654,6 +985,8 @@ impl CairnApp {
     pub fn render_treemap_body(
         &mut self,
         tokens: &ShellTokens,
+        sidebar_width: f32,
+        sidebar_animating: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -666,11 +999,6 @@ impl CairnApp {
         // The shell lays its boxes out border-box, so the 1px hairlines are
         // already inside these band widths; counting them again would shift
         // every pointer-to-base projection by a pixel or two.
-        let sidebar_w = if self.sidebar_collapsed {
-            0.0
-        } else {
-            f32::from(theme::rem(window) * layout::SIDEBAR_WIDTH)
-        };
         // The canvas is the content column's panel, below the path band. It keeps the
         // panel's own margin on the sides and bottom, while the band's bottom inset is
         // its top gap, mirroring the table panel under the search band. Pointer
@@ -678,24 +1006,43 @@ impl CairnApp {
         let panel_margin = f32::from(theme::rem(window) * layout::SPACE_4);
         let band_height = f32::from(theme::rem(window) * layout::SEARCH_BAND_HEIGHT);
         let avail_w =
-            (f32::from(window_bounds.size.width) - sidebar_w - 2.0 * panel_margin).max(100.0);
+            (f32::from(window_bounds.size.width) - sidebar_width - 2.0 * panel_margin).max(100.0);
         let chrome_h = f32::from(layout::TITLE_BAR_HEIGHT)
             + f32::from(theme::rem(window) * layout::STATUS_HEIGHT)
             + band_height;
         let avail_h = (f32::from(window_bounds.size.height) - chrome_h - panel_margin).max(100.0);
         let canvas_origin = (
-            sidebar_w + panel_margin,
+            sidebar_width + panel_margin,
             f32::from(layout::TITLE_BAR_HEIGHT) + band_height,
         );
         let canvas_size = (avail_w, avail_h);
+        let window_size = (
+            f32::from(window_bounds.size.width),
+            f32::from(window_bounds.size.height),
+        );
         state.last_scale_factor = window.scale_factor().max(1.0);
 
-        if (state.last_bounds.0 - canvas_size.0).abs() > 0.5
-            || (state.last_bounds.1 - canvas_size.1).abs() > 0.5
-        {
+        // The squarified layout is tied to the window, not to the sidebar. A
+        // sidebar motion projects the existing cells onto the new canvas width,
+        // so the topology never reshuffles and no frame exposes the background.
+        // A real window resize recomputes once the sidebar has settled.
+        let is_initial = state.last_window_size.0 <= 1.0 || state.last_window_size.1 <= 1.0;
+        let window_changed = (state.last_window_size.0 - window_size.0).abs() > 0.5
+            || (state.last_window_size.1 - window_size.1).abs() > 0.5;
+        if is_initial || (window_changed && !sidebar_animating) {
+            state.last_window_size = window_size;
             state.last_bounds = canvas_size;
             state.recompute_layout();
         }
+
+        // A sidebar shift only changes the width the same cells cover. The
+        // projection absorbs the delta, so the final frame has no layout jump.
+        let stretch_x = if state.last_bounds.0 > 1.0 {
+            canvas_size.0 / state.last_bounds.0
+        } else {
+            1.0
+        };
+        state.zoom.set_stretch_x(stretch_x, canvas_size);
 
         let is_dark = self.settings.is_dark(self.system_dark);
         let viewport = state.zoom.viewport();
@@ -704,16 +1051,8 @@ impl CairnApp {
         let pan_view = view.clone();
         let focus = state.focus_handle().cloned();
 
-        // The skeleton covers the whole scan: the canvas has no intermediate
-        // state. Scan progress is reported by the status bar, not here; a
-        // later navigation also clears the old layout, and until the new
-        // listing arrives the same skeleton stands in for a false "empty
-        // folder".
-        //
-        // The blocks are still. A scan can last minutes, and the design system's Skeleton
-        // animates at the display rate; the status band's mark is the one moving element,
-        // capped so a long build does not repaint the window at the display rate.
-        let loading = shows_loading_skeleton(state.content_revealed, state.is_scanning);
+        // Scan progress is reported by the status bar, not here.
+        let is_scanning = state.is_scanning;
 
         let render_cx = TreemapRenderContext {
             tokens,
@@ -728,47 +1067,11 @@ impl CairnApp {
 
         // An empty directory is content, not a separate surface: it must keep
         // the canvas focus, Backspace/Enter and wheel zoom.
-        let content = if loading {
+        let content = if is_scanning {
             v_flex()
-                .id("treemap-loading-skeleton")
+                .id("treemap-scanning-blank")
                 .size_full()
-                // The panel's four-sided frame step, not the content spine: the
-                // skeleton sits inside the same 4px-gap card as the canvas.
                 .p(rems(layout::SPACE_4))
-                .child(
-                    h_flex()
-                        .w_full()
-                        .h_full()
-                        .gap_x(rems(layout::SPACE_4))
-                        .child(
-                            div()
-                                .h_full()
-                                .w(relative(0.65))
-                                .flex_shrink_0()
-                                .rounded(tokens.radius)
-                                .bg(tokens.skeleton),
-                        )
-                        .child(
-                            v_flex()
-                                .h_full()
-                                .flex_1()
-                                .gap_y(rems(layout::SPACE_4))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .w_full()
-                                        .rounded(tokens.radius)
-                                        .bg(tokens.skeleton.opacity(0.5)),
-                                )
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .w_full()
-                                        .rounded(tokens.radius)
-                                        .bg(tokens.skeleton.opacity(0.5)),
-                                ),
-                        ),
-                )
                 .into_any_element()
         } else if state.layout_nodes.is_empty() {
             let control = accessibility::control("treemap-state");
@@ -1061,7 +1364,24 @@ impl CairnApp {
                 )
             });
 
-        canvas_element.into_any_element()
+        // Only a content reveal changes this key. A canvas resize keeps the
+        // current surface visible instead of restarting opacity at zero.
+        let reduce_motion = cx.reduce_motion();
+        let reveal_generation = state.reveal_generation;
+        let reveal_key = format!("treemap-surface-reveal-{}", reveal_generation);
+        canvas_element
+            .with_animation(
+                reveal_key,
+                Animation::new(crate::shell::motion::PANEL_REVEAL).with_easing(ease_out_quint()),
+                move |el, delta| {
+                    if reduce_motion {
+                        el
+                    } else {
+                        el.opacity(delta)
+                    }
+                },
+            )
+            .into_any_element()
     }
 }
 
@@ -1572,10 +1892,6 @@ fn category_icon(category: TreemapCategory) -> IconName {
     }
 }
 
-fn shows_loading_skeleton(content_revealed: bool, is_scanning: bool) -> bool {
-    !content_revealed || is_scanning
-}
-
 fn same_directory(left: &str, right: &str) -> bool {
     left.trim_end_matches('\\')
         .eq_ignore_ascii_case(right.trim_end_matches('\\'))
@@ -1679,19 +1995,62 @@ mod tests {
 
     use super::*;
 
-    /// A wheel event is normalized to upward-positive lines: pixels use 120px
-    /// per line, and Windows reports one notch as three lines, so Lines is
-    /// divided by three. Horizontal movement never zooms.
-    /// A directory that is still scanning without a listing must keep the
-    /// skeleton; only a finished, empty directory shows the empty message.
+    /// The path menu reads the directory as it stands on disk: child folders
+    /// only, in display order, each joined to an absolute path the Treemap can
+    /// enter. A sibling file never becomes a row.
     #[test]
-    fn loading_skeleton_wins_over_a_false_empty_directory() {
-        assert!(shows_loading_skeleton(false, true));
-        assert!(shows_loading_skeleton(true, true));
-        assert!(shows_loading_skeleton(false, false));
-        assert!(!shows_loading_skeleton(true, false));
+    fn the_path_menu_lists_child_directories_in_display_order() {
+        let root = std::env::temp_dir().join(format!("cairn_path_menu_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("the temp root exists");
+        for name in ["Windows", "Users", "Program Files"] {
+            std::fs::create_dir(root.join(name)).expect("a child directory exists");
+        }
+        std::fs::write(root.join("notes.md"), "").expect("a sibling file exists");
+
+        let base = root
+            .to_string_lossy()
+            .trim_end_matches(['\\', '/'])
+            .to_string();
+        assert_eq!(
+            path_menu_directories(&base),
+            vec![
+                (
+                    "Program Files".to_string(),
+                    format!(r"{base}\Program Files")
+                ),
+                ("Users".to_string(), format!(r"{base}\Users")),
+                ("Windows".to_string(), format!(r"{base}\Windows")),
+            ]
+        );
+        std::fs::remove_dir_all(&root).expect("the temp root is removed");
     }
 
+    /// The scan stops at the menu's cap rather than materializing a whole directory: a folder
+    /// holding more children than the menu can show still yields cap-plus-one rows, and that
+    /// one extra row is what tells the menu to offer the truncation note.
+    #[test]
+    fn the_path_menu_scan_stops_once_it_passes_the_cap() {
+        let root = std::env::temp_dir().join(format!("cairn_path_menu_cap_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("the temp root exists");
+        for index in 0..PATH_MENU_LIMIT + 5 {
+            std::fs::create_dir(root.join(format!("folder-{index:03}")))
+                .expect("a child directory exists");
+        }
+
+        let base = root
+            .to_string_lossy()
+            .trim_end_matches(['\\', '/'])
+            .to_string();
+        let listed = path_menu_directories(&base);
+        assert_eq!(listed.len(), PATH_MENU_LIMIT + 1);
+        assert!(listed.windows(2).all(|pair| pair[0].0 <= pair[1].0));
+
+        std::fs::remove_dir_all(&root).expect("the temp root is removed");
+    }
+    /// per line, and Windows reports one notch as three lines, so Lines is
+    /// divided by three. Horizontal movement never zooms.
     /// A root-owned summary has no parent to enter; drilling would reload the
     /// same directory and trigger the loading flash.
     #[test]

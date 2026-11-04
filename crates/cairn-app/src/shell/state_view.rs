@@ -6,7 +6,7 @@
 
 use crate::app::layout;
 use crate::shell::accessibility::{self, ControlElement, KeyControl};
-use crate::shell::theme::{self, ShellTokens};
+use crate::shell::theme::ShellTokens;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{h_flex, Sizable as _};
@@ -47,10 +47,9 @@ pub(crate) fn render_state_band(
         .min_w_0()
         .text_center()
         .text_base()
-        .font(theme::serif_font(FontWeight::SEMIBOLD))
         .line_height(relative(1.4))
         .text_color(tokens.foreground)
-        .child(theme::heading_text(message, FontWeight::SEMIBOLD));
+        .child(message);
     let sentence = match action {
         Some(action) => h_flex()
             .w_full()

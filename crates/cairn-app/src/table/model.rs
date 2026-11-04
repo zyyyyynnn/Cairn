@@ -23,6 +23,11 @@ use std::ops::Range;
 /// before the next frame lands.
 const OVERSCAN_ROWS: usize = 3;
 
+/// Ctrl+A selects the fetched window, never the whole virtual result set.
+/// This cap keeps one bulk action from collecting an unbounded number of rows;
+/// when fewer rows are loaded, the selection is naturally smaller than the cap.
+pub const SELECT_ALL_LIMIT: usize = 1000;
+
 /// Lane widths the table grows its four columns from, in rem. They are ratios, not fixed extents:
 /// a wider window makes every lane wider in proportion, and a narrower one shrinks them down to
 /// their minima before the band scrolls sideways. Dragging a boundary trades width between the two
@@ -564,14 +569,16 @@ impl TableState {
         self.selection_anchor = Some(ix);
     }
 
-    /// Selects every loaded row. Only the model tests exercise it today; the
-    /// window's Ctrl+A selects the query text instead.
-    #[cfg(test)]
-    pub fn select_all(&mut self) {
+    /// Selects the loaded rows up to `limit` and returns how many were taken.
+    /// The selection never reaches rows that have not been fetched.
+    pub fn select_all_loaded(&mut self, limit: usize) -> usize {
+        let loaded = self.loaded_range();
+        let end = loaded.start.saturating_add(limit.min(loaded.len()));
         self.selected_indices.clear();
-        for ix in self.loaded_range() {
-            self.selected_indices.insert(ix);
-        }
+        self.selected_indices.extend(loaded.start..end);
+        self.focused_idx = self.selected_indices.iter().copied().min();
+        self.selection_anchor = self.focused_idx;
+        self.selected_indices.len()
     }
 
     /// Drops the whole selection and focus. The shell calls this when a press lands outside the
@@ -1052,8 +1059,20 @@ mod tests {
         assert_eq!(table.focused_idx, Some(2));
         table.move_selection_down(false);
         assert_eq!(table.focused_idx, Some(3));
-        table.select_all();
+        table.select_all_loaded(usize::MAX);
         assert_eq!(table.selected_indices.len(), table.loaded_range().len());
+    }
+
+    #[test]
+    fn select_all_loaded_stops_at_the_limit() {
+        let mut table = table(1_200, 2_000);
+
+        assert_eq!(table.select_all_loaded(1_000), 1_000);
+        assert_eq!(table.selected_indices.len(), 1_000);
+        assert!(table.selected_indices.contains(&999));
+        assert!(!table.selected_indices.contains(&1_000));
+        assert_eq!(table.focused_idx, Some(0));
+        assert_eq!(table.selection_anchor, Some(0));
     }
 
     #[test]

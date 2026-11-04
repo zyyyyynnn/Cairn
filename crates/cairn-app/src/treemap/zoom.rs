@@ -24,11 +24,14 @@ const MAX_STEPS_PER_EVENT: f32 = 3.0;
 /// first automatic drill.
 const AUTO_ENTER_COOLDOWN: Duration = Duration::from_millis(400);
 
-/// The base-to-screen transform: `screen = (base - origin) * scale`.
+/// The base-to-screen transform: `screen = (base - origin) * scale`, with an
+/// independent horizontal stretch that keeps the layout canvas covering the
+/// sidebar-driven width without re-running the squarified layout.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct TreemapViewport {
     scale: f32,
     origin: (f32, f32),
+    stretch_x: f32,
 }
 
 impl Default for TreemapViewport {
@@ -36,6 +39,7 @@ impl Default for TreemapViewport {
         Self {
             scale: MIN_SCALE,
             origin: (0.0, 0.0),
+            stretch_x: 1.0,
         }
     }
 }
@@ -53,6 +57,16 @@ impl TreemapViewport {
         *self = Self::default();
     }
 
+    /// Sets the horizontal projection that maps the layout width onto the
+    /// current canvas. A non-finite or non-positive value falls back to 1.0.
+    pub(super) fn set_stretch_x(&mut self, stretch_x: f32) {
+        self.stretch_x = if stretch_x.is_finite() && stretch_x > 0.0 {
+            stretch_x
+        } else {
+            1.0
+        };
+    }
+
     /// Keeps at least one full canvas of content in view. Resizing the window or
     /// collapsing the sidebar shrinks the canvas under an existing origin, so
     /// the origin has to move back inside the legal range.
@@ -62,7 +76,8 @@ impl TreemapViewport {
             self.origin = (0.0, 0.0);
             return;
         }
-        let max_x = (canvas.0 - canvas.0 / self.scale).max(0.0);
+        let base_w = canvas.0 / self.stretch_x;
+        let max_x = (base_w - base_w / self.scale).max(0.0);
         let max_y = (canvas.1 - canvas.1 / self.scale).max(0.0);
         self.origin.0 = self.origin.0.clamp(0.0, max_x);
         self.origin.1 = self.origin.1.clamp(0.0, max_y);
@@ -92,7 +107,10 @@ impl TreemapViewport {
         if next <= MIN_SCALE {
             self.origin = (0.0, 0.0);
         } else {
-            self.origin = (world.0 - anchor.0 / next, world.1 - anchor.1 / next);
+            self.origin = (
+                world.0 - anchor.0 / (next * self.stretch_x),
+                world.1 - anchor.1 / next,
+            );
         }
         self.clamp(canvas);
         self.scale != previous
@@ -100,7 +118,12 @@ impl TreemapViewport {
 
     pub(super) fn project(&self, rect: TreemapRect) -> TreemapRect {
         let (x, y) = self.project_point((rect.x, rect.y));
-        TreemapRect::new(x, y, rect.width * self.scale, rect.height * self.scale)
+        TreemapRect::new(
+            x,
+            y,
+            rect.width * self.scale * self.stretch_x,
+            rect.height * self.scale,
+        )
     }
 
     /// Moves the visible content by a screen-space delta. Dragging the canvas
@@ -111,7 +134,7 @@ impl TreemapViewport {
             return false;
         }
         let previous = self.origin;
-        self.origin.0 -= dx_screen / self.scale;
+        self.origin.0 -= dx_screen / (self.scale * self.stretch_x);
         self.origin.1 -= dy_screen / self.scale;
         self.clamp(canvas);
         self.origin != previous
@@ -119,14 +142,14 @@ impl TreemapViewport {
 
     pub(super) fn project_point(&self, point: (f32, f32)) -> (f32, f32) {
         (
-            (point.0 - self.origin.0) * self.scale,
+            (point.0 - self.origin.0) * self.scale * self.stretch_x,
             (point.1 - self.origin.1) * self.scale,
         )
     }
 
     pub(super) fn unproject_point(&self, point: (f32, f32)) -> (f32, f32) {
         (
-            point.0 / self.scale + self.origin.0,
+            point.0 / (self.scale * self.stretch_x) + self.origin.0,
             point.1 / self.scale + self.origin.1,
         )
     }
@@ -141,7 +164,7 @@ impl TreemapViewport {
         if rect.width <= 0.0 || rect.height <= 0.0 {
             return f32::INFINITY;
         }
-        (canvas.0 / rect.width).max(canvas.1 / rect.height)
+        (canvas.0 / (rect.width * self.stretch_x)).max(canvas.1 / rect.height)
     }
 }
 
@@ -173,6 +196,13 @@ impl TreemapZoom {
 
     pub(super) fn viewport(&self) -> TreemapViewport {
         self.viewport
+    }
+
+    /// Adopts the horizontal projection for the current canvas and keeps a
+    /// zoomed viewport covering it. The layout itself never changes here.
+    pub(super) fn set_stretch_x(&mut self, stretch_x: f32, canvas: (f32, f32)) {
+        self.viewport.set_stretch_x(stretch_x);
+        self.viewport.clamp(canvas);
     }
 
     pub(super) fn is_zoomed(&self) -> bool {
@@ -240,10 +270,6 @@ impl TreemapZoom {
     pub(super) fn reset_view(&mut self) {
         self.viewport.reset();
         self.pan_anchor = None;
-    }
-
-    pub(super) fn clamp(&mut self, canvas: (f32, f32)) {
-        self.viewport.clamp(canvas);
     }
 
     /// Applies one wheel event and, only for upward lines, decides whether the
@@ -433,6 +459,62 @@ mod tests {
         assert_eq!(viewport.project(bounds), bounds);
         assert_eq!(viewport.project_point((5.0, 6.0)), (5.0, 6.0));
         assert_eq!(viewport.unproject_point((5.0, 6.0)), (5.0, 6.0));
+    }
+
+    #[test]
+    fn stretch_maps_the_layout_width_onto_the_canvas_and_inverts_cleanly() {
+        let mut viewport = TreemapViewport::default();
+        viewport.set_stretch_x(1.2);
+
+        assert_eq!(
+            viewport.project(rect(10.0, 20.0, 30.0, 40.0)),
+            rect(12.0, 20.0, 36.0, 40.0)
+        );
+
+        let world = viewport.unproject_point(viewport.project_point((10.0, 20.0)));
+        assert!((world.0 - 10.0).abs() < 0.001);
+        assert!((world.1 - 20.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn stretch_keeps_a_zoomed_canvas_covered_and_panning_stays_one_to_one() {
+        let base = (800.0, 600.0);
+        let canvas = (960.0, 600.0);
+        let mut zoom = TreemapZoom::new();
+        zoom.viewport.set_stretch_x(1.2);
+        assert!(zoom.viewport.zoom_by_lines(2.0, (480.0, 300.0), canvas));
+        zoom.viewport.clamp(canvas);
+
+        let bottom_right = zoom.viewport.project_point(base);
+        assert!(
+            bottom_right.0 >= canvas.0 - 0.001 && bottom_right.1 >= canvas.1 - 0.001,
+            "the stretched canvas exposes background: {bottom_right:?}"
+        );
+
+        let before = zoom.viewport.project_point((200.0, 200.0));
+        assert!(zoom.viewport.pan_by(30.0, 0.0, canvas));
+        let after = zoom.viewport.project_point((200.0, 200.0));
+        assert!((after.0 - before.0 - 30.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn fill_scale_accounts_for_the_horizontal_stretch() {
+        let viewport = TreemapViewport {
+            scale: 1.0,
+            origin: (0.0, 0.0),
+            stretch_x: 1.2,
+        };
+        let scale = viewport.fill_scale(rect(0.0, 0.0, 100.0, 100.0), (960.0, 600.0));
+        assert!((scale - 8.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn an_invalid_stretch_falls_back_to_identity() {
+        let mut viewport = TreemapViewport::default();
+        viewport.set_stretch_x(f32::NAN);
+        assert_eq!(viewport.project_point((1.0, 0.0)), (1.0, 0.0));
+        viewport.set_stretch_x(0.0);
+        assert_eq!(viewport.project_point((1.0, 0.0)), (1.0, 0.0));
     }
 
     #[test]
@@ -817,7 +899,11 @@ mod tests {
 
     fn zoomed(scale: f32, origin: (f32, f32)) -> TreemapZoom {
         let mut zoom = TreemapZoom::new();
-        zoom.viewport = TreemapViewport { scale, origin };
+        zoom.viewport = TreemapViewport {
+            scale,
+            origin,
+            stretch_x: 1.0,
+        };
         zoom
     }
 
@@ -906,7 +992,7 @@ mod tests {
         assert!(zoom.begin_pan((400.0, 300.0)));
         assert!(zoom.pan_to((500.0, 300.0), (800.0, 600.0)));
 
-        zoom.clamp((320.0, 100.0));
+        zoom.viewport.clamp((320.0, 100.0));
 
         assert_canvas_is_covered(&zoom.viewport(), (320.0, 100.0));
     }

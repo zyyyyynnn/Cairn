@@ -90,6 +90,11 @@ pub mod layout {
     /// The status line: the compact data row, so it takes the result-row step. The shell pins it
     /// so its arithmetic and the rendered band cannot drift apart.
     pub const STATUS_HEIGHT: f32 = ROW_HEIGHT;
+    /// The option row step every dropdown in the app shares: the title-bar menus, the row context
+    /// menu and the Treemap path menu. `gpui-kit`'s `PopupMenu` paints its own rows at this fixed
+    /// physical step, so a menu row the application draws itself has to match it rather than take
+    /// the 28px data-row step, which would leave two menu row heights in one product.
+    pub const MENU_ROW_HEIGHT: Pixels = gpui_kit::gpui::px(26.0);
     /// The Treemap category legend is a compact status item: one 12px swatch plus a text_sm
     /// label inside a 20px hit row. Its 2px horizontal inset is an optical exception and stays
     /// off the 4px ladder.
@@ -134,8 +139,8 @@ pub mod layout {
     pub const DIALOG_SEAT_HEIGHT: f32 = 32.0 * STEP; // 128px
 
     // ---- panes ---------------------------------------------------------------------
-    /// The sidebar keeps its previous rendered width on the 4px ladder: 208px and 152px at 100%.
-    pub const SIDEBAR_MIN_WIDTH: f32 = 38.0 * STEP;
+    /// The sidebar renders at this width or not at all; collapsing clips its
+    /// full surface instead of compressing the rows.
     pub const SIDEBAR_WIDTH: f32 = 52.0 * STEP;
     /// Sidebar leading glyph. It reads the shared control-glyph token (1rem = 14 px at 100%);
     /// the 0.875rem row label sits inside the 1–1.25em icon band. A graphic size, not a layout
@@ -290,7 +295,7 @@ pub struct ResultsDomain {
     /// value both the visible scrollbar and the keyboard path write.
     pub table_scroll: ScrollHandle,
     pub table: TableState,
-    /// Lane widths in rem, the one geometry the heading row, real rows and skeleton rows share.
+    /// Lane widths in rem, shared by the heading row and content rows.
     pub column_widths: ColumnWidths,
     /// Set between a header boundary's mouse down and its release.
     pub(crate) column_drag: Option<ColumnDrag>,
@@ -310,7 +315,7 @@ pub struct ServiceDomain {
     /// repeated; if access is denied the explicit UAC button is the remaining route.
     pub(crate) has_attempted_silent_start: bool,
     /// One status-refresh loop while a volume is building or catching up; it stops at the first
-    /// all-Synced answer so the skeleton and the index capsule can disappear.
+    /// all-Synced answer so the index capsule can disappear.
     pub(crate) is_refreshing_status: bool,
     /// `true` while a connection probe is in flight. It is what makes the retry button answer at once
     /// and refuse a second click while the first is still unanswered, so the state has to belong to
@@ -371,6 +376,14 @@ pub struct CairnApp {
     pub drive_view: Option<char>,
     pub treemap_state: Option<crate::treemap::state::TreemapViewState>,
     pub(crate) treemap_path: TreemapPathField,
+    /// The path switch menu anchored to one breadcrumb segment.
+    pub(crate) treemap_path_menu: Option<Entity<PopupMenu>>,
+    pub(crate) treemap_path_menu_for: Option<String>,
+    /// The segment whose arrow is being pressed. The open menu sees that press
+    /// as an outside click, so its dismissal must not erase the segment the
+    /// same press is about to toggle closed.
+    pub(crate) treemap_path_menu_press: Option<String>,
+    pub(crate) treemap_path_menu_dismiss: Option<Subscription>,
     /// The Recycle Bin view. The bin is a location, not a search scope: the view owns its rows,
     /// its selection and its error band together, so any query or drive switch releases the whole
     /// location instead of leaving half of it behind.
@@ -380,6 +393,15 @@ pub struct CairnApp {
     /// The app-owned transient status surface. One at a time; errors persist.
     pub toast: Option<crate::shell::toast::ToastState>,
     pub(crate) toast_serial: u64,
+    /// Generation identifier for the results table panel's entrance animation.
+    pub table_reveal_generation: u64,
+    /// A table panel session is waiting for its first visible result set, so
+    /// the entrance starts with content instead of running while the query is
+    /// still in flight.
+    pub table_reveal_pending: bool,
+    /// New content paints hidden for one frame; a deferred pass then starts
+    /// the fade only after that frame has been laid out and painted.
+    pub table_reveal_ready: bool,
     /// True while the GitHub release check is in flight. The Help menu trigger carries the
     /// loading icon; no separate waiting dialog is opened.
     pub(crate) is_checking_update: bool,
@@ -505,16 +527,59 @@ impl CairnApp {
                 error: false,
                 _subscription: treemap_path_subscription,
             },
+            treemap_path_menu: None,
+            treemap_path_menu_for: None,
+            treemap_path_menu_press: None,
+            treemap_path_menu_dismiss: None,
             recycle_bin: crate::shell::recycle_bin::RecycleBinView::closed(),
             delete_in_flight: false,
             toast: None,
             toast_serial: 0,
+            table_reveal_generation: 0,
+            table_reveal_pending: true,
+            table_reveal_ready: true,
             is_checking_update: false,
         };
         window.focus(&app.query.search_focus, cx);
         app.consume_update_notice(cx);
         app.check_service_connection(cx);
         app
+    }
+
+    /// Starts the results panel's entrance and closes the pending session.
+    pub(crate) fn bump_table_reveal(&mut self) {
+        self.table_reveal_generation = self.table_reveal_generation.wrapping_add(1);
+        self.table_reveal_pending = false;
+        self.table_reveal_ready = false;
+    }
+
+    /// Leaves the drive visualization. The next visible table content starts a
+    /// fresh panel entrance instead of reviving the hidden table in place.
+    pub(crate) fn leave_drive_view(&mut self) {
+        if self.drive_view.take().is_some() {
+            self.clear_treemap_path_menu();
+            self.treemap_state = None;
+            self.table_reveal_pending = true;
+        }
+    }
+
+    /// Starts the table entrance once a panel session actually has rows, so the
+    /// fade begins with content rather than while the query is still in flight.
+    pub(crate) fn note_table_content(&mut self) {
+        if self.table_reveal_pending
+            && self.results.table.total_rows() > 0
+            && self.drive_view.is_none()
+        {
+            self.bump_table_reveal();
+        }
+    }
+
+    /// Starts the same entrance for a new session whose answer is empty; the
+    /// state band is content too, not a reason to leave the old frame static.
+    pub(crate) fn note_table_empty(&mut self) {
+        if self.table_reveal_pending && self.drive_view.is_none() {
+            self.bump_table_reveal();
+        }
     }
 
     pub fn set_initial_query(&mut self, text: &str, cx: &mut Context<Self>) {
@@ -772,7 +837,6 @@ mod tests {
             layout::DATE_COLUMN,
             layout::TABLE_MIN_WIDTH,
             layout::MESSAGE_MAX_WIDTH,
-            layout::SIDEBAR_MIN_WIDTH,
             layout::SIDEBAR_WIDTH,
             layout::CONTENT_INSET,
             layout::TIGHT_LEAD,
@@ -900,9 +964,5 @@ mod tests {
     fn the_column_lanes_are_shared_and_leave_room_for_the_path() {
         assert!(layout::NAME_MIN_COLUMN > layout::PATH_MIN_COLUMN);
         assert!(layout::DATE_COLUMN > layout::SIZE_COLUMN);
-        assert!(
-            layout::SIDEBAR_WIDTH >= layout::SIDEBAR_MIN_WIDTH,
-            "the default sidebar cannot be narrower than its minimum"
-        );
     }
 }

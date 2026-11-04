@@ -263,10 +263,11 @@ impl CairnApp {
     pub(crate) fn render_sidebar(
         &self,
         tokens: &ShellTokens,
+        sidebar_width: f32,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        if self.sidebar_collapsed {
+        if sidebar_width <= 0.5 {
             return div()
                 .id("cairn-sidebar-collapsed")
                 .w_0()
@@ -397,7 +398,7 @@ impl CairnApp {
 
         // While the connection probe or the first query is still running, an empty drive list is
         // not a fact about the machine. Saying "no drives found" there reports a failure that has
-        // not happened; the table's skeleton already says the index is being read.
+        // not happened; status reports whether the index is being read.
         let awaiting_index =
             drive_rows.is_empty() && (self.service.is_probing_service || self.query.is_searching);
         let drive_elements = if awaiting_index {
@@ -425,26 +426,20 @@ impl CairnApp {
             drive_rows
         };
 
-        v_flex()
+        // The content keeps its full width while the outer surface clips it, so
+        // labels and rows never reflow during a collapse or an expand.
+        let full_width = f32::from(theme::rem(window) * layout::SIDEBAR_WIDTH);
+        let opacity = (sidebar_width / full_width.max(1.0)).clamp(0.0, 1.0);
+        let sidebar = v_flex()
             .id("cairn-sidebar")
             .w(rems(layout::SIDEBAR_WIDTH))
-            .min_w(rems(layout::SIDEBAR_MIN_WIDTH))
-            .flex_shrink_0()
             .h_full()
-            .bg(tokens.sidebar)
-            .border_r_1()
-            .border_color(tokens.border)
-            // The sidebar is another content surface: any press in it leaves the result rows,
-            // including a press on a row that is navigating away. The bin keeps its
-            // identity-keyed selection across these presses.
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| this.dismiss_result_selection_on_chrome_press(cx)),
-            )
             .justify_between()
             .child(
                 v_flex()
                     .id("sidebar-scroll-viewport")
+                    .w(rems(layout::SIDEBAR_WIDTH))
+                    .flex_shrink_0()
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
@@ -461,7 +456,26 @@ impl CairnApp {
                     .child(recycle_entry)
                     .child(sidebar_caption(drives, drives_title, window, tokens))
                     .children(drive_elements),
+            );
+
+        div()
+            .id("cairn-sidebar-surface")
+            .w(px(sidebar_width))
+            .h_full()
+            .flex_shrink_0()
+            .overflow_hidden()
+            .bg(tokens.sidebar)
+            .border_r_1()
+            .border_color(tokens.border)
+            .opacity(opacity)
+            // The sidebar is another content surface: any press in it leaves the result rows,
+            // including a press on a row that is navigating away. The bin keeps its
+            // identity-keyed selection across these presses.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.dismiss_result_selection_on_chrome_press(cx)),
             )
+            .child(sidebar)
             .into_any_element()
     }
 }

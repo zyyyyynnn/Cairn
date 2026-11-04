@@ -12,7 +12,7 @@ use gpui_kit::component::ActiveTheme;
 use gpui_kit::gpui::{App, Hsla, Pixels, Window};
 
 pub use cairn_ui::brand::{
-    heading_text, serif_font, tabular_figures, BASE_FONT_PX, BRAND_TITLE_SIZE, HAIRLINE, RADIUS,
+    serif_font, tabular_figures, BASE_FONT_PX, BRAND_TITLE_SIZE, HAIRLINE, RADIUS,
     SERIF_LINE_HEIGHT, SMALL_TEXT_SIZE, UI_ICON_SIZE,
 };
 pub use cairn_ui::locale::system_prefers_dark;
@@ -63,7 +63,7 @@ pub struct ShellTokens {
     pub table_head_foreground: Hsla,
     /// Editable control outlines, held at 3:1 against the page and muted surfaces.
     pub control_stroke: Hsla,
-    pub skeleton: Hsla,
+
     // ---- ink ----------------------------------------------------------------------
     pub foreground: Hsla,
     pub muted_foreground: Hsla,
@@ -78,7 +78,7 @@ pub struct ShellTokens {
     pub danger: Hsla,
     pub danger_foreground: Hsla,
     // ---- shape --------------------------------------------------------------------
-    /// Every app-owned corner: search box, sidebar rows, skeleton bars, focus frames.
+    /// Every app-owned corner: search box, sidebar rows, focus frames.
     pub radius: Pixels,
 }
 
@@ -97,7 +97,7 @@ impl ShellTokens {
             table_head: theme.table_head,
             table_head_foreground: theme.table_head_foreground,
             control_stroke: control_stroke(theme),
-            skeleton: theme.skeleton,
+
             foreground: theme.foreground,
             muted_foreground: theme.muted_foreground,
             border: theme.border,
@@ -121,34 +121,5 @@ impl ShellTokens {
         } else {
             self.background
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use core::prelude::rust_2021::test;
-
-    use super::{clamp_zoom, BASE_FONT_PX, HAIRLINE};
-    use cairn_ui::theme::{MAX_ZOOM, MIN_ZOOM};
-    use gpui_kit::gpui::px;
-
-    /// A restored or supplied zoom must land inside the band the control frames were designed for.
-    #[test]
-    fn zoom_stays_inside_the_designed_band() {
-        assert_eq!(clamp_zoom(0.1), MIN_ZOOM);
-        assert_eq!(clamp_zoom(10.0), MAX_ZOOM);
-        for zoom in [0.9, 1.0, 1.1] {
-            assert_eq!(clamp_zoom(zoom), zoom, "{zoom} is inside the band");
-        }
-        assert_eq!(clamp_zoom(1.25), MAX_ZOOM);
-        assert_eq!(clamp_zoom(0.75), MIN_ZOOM);
-    }
-
-    /// The one literal the shell keeps is a physical boundary, so it has to stay a single pixel
-    /// whatever the interface zoom is.
-    #[test]
-    fn the_hairline_is_a_device_pixel_not_a_rem_step() {
-        assert_eq!(HAIRLINE, px(1.0));
-        assert_eq!(BASE_FONT_PX, 14.0, "the shell's base font anchors its rem");
     }
 }

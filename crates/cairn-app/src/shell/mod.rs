@@ -14,6 +14,7 @@ pub(crate) mod dialogs;
 pub(crate) mod i18n;
 pub(crate) mod menu_actions;
 pub(crate) mod menu_rules;
+pub(crate) mod motion;
 pub(crate) mod nav_history;
 pub(crate) mod os;
 pub(crate) mod perf;

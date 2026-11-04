@@ -186,7 +186,7 @@ fn main() {
             //
             // Both sizes are logical pixels and both are read off the shell's own budgets. 1024x640
             // is the smallest standard desktop rung (1024 / 1280 / 1440 / 1920) whose width still
-            // contains what the shell cannot compress: `SIDEBAR_MIN_WIDTH`, the four column floors
+            // contains what the shell cannot compress: `SIDEBAR_WIDTH`, the four column floors
             // from `crate::app::layout` and their cell padding, about 780px at zoom 1.0. Below that
             // rung a lane stops narrowing and starts being cut off. Its height leaves the result
             // band about eighteen rows once the title bar and the three bands of

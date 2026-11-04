@@ -76,7 +76,7 @@ impl StatusBarModel {
     }
 
     /// `true` while at least one volume is still building or catching up. This is a loading state,
-    /// not a warning: the table renders its skeleton until the index has data to show.
+    /// not a warning: the status bar annotates catching up volumes.
     pub fn is_any_loading(&self) -> bool {
         self.volumes.iter().any(|volume| {
             matches!(
@@ -91,7 +91,7 @@ impl StatusBarModel {
         let mut args = FluentArgs::new();
         args.set("count", self.objects_count);
         args.set("count_text", format_count(self.objects_count));
-        if self.objects_count == 0 {
+        if self.objects_count == 0 || self.objects_bytes == 0 {
             i18n.get_text_with_args("status_objects_count", &args)
         } else {
             args.set("size", format_size_bytes(self.objects_bytes));
@@ -339,6 +339,30 @@ mod tests {
         assert!(model.has_objects_summary());
         let text = model.objects_summary_text(&i18n);
         assert!(text.contains('0'), "{text}");
+    }
+
+    #[test]
+    fn folder_results_without_file_bytes_omit_zero_byte_display() {
+        let zh = I18nManager::new("zh-CN");
+        let en = I18nManager::new("en-US");
+        let mut model = StatusBarModel::default();
+        model.set_objects_summary(206_211, 0);
+
+        let zh_text = model.objects_summary_text(&zh);
+        assert!(zh_text.contains("206,211"), "{zh_text}");
+        assert!(zh_text.contains("项目"), "{zh_text}");
+        assert!(
+            !zh_text.contains("0 B") && !zh_text.contains("0B"),
+            "{zh_text}"
+        );
+
+        let en_text = model.objects_summary_text(&en);
+        assert!(en_text.contains("206,211"), "{en_text}");
+        assert!(en_text.contains("items"), "{en_text}");
+        assert!(
+            !en_text.contains("0 B") && !en_text.contains("0B"),
+            "{en_text}"
+        );
     }
 
     #[test]

@@ -225,6 +225,25 @@ impl CairnApp {
             }
         }
 
+        // A selection replaces the total summary with the count the next bulk action will
+        // actually receive. Treemap selection is reported by its own node summary.
+        if !summary_loading && !self.results.table.selected_indices.is_empty() {
+            let selected = self.results.table.selected_indices.len();
+            let mut args = FluentArgs::new();
+            args.set("count", selected as i64);
+            args.set("count_text", format_count(selected));
+            let text = self.i18n.get_text_with_args("status_selected_count", &args);
+            summary_aria = Some(text.clone());
+            summary = Some(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .font_features(theme::tabular_figures())
+                    .child(text)
+                    .into_any_element(),
+            );
+        }
+
         // The native xsmall body is 20px; a 24px minimum would let the hover surface
         // extend a row above/below the status line.
         //
@@ -337,9 +356,7 @@ impl CairnApp {
             // The summary can carry a full path; let it ellipsize before it
             // pushes the category legend out of the bar.
             .left(left);
-        let right = self
-            .render_treemap_legend(tokens, window, cx)
-            .or_else(|| self.render_empty_bin_action(cx));
+        let right = self.render_treemap_legend(tokens, window, cx);
         if let Some(right) = right {
             status_bar = status_bar.right(right);
         }
@@ -355,32 +372,6 @@ impl CairnApp {
                 cx.listener(|this, _, _, cx| this.dismiss_result_selection_on_chrome_press(cx)),
             )
             .child(status_bar)
-    }
-
-    /// The Recycle Bin's one location-wide action. It lives in the status band
-    /// because the bin has no toolbar, and it is absent while the listing is
-    /// loading, unreadable or genuinely empty.
-    fn render_empty_bin_action(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.recycle_bin.is_open()
-            || self.recycle_bin.is_loading()
-            || self.recycle_bin.error().is_some()
-            || self.recycle_bin.all().is_empty()
-        {
-            return None;
-        }
-        let control = accessibility::control("empty-recycle-bin");
-        let label = accessibility::name(control, &self.i18n);
-        Some(
-            Button::new(control.element)
-                .small()
-                .font_weight(FontWeight::MEDIUM)
-                .ghost()
-                .min_h(rems(layout::SPACE_24))
-                .label(label.clone())
-                .accessibility_label(label)
-                .on_click(cx.listener(|this, _, window, cx| this.empty_bin(window, cx)))
-                .into_any_element(),
-        )
     }
 
     /// A compact labeled legend doubles as the category filter: clicking an

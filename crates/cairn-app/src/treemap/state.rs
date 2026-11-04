@@ -77,6 +77,8 @@ pub struct TreemapViewState {
     /// Shares the allocation with `root_tree` when the view shows the drive
     /// root, so a finished tree is held once, not twice.
     stored_drive_tree: Option<Arc<TreemapTreeNode>>,
+    /// Cached directory trees for drilled subdirectories fetched from the service.
+    cached_dir_trees: HashMap<String, Arc<TreemapTreeNode>>,
     /// Calculated rectangular layout nodes (hierarchical nested)
     pub(super) layout_nodes: Vec<NestedTreemapLayoutNode>,
     /// Level of detail (1 to 5, default 5)
@@ -95,8 +97,14 @@ pub struct TreemapViewState {
     current_dir_total_items: usize,
     /// Focus handle for keyboard events (Backspace, Enter)
     pub(super) focus: Option<FocusHandle>,
-    /// Last measured layout bounds (width, height)
+    /// Generation identifier for layout and surface reveal animation.
+    pub(super) reveal_generation: u64,
+    /// Bounds used by the current squarified layout. Sidebar width changes are
+    /// projected onto it instead of triggering another layout.
     pub(super) last_bounds: (f32, f32),
+    /// Last whole-window size, so a real window resize recomputes the layout
+    /// while a sidebar-driven canvas change stays a projection.
+    pub(super) last_window_size: (f32, f32),
     /// Last observed window scale factor for device-pixel snapping.
     pub(super) last_scale_factor: f32,
     /// Loaded in-memory index, if available from index files
@@ -119,6 +127,10 @@ pub struct TreemapViewState {
     pub(super) zoom: TreemapZoom,
 }
 
+fn normalize_dir_key(path: &str) -> String {
+    path.trim_end_matches(['\\', '/']).to_ascii_uppercase()
+}
+
 impl TreemapViewState {
     pub(super) fn new(drive: char, focus: FocusHandle) -> (Self, Option<PathBuf>) {
         let drive_upper = drive.to_ascii_uppercase();
@@ -129,6 +141,7 @@ impl TreemapViewState {
             navigation: TreemapNavigation::at_drive_root(drive_upper),
             root_tree: None,
             stored_drive_tree: None,
+            cached_dir_trees: HashMap::new(),
             layout_nodes: Vec::new(),
             detail_level: 5,
             selected_path: None,
@@ -136,7 +149,9 @@ impl TreemapViewState {
             current_dir_total_size: 0,
             current_dir_total_items: 0,
             focus: Some(focus.tab_stop(true)),
+            reveal_generation: 0,
             last_bounds: (800.0, 600.0),
+            last_window_size: (0.0, 0.0),
             last_scale_factor: 1.0,
             cached_index,
             is_scanning: false,
@@ -159,6 +174,7 @@ impl TreemapViewState {
             navigation: TreemapNavigation::at_drive_root(drive_upper),
             root_tree: None,
             stored_drive_tree: None,
+            cached_dir_trees: HashMap::new(),
             layout_nodes: Vec::new(),
             detail_level: 5,
             selected_path: None,
@@ -166,7 +182,9 @@ impl TreemapViewState {
             current_dir_total_size: 0,
             current_dir_total_items: 0,
             focus: None,
+            reveal_generation: 0,
             last_bounds: (800.0, 600.0),
+            last_window_size: (0.0, 0.0),
             last_scale_factor: 1.0,
             cached_index: None,
             is_scanning: false,
@@ -254,11 +272,9 @@ impl TreemapViewState {
             }
         }
 
-        // 2. Check if we have already scanned the drive tree and can find the subtree in memory (0ms instant)
-        if let Some(drive_tree) = self.stored_drive_tree.clone() {
-            if is_drive_root(&current_dir) {
-                // The root view shares the cached tree's allocation instead
-                // of copying the largest tree in the app on every visit.
+        // 2. Drive root: instant from stored_drive_tree if already scanned.
+        if is_drive_root(&current_dir) {
+            if let Some(drive_tree) = self.stored_drive_tree.clone() {
                 self.current_dir_total_items = self
                     .scanned_item_totals
                     .get(&current_dir)
@@ -268,13 +284,16 @@ impl TreemapViewState {
                 self.reveal_content();
                 return None;
             }
-            if let Some(node) = drive_tree.find_by_path(&current_dir) {
+        } else {
+            // 3. Subdirectory: check if we previously fetched and cached the full tree for this directory.
+            let dir_key = normalize_dir_key(&current_dir);
+            if let Some(cached_tree) = self.cached_dir_trees.get(&dir_key).cloned() {
                 self.current_dir_total_items = self
                     .scanned_item_totals
                     .get(&current_dir)
                     .copied()
-                    .unwrap_or_else(|| node.descendant_count());
-                self.set_tree(node.clone());
+                    .unwrap_or_else(|| cached_tree.descendant_count());
+                self.adopt_shared_tree(cached_tree);
                 self.reveal_content();
                 return None;
             }
@@ -314,9 +333,10 @@ impl TreemapViewState {
         self.recompute_layout();
     }
 
-    /// Leaves the loading skeleton for good.
+    /// Marks the scanned tree content as ready for display.
     pub(super) fn reveal_content(&mut self) {
         self.content_revealed = true;
+        self.reveal_generation = self.reveal_generation.wrapping_add(1);
     }
 
     /// The service could not answer for this directory. The canvas shows the
@@ -347,6 +367,9 @@ impl TreemapViewState {
         let current_dir = self.navigation.current_dir().to_string();
         if is_drive_root(&current_dir) {
             self.stored_drive_tree = self.root_tree.clone();
+        } else if let Some(ref tree) = self.root_tree {
+            self.cached_dir_trees
+                .insert(normalize_dir_key(&current_dir), tree.clone());
         }
         self.scanned_item_totals
             .insert(current_dir, descendant_count);
@@ -375,9 +398,9 @@ impl TreemapViewState {
         } else {
             self.layout_nodes.clear();
         }
-        // A resize or sidebar collapse can shrink the canvas under an existing
-        // origin; keep the projected content covering the whole canvas.
-        self.zoom.clamp((w, h));
+        // A recompute starts from the layout's own width. The render pass then
+        // adopts the projection that fits the current sidebar-driven canvas.
+        self.zoom.set_stretch_x(1.0, (w, h));
     }
 
     pub(super) fn set_detail_level(&mut self, level: usize) {
@@ -386,6 +409,7 @@ impl TreemapViewState {
             self.detail_level = clamped;
             self.zoom.reset_view();
             self.recompute_layout();
+            self.reveal_generation = self.reveal_generation.wrapping_add(1);
         }
     }
 
@@ -535,6 +559,7 @@ impl TreemapViewState {
         // Invalidate in-memory pre-built volume index snapshot so navigation
         // cannot reconstruct and resurrect deleted files from the stale snapshot.
         self.cached_index = None;
+        self.cached_dir_trees.clear();
 
         // Keep cached scan totals updated for ancestors, drop deleted subtrees,
         // and avoid double-decrementing the current directory.
@@ -1042,15 +1067,35 @@ mod tests {
         // 3. scanned_item_totals contains root count
         assert_eq!(state.scanned_item_totals.get(r"C:\"), Some(&3));
 
-        // 4. Drilling into a subdirectory finds it instantly in stored_drive_tree
-        // without requesting a scan (load_current_dir returns None)
+        // 4. Drilling into a subdirectory requires querying the service for that directory
+        // instead of assuming stored_drive_tree has infinite depth
         state.navigation.enter(r"C:\Windows");
         let scan_target = state.load_current_dir();
-        assert_eq!(
-            scan_target, None,
-            "subtree must be found in stored_drive_tree"
-        );
+        assert_eq!(scan_target, Some(PathBuf::from(r"C:\Windows")));
+
+        // 5. Adopting service tree for the subdirectory caches it in cached_dir_trees
+        let win_entries = vec![
+            entry("Windows", 4_000, true, 0),
+            entry("System32", 3_000, true, 1),
+            entry("calc.exe", 3_000, false, 2),
+        ];
+        state.adopt_service_tree(win_entries);
         assert_eq!(state.current_dir_total_items, 2);
+
+        // 6. Navigating back to drive root is 0ms instant from stored_drive_tree
+        assert!(state.navigation.back());
+        assert_eq!(state.load_current_dir(), None);
+        assert_eq!(state.current_dir_total_items, 3);
+
+        // 7. Navigating forward to C:\Windows is 0ms instant from cached_dir_trees
+        assert!(state.navigation.forward());
+        assert_eq!(state.load_current_dir(), None);
+        assert_eq!(state.current_dir_total_items, 2);
+
+        // 8. Navigating up to drive root is also 0ms instant from stored_drive_tree
+        assert!(state.navigation.up());
+        assert_eq!(state.load_current_dir(), None);
+        assert_eq!(state.current_dir_total_items, 3);
     }
 
     #[test]

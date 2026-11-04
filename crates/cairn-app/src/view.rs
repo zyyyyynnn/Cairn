@@ -23,6 +23,7 @@ use crate::shell::command_groups::{menu_groups, GroupCommand, MenuGroup};
 use crate::shell::commands::{self, WINDOW_CONTEXT, WINDOW_CONTROL_CONTEXT};
 use crate::shell::theme::{self, ShellTokens};
 use gpui_kit::assets::IconName as AssetIconName;
+use gpui_kit::base::motion::{transition_with_status, MotionStatus, Transition};
 use gpui_kit::base::Disableable;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
@@ -126,7 +127,6 @@ fn render_window_control(
         )
 }
 
-static FIRST_SKELETON_FRAME: AtomicBool = AtomicBool::new(false);
 static FIRST_ROWS_FRAME: AtomicBool = AtomicBool::new(false);
 
 /// One row of a command-group menu, already resolved to what this frame shows.
@@ -357,6 +357,13 @@ struct TableBand {
     results_hold_focus: bool,
 }
 
+/// The sidebar's sampled width for this frame. The content column uses it as
+/// the canvas origin, so both regions share one motion value.
+struct SidebarBand {
+    width: f32,
+    animating: bool,
+}
+
 impl Render for CairnApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _perf = crate::shell::perf::scope("render");
@@ -411,17 +418,11 @@ impl Render for CairnApp {
         }
         self.results.table.scroll_top = clamped;
         let visible = self.visible_rows(row_height);
-        if crate::shell::perf::enabled() {
-            if self.results.table.total_rows() == 0
-                && !FIRST_SKELETON_FRAME.swap(true, Ordering::Relaxed)
-            {
-                crate::shell::perf::mark("skeleton first frame");
-            }
-            if self.results.table.total_rows() > 0
-                && !FIRST_ROWS_FRAME.swap(true, Ordering::Relaxed)
-            {
-                crate::shell::perf::mark("rows first frame");
-            }
+        if crate::shell::perf::enabled()
+            && self.results.table.total_rows() > 0
+            && !FIRST_ROWS_FRAME.swap(true, Ordering::Relaxed)
+        {
+            crate::shell::perf::mark("rows first frame");
         }
         // Wheel, pointer and keyboard page directly; a scrollbar drag only moves the scroll handle.
         // Detect the unloaded band here, after the handle's offset became this frame's scroll_top,
@@ -433,8 +434,29 @@ impl Render for CairnApp {
             });
         }
 
+        // One transition value drives the sidebar and the content column, so
+        // the treemap canvas width is always the width the layout actually left
+        // for it. The first frame adopts the target; a toggle reverses from the
+        // currently sampled width.
+        let target_sidebar_width = if self.sidebar_collapsed {
+            0.0
+        } else {
+            f32::from(theme::rem(window) * layout::SIDEBAR_WIDTH)
+        };
+        let sidebar_motion = transition_with_status(
+            "cairn-sidebar-width",
+            target_sidebar_width,
+            Transition::new(crate::shell::motion::SIDEBAR).ease(ease_out_quint()),
+            window,
+            cx,
+        );
+        let sidebar_animating = matches!(
+            sidebar_motion.status,
+            MotionStatus::Running | MotionStatus::Delayed
+        );
+
         let title_bar = self.render_title_bar(view.clone(), window, &tokens, cx);
-        let sidebar = self.render_sidebar(&tokens, window, cx);
+        let sidebar = self.render_sidebar(&tokens, sidebar_motion.value, window, cx);
         let content = self.render_content_column(
             &tokens,
             QueryBand {
@@ -446,6 +468,10 @@ impl Render for CairnApp {
                 visible,
                 row_height,
                 results_hold_focus,
+            },
+            SidebarBand {
+                width: sidebar_motion.value,
+                animating: sidebar_animating,
             },
             window,
             cx,
@@ -466,7 +492,7 @@ impl Render for CairnApp {
             .on_action(cx.listener(Self::undo_query_text))
             .on_action(cx.listener(Self::redo_query_text))
             .on_action(cx.listener(Self::cut_query_text))
-            .on_action(cx.listener(Self::select_all_query_text))
+            .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::escape_query))
             .on_action(cx.listener(Self::focus_search_box))
             .on_action(cx.listener(Self::toggle_case_sensitive))
@@ -475,6 +501,7 @@ impl Render for CairnApp {
             .on_action(cx.listener(Self::toggle_regex))
             .on_action(cx.listener(Self::cycle_filter))
             .on_action(cx.listener(Self::show_properties))
+            .on_action(cx.listener(Self::restore_all_action))
             .on_action(cx.listener(Self::open_file_menu))
             .on_action(cx.listener(Self::open_edit_menu))
             .on_action(cx.listener(Self::open_view_menu))
@@ -950,48 +977,56 @@ impl CairnApp {
         tokens: &ShellTokens,
         band: QueryBand,
         table_band: TableBand,
+        sidebar: SidebarBand,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Div {
-        if self.drive_view.is_some() {
+    ) -> impl IntoElement {
+        let column = if self.drive_view.is_some() {
             let path_band = self.render_treemap_path_band(tokens, band.view.clone(), window, cx);
-            let body = self.render_treemap_body(tokens, window, cx);
+            let body =
+                self.render_treemap_body(tokens, sidebar.width, sidebar.animating, window, cx);
             // The path band's bottom inset is this panel's top gap, the same
             // relationship the search band has with the result panel.
             let body_surface = content_panel(tokens, body);
-            return v_flex()
+            v_flex()
                 .flex_1()
                 .min_w_0()
                 .min_h_0()
                 .bg(tokens.chrome)
                 .child(path_band)
-                .child(body_surface);
-        }
+                .child(body_surface)
+        } else {
+            let QueryBand {
+                is_query_focused,
+                search_focus,
+                view,
+            } = band;
+            let query =
+                self.render_search_band(tokens, is_query_focused, search_focus, view.clone(), cx);
+            let results = self.render_results(
+                tokens,
+                table_band.visible,
+                table_band.row_height,
+                table_band.results_hold_focus,
+                window,
+                cx,
+            );
 
-        let QueryBand {
-            is_query_focused,
-            search_focus,
-            view,
-        } = band;
-        let query =
-            self.render_search_band(tokens, is_query_focused, search_focus, view.clone(), cx);
-        let results = self.render_results(
-            tokens,
-            table_band.visible,
-            table_band.row_height,
-            table_band.results_hold_focus,
-            cx,
-        );
+            // The search band's own bottom inset is this panel's top gap. Repeating it as a margin
+            // would space the same boundary twice and push the heading off the row band.
+            let results_surface = content_panel(tokens, results);
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .bg(tokens.chrome)
+                .child(query)
+                .child(results_surface)
+        };
 
-        // The search band's own bottom inset is this panel's top gap. Repeating it as a margin
-        // would space the same boundary twice and push the heading off the row band.
-        let results_surface = content_panel(tokens, results);
-        v_flex()
-            .flex_1()
-            .min_w_0()
-            .min_h_0()
-            .bg(tokens.chrome)
-            .child(query)
-            .child(results_surface)
+        // Return the column directly without wrapping it in an animation during sidebar motion.
+        // Wrapping this column alters its GlobalElementId path, which forces nested elements
+        // (such as table rows) to re-initialize and flicker, and causes distracting opacity changes.
+        column.into_any_element()
     }
 }

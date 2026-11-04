@@ -17,9 +17,13 @@ use crate::shell::os::{
     BinOperationError, RecycleBinItem,
 };
 use crate::shell::recycle_bin::BinRetry;
+use crate::shell::reveal::{reveal_targets, MAX_REVEAL_TARGETS};
 use crate::shell::settings::THEME_SYSTEM;
+use crate::shell::status_bar::format_count;
 use crate::shell::theme;
-use crate::table::model::{format_timestamp, ColumnBoundary, ColumnWidths, SortColumn};
+use crate::table::model::{
+    format_timestamp, ColumnBoundary, ColumnWidths, SortColumn, SELECT_ALL_LIMIT,
+};
 use crate::view;
 use cairn_core::format_size_bytes;
 use cairn_protocol::status::ContentIndexState;
@@ -148,12 +152,29 @@ fn style_confirmation_alert(
     ok_text: impl Into<SharedString>,
     cancel_text: impl Into<SharedString>,
 ) -> AlertDialog {
+    style_confirmation_alert_with_variant(
+        alert,
+        window,
+        cx,
+        ok_text,
+        cancel_text,
+        ButtonVariant::Danger,
+    )
+}
+
+fn style_confirmation_alert_with_variant(
+    alert: AlertDialog,
+    window: &mut Window,
+    cx: &mut App,
+    ok_text: impl Into<SharedString>,
+    cancel_text: impl Into<SharedString>,
+    variant: ButtonVariant,
+) -> AlertDialog {
     // Both footer actions keep the same medium frame; the lighter neutral plate is painted
-    // one pixel inside it so the pair reads as one optical size. The commit button is danger,
-    // not a neutral primary: every confirmation on this helper destroys data.
+    // one pixel inside it so the pair reads as one optical size. Destructive actions pass Danger,
+    // while non-destructive recoveries (like restoring all bin items) pass Primary.
     let surface = cairn_ui::theme::dialog_surface(cx.theme());
-    let actions =
-        dialogs::DialogActions::new(ok_text, ButtonVariant::Danger).with_cancel(cancel_text);
+    let actions = dialogs::DialogActions::new(ok_text, variant).with_cancel(cancel_text);
     dialogs::alert_surface(alert, window, cx, surface, actions)
 }
 
@@ -777,9 +798,9 @@ impl CairnApp {
             ),
             // The bin's own commands exist only where the bin is open; the container's
             // read commands that assume a live filesystem path are hidden there.
-            GroupCommand::RestoreSelected | GroupCommand::EmptyRecycleBin => {
-                !self.recycle_bin.is_open()
-            }
+            GroupCommand::RestoreSelected
+            | GroupCommand::RestoreAll
+            | GroupCommand::EmptyRecycleBin => !self.recycle_bin.is_open(),
             GroupCommand::RevealLocation | GroupCommand::ShowProperties => {
                 self.recycle_bin.is_open()
             }
@@ -829,7 +850,7 @@ impl CairnApp {
                     self.delete_in_flight || self.selection_indices().is_empty()
                 }
             }
-            GroupCommand::EmptyRecycleBin => {
+            GroupCommand::RestoreAll | GroupCommand::EmptyRecycleBin => {
                 !self.recycle_bin.is_open()
                     || self.recycle_bin.is_loading()
                     || self.recycle_bin.all().is_empty()
@@ -883,10 +904,9 @@ impl CairnApp {
             GroupCommand::ShowProperties => self.show_properties(&ShowProperties, window, cx),
             GroupCommand::DeleteSelected => self.delete_selected(&DeleteSelected, window, cx),
             GroupCommand::RestoreSelected => self.restore_selected(&RestoreSelected, window, cx),
+            GroupCommand::RestoreAll => self.restore_all(window, cx),
             GroupCommand::EmptyRecycleBin => self.empty_bin(window, cx),
-            GroupCommand::SelectAllQueryText => {
-                self.select_all_query_text(&SelectAllQueryText, window, cx)
-            }
+            GroupCommand::SelectAll => self.select_all(&SelectAll, window, cx),
             GroupCommand::ClearQuery => {
                 // A command names one action. Running the Escape cascade here would dismiss an
                 // unrelated toast/menu first and leave the query untouched.
@@ -1011,13 +1031,17 @@ impl CairnApp {
             && self.drive_view.is_none()
             && !self.recycle_bin.is_open()
         {
+            // Re-selecting the active location refreshes it, matching the
+            // recycle-bin and drive entries.
+            self.table_reveal_pending = true;
+            self.trigger_search(cx);
+            cx.notify();
             return;
         }
         // Leaving the visualization releases its partial tree instead of keeping
-        // it alive behind the table.
-        if self.drive_view.take().is_some() {
-            self.treemap_state = None;
-        }
+        // it alive behind the table, and starts a fresh table entrance.
+        self.leave_drive_view();
+        self.table_reveal_pending = true;
         // The bin's current nav entry already holds the query that preceded it;
         // reading the search box here would overwrite it with the cleared label.
         let leaving_bin = self.recycle_bin.is_open();
@@ -1098,16 +1122,48 @@ impl CairnApp {
         cx.notify();
     }
 
-    pub fn select_all_query_text(
-        &mut self,
-        _: &SelectAllQueryText,
-        _w: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.drive_view.is_some() {
+    pub fn select_all(&mut self, _: &SelectAll, window: &mut Window, cx: &mut Context<Self>) {
+        let path_input_focused = self.treemap_path.editing
+            && self
+                .treemap_path
+                .input
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window);
+        if path_input_focused {
+            let input = self.treemap_path.input.clone();
+            input.update(cx, |input, cx| input.select_all(window, cx));
             return;
         }
-        self.query.search_input.select_all();
+        // A row click keeps the search box focused so typing continues there.
+        // An existing row selection is the signal that the result list, not the
+        // query text, is the surface Ctrl+A should act on.
+        let results_active = !self.results.table.selected_indices.is_empty()
+            || self.results.results_focus.contains_focused(window, cx);
+        if self.query.search_focus.is_focused(window) && !results_active {
+            self.query.search_input.select_all();
+            cx.notify();
+            return;
+        }
+        if self.drive_view.is_some() || self.results.table.total_rows() == 0 {
+            return;
+        }
+
+        let loaded = self.results.table.loaded_range().len();
+        let selected = self.results.table.select_all_loaded(SELECT_ALL_LIMIT);
+        if selected == 0 {
+            return;
+        }
+        if loaded > SELECT_ALL_LIMIT {
+            let title = self.i18n.get_text("selection_limit_title");
+            let mut args = FluentArgs::new();
+            args.set("count", SELECT_ALL_LIMIT as i64);
+            args.set("count_text", format_count(SELECT_ALL_LIMIT));
+            let message = self
+                .i18n
+                .get_text_with_args("selection_limit_message", &args);
+            self.show_info_toast(title, message, cx);
+        }
         cx.notify();
     }
 
@@ -1171,7 +1227,19 @@ impl CairnApp {
             return;
         }
         let paths = self.collect_selected_paths();
-        let targets = crate::shell::reveal::reveal_targets(&paths);
+        let targets = reveal_targets(&paths);
+        if targets.len() > MAX_REVEAL_TARGETS {
+            let title = self.i18n.get_text("reveal_limit_title");
+            let mut args = FluentArgs::new();
+            args.set("count", targets.len() as i64);
+            args.set("count_text", format_count(targets.len()));
+            args.set("limit", MAX_REVEAL_TARGETS as i64);
+            args.set("limit_text", format_count(MAX_REVEAL_TARGETS));
+            let message = self.i18n.get_text_with_args("reveal_limit_message", &args);
+            self.show_info_toast(title, message, cx);
+            cx.notify();
+            return;
+        }
         if targets.is_empty() {
             if let Some(path) = self.target_full_path() {
                 let _ = open_folder_and_select(&path);
@@ -1194,10 +1262,10 @@ impl CairnApp {
     /// the table renders them. Any query or drive switch leaves the view.
     pub fn open_recycle_bin(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         // Leaving the visualization releases its partial tree; the bin is a
-        // location, so no hidden Treemap state remains behind it.
-        if self.drive_view.take().is_some() {
-            self.treemap_state = None;
-        }
+        // location, so no hidden Treemap state remains behind it. Its first
+        // listing fades in instead of replacing the table text in place.
+        self.leave_drive_view();
+        self.table_reveal_pending = true;
         self.close_group();
         // Keep the query the person left behind in the current history entry
         // before the bin replaces the search box with a location.
@@ -1493,6 +1561,63 @@ impl CairnApp {
             },
             cx,
         );
+    }
+
+    /// Action handler for the RestoreAll command.
+    pub fn restore_all_action(
+        &mut self,
+        _: &RestoreAll,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.restore_all(window, cx);
+    }
+
+    /// Confirms restoring all items from the Recycle Bin through Cairn's unified dialog style
+    /// before delegating to the shell's restore pipeline.
+    pub fn restore_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.recycle_bin.is_open()
+            || self.recycle_bin.is_loading()
+            || self.recycle_bin.all().is_empty()
+        {
+            return;
+        }
+        self.close_group();
+        let title = self.i18n.get_text("recycle_bin_restore_all_confirm_title");
+        let description = self
+            .i18n
+            .get_text("recycle_bin_restore_all_confirm_description");
+        let ok = self.i18n.get_text("recycle_bin_restore_all_confirm_action");
+        let cancel = self.i18n.get_text("delete_confirm_cancel");
+        let view = cx.entity();
+        window.open_alert_dialog(cx, move |alert, window, app| {
+            style_confirmation_alert_with_variant(
+                alert,
+                window,
+                app,
+                ok.clone(),
+                cancel.clone(),
+                ButtonVariant::Primary,
+            )
+            .child(dialogs::body(title.clone(), description.clone(), window))
+            .confirm()
+            .on_ok({
+                let view = view.clone();
+                move |_, _, cx| {
+                    view.update(cx, |this, cx| this.execute_restore_all(cx));
+                    true
+                }
+            })
+        });
+    }
+
+    /// Dispatches restore of all items in the bin.
+    pub fn execute_restore_all(&mut self, cx: &mut Context<Self>) {
+        if !self.recycle_bin.is_open() || self.recycle_bin.is_loading() {
+            return;
+        }
+        let items = self.recycle_bin.all().to_vec();
+        self.restore_bin_items(items, cx);
     }
 
     /// Confirms emptying the Recycle Bin through Cairn's unified dialog style before
@@ -2082,5 +2207,61 @@ mod confirmation_tests {
         assert!(content_failed(Some("status"), None));
         assert!(content_failed(None, Some("action")));
         assert!(content_failed(Some("status"), Some("action")));
+    }
+
+    #[test]
+    fn delete_and_recycle_bin_actions_have_no_redundant_ellipsis() {
+        for (locale, zh) in [("zh-CN", true), ("en-US", false)] {
+            let i18n = I18nManager::new(locale);
+            let delete = i18n.get_text("ctx_delete");
+            let perm_delete = i18n.get_text("ctx_delete_permanently");
+            let empty_bin = i18n.get_text("ctx_empty_recycle_bin");
+            let restore_all = i18n.get_text("ctx_restore_all");
+            let clear_content = i18n.get_text("menu_content_search_clear");
+
+            for (text, name) in [
+                (&delete, "ctx_delete"),
+                (&perm_delete, "ctx_delete_permanently"),
+                (&empty_bin, "ctx_empty_recycle_bin"),
+                (&restore_all, "ctx_restore_all"),
+                (&clear_content, "menu_content_search_clear"),
+            ] {
+                assert!(
+                    !text.ends_with('…') && !text.ends_with("..."),
+                    "{name} in {locale} should not have ellipsis suffix: {text}"
+                );
+            }
+
+            if zh {
+                assert_eq!(delete, "删除");
+                assert_eq!(perm_delete, "永久删除");
+                assert_eq!(empty_bin, "清空回收站");
+                assert_eq!(restore_all, "还原所有项目");
+                assert_eq!(clear_content, "清空内容索引");
+            } else {
+                assert_eq!(delete, "Delete");
+                assert_eq!(perm_delete, "Delete permanently");
+                assert_eq!(empty_bin, "Empty Recycle Bin");
+                assert_eq!(restore_all, "Restore all items");
+                assert_eq!(clear_content, "Clear the content index");
+            }
+        }
+    }
+
+    #[test]
+    fn restore_all_confirmation_dialog_strings_are_localized() {
+        for locale in ["zh-CN", "en-US"] {
+            let i18n = I18nManager::new(locale);
+            for key in [
+                "recycle_bin_restore_all_confirm_title",
+                "recycle_bin_restore_all_confirm_description",
+                "recycle_bin_restore_all_confirm_action",
+            ] {
+                let resolved = i18n
+                    .try_text(key)
+                    .unwrap_or_else(|| panic!("{key} missing in {locale}"));
+                assert_ne!(resolved, key, "{key} fell back to raw key in {locale}");
+            }
+        }
     }
 }
