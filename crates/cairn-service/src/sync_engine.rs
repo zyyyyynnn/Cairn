@@ -36,6 +36,20 @@ fn flatten_tree(
         flatten_tree(child, depth + 1, out);
     }
 }
+
+/// The deepest level at or below `requested` whose entry count fits `budget`, with that count.
+/// Shallower levels are tried in turn, so one oversized subtree degrades its own depth instead of
+/// failing the request; `None` means even the immediate children do not fit.
+fn budgeted_tree_depth(
+    mut count_at_depth: impl FnMut(usize) -> usize,
+    requested: usize,
+    budget: usize,
+) -> Option<(usize, usize)> {
+    (1..=requested).rev().find_map(|depth| {
+        let count = count_at_depth(depth);
+        (count <= budget).then_some((depth, count))
+    })
+}
 use cairn_ntfs::mft::ExtractedItem;
 use cairn_ntfs::usn::{file_record_flags, UsnChange};
 use cairn_ntfs::volume::enumerate_fixed_drives;
@@ -1047,7 +1061,7 @@ impl TreeUnavailable {
         match self {
             Self::NotIndexed => "the path is not covered by the volume index",
             Self::NotDirectory => "the path is not a directory",
-            Self::TooLarge => "the directory tree exceeds the one-response budget",
+            Self::TooLarge => "the directory's immediate children exceed the one-response budget",
         }
     }
 }
@@ -1549,17 +1563,19 @@ impl MultiVolumeEngine {
             )
         };
 
-        let entry_count = dir_index.subtree_entry_count(dir_idx, max_depth);
-        if entry_count > Self::MAX_TREE_ENTRIES {
-            return Err(TreeUnavailable::TooLarge);
-        }
-        let tree = dir_index.build_tree_node(
-            &volume.records,
-            &volume.arena,
-            dir_idx,
-            &root_name,
+        // The budget picks the depth, not the caller. A depth-capped subtree that
+        // cannot fit one response is still served one level shallower: every node
+        // carries its exact descendant total, so the Treemap renders the children
+        // it gets and its own aggregate blocks absorb the rest. Only a directory
+        // whose immediate children overflow the budget has no answer to give.
+        let (depth, entry_count) = budgeted_tree_depth(
+            |depth| dir_index.subtree_entry_count(dir_idx, depth),
             max_depth,
-        );
+            Self::MAX_TREE_ENTRIES,
+        )
+        .ok_or(TreeUnavailable::TooLarge)?;
+        let tree =
+            dir_index.build_tree_node(&volume.records, &volume.arena, dir_idx, &root_name, depth);
         let mut entries = Vec::with_capacity(entry_count);
         flatten_tree(&tree, 0, &mut entries);
         // A path above either budget cannot be answered in one response.
@@ -2596,6 +2612,26 @@ mod tests {
         assert_eq!(vol.records[record_index(&vol, 1) as usize].size, 0);
         vol.apply_usn_change(UsnChange::Deleted { frn: 4 });
         assert_eq!(vol.records[record_index(&vol, 1) as usize].size, 0);
+    }
+
+    /// One oversized subtree shallows its own depth instead of failing the request, because the
+    /// children it does get still carry exact totals.
+    #[test]
+    fn an_oversized_subtree_shallows_its_depth_before_failing() {
+        // Depth 2 wants 500 entries, depth 1 wants 40, and the budget is 100.
+        assert_eq!(
+            budgeted_tree_depth(|depth| if depth == 2 { 500 } else { 40 }, 2, 100),
+            Some((1, 40))
+        );
+
+        // A subtree that fits is never shallowed.
+        assert_eq!(budgeted_tree_depth(|_| 40, 2, 100), Some((2, 40)));
+
+        // Even the immediate children over the budget leaves no answer to give.
+        assert_eq!(budgeted_tree_depth(|_| 500, 2, 100), None);
+
+        // A caller who asked for one level is never served a deeper tree.
+        assert_eq!(budgeted_tree_depth(|_| 10, 1, 100), Some((1, 10)));
     }
 
     #[test]
