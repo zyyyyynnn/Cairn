@@ -151,6 +151,16 @@ fn init_system_tray() -> Option<tray_icon::TrayIcon> {
 }
 
 fn main() {
+    // The elevated copy of this image has one job and no window. It answers before the single
+    // instance mutex is taken: a copy that found the mutex already held would otherwise return
+    // here and exit as though it had started the service.
+    let request: Vec<String> = std::env::args().skip(1).collect();
+    // The exit code is the Win32 code, bit-for-bit: `GetExitCodeProcess` hands it back to the
+    // waiting window as `u32`, which is what decides success there.
+    if let Some(code) = service::service_control::elevated_start_reply(&request) {
+        std::process::exit(code as i32);
+    }
+
     crate::shell::perf::mark("process main");
     let _ = tracing_subscriber::fmt::try_init();
 

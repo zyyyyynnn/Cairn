@@ -346,7 +346,8 @@ impl CairnApp {
             let (tx, rx) = tokio::sync::oneshot::channel();
             runtime.spawn(async move {
                 if elevate {
-                    // UAC and sc.exe are blocking; keep them off the IPC runtime's worker threads.
+                    // UAC and the elevated process are blocking; keep them off the IPC runtime's
+                    // worker threads.
                     let launched = tokio::task::spawn_blocking(
                         crate::service::service_control::start_service_elevated,
                     )

@@ -6,8 +6,8 @@
 //! icons, and the explicit "start the installed service" action.
 //!
 //! The GUI itself is never elevated. Index configuration goes through the service pipe; the only
-//! UAC request is the user's explicit click on "Start service", which launches
-//! `sc.exe start CairnService` elevated and waits for its exit code.
+//! UAC request is the user's explicit click on "Start service", which elevates a second copy of
+//! this executable and waits for its exit code.
 
 #[cfg(windows)]
 use windows::core::PCWSTR;
