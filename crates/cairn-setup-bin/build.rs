@@ -8,10 +8,13 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
 
     if std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default() == "windows" {
+        assert!(
+            icon_path.exists(),
+            "missing application icon: {}",
+            icon_path.display()
+        );
         let mut res = winres::WindowsResource::new();
-        if icon_path.exists() {
-            res.set_icon(icon_path.to_str().unwrap());
-        }
+        res.set_icon(icon_path.to_str().unwrap());
         res.set("FileDescription", "Cairn Installer");
         res.set("ProductName", "Cairn");
         res.set("CompanyName", "Cairn Contributors");
