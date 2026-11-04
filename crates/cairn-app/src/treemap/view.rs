@@ -1624,6 +1624,15 @@ fn render_nested_node(
     // the fractional layout value; otherwise a label/size threshold can flip
     // on a device-pixel boundary.
     let display = snap_rect_to_device_pixels(paint, rcx.window.scale_factor().max(1.0));
+    // Label decisions read the settled layout, not the animated projection: `stretch_x` moves
+    // every frame while the panel collapses, and device-pixel rounding flips a size threshold
+    // back and forth, which makes titles appear and disappear mid-animation.
+    let stable = TreemapRect::new(
+        0.0,
+        0.0,
+        node.rect.width * viewport.scale(),
+        node.rect.height * viewport.scale(),
+    );
 
     let category = node.item.category;
     // Filtered categories dim in place; the layout and selection path never
@@ -1639,7 +1648,7 @@ fn render_nested_node(
     };
     let has_header = is_dir && node.header_rect.is_some();
     let is_label_sized =
-        display.width >= TREEMAP_LABEL_MIN_WIDTH && display.height >= TREEMAP_LABEL_MIN_HEIGHT;
+        stable.width >= TREEMAP_LABEL_MIN_WIDTH && stable.height >= TREEMAP_LABEL_MIN_HEIGHT;
     if !has_header && !is_label_sized {
         // Sub-label cells are texture, not blocks with missing content. The
         // core keeps these rare by folding anything this small into a summary.
@@ -1664,7 +1673,7 @@ fn render_nested_node(
             IconName::FileStack,
             label,
             &size_str,
-            display,
+            stable,
             rcx.window,
             rcx.palette.ink(),
             rcx.palette.ink_secondary(),
@@ -1719,7 +1728,7 @@ fn render_nested_node(
             let header_view = rcx.view.clone();
             let full_path_drill = full_path.clone();
             let header_size_label = size_str.clone();
-            let inner_width = (display.width - TREEMAP_TEXT_PADDING).max(0.0);
+            let inner_width = (stable.width - TREEMAP_TEXT_PADDING).max(0.0);
             let size_width = text_width(rcx.window, &header_size_label, FontWeight::NORMAL);
             // The name is the header's identity; the size yields instead of
             // squeezing the name below a readable width. The name ellipsizes
@@ -1905,7 +1914,7 @@ fn render_nested_node(
         leaf_icon,
         name,
         &size_str,
-        display,
+        stable,
         rcx.window,
         rcx.palette.ink(),
         rcx.palette.ink_secondary(),
