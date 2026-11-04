@@ -58,27 +58,6 @@ impl PipeServer {
         }
     }
 
-    /// Serves a different pipe name; used by `--console` development runs and by the integration
-    /// tests, which must not collide with the installed service.
-    pub fn with_pipe_name(
-        engine: Arc<MultiVolumeEngine>,
-        sessions: Arc<SessionManager>,
-        name: &str,
-    ) -> Self {
-        Self {
-            pipe_name: name.to_string(),
-            ..Self::new(engine, sessions)
-        }
-    }
-
-    /// The protocol version this service instance negotiates. Production builds keep
-    /// [`PROTOCOL_VERSION`]; tests set it to another value so the same version gate can be exercised
-    /// from both directions — a new client against an older service and the reverse (SVC-03).
-    pub fn with_protocol_version(mut self, version: u16) -> Self {
-        self.protocol_version = version;
-        self
-    }
-
     pub async fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
         info!("Starting Named Pipe server on {}", self.pipe_name);
 

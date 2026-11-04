@@ -27,8 +27,8 @@ pub use engine::{
 pub use filter::{DateFilter, DateOp, SizeFilter, SizeOp};
 pub use format::format_size_bytes;
 pub use model::{
-    FileRecord, FLAG_ARCHIVE, FLAG_COMPRESSED, FLAG_DIRECTORY, FLAG_HIDDEN, FLAG_READONLY,
-    FLAG_REPARSE_POINT, FLAG_SPARSE, FLAG_SYSTEM, FLAG_TOMBSTONE,
+    FileRecord, FLAG_ARCHIVE, FLAG_COMPRESSED, FLAG_DIRECTORY, FLAG_HIDDEN, FLAG_REPARSE_POINT,
+    FLAG_SPARSE, FLAG_SYSTEM, FLAG_TOMBSTONE,
 };
 pub use path_cache::DirectoryPathCache;
 pub use sort::{sort_indices, PresortedIndices, SortColumn, SortDirection};

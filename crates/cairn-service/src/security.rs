@@ -257,12 +257,6 @@ fn location_presence(path: &std::path::Path) -> LocationPresence {
 /// files and directories, so a standard account can pre-empt `%ProgramData%\Cairn` and hand the
 /// LocalSystem service a configuration it controls. Detection, repair, and — when the repair is not
 /// possible from this process — refusal to continue are all part of this call.
-pub fn prepare_service_data_layout() -> Result<ServiceDataLayout, DataDirectoryError> {
-    prepare_data_layout(&default_service_data_root())
-}
-
-/// [`prepare_service_data_layout`] for an explicit root; used by tests and by service startup.
-///
 /// The tree is created first and locked down afterwards, location by location, and every location is
 /// attempted: stopping at the first refusal would leave the later ones inherited and writable. The
 /// first failure is then returned instead of a layout, so a partially locked tree is never handed to

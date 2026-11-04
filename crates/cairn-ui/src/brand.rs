@@ -135,25 +135,6 @@ pub fn serif_font(weight: FontWeight) -> Font {
     }
 }
 
-/// Font runs for a heading. The caller shapes these runs as one line, so Latin, CJK and digits
-/// share a baseline.
-pub fn heading_runs(text: &str, latin_weight: FontWeight) -> Vec<(usize, Font)> {
-    let mut runs = Vec::new();
-    push_heading_runs(&mut runs, text, latin_weight);
-    runs
-}
-
-fn push_heading_runs(runs: &mut Vec<(usize, Font)>, text: &str, latin_weight: FontWeight) {
-    for (cjk, part) in split_scripts(text) {
-        let font = if cjk {
-            cjk_heading_font()
-        } else {
-            serif_font(latin_weight)
-        };
-        runs.push((part.len(), font));
-    }
-}
-
 /// A localized heading whose CJK runs use the embedded serif at its regular weight while
 /// Latin runs keep the requested heading weight. Shared punctuation such as curly double
 /// quotes, dashes and the ellipsis follows the CJK face when the heading contains Chinese.

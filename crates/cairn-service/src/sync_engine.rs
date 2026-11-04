@@ -50,7 +50,7 @@ use std::sync::{Arc, Mutex, RwLock};
 
 /// A journal backlog beyond this size is cheaper to recover with a fresh `$MFT` scan than by
 /// replaying hundreds of thousands of USN records. It also bounds how long a cold start can show
-/// the loading skeleton.
+/// bounds cold start recovery time.
 const MAX_USN_REPLAY_BACKLOG_BYTES: i64 = 64 * 1024 * 1024;
 
 /// A smaller volume is rebuilt quickly enough that compaction on every start would cost more than
@@ -850,8 +850,8 @@ impl VolumeIndex {
     /// dropped. Names are re-packed and every parent reference is remapped; a record whose parent
     /// was dropped becomes a root instead of pointing at a slot that no longer exists.
     // Production goes through [`Self::compact_if_needed`] so the classification that decides
-    // whether to compact is not thrown away; the direct entry point exists for tests.
-    #[cfg_attr(not(test), allow(dead_code))]
+    // whether to compact is not thrown away; this direct entry point is for tests.
+    #[cfg(test)]
     pub(crate) fn compact(&mut self) -> usize {
         let states = self.excluded_subtree_states();
         self.compact_with_states(states)
@@ -1070,7 +1070,7 @@ impl MultiVolumeEngine {
     }
 
     /// Builds the engine around the SPEC SET-02 data layout, whose access control has already been
-    /// enforced by [`crate::security::prepare_service_data_layout`].
+    /// enforced by [`crate::security::prepare_data_layout`].
     pub fn for_data_layout(
         layout: &crate::security::ServiceDataLayout,
         config: ServiceConfig,
@@ -2467,26 +2467,6 @@ impl MultiVolumeEngine {
         (all_results, total, highlight_terms, snippets, total_bytes)
     }
 
-    /// Single volume search compatibility method.
-    #[allow(dead_code)]
-    pub fn execute_search(
-        &self,
-        raw_query: &str,
-        sort_by: SortColumn,
-        sort_asc: bool,
-        cancel: &CancellationToken,
-    ) -> (Vec<u32>, usize) {
-        let (items, count, ..) = self.execute_search_multi(
-            raw_query,
-            &QueryDefaults::default(),
-            sort_by,
-            sort_asc,
-            cancel,
-        );
-        let indices = items.into_iter().map(|it| it.record_idx).collect();
-        (indices, count)
-    }
-
     pub fn with_volumes<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&HashMap<char, VolumeIndex>) -> R,
@@ -2495,7 +2475,7 @@ impl MultiVolumeEngine {
         f(&lock)
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn with_primary_volume<F, R>(&self, f: F) -> Option<R>
     where
         F: FnOnce(&VolumeIndex) -> R,
@@ -2505,7 +2485,7 @@ impl MultiVolumeEngine {
         Some(f(vol))
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn with_primary_volume_mut<F, R>(&self, f: F) -> Option<R>
     where
         F: FnOnce(&mut VolumeIndex) -> R,
