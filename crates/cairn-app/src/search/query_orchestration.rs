@@ -308,6 +308,7 @@ impl CairnApp {
             // The new result set has no completed count yet; the band shows only its loading
             // control until the query and any index build settle.
             self.service.status.clear_objects_count();
+            self.table_reveal_pending = true;
         }
 
         // An empty query is not an idle state: it is the "所有文件" view. The service answers it

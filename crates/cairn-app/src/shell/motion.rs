@@ -12,7 +12,11 @@ use std::time::Duration;
 pub(crate) const SIDEBAR: Duration = Duration::from_millis(200);
 
 /// A content panel replacing or revealing the result surface.
+#[allow(dead_code)]
 pub(crate) const PANEL_REVEAL: Duration = Duration::from_millis(260);
 
 /// A transient toast entering or leaving.
 pub(crate) const TOAST: Duration = Duration::from_millis(140);
+
+/// A mask or overlay dissolving into the revealed content.
+pub(crate) const MASK_DISSOLVE: Duration = Duration::from_millis(150);

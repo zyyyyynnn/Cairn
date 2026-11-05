@@ -220,8 +220,8 @@ fn main() {
                     cx,
                 ))),
                 window_min_size: Some(Size {
-                    width: px(1024.0),
-                    height: px(640.0),
+                    width: px(1280.0),
+                    height: px(800.0),
                 }),
                 ..base
             };

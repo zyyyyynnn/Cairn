@@ -485,6 +485,7 @@ impl CairnApp {
         state.request_epoch = next_tree_request_epoch();
         let epoch = state.request_epoch;
         state.is_scanning = true;
+        state.scan_fade_epoch = 0;
         state.content_revealed = false;
         state.unavailable = None;
         state.layout_nodes.clear();
@@ -1101,10 +1102,10 @@ impl CairnApp {
         // An empty directory is content, not a separate surface: it must keep
         // the canvas focus, Backspace/Enter and wheel zoom.
         let content = if is_scanning {
-            v_flex()
-                .id("treemap-scanning-blank")
+            div()
+                .id("treemap-scanning-overlay")
                 .size_full()
-                .p(rems(layout::SPACE_4))
+                .bg(tokens.muted)
                 .into_any_element()
         } else if state.layout_nodes.is_empty() {
             let control = accessibility::control("treemap-state");
@@ -1155,13 +1156,38 @@ impl CairnApp {
             for node in &state.layout_nodes {
                 render_nested_node(node, &render_cx, viewport, canvas_size, &mut block_elements);
             }
-            div()
+            let mut tiles_layer = div()
                 .absolute()
                 .left(px(0.0))
                 .top(px(0.0))
                 .size_full()
-                .children(block_elements)
-                .into_any_element()
+                .children(block_elements);
+
+            if state.scan_fade_epoch > 0 {
+                let fade_key = format!("treemap-scan-fade-{}", state.scan_fade_epoch);
+                let reduce_motion = cx.reduce_motion();
+                tiles_layer = tiles_layer.child(
+                    div()
+                        .id("treemap-scan-fade-overlay")
+                        .absolute()
+                        .inset_0()
+                        .bg(tokens.muted)
+                        .with_animation(
+                            fade_key,
+                            Animation::new(crate::shell::motion::MASK_DISSOLVE)
+                                .with_easing(ease_out_quint()),
+                            move |el, delta| {
+                                if reduce_motion {
+                                    el.opacity(0.0)
+                                } else {
+                                    el.opacity(1.0 - delta)
+                                }
+                            },
+                        ),
+                );
+            }
+
+            tiles_layer.into_any_element()
         };
 
         let mut canvas_element = v_flex()
@@ -1170,6 +1196,7 @@ impl CairnApp {
             .flex_1()
             .w_full()
             .h_full()
+            .bg(tokens.muted)
             .overflow_hidden();
         if let Some(ref focus) = focus {
             canvas_element = canvas_element.track_focus(focus);
@@ -1400,24 +1427,24 @@ impl CairnApp {
                 )
             });
 
-        // Only a content reveal changes this key. A canvas resize keeps the
-        // current surface visible instead of restarting opacity at zero.
-        let reduce_motion = cx.reduce_motion();
-        let reveal_generation = state.reveal_generation;
-        let reveal_key = format!("treemap-surface-reveal-{}", reveal_generation);
-        canvas_element
-            .with_animation(
-                reveal_key,
-                Animation::new(crate::shell::motion::PANEL_REVEAL).with_easing(ease_out_quint()),
-                move |el, delta| {
-                    if reduce_motion {
-                        el
-                    } else {
-                        el.opacity(delta)
+        if state.scan_fade_epoch > 0 {
+            let epoch = state.scan_fade_epoch;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(160))
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    if let Some(ref mut state) = this.treemap_state {
+                        if state.scan_fade_epoch == epoch {
+                            state.scan_fade_epoch = 0;
+                            cx.notify();
+                        }
                     }
-                },
-            )
-            .into_any_element()
+                });
+            })
+            .detach();
+        }
+        canvas_element.into_any_element()
     }
 }
 
@@ -2150,5 +2177,27 @@ mod tests {
             wheel_zoom_lines(ScrollDelta::Pixels(point(px(240.0), px(0.0)))),
             0.0
         );
+    }
+
+    #[test]
+    fn scan_overlay_and_fade_flow() {
+        let mut state = crate::treemap::state::TreemapViewState::new_for_test('C');
+        assert!(!state.is_scanning());
+        assert_eq!(state.scan_fade_epoch, 0);
+
+        // 1. Scan started: is_scanning active, scan_fade_epoch reset
+        state.is_scanning = true;
+        state.scan_fade_epoch = 0;
+        assert!(state.is_scanning());
+        assert_eq!(state.scan_fade_epoch, 0);
+
+        // 2. Tree revealed: content_revealed true, scan_fade_epoch activated
+        state.reveal_content();
+        assert_eq!(state.scan_fade_epoch, state.reveal_generation);
+        assert!(state.scan_fade_epoch > 0);
+
+        // 3. 160ms dissolve settles: scan_fade_epoch cleared
+        state.scan_fade_epoch = 0;
+        assert_eq!(state.scan_fade_epoch, 0);
     }
 }

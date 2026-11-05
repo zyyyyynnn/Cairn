@@ -278,7 +278,7 @@ impl CairnApp {
         visible: Range<usize>,
         row_height: Pixels,
         results_hold_focus: bool,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let header = self.render_table_header(tokens, cx);
@@ -324,41 +324,24 @@ impl CairnApp {
         // New content paints hidden for one frame, then a deferred pass starts
         // the fade. The header is outside this wrapper, so a refresh never
         // blanks or re-fades the column labels.
-        let reveal_pending = self.table_reveal_pending;
-        let reveal_ready = self.table_reveal_ready;
-        let reveal_generation = self.table_reveal_generation;
-        let reduce_motion = cx.reduce_motion();
-        if !reveal_pending && !reveal_ready {
-            cx.defer_in(window, |this, _, cx| {
-                if !this.table_reveal_ready {
-                    this.table_reveal_ready = true;
-                    cx.notify();
-                }
-            });
+        if self.table_reveal_fade_epoch > 0 {
+            let fade_epoch = self.table_reveal_fade_epoch;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(160))
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    if this.table_reveal_fade_epoch == fade_epoch {
+                        this.table_reveal_fade_epoch = 0;
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
         }
-        let reveal_body = |body: ControlElement| -> AnyElement {
-            if reveal_pending {
-                body.into_any_element()
-            } else if !reveal_ready {
-                body.opacity(0.0).into_any_element()
-            } else {
-                body.with_animation(
-                    format!("table-body-reveal-{}", reveal_generation),
-                    Animation::new(crate::shell::motion::PANEL_REVEAL)
-                        .with_easing(ease_out_quint()),
-                    move |body, delta| {
-                        if reduce_motion {
-                            body
-                        } else {
-                            body.opacity(delta)
-                        }
-                    },
-                )
-                .into_any_element()
-            }
-        };
-        let rows = rows.map(reveal_body);
-        let state = state.map(reveal_body);
+        let has_state = state.is_some();
+        let rows = rows.map(|body| body.into_any_element());
+        let state = state.map(|body| body.into_any_element());
 
         // Whether the columns need the sideways route at all, read from the handle that measured it
         // last frame. The component skips an axis whose content fits
@@ -392,7 +375,7 @@ impl CairnApp {
                 v_flex()
                     .w_full()
                     .min_w(rems(layout::TABLE_MIN_WIDTH))
-                    .when(has_content, |this| this.flex_1())
+                    .flex_1()
                     .min_h_0()
                     // The heading row owns the separator under it; the scrolling band must not draw
                     // the same edge a second time.
@@ -441,7 +424,8 @@ impl CairnApp {
                             .flex_shrink_0()
                             .h_full()
                             .w(Scrollbar::width())
-                            .bg(tokens.background)
+                            .when(has_content, |this| this.bg(tokens.background))
+                            .when(!has_content, |this| this.bg(tokens.muted))
                             // The heading owns the top of the region, so its gutter keeps the
                             // header surface and the scrollbar track starts underneath it.
                             .child(
@@ -475,11 +459,52 @@ impl CairnApp {
                     ),
                 )
             })
-            .when_some(state, |this, band| this.child(band))
+            .when_some(state, |this, band| {
+                if !self.table_reveal_pending {
+                    this.child(band)
+                } else {
+                    this
+                }
+            })
             // Keyboard focus has to be visible, and the ring must not move the columns it surrounds,
             // so it is painted over the region's edge instead of becoming a border on the region. It
             // carries no id and no listener, so drawing it last costs the content nothing it needs to
             // be hit by.
+            .when(self.table_reveal_pending && !has_content, |this| {
+                this.child(
+                    div()
+                        .id("table-loading-overlay")
+                        .absolute()
+                        .inset_0()
+                        .bg(tokens.muted),
+                )
+            })
+            .when(
+                self.table_reveal_fade_epoch > 0 && (has_content || has_state),
+                |this| {
+                    let fade_key = format!("table-reveal-fade-{}", self.table_reveal_fade_epoch);
+                    let reduce_motion = cx.reduce_motion();
+                    this.child(
+                        div()
+                            .id("table-reveal-fade-overlay")
+                            .absolute()
+                            .inset_0()
+                            .bg(tokens.muted)
+                            .with_animation(
+                                fade_key,
+                                Animation::new(crate::shell::motion::MASK_DISSOLVE)
+                                    .with_easing(ease_out_quint()),
+                                move |el, delta| {
+                                    if reduce_motion {
+                                        el.opacity(0.0)
+                                    } else {
+                                        el.opacity(1.0 - delta)
+                                    }
+                                },
+                            ),
+                    )
+                },
+            )
             .when(results_hold_focus, |this| {
                 this.child(
                     div()
@@ -1725,5 +1750,27 @@ mod tests {
         assert_eq!(painted.range, 84..101);
         assert_eq!(painted.top, 84.0 * 28.0 - 2_380.0);
         assert!(!painted.pinned);
+    }
+
+    #[test]
+    fn table_loading_overlay_and_fade_flow() {
+        let mut app_reveal_generation: u64 = 0;
+        let mut app_reveal_pending = true;
+        let mut app_reveal_fade_epoch = 0;
+
+        // 1. Initial state: pending content, no rows
+        assert!(app_reveal_pending);
+        assert_eq!(app_reveal_fade_epoch, 0);
+
+        // 2. Data arrives, bump_table_reveal called
+        app_reveal_generation = app_reveal_generation.wrapping_add(1);
+        app_reveal_pending = false;
+        app_reveal_fade_epoch = app_reveal_generation;
+        assert_eq!(app_reveal_fade_epoch, 1);
+        assert!(!app_reveal_pending);
+
+        // 3. 160ms dissolve completes: fade epoch cleared
+        app_reveal_fade_epoch = 0;
+        assert_eq!(app_reveal_fade_epoch, 0);
     }
 }

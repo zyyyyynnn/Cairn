@@ -395,6 +395,8 @@ pub struct CairnApp {
     pub(crate) toast_serial: u64,
     /// Generation identifier for the results table panel's entrance animation.
     pub table_reveal_generation: u64,
+    /// Generation counter for the table reveal overlay fade-out animation.
+    pub table_reveal_fade_epoch: u64,
     /// A table panel session is waiting for its first visible result set, so
     /// the entrance starts with content instead of running while the query is
     /// still in flight.
@@ -536,6 +538,7 @@ impl CairnApp {
             toast: None,
             toast_serial: 0,
             table_reveal_generation: 0,
+            table_reveal_fade_epoch: 0,
             table_reveal_pending: true,
             table_reveal_ready: true,
             is_checking_update: false,
@@ -551,6 +554,7 @@ impl CairnApp {
         self.table_reveal_generation = self.table_reveal_generation.wrapping_add(1);
         self.table_reveal_pending = false;
         self.table_reveal_ready = false;
+        self.table_reveal_fade_epoch = self.table_reveal_generation;
     }
 
     /// Leaves the drive visualization. The next visible table content starts a

@@ -107,6 +107,8 @@ pub struct TreemapViewState {
     pub(super) last_window_size: (f32, f32),
     /// Last observed window scale factor for device-pixel snapping.
     pub(super) last_scale_factor: f32,
+    /// Generation counter for the scan/load overlay fade-out animation.
+    pub(super) scan_fade_epoch: u64,
     /// Loaded in-memory index, if available from index files
     cached_index: Option<Arc<VolumeTreemapIndex>>,
     /// Whether a service tree request is in flight.
@@ -153,6 +155,7 @@ impl TreemapViewState {
             last_bounds: (800.0, 600.0),
             last_window_size: (0.0, 0.0),
             last_scale_factor: 1.0,
+            scan_fade_epoch: 0,
             cached_index,
             is_scanning: false,
             request_epoch: 0,
@@ -186,6 +189,7 @@ impl TreemapViewState {
             last_bounds: (800.0, 600.0),
             last_window_size: (0.0, 0.0),
             last_scale_factor: 1.0,
+            scan_fade_epoch: 0,
             cached_index: None,
             is_scanning: false,
             request_epoch: 0,
@@ -337,6 +341,7 @@ impl TreemapViewState {
     pub(super) fn reveal_content(&mut self) {
         self.content_revealed = true;
         self.reveal_generation = self.reveal_generation.wrapping_add(1);
+        self.scan_fade_epoch = self.reveal_generation;
     }
 
     /// The service could not answer for this directory. The canvas shows the
@@ -414,6 +419,7 @@ impl TreemapViewState {
             self.zoom.reset_view();
             self.recompute_layout();
             self.reveal_generation = self.reveal_generation.wrapping_add(1);
+            self.scan_fade_epoch = self.reveal_generation;
         }
     }
 

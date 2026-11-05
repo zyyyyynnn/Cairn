@@ -265,7 +265,7 @@ fn content_panel(tokens: &ShellTokens, child: impl IntoElement) -> Div {
         .relative()
         .mx(rems(layout::SPACE_4))
         .mb(rems(layout::SPACE_4))
-        .bg(tokens.background)
+        .bg(tokens.muted)
         .rounded(tokens.radius)
         .overflow_hidden()
         .child(child)

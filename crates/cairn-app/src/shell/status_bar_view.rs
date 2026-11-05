@@ -502,7 +502,9 @@ impl CairnApp {
     /// a new bin listing, or a service probe instead of animating a value.
     pub(crate) fn refresh_current_view(&mut self, cx: &mut Context<Self>) {
         if self.recycle_bin.is_open() {
+            self.table_reveal_pending = true;
             self.begin_recycle_bin_load(cx);
+            cx.notify();
             return;
         }
         if self.drive_view.is_some() {
@@ -519,7 +521,9 @@ impl CairnApp {
             self.check_service_connection(cx);
             return;
         }
+        self.table_reveal_pending = true;
         self.trigger_search(cx);
+        cx.notify();
     }
 }
 
