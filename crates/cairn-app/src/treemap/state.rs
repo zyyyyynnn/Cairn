@@ -109,6 +109,16 @@ pub struct TreemapViewState {
     pub(super) last_scale_factor: f32,
     /// Generation counter for the scan/load overlay fade-out animation.
     pub(super) scan_fade_epoch: u64,
+    /// Size a live window resize is heading to; `Some` while the canvas is masked.
+    pub(super) pending_window_size: Option<(f32, f32)>,
+    /// Canvas size that belongs to [`Self::pending_window_size`].
+    pub(super) pending_canvas_size: Option<(f32, f32)>,
+    /// True while a window resize is in progress and the canvas shows the muted mask.
+    pub(super) is_resizing_window: bool,
+    /// Identifies the current resize so a stale settle task cannot finish it.
+    pub(super) resize_epoch: u64,
+    /// Generation counter for the resize mask fade-out animation.
+    pub(super) resize_fade_epoch: u64,
     /// Loaded in-memory index, if available from index files
     cached_index: Option<Arc<VolumeTreemapIndex>>,
     /// Whether a service tree request is in flight.
@@ -156,6 +166,11 @@ impl TreemapViewState {
             last_window_size: (0.0, 0.0),
             last_scale_factor: 1.0,
             scan_fade_epoch: 0,
+            pending_window_size: None,
+            pending_canvas_size: None,
+            is_resizing_window: false,
+            resize_epoch: 0,
+            resize_fade_epoch: 0,
             cached_index,
             is_scanning: false,
             request_epoch: 0,
@@ -190,6 +205,11 @@ impl TreemapViewState {
             last_window_size: (0.0, 0.0),
             last_scale_factor: 1.0,
             scan_fade_epoch: 0,
+            pending_window_size: None,
+            pending_canvas_size: None,
+            is_resizing_window: false,
+            resize_epoch: 0,
+            resize_fade_epoch: 0,
             cached_index: None,
             is_scanning: false,
             request_epoch: 0,
@@ -410,6 +430,56 @@ impl TreemapViewState {
         // A recompute starts from the layout's own width. The render pass then
         // adopts the projection that fits the current sidebar-driven canvas.
         self.zoom.set_stretch_x(1.0, (w, h));
+    }
+
+    /// Starts the masked phase of a live window resize and returns the epoch
+    /// that identifies it. The layout keeps its previous geometry until the
+    /// settle, so a drag cannot reflow the tiles on every frame.
+    pub(super) fn begin_window_resize(
+        &mut self,
+        window_size: (f32, f32),
+        canvas_size: (f32, f32),
+    ) -> u64 {
+        self.is_resizing_window = true;
+        self.pending_window_size = Some(window_size);
+        self.pending_canvas_size = Some(canvas_size);
+        self.resize_epoch = self.resize_epoch.wrapping_add(1);
+        self.resize_epoch
+    }
+
+    /// Applies the last observed size once the drag has stopped. A stale epoch
+    /// belongs to a resize that has already been superseded and does nothing.
+    pub(super) fn settle_window_resize(&mut self, epoch: u64) -> bool {
+        if self.resize_epoch != epoch {
+            return false;
+        }
+        let (Some(window_size), Some(canvas_size)) = (
+            self.pending_window_size.take(),
+            self.pending_canvas_size.take(),
+        ) else {
+            return false;
+        };
+        self.last_window_size = window_size;
+        self.last_bounds = canvas_size;
+        self.is_resizing_window = false;
+        self.recompute_layout();
+        self.resize_fade_epoch = epoch;
+        true
+    }
+
+    /// Whether the canvas is covered by the resize mask.
+    pub(super) fn is_resize_masked(&self) -> bool {
+        self.is_resizing_window || self.pending_window_size.is_some()
+    }
+
+    /// Ends the resize dissolve overlay for `epoch`; a newer resize keeps its own.
+    pub(super) fn clear_resize_fade(&mut self, epoch: u64) -> bool {
+        if self.resize_fade_epoch == epoch {
+            self.resize_fade_epoch = 0;
+            true
+        } else {
+            false
+        }
     }
 
     pub(super) fn set_detail_level(&mut self, level: usize) {
@@ -1248,5 +1318,28 @@ mod tests {
         assert!(state.content_revealed);
         assert!(state.layout_nodes.is_empty());
         assert_eq!(state.total_items(), 0);
+    }
+
+    #[test]
+    fn a_window_resize_masks_the_canvas_until_the_settle_frame() {
+        let mut state = TreemapViewState::new_for_test('C');
+        state.last_window_size = (1280.0, 800.0);
+        state.last_bounds = (928.0, 680.0);
+
+        let epoch = state.begin_window_resize((1400.0, 900.0), (1048.0, 780.0));
+        assert!(state.is_resize_masked());
+        assert!(!state.settle_window_resize(epoch.wrapping_add(1)));
+        assert!(
+            state.is_resize_masked(),
+            "a stale settle must not clear the current mask"
+        );
+
+        assert!(state.settle_window_resize(epoch));
+        assert!(!state.is_resize_masked());
+        assert_eq!(state.last_window_size, (1400.0, 900.0));
+        assert_eq!(state.last_bounds, (1048.0, 780.0));
+        assert_eq!(state.resize_fade_epoch, epoch);
+        assert!(state.clear_resize_fade(epoch));
+        assert_eq!(state.resize_fade_epoch, 0);
     }
 }

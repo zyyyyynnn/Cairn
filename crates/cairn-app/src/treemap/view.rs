@@ -40,7 +40,7 @@ use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::*;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// One breadcrumb label never takes more than a readable share of the path band; the
 /// full path remains in the band's tooltip.
@@ -62,6 +62,14 @@ const MENU_LABEL_MAX_WIDTH: f32 = 20.0;
 /// One screen-half cap for every path menu, so a long list scrolls instead of
 /// running past the window.
 const MENU_MAX_HEIGHT: f32 = 20.0;
+
+/// How often the resize mask checks whether the drag has settled.
+const RESIZE_SETTLE_POLL: Duration = Duration::from_millis(150);
+/// A resize may hold the mask through a slow drag, but a button that never
+/// reports a release must not pin it indefinitely.
+const RESIZE_SETTLE_MAX_POLLS: usize = 200;
+/// The dissolve overlay outlives its animation long enough to be unmounted.
+const RESIZE_FADE_CLEANUP: Duration = Duration::from_millis(160);
 
 /// Child folders of `directory` as the filesystem holds them now. The Treemap tree can lag
 /// deletions and a breadcrumb segment can name an ancestor the current tree does not hold, so
@@ -1059,15 +1067,40 @@ impl CairnApp {
         // The squarified layout is tied to the window, not to the sidebar. A
         // sidebar motion projects the existing cells onto the new canvas width,
         // so the topology never reshuffles and no frame exposes the background.
-        // A real window resize recomputes once the sidebar has settled.
+        // A real window resize masks the canvas and recomputes once it settles.
         let is_initial = state.last_window_size.0 <= 1.0 || state.last_window_size.1 <= 1.0;
-        let window_changed = (state.last_window_size.0 - window_size.0).abs() > 0.5
-            || (state.last_window_size.1 - window_size.1).abs() > 0.5;
-        if is_initial || (window_changed && !sidebar_animating) {
+        let current_target = state.pending_window_size.unwrap_or(state.last_window_size);
+        let window_changed = (current_target.0 - window_size.0).abs() > 0.5
+            || (current_target.1 - window_size.1).abs() > 0.5;
+        if is_initial {
             state.last_window_size = window_size;
             state.last_bounds = canvas_size;
             state.recompute_layout();
+        } else if window_changed && !sidebar_animating {
+            let epoch = state.begin_window_resize(window_size, canvas_size);
+            cx.spawn(async move |this, cx| {
+                for _ in 0..RESIZE_SETTLE_MAX_POLLS {
+                    cx.background_executor().timer(RESIZE_SETTLE_POLL).await;
+                    let current = this.update(cx, |this, _| {
+                        this.treemap_state
+                            .as_ref()
+                            .is_some_and(|state| state.resize_epoch == epoch)
+                    });
+                    if !matches!(current, Ok(true)) {
+                        return;
+                    }
+                    if crate::win32::is_left_mouse_button_down() {
+                        continue;
+                    }
+                    let _ = this.update(cx, |this, cx| settle_treemap_resize(this, cx, epoch));
+                    return;
+                }
+                let _ = this.update(cx, |this, cx| settle_treemap_resize(this, cx, epoch));
+            })
+            .detach();
         }
+
+        let is_resizing = state.is_resize_masked();
 
         // A sidebar shift only changes the width the same cells cover. The
         // projection absorbs the delta, so the final frame has no layout jump.
@@ -1104,6 +1137,14 @@ impl CairnApp {
         let content = if is_scanning {
             div()
                 .id("treemap-scanning-overlay")
+                .size_full()
+                .bg(tokens.muted)
+                .into_any_element()
+        } else if is_resizing {
+            div()
+                .id("treemap-resize-overlay")
+                .absolute()
+                .inset_0()
                 .size_full()
                 .bg(tokens.muted)
                 .into_any_element()
@@ -1169,6 +1210,30 @@ impl CairnApp {
                 tiles_layer = tiles_layer.child(
                     div()
                         .id("treemap-scan-fade-overlay")
+                        .absolute()
+                        .inset_0()
+                        .bg(tokens.muted)
+                        .with_animation(
+                            fade_key,
+                            Animation::new(crate::shell::motion::MASK_DISSOLVE)
+                                .with_easing(ease_out_quint()),
+                            move |el, delta| {
+                                if reduce_motion {
+                                    el.opacity(0.0)
+                                } else {
+                                    el.opacity(1.0 - delta)
+                                }
+                            },
+                        ),
+                );
+            }
+
+            if state.resize_fade_epoch > 0 {
+                let fade_key = format!("treemap-resize-fade-{}", state.resize_fade_epoch);
+                let reduce_motion = cx.reduce_motion();
+                tiles_layer = tiles_layer.child(
+                    div()
+                        .id("treemap-resize-fade-overlay")
                         .absolute()
                         .inset_0()
                         .bg(tokens.muted)
@@ -1446,6 +1511,29 @@ impl CairnApp {
         }
         canvas_element.into_any_element()
     }
+}
+
+/// Applies the pending window size once the drag has stopped, reflows the
+/// tiles, and leaves the muted dissolve overlay on top of the new layout.
+fn settle_treemap_resize(this: &mut CairnApp, cx: &mut Context<CairnApp>, epoch: u64) {
+    let Some(state) = this.treemap_state.as_mut() else {
+        return;
+    };
+    if !state.settle_window_resize(epoch) {
+        return;
+    }
+    cx.notify();
+    cx.spawn(async move |this, cx| {
+        cx.background_executor().timer(RESIZE_FADE_CLEANUP).await;
+        let _ = this.update(cx, |this, cx| {
+            if let Some(state) = this.treemap_state.as_mut() {
+                if state.clear_resize_fade(epoch) {
+                    cx.notify();
+                }
+            }
+        });
+    })
+    .detach();
 }
 
 struct TreemapRenderContext<'a> {
