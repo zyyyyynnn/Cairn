@@ -1033,15 +1033,15 @@ impl CairnApp {
         {
             // Re-selecting the active location refreshes it, matching the
             // recycle-bin and drive entries.
-            self.table_reveal_pending = true;
+            self.begin_table_session();
             self.trigger_search(cx);
             cx.notify();
             return;
         }
         // Leaving the visualization releases its partial tree instead of keeping
         // it alive behind the table, and starts a fresh table entrance.
+        // `leave_drive_view` opens the session for the view it just emptied.
         self.leave_drive_view();
-        self.table_reveal_pending = true;
         // The bin's current nav entry already holds the query that preceded it;
         // reading the search box here would overwrite it with the cleared label.
         let leaving_bin = self.recycle_bin.is_open();
@@ -1181,8 +1181,8 @@ impl CairnApp {
             if let Some(ref st) = self.treemap_state {
                 if let Some(node) = st.selected_node().cloned() {
                     if node.is_aggregate() {
-                        // A summary block folds siblings of this same directory, so there is no
-                        // level to enter. The table lists the directory's children instead.
+                        // A summary block folds the tail of one category in this same directory, so
+                        // there is no level to enter. The table lists that category instead.
                         if let Some(parent) = cairn_core::treemap::aggregate_parent_path(&node.path)
                         {
                             self.switch_to_table_with_path(parent, window, cx);
@@ -1265,8 +1265,8 @@ impl CairnApp {
         // Leaving the visualization releases its partial tree; the bin is a
         // location, so no hidden Treemap state remains behind it. Its first
         // listing fades in instead of replacing the table text in place.
+        // `leave_drive_view` opens the session for the view it just emptied.
         self.leave_drive_view();
-        self.table_reveal_pending = true;
         self.close_group();
         // Keep the query the person left behind in the current history entry
         // before the bin replaces the search box with a location.

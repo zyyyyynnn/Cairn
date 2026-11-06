@@ -1250,8 +1250,8 @@ mod tests {
     #[test]
     #[ignore = "manual: creates and restores a real Recycle Bin item"]
     fn a_deleted_file_lists_and_restores_through_the_shell() {
-        let dir = std::env::temp_dir().join("cairn-bin-round-trip");
-        std::fs::create_dir_all(&dir).expect("create the probe directory");
+        let temp = tempfile::tempdir().expect("create the probe directory");
+        let dir = temp.path();
         let file = dir.join("cairn-bin-round-trip.txt");
         std::fs::write(&file, b"cairn").expect("create the probe file");
         let path = file.to_string_lossy().into_owned();
@@ -1276,8 +1276,5 @@ mod tests {
             !listing.iter().any(|entry| entry.fs_path == item.fs_path),
             "the restored item must leave the bin"
         );
-
-        let _ = std::fs::remove_file(&file);
-        let _ = std::fs::remove_dir(&dir);
     }
 }

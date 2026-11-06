@@ -4,7 +4,7 @@
 
 //! Framing codec for Named Pipe length-prefixed postcard streams.
 
-use crate::message::PROTOCOL_VERSION;
+use crate::message::WIRE_GUARD;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use thiserror::Error;
@@ -17,7 +17,7 @@ pub const HEADER_SIZE: usize = 6;
 pub enum CodecError {
     #[error("Frame payload too large: {0} bytes (max {MAX_FRAME_PAYLOAD})")]
     FrameTooLarge(usize),
-    #[error("Incompatible protocol version: received {received}, supported {PROTOCOL_VERSION}")]
+    #[error("Incompatible wire guard: received {received}, supported {WIRE_GUARD}")]
     IncompatibleVersion { received: u16 },
     #[error("Serialization error: {0}")]
     Serialization(#[from] postcard::Error),
@@ -28,7 +28,7 @@ pub enum CodecError {
 /// Encodes a message into a length-prefixed frame:
 /// `[u32 LE: payload_len][u16 LE: protocol_version][postcard payload]`
 pub fn encode_frame<T: Serialize>(payload: &T) -> Result<Vec<u8>, CodecError> {
-    encode_frame_with_version(PROTOCOL_VERSION, payload)
+    encode_frame_with_version(WIRE_GUARD, payload)
 }
 
 struct VecWriter<'a>(&'a mut Vec<u8>);
@@ -130,7 +130,7 @@ pub fn decode_frame<T: DeserializeOwned>(buf: &[u8]) -> Result<(u16, T), CodecEr
         });
     }
 
-    if header.version != PROTOCOL_VERSION {
+    if header.version != WIRE_GUARD {
         return Err(CodecError::IncompatibleVersion {
             received: header.version,
         });
@@ -152,7 +152,7 @@ pub fn try_decode_frame<T: DeserializeOwned>(buf: &[u8]) -> Result<Option<(usize
         return Ok(None);
     }
 
-    if header.version != PROTOCOL_VERSION {
+    if header.version != WIRE_GUARD {
         return Err(CodecError::IncompatibleVersion {
             received: header.version,
         });
@@ -271,15 +271,15 @@ mod tests {
                 .expect("complete"),
             FrameHeader {
                 payload_len: (current.len() - HEADER_SIZE) as u32,
-                version: PROTOCOL_VERSION,
+                version: WIRE_GUARD,
             }
         );
 
-        let foreign = encode_frame_with_version(PROTOCOL_VERSION + 1, &req).expect("encode failed");
+        let foreign = encode_frame_with_version(WIRE_GUARD + 1, &req).expect("encode failed");
         let header = peek_frame_header(&foreign)
             .expect("header")
             .expect("complete");
-        assert_eq!(header.version, PROTOCOL_VERSION + 1);
+        assert_eq!(header.version, WIRE_GUARD + 1);
         assert_eq!(header.total_len(), foreign.len());
 
         // A header that has not fully arrived yet is not an error: the reader waits for more bytes.
@@ -291,7 +291,7 @@ mod tests {
 
     #[test]
     fn decoding_a_frame_of_another_version_is_refused_before_the_payload_is_trusted() {
-        let legacy = encode_frame_with_version(PROTOCOL_VERSION - 1, &ClientRequest::GetConfig)
+        let legacy = encode_frame_with_version(WIRE_GUARD - 1, &ClientRequest::GetConfig)
             .expect("encode failed");
 
         assert!(
@@ -299,13 +299,13 @@ mod tests {
                 try_decode_frame::<ClientRequest>(&legacy),
                 Err(CodecError::IncompatibleVersion {
                     received: v
-                }) if v == PROTOCOL_VERSION - 1
+                }) if v == WIRE_GUARD - 1
             ),
             "a frame of another version must never be deserialized"
         );
         assert!(matches!(
             decode_frame::<ClientRequest>(&legacy),
-            Err(CodecError::IncompatibleVersion { received: v }) if v == PROTOCOL_VERSION - 1
+            Err(CodecError::IncompatibleVersion { received: v }) if v == WIRE_GUARD - 1
         ));
     }
 

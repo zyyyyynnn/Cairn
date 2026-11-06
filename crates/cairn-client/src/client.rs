@@ -8,7 +8,7 @@ use cairn_protocol::codec::{encode_frame, try_decode_frame, CodecError};
 use cairn_protocol::message::{
     ClientRequest, Envelope, QueryDefaults, ResponsePayload, ERROR_CODE_ADMIN_ONLY_QUERY,
     ERROR_CODE_HANDSHAKE_REQUIRED, ERROR_CODE_PROTOCOL_VERSION_MISMATCH, ERROR_CODE_UNAUTHORIZED,
-    PIPE_NAME, PROTOCOL_VERSION,
+    PIPE_NAME, PRODUCT_VERSION, WIRE_GUARD,
 };
 use std::time::Duration;
 use thiserror::Error;
@@ -24,11 +24,11 @@ pub enum ClientError {
     #[error("Server returned protocol error {code}: {message}")]
     ServerProtocolError { code: u32, message: String },
     #[error(
-        "Incompatible protocol version: server={server_version}, supported={supported_version}"
+        "The Cairn service was built from a different product version (guard {server_guard}); this app is {PRODUCT_VERSION}. Update the app and the service together."
     )]
     IncompatibleProtocolVersion {
-        server_version: u32,
-        supported_version: u32,
+        /// The guard the service declared in its frame header, as `major << 8 | minor`.
+        server_guard: u16,
     },
     #[error("The Cairn service refused the protocol handshake: {message}")]
     HandshakeRejected { message: String },
@@ -145,7 +145,7 @@ impl CairnClient {
         let pid = std::process::id();
         let resp = self
             .send_request(&ClientRequest::Hello {
-                client_version: PROTOCOL_VERSION as u32,
+                client_version: WIRE_GUARD as u32,
                 pid,
             })
             .await?;
@@ -155,10 +155,9 @@ impl CairnClient {
                 server_version,
                 caller_is_admin,
             } => {
-                if *server_version != PROTOCOL_VERSION as u32 {
+                if *server_version != WIRE_GUARD as u32 {
                     return Err(ClientError::IncompatibleProtocolVersion {
-                        server_version: *server_version,
-                        supported_version: PROTOCOL_VERSION as u32,
+                        server_guard: *server_version as u16,
                     });
                 }
                 // Record what the service actually confirmed. Privileged calls rely on this;
@@ -396,8 +395,7 @@ impl CairnClient {
                 // transport failure: say so, so the GUI can show an update hint (SVC-03).
                 Err(CodecError::IncompatibleVersion { received }) => {
                     return Err(ClientError::IncompatibleProtocolVersion {
-                        server_version: received as u32,
-                        supported_version: PROTOCOL_VERSION as u32,
+                        server_guard: received,
                     })
                 }
                 Err(other) => return Err(ClientError::Codec(other)),
@@ -429,10 +427,7 @@ mod tests {
         assert!(unauthorized.is_unauthorized());
         assert!(!unauthorized.is_protocol_incompatible());
 
-        let incompatible = ClientError::IncompatibleProtocolVersion {
-            server_version: 2,
-            supported_version: PROTOCOL_VERSION as u32,
-        };
+        let incompatible = ClientError::IncompatibleProtocolVersion { server_guard: 2 };
         assert!(incompatible.is_protocol_incompatible());
         assert!(!incompatible.is_unauthorized());
 
@@ -577,12 +572,8 @@ mod tests {
             .unwrap()
             .expect_err("version 999 must not be accepted");
         match error {
-            ClientError::IncompatibleProtocolVersion {
-                server_version,
-                supported_version,
-            } => {
-                assert_eq!(server_version, 999);
-                assert_eq!(supported_version, PROTOCOL_VERSION as u32);
+            ClientError::IncompatibleProtocolVersion { server_guard } => {
+                assert_eq!(server_guard, 999);
             }
             other => panic!("expected IncompatibleProtocolVersion, got {other:?}"),
         }
@@ -633,7 +624,7 @@ mod tests {
     async fn successful_handshake_keeps_the_privilege_the_service_observed() {
         let (mut server, client) = stub_pipe_pair(r"\\.\pipe\cairn.client.stub.privilege").await;
         let reply = ResponsePayload::HelloAck {
-            server_version: PROTOCOL_VERSION as u32,
+            server_version: WIRE_GUARD as u32,
             caller_is_admin: false,
         };
         let task = tokio::spawn(async move {
@@ -644,7 +635,7 @@ mod tests {
         answer_one_request(&mut server, reply).await;
 
         let client = task.await.unwrap().expect("compatible handshake");
-        assert_eq!(client.server_protocol_version(), PROTOCOL_VERSION as u32);
+        assert_eq!(client.server_protocol_version(), WIRE_GUARD as u32);
         assert!(
             !client.caller_is_admin(),
             "the client must not invent a privilege the service did not confirm"

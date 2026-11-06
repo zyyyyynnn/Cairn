@@ -31,27 +31,6 @@ pub(crate) const fn win32_code_from_hresult(code: i32) -> Option<u32> {
     }
 }
 
-/// Whether the left mouse button is physically down anywhere on the desktop.
-/// A window resize runs inside the system's modal loop, so the window itself
-/// receives no release until the drag ends; the Treemap mask polls this state
-/// to stay up through a slow drag instead of settling on a pause.
-#[cfg(windows)]
-pub(crate) fn is_left_mouse_button_down() -> bool {
-    #[link(name = "user32")]
-    extern "system" {
-        fn GetAsyncKeyState(v_key: i32) -> i16;
-    }
-    const VK_LBUTTON: i32 = 0x01;
-    // SAFETY: GetAsyncKeyState only reads the asynchronous key state.
-    let state = unsafe { GetAsyncKeyState(VK_LBUTTON) };
-    (state as u16 & 0x8000) != 0
-}
-
-#[cfg(not(windows))]
-pub(crate) fn is_left_mouse_button_down() -> bool {
-    false
-}
-
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;

@@ -5,7 +5,7 @@
 //! Results table view: headers, rows, placeholders, and empty / offline states.
 
 use crate::app::{element_id, join_row_path, layout, split_name_highlights, CairnApp};
-use crate::service::service_issue::ServiceIssue;
+use crate::service::service_issue::{self, ServiceBandAction, ServiceIssue};
 use crate::shell::accessibility::{self, ControlElement};
 use crate::shell::command_groups::GroupCommand;
 use crate::shell::commands::RESULTS_CONTEXT;
@@ -255,6 +255,29 @@ enum HeaderLane {
     Date,
 }
 
+/// What the result region shows while it holds no rows.
+///
+/// The loading cover answers a request that is actually in flight and nothing
+/// else: a service problem or an empty answer is content with its own recovery
+/// actions, and covering it would hide the only way out (SPEC SVC-04).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResultSurface {
+    Rows,
+    Loading,
+    StateBand,
+}
+
+/// Decides the result surface from the two facts the panel can observe.
+fn result_surface(has_content: bool, is_loading: bool) -> ResultSurface {
+    if has_content {
+        ResultSurface::Rows
+    } else if is_loading {
+        ResultSurface::Loading
+    } else {
+        ResultSurface::StateBand
+    }
+}
+
 impl CairnApp {
     /// The heading row plus whatever the band under it holds: the rows, the empty state, or the
     /// reason there are no rows to show.
@@ -313,7 +336,8 @@ impl CairnApp {
             None
         };
         let has_content = rows.is_some();
-        let state = if has_content || is_loading {
+        let surface = result_surface(has_content, is_loading);
+        let state = if surface != ResultSurface::StateBand {
             None
         } else if local_location {
             Some(self.render_empty_state(tokens, cx))
@@ -328,7 +352,7 @@ impl CairnApp {
             let fade_epoch = self.table_reveal_fade_epoch;
             cx.spawn(async move |this, cx| {
                 cx.background_executor()
-                    .timer(std::time::Duration::from_millis(160))
+                    .timer(crate::shell::motion::MASK_DISSOLVE_CLEANUP)
                     .await;
                 let _ = this.update(cx, |this, cx| {
                     if this.table_reveal_fade_epoch == fade_epoch {
@@ -343,10 +367,9 @@ impl CairnApp {
         let rows = rows.map(|body| body.into_any_element());
         let state = state.map(|body| body.into_any_element());
 
-        // Whether the columns need the sideways route at all, read from the handle that measured it
-        // last frame. The component skips an axis whose content fits
-        // (`gpui-base-0.7.3/src/scrollbar.rs`: "Hide scrollbar, if the scroll area is smaller than
-        // the container"), so this only decides whether to spend the row on it.
+        // Whether the columns need the sideways route at all, read from the handle that measured
+        // it last frame: the row is spent on a scrollbar only when the content is genuinely wider
+        // than the viewport.
         let overflows_sideways = self.results.table_scroll.max_offset().x > px(0.0);
 
         let viewport = div()
@@ -459,23 +482,20 @@ impl CairnApp {
                     ),
                 )
             })
-            .when_some(state, |this, band| {
-                if !self.table_reveal_pending {
-                    this.child(band)
-                } else {
-                    this
-                }
-            })
+            .when_some(state, |this, band| this.child(band))
             // Keyboard focus has to be visible, and the ring must not move the columns it surrounds,
             // so it is painted over the region's edge instead of becoming a border on the region. It
             // carries no id and no listener, so drawing it last costs the content nothing it needs to
             // be hit by.
-            .when(self.table_reveal_pending && !has_content, |this| {
+            .when(surface == ResultSurface::Loading, |this| {
                 this.child(
                     div()
                         .id("table-loading-overlay")
                         .absolute()
                         .inset_0()
+                        // The horizontal scrollbar is a row of this region, so the cover stops
+                        // above it: a control that can still be hit must not be hidden.
+                        .when(overflows_sideways, |this| this.bottom(Scrollbar::width()))
                         .bg(tokens.muted),
                 )
             })
@@ -489,6 +509,7 @@ impl CairnApp {
                             .id("table-reveal-fade-overlay")
                             .absolute()
                             .inset_0()
+                            .when(overflows_sideways, |this| this.bottom(Scrollbar::width()))
                             .bg(tokens.muted)
                             .with_animation(
                                 fade_key,
@@ -708,22 +729,27 @@ impl CairnApp {
             retry_label.clone()
         };
         // Starting the service is a UAC action, so it is offered only when SCM says the service
-        // exists. A missing service gets install guidance instead of an elevation prompt.
-        let can_start = self.service.service_installed && issue == ServiceIssue::NotRunning;
-        let action = if can_start {
-            icon_action(start, AssetIconName::Play, start_face)
-                .loading(self.service.is_probing_service)
-                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                    this.start_service(cx);
-                }))
-                .into_any_element()
-        } else {
-            icon_action(retry, AssetIconName::RotateCcw, retry_face)
-                .loading(self.service.is_probing_service)
-                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                    this.retry_service_connection(cx);
-                }))
-                .into_any_element()
+        // exists. A missing service gets install guidance instead of an elevation prompt, and an
+        // issue the app cannot clear gets its sentence alone: a control that cannot change the
+        // outcome is worse than no control.
+        let action = match service_issue::band_action(issue, self.service.service_installed) {
+            ServiceBandAction::Start => Some(
+                icon_action(start, AssetIconName::Play, start_face)
+                    .loading(self.service.is_probing_service)
+                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                        this.start_service(cx);
+                    }))
+                    .into_any_element(),
+            ),
+            ServiceBandAction::Retry => Some(
+                icon_action(retry, AssetIconName::RotateCcw, retry_face)
+                    .loading(self.service.is_probing_service)
+                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                        this.retry_service_connection(cx);
+                    }))
+                    .into_any_element(),
+            ),
+            ServiceBandAction::None => None,
         };
         render_state_band(
             tokens,
@@ -733,7 +759,7 @@ impl CairnApp {
                 .size_8()
                 .text_color(tokens.danger)
                 .into_any_element(),
-            Some(action),
+            action,
         )
     }
 
@@ -1506,13 +1532,24 @@ mod tests {
     use core::prelude::rust_2021::test;
 
     use super::{
-        column_label_key, content_query_notice, result_command_label_key, rows_band_local_top,
-        rows_to_paint, ContentQueryNotice,
+        column_label_key, content_query_notice, result_command_label_key, result_surface,
+        rows_band_local_top, rows_to_paint, ContentQueryNotice, ResultSurface,
     };
     use crate::app::CairnApp;
     use crate::shell::command_groups::GroupCommand;
     use crate::table::model::SortColumn;
     use cairn_protocol::status::ContentIndexState;
+
+    #[test]
+    fn rows_beat_the_cover_and_a_stopped_service_beats_neither() {
+        // The cover answers an in-flight request only. With nothing in flight and no rows the band
+        // owns the region, because its recovery actions are the only way out of a stopped service
+        // (SPEC SVC-04).
+        assert_eq!(result_surface(false, false), ResultSurface::StateBand);
+        assert_eq!(result_surface(false, true), ResultSurface::Loading);
+        assert_eq!(result_surface(true, true), ResultSurface::Rows);
+        assert_eq!(result_surface(true, false), ResultSurface::Rows);
+    }
     use gpui_kit::assets::IconName as AssetIconName;
 
     #[test]
@@ -1750,27 +1787,5 @@ mod tests {
         assert_eq!(painted.range, 84..101);
         assert_eq!(painted.top, 84.0 * 28.0 - 2_380.0);
         assert!(!painted.pinned);
-    }
-
-    #[test]
-    fn table_loading_overlay_and_fade_flow() {
-        let mut app_reveal_generation: u64 = 0;
-        let mut app_reveal_pending = true;
-        let mut app_reveal_fade_epoch = 0;
-
-        // 1. Initial state: pending content, no rows
-        assert!(app_reveal_pending);
-        assert_eq!(app_reveal_fade_epoch, 0);
-
-        // 2. Data arrives, bump_table_reveal called
-        app_reveal_generation = app_reveal_generation.wrapping_add(1);
-        app_reveal_pending = false;
-        app_reveal_fade_epoch = app_reveal_generation;
-        assert_eq!(app_reveal_fade_epoch, 1);
-        assert!(!app_reveal_pending);
-
-        // 3. 160ms dissolve completes: fade epoch cleared
-        app_reveal_fade_epoch = 0;
-        assert_eq!(app_reveal_fade_epoch, 0);
     }
 }

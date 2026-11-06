@@ -20,7 +20,8 @@ use cairn_core::sort::SortColumn;
 use cairn_protocol::codec::{encode_frame_into, peek_frame_header, try_decode_frame};
 use cairn_protocol::message::{
     ClientRequest, Envelope, ResponsePayload, ERROR_CODE_HANDSHAKE_REQUIRED,
-    ERROR_CODE_PROTOCOL_VERSION_MISMATCH, ERROR_CODE_SESSION_EXPIRED, PIPE_NAME, PROTOCOL_VERSION,
+    ERROR_CODE_PROTOCOL_VERSION_MISMATCH, ERROR_CODE_SESSION_EXPIRED, MAX_TREE_DEPTH, PIPE_NAME,
+    PRODUCT_VERSION, WIRE_GUARD,
 };
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -34,12 +35,6 @@ fn tree_error_payload(reason: crate::sync_engine::TreeUnavailable) -> ResponsePa
         message: reason.message().to_string(),
     }
 }
-
-/// The deepest tree a single response may carry. Three levels stay inside the entry and frame
-/// budgets on a full drive (about 42k entries on a 1.8M-record index); a subtree that still
-/// overflows is answered one level shallower, and deeper levels are requested per directory as the
-/// reader drills in.
-const MAX_TREE_DEPTH: usize = 3;
 
 pub struct PipeServer {
     engine: Arc<MultiVolumeEngine>,
@@ -55,7 +50,7 @@ impl PipeServer {
             engine,
             sessions,
             pipe_name: PIPE_NAME.to_string(),
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: WIRE_GUARD,
         }
     }
 
@@ -259,7 +254,7 @@ async fn handle_client(
                 };
 
                 write_buf.clear();
-                encode_frame_into(&mut write_buf, PROTOCOL_VERSION, &envelope)?;
+                encode_frame_into(&mut write_buf, WIRE_GUARD, &envelope)?;
                 if let Err(e) = pipe.write_all(&write_buf).await {
                     if is_pipe_closed_error(&e) {
                         return Ok(());
@@ -288,11 +283,11 @@ async fn handle_client(
     Ok(())
 }
 
-fn version_mismatch(server_version: u16, client_version: u16) -> ResponsePayload {
+fn version_mismatch(server_guard: u16, client_guard: u16) -> ResponsePayload {
     ResponsePayload::Error {
         code: ERROR_CODE_PROTOCOL_VERSION_MISMATCH,
         message: format!(
-            "Incompatible protocol version: client={client_version}, server={server_version}"
+            "Incompatible build: client guard {client_guard}, service guard {server_guard}; the service is built from {PRODUCT_VERSION}."
         ),
     }
 }
@@ -325,14 +320,14 @@ fn process_request(
             client_version,
             pid,
         } => {
-            if client_version != PROTOCOL_VERSION as u32 {
-                version_mismatch(PROTOCOL_VERSION, client_version as u16)
+            if client_version != WIRE_GUARD as u32 {
+                version_mismatch(WIRE_GUARD, client_version as u16)
             } else {
                 info!(
                     "handshake with self-reported pid {pid} accepted; caller classified as {caller:?}"
                 );
                 ResponsePayload::HelloAck {
-                    server_version: PROTOCOL_VERSION as u32,
+                    server_version: WIRE_GUARD as u32,
                     caller_is_admin: caller.is_privileged(),
                 }
             }
@@ -730,7 +725,7 @@ mod tests {
         assert!(matches!(
             harness.handle(
                 ClientRequest::Hello {
-                    client_version: PROTOCOL_VERSION as u32,
+                    client_version: WIRE_GUARD as u32,
                     pid: 1,
                 },
                 CallerAuthorization::StandardUser
@@ -750,7 +745,7 @@ mod tests {
     fn hello_ack_reports_the_callers_privilege_not_a_fixed_value() {
         let harness = Harness::new(ServiceConfig::default());
         let hello = ClientRequest::Hello {
-            client_version: PROTOCOL_VERSION as u32,
+            client_version: WIRE_GUARD as u32,
             pid: 4242,
         };
 
@@ -765,7 +760,7 @@ mod tests {
                     server_version,
                     caller_is_admin,
                 } => {
-                    assert_eq!(server_version, PROTOCOL_VERSION as u32);
+                    assert_eq!(server_version, WIRE_GUARD as u32);
                     assert_eq!(caller_is_admin, expected, "{caller:?}");
                 }
                 other => panic!("unexpected response for {caller:?}: {other:?}"),
@@ -808,19 +803,21 @@ mod tests {
         assert_eq!(drive_from_volume_id(60000), None);
     }
 
+    /// A peer whose guard differs from this build's is refused at the message gate, and the reason
+    /// names the product the service was built from rather than a counter.
     #[test]
-    fn incompatible_client_version_is_rejected_at_the_message_gate() {
+    fn a_client_from_another_build_is_rejected_at_the_message_gate() {
         let harness = Harness::new(ServiceConfig::default());
         let (code, message) = denial(harness.handle(
             ClientRequest::Hello {
-                client_version: PROTOCOL_VERSION as u32 + 7,
+                client_version: WIRE_GUARD as u32 + 7,
                 pid: 1,
             },
             CallerAuthorization::Administrator,
         ));
         assert_eq!(code, ERROR_CODE_PROTOCOL_VERSION_MISMATCH);
         assert!(
-            message.contains("Incompatible protocol version"),
+            message.contains(&format!("the service is built from {PRODUCT_VERSION}")),
             "{message}"
         );
     }

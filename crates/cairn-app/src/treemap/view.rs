@@ -28,7 +28,7 @@ use cairn_core::format_size_bytes;
 use cairn_core::treemap::{
     aggregate_parent_path, NestedTreemapLayoutNode, TreemapCategory, TreemapRect,
 };
-use cairn_protocol::message::ResponsePayload;
+use cairn_protocol::message::{ResponsePayload, MAX_TREE_DEPTH};
 use fluent_bundle::FluentArgs;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::StyledExt;
@@ -40,7 +40,7 @@ use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::*;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// One breadcrumb label never takes more than a readable share of the path band; the
 /// full path remains in the band's tooltip.
@@ -62,14 +62,6 @@ const MENU_LABEL_MAX_WIDTH: f32 = 20.0;
 /// One screen-half cap for every path menu, so a long list scrolls instead of
 /// running past the window.
 const MENU_MAX_HEIGHT: f32 = 20.0;
-
-/// How often the resize mask checks whether the drag has settled.
-const RESIZE_SETTLE_POLL: Duration = Duration::from_millis(150);
-/// A resize may hold the mask through a slow drag, but a button that never
-/// reports a release must not pin it indefinitely.
-const RESIZE_SETTLE_MAX_POLLS: usize = 200;
-/// The dissolve overlay outlives its animation long enough to be unmounted.
-const RESIZE_FADE_CLEANUP: Duration = Duration::from_millis(160);
 
 /// Child folders of `directory` as the filesystem holds them now. The Treemap tree can lag
 /// deletions and a breadcrumb segment can name an ancestor the current tree does not hold, so
@@ -132,6 +124,7 @@ fn menu_directory(entry: &std::fs::DirEntry) -> bool {
 /// folder it opens.
 fn path_menu_option(
     name: String,
+    accessible_name: String,
     path: String,
     label_width: Pixels,
     view: Entity<CairnApp>,
@@ -143,7 +136,7 @@ fn path_menu_option(
     PopupMenuItem::element(move |_, _| {
         let tooltip_text = tooltip_path.clone();
         accessibility::element_at_key(control, &row_path)
-            .aria_label(name.clone())
+            .aria_label(accessible_name.clone())
             .h(layout::MENU_ROW_HEIGHT)
             .w_full()
             .flex()
@@ -188,11 +181,6 @@ fn path_menu_note(key: &'static str, label: String) -> PopupMenuItem {
 const TREEMAP_LABEL_MIN_WIDTH: f32 = 44.0;
 const TREEMAP_LABEL_MIN_HEIGHT: f32 = 28.0;
 
-/// Depth cap for a tree served by the index. A subtree that still overflows the response budget
-/// comes back one level shallower with exact totals on the capped nodes, and deeper levels are
-/// requested per directory as the reader drills in.
-const TREEMAP_SERVICE_DEPTH: usize = 3;
-
 /// Horizontal inset used by headers, leaves and summary labels.
 const TREEMAP_TEXT_PADDING: f32 = 4.0;
 /// The one gutter used between a block's own parts (icon and name, name and size) and between
@@ -202,6 +190,12 @@ const TREEMAP_BLOCK_GAP: f32 = 2.0;
 const TREEMAP_ICON_SPACE: f32 = 14.0;
 /// The header hides its size rather than squeezing the name below this width.
 const TREEMAP_MIN_HEADER_NAME_WIDTH: f32 = 28.0;
+
+/// The device scale the canvas paints at, clamped once at the read: every gutter, snap
+/// and hit test divides by it, so the helpers take it as given.
+fn canvas_scale(window: &Window) -> f32 {
+    window.scale_factor().max(1.0)
+}
 
 /// Shapes a label at the size and weight it will be painted, so fit decisions
 /// use real glyph advances (CJK, emoji and zoom changes included) instead of a
@@ -235,10 +229,31 @@ fn wheel_zoom_lines(delta: ScrollDelta) -> f32 {
 }
 
 impl CairnApp {
-    /// Switches to the drive disk space Treemap visualization.
+    /// Switches to the drive disk space Treemap visualization and records it as a history step, so
+    /// Back leaves the canvas again instead of stopping at its root.
     pub fn open_drive_visualization(
         &mut self,
         drive: char,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // The query being left behind stays in the entry it belongs to.
+        self.update_current_nav_state_text();
+        self.open_drive_at(
+            drive,
+            &format!("{}:\\", drive.to_ascii_uppercase()),
+            window,
+            cx,
+        );
+        self.record_nav_state();
+    }
+
+    /// Opens the visualization on `dir` without touching navigation history: Back and Forward
+    /// restore a recorded directory through here, and pushing an entry would move the cursor.
+    pub(crate) fn open_drive_at(
+        &mut self,
+        drive: char,
+        dir: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -250,7 +265,7 @@ impl CairnApp {
         self.clear_treemap_path_menu();
         self.drive_view = Some(drive_upper);
         self.query.scope_drive = Some(drive_upper);
-        let (state, scan_target) = TreemapViewState::new(drive_upper, cx.focus_handle());
+        let (state, scan_target) = TreemapViewState::new(drive_upper, dir, cx.focus_handle());
         state.request_focus(window, cx);
         self.treemap_state = Some(state);
         if let Some(path) = scan_target {
@@ -336,7 +351,7 @@ impl CairnApp {
         self.treemap_path_menu_dismiss = None;
         self.treemap_path_menu = None;
         self.treemap_path_menu_for = None;
-        self.treemap_path_menu_press = None;
+        self.treemap_path_menu_focus = None;
     }
 
     /// Opens the child-folder menu under one breadcrumb segment. The menu
@@ -345,10 +360,10 @@ impl CairnApp {
     pub(crate) fn toggle_treemap_path_menu(
         &mut self,
         segment: &str,
+        trigger_focus: FocusHandle,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.treemap_path_menu_press = None;
         let same_segment = self.treemap_path_menu_for.as_deref() == Some(segment);
         if same_segment {
             self.clear_treemap_path_menu();
@@ -376,6 +391,18 @@ impl CairnApp {
             .map(|(name, _)| px(text_width(window, name, FontWeight::default())))
             .fold(px(0.0), |widest, width| widest.max(width))
             .min(window.rem_size() * MENU_LABEL_MAX_WIDTH);
+        // Named here, where the locale is reachable: an accessible name belongs to
+        // the row, and the menu builder's closure owns no application context.
+        let rows: Vec<(String, String, String)> = directories
+            .iter()
+            .take(PATH_MENU_LIMIT)
+            .map(|(name, path)| {
+                let mut args = FluentArgs::new();
+                args.set("label", name.clone());
+                let accessible_name = self.i18n.get_text_with_args("treemap_path_menu_row", &args);
+                (name.clone(), accessible_name, path.clone())
+            })
+            .collect();
         let menu = PopupMenu::build(window, cx, move |menu, window, _cx| {
             let mut menu = menu
                 .min_w(menu_width)
@@ -385,10 +412,11 @@ impl CairnApp {
             if directories.is_empty() {
                 return menu.item(path_menu_note("empty", empty_label));
             }
-            for (name, path) in directories.iter().take(PATH_MENU_LIMIT) {
+            for (name, accessible_name, path) in rows {
                 menu = menu.item(path_menu_option(
-                    name.clone(),
-                    path.clone(),
+                    name,
+                    accessible_name,
+                    path,
                     label_width,
                     view.clone(),
                 ));
@@ -402,20 +430,25 @@ impl CairnApp {
             &menu,
             window,
             |this, _menu, _: &DismissEvent, window, cx| {
-                let triggered_by_arrow = this.treemap_path_menu_press.take().is_some();
                 this.treemap_path_menu_dismiss = None;
                 this.treemap_path_menu = None;
-                if !triggered_by_arrow {
-                    this.treemap_path_menu_for = None;
-                }
-                if let Some(state) = this.treemap_state.as_ref() {
-                    state.request_focus(window, cx);
+                this.treemap_path_menu_for = None;
+                // Dismissal returns focus to the arrow that opened the menu; the canvas only
+                // catches the case where the segment is no longer on screen.
+                match this.treemap_path_menu_focus.take() {
+                    Some(trigger) => trigger.focus(window, cx),
+                    None => {
+                        if let Some(state) = this.treemap_state.as_ref() {
+                            state.request_focus(window, cx);
+                        }
+                    }
                 }
                 cx.notify();
             },
         );
         menu.focus_handle(cx).focus(window, cx);
         self.treemap_path_menu = Some(menu);
+        self.treemap_path_menu_focus = Some(trigger_focus);
         self.treemap_path_menu_for = Some(segment.to_string());
         self.treemap_path_menu_dismiss = Some(subscription);
         cx.notify();
@@ -506,9 +539,7 @@ impl CairnApp {
             get_tokio_runtime().spawn(async move {
                 let result = async {
                     let mut client = crate::service::ipc_channel::connect().await?;
-                    client
-                        .get_tree(&path_for_service, TREEMAP_SERVICE_DEPTH)
-                        .await
+                    client.get_tree(&path_for_service, MAX_TREE_DEPTH).await
                 }
                 .await;
                 let _ = tx.send(result);
@@ -638,12 +669,15 @@ impl CairnApp {
         self.leave_drive_view();
         self.query.active_filter = FilterCategory::All;
         self.query.search_input.set_text(&Self::parent_query(path));
+        self.record_nav_state();
         self.trigger_search(cx);
         self.query.search_focus.focus(window, cx);
         cx.notify();
     }
 
-    /// The search that lists a directory's own children, used by the table hand-off.
+    /// The search that lists a directory's own children. A category narrowing is not written here:
+    /// it travels as query state and is spliced when the request is sent, so the box stays a path a
+    /// person can read and edit.
     fn parent_query(path: &str) -> String {
         let trimmed = path.trim_end_matches(['\\', '/']);
         // A drive root must keep its separator: `parent:"C"` matches nothing, `parent:"C:\"`
@@ -836,8 +870,10 @@ impl CairnApp {
                 let down_path = path.clone();
                 let click_view = view.clone();
                 let click_path = path.clone();
+                let click_focus = menu_focus.clone();
                 let key_view = view.clone();
                 let key_path = path.clone();
+                let key_focus = menu_focus.clone();
                 let toggle_label = menu_label.clone();
                 let open_menu = menu.clone().filter(|_| open);
                 let arrow = div()
@@ -877,8 +913,12 @@ impl CairnApp {
                                 cx.stop_propagation();
                                 down_focus.focus(window, cx);
                                 down_view.update(cx, |this, cx| {
-                                    this.treemap_path_menu_press = Some(down_path.clone());
-                                    this.toggle_treemap_path_menu(&down_path, window, cx)
+                                    this.toggle_treemap_path_menu(
+                                        &down_path,
+                                        down_focus.clone(),
+                                        window,
+                                        cx,
+                                    )
                                 });
                             })
                             .on_click(move |event: &ClickEvent, window, cx| {
@@ -888,7 +928,12 @@ impl CairnApp {
                                     return;
                                 }
                                 click_view.update(cx, |this, cx| {
-                                    this.toggle_treemap_path_menu(&click_path, window, cx)
+                                    this.toggle_treemap_path_menu(
+                                        &click_path,
+                                        click_focus.clone(),
+                                        window,
+                                        cx,
+                                    )
                                 });
                             })
                             .on_action(
@@ -897,7 +942,12 @@ impl CairnApp {
                                       cx: &mut App| {
                                     cx.stop_propagation();
                                     key_view.update(cx, |this, cx| {
-                                        this.toggle_treemap_path_menu(&key_path, window, cx)
+                                        this.toggle_treemap_path_menu(
+                                            &key_path,
+                                            key_focus.clone(),
+                                            window,
+                                            cx,
+                                        )
                                     });
                                 },
                             )
@@ -1028,10 +1078,13 @@ impl CairnApp {
         &mut self,
         tokens: &ShellTokens,
         sidebar_width: f32,
+        sidebar_settled_width: f32,
         sidebar_animating: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        // Read the shell's resize cover before `state` borrows the app.
+        let resize_covered = self.window_resize.is_covered();
         let Some(ref mut state) = self.treemap_state else {
             return div().into_any_element();
         };
@@ -1062,45 +1115,21 @@ impl CairnApp {
             f32::from(window_bounds.size.width),
             f32::from(window_bounds.size.height),
         );
-        state.last_scale_factor = window.scale_factor().max(1.0);
+        state.last_scale_factor = canvas_scale(window);
 
         // The squarified layout is tied to the window, not to the sidebar. A
         // sidebar motion projects the existing cells onto the new canvas width,
         // so the topology never reshuffles and no frame exposes the background.
-        // A real window resize masks the canvas and recomputes once it settles.
+        // While the shell covers a live resize the layout stays put and reflows
+        // once, on the first frame after the cover lifts.
         let is_initial = state.last_window_size.0 <= 1.0 || state.last_window_size.1 <= 1.0;
-        let current_target = state.pending_window_size.unwrap_or(state.last_window_size);
-        let window_changed = (current_target.0 - window_size.0).abs() > 0.5
-            || (current_target.1 - window_size.1).abs() > 0.5;
-        if is_initial {
+        let window_changed = (state.last_window_size.0 - window_size.0).abs() > 0.5
+            || (state.last_window_size.1 - window_size.1).abs() > 0.5;
+        if !resize_covered && (is_initial || (window_changed && !sidebar_animating)) {
             state.last_window_size = window_size;
             state.last_bounds = canvas_size;
             state.recompute_layout();
-        } else if window_changed && !sidebar_animating {
-            let epoch = state.begin_window_resize(window_size, canvas_size);
-            cx.spawn(async move |this, cx| {
-                for _ in 0..RESIZE_SETTLE_MAX_POLLS {
-                    cx.background_executor().timer(RESIZE_SETTLE_POLL).await;
-                    let current = this.update(cx, |this, _| {
-                        this.treemap_state
-                            .as_ref()
-                            .is_some_and(|state| state.resize_epoch == epoch)
-                    });
-                    if !matches!(current, Ok(true)) {
-                        return;
-                    }
-                    if crate::win32::is_left_mouse_button_down() {
-                        continue;
-                    }
-                    let _ = this.update(cx, |this, cx| settle_treemap_resize(this, cx, epoch));
-                    return;
-                }
-                let _ = this.update(cx, |this, cx| settle_treemap_resize(this, cx, epoch));
-            })
-            .detach();
         }
-
-        let is_resizing = state.is_resize_masked();
 
         // A sidebar shift only changes the width the same cells cover. The
         // projection absorbs the delta, so the final frame has no layout jump.
@@ -1110,6 +1139,18 @@ impl CairnApp {
             1.0
         };
         state.zoom.set_stretch_x(stretch_x, canvas_size);
+
+        // Labels are sized by the width the canvas keeps once the sidebar stops moving: a collapse
+        // widens every cell without reshaping the squarified layout, so a title has to appear on
+        // the settled width instead of flipping with the animated one.
+        let settled_canvas_width =
+            (f32::from(window_bounds.size.width) - sidebar_settled_width - 2.0 * panel_margin)
+                .max(100.0);
+        let label_stretch_x = if state.last_bounds.0 > 1.0 {
+            settled_canvas_width / state.last_bounds.0
+        } else {
+            1.0
+        };
 
         let is_dark = self.settings.is_dark(self.system_dark);
         let viewport = state.zoom.viewport();
@@ -1129,25 +1170,16 @@ impl CairnApp {
             view: &view,
             i18n: &self.i18n,
             window,
+            label_stretch_x,
             panning,
         };
 
         // An empty directory is content, not a separate surface: it must keep
         // the canvas focus, Backspace/Enter and wheel zoom.
+        // A scan waits on the panel's own muted surface: the canvas container is already
+        // painted in it, so a waiting overlay would add no pixels and one more id to keep.
         let content = if is_scanning {
-            div()
-                .id("treemap-scanning-overlay")
-                .size_full()
-                .bg(tokens.muted)
-                .into_any_element()
-        } else if is_resizing {
-            div()
-                .id("treemap-resize-overlay")
-                .absolute()
-                .inset_0()
-                .size_full()
-                .bg(tokens.muted)
-                .into_any_element()
+            div().into_any_element()
         } else if state.layout_nodes.is_empty() {
             let control = accessibility::control("treemap-state");
             let unavailable = state.unavailable_reason();
@@ -1210,30 +1242,6 @@ impl CairnApp {
                 tiles_layer = tiles_layer.child(
                     div()
                         .id("treemap-scan-fade-overlay")
-                        .absolute()
-                        .inset_0()
-                        .bg(tokens.muted)
-                        .with_animation(
-                            fade_key,
-                            Animation::new(crate::shell::motion::MASK_DISSOLVE)
-                                .with_easing(ease_out_quint()),
-                            move |el, delta| {
-                                if reduce_motion {
-                                    el.opacity(0.0)
-                                } else {
-                                    el.opacity(1.0 - delta)
-                                }
-                            },
-                        ),
-                );
-            }
-
-            if state.resize_fade_epoch > 0 {
-                let fade_key = format!("treemap-resize-fade-{}", state.resize_fade_epoch);
-                let reduce_motion = cx.reduce_motion();
-                tiles_layer = tiles_layer.child(
-                    div()
-                        .id("treemap-resize-fade-overlay")
                         .absolute()
                         .inset_0()
                         .bg(tokens.muted)
@@ -1496,7 +1504,7 @@ impl CairnApp {
             let epoch = state.scan_fade_epoch;
             cx.spawn(async move |this, cx| {
                 cx.background_executor()
-                    .timer(std::time::Duration::from_millis(160))
+                    .timer(crate::shell::motion::MASK_DISSOLVE_CLEANUP)
                     .await;
                 let _ = this.update(cx, |this, cx| {
                     if let Some(ref mut state) = this.treemap_state {
@@ -1513,29 +1521,6 @@ impl CairnApp {
     }
 }
 
-/// Applies the pending window size once the drag has stopped, reflows the
-/// tiles, and leaves the muted dissolve overlay on top of the new layout.
-fn settle_treemap_resize(this: &mut CairnApp, cx: &mut Context<CairnApp>, epoch: u64) {
-    let Some(state) = this.treemap_state.as_mut() else {
-        return;
-    };
-    if !state.settle_window_resize(epoch) {
-        return;
-    }
-    cx.notify();
-    cx.spawn(async move |this, cx| {
-        cx.background_executor().timer(RESIZE_FADE_CLEANUP).await;
-        let _ = this.update(cx, |this, cx| {
-            if let Some(state) = this.treemap_state.as_mut() {
-                if state.clear_resize_fade(epoch) {
-                    cx.notify();
-                }
-            }
-        });
-    })
-    .detach();
-}
-
 struct TreemapRenderContext<'a> {
     tokens: &'a ShellTokens,
     /// Data-plane category fills. Resolved once per frame from the theme mode;
@@ -1548,6 +1533,9 @@ struct TreemapRenderContext<'a> {
     /// Text is shaped at render time so labels are shown only when their real
     /// advance fits the painted block.
     window: &'a Window,
+    /// How much wider or narrower the canvas is settled to be than the layout was built for, so a
+    /// sidebar motion changes which labels fit without changing which cells exist.
+    label_stretch_x: f32,
     /// A middle-button drag owns the pointer; hover tooltips would otherwise
     /// pop up under the cursor while the content moves.
     panning: bool,
@@ -1590,21 +1578,31 @@ where
 /// parent color showing through. The patch has no id, radius, text or
 /// interaction, so a press inside it falls through to the containing
 /// directory's selection handler.
-fn push_flat_fill(elements: &mut Vec<AnyElement>, rect: TreemapRect, fill: Hsla, dimmed: bool) {
+fn push_flat_fill(
+    elements: &mut Vec<AnyElement>,
+    rect: TreemapRect,
+    fill: Hsla,
+    palette: TreemapPalette,
+    dimmed: bool,
+) {
     if rect.width < 1.0 || rect.height < 1.0 {
         return;
     }
-    let mut patch = div()
-        .absolute()
-        .left(px(rect.x))
-        .top(px(rect.y))
-        .w(px(rect.width))
-        .h(px(rect.height))
-        .bg(fill);
-    if dimmed {
-        patch = patch.opacity(0.35);
-    }
-    elements.push(patch.into_any_element());
+    let background = if dimmed {
+        palette.dimmed_fill(fill)
+    } else {
+        fill
+    };
+    elements.push(
+        div()
+            .absolute()
+            .left(px(rect.x))
+            .top(px(rect.y))
+            .w(px(rect.width))
+            .h(px(rect.height))
+            .bg(background)
+            .into_any_element(),
+    );
 }
 
 /// Paints the selection ring above the tile and its children. A border on the
@@ -1718,7 +1716,7 @@ fn render_nested_node(
     // Paint geometry is the single source for painting, hit surfaces, tooltips
     // and the selection ring. The project step is the only difference between
     // the identity view and a zoomed one.
-    let scale = rcx.window.scale_factor().max(1.0);
+    let scale = canvas_scale(rcx.window);
     let paint = inset_device_pixels(
         snap_rect_to_device_pixels(viewport.project(node.rect), scale),
         scale,
@@ -1738,14 +1736,15 @@ fn render_nested_node(
     // Content decisions run on the rect that will actually be painted, not on
     // the fractional layout value; otherwise a label/size threshold can flip
     // on a device-pixel boundary.
-    let display = snap_rect_to_device_pixels(paint, rcx.window.scale_factor().max(1.0));
-    // Label decisions read the settled layout, not the animated projection: `stretch_x` moves
-    // every frame while the panel collapses, and device-pixel rounding flips a size threshold
-    // back and forth, which makes titles appear and disappear mid-animation.
+    let display = snap_rect_to_device_pixels(paint, canvas_scale(rcx.window));
+    // Label decisions read the settled cell, never the per-frame projection: `stretch_x` moves
+    // every frame while the panel collapses, and device-pixel rounding flips a size threshold back
+    // and forth, which makes titles appear and disappear mid-animation. The settled stretch is
+    // fixed for the whole motion, so a collapse shows exactly the labels its final width carries.
     let stable = TreemapRect::new(
         0.0,
         0.0,
-        node.rect.width * viewport.scale(),
+        node.rect.width * viewport.scale() * rcx.label_stretch_x,
         node.rect.height * viewport.scale(),
     );
 
@@ -1767,7 +1766,7 @@ fn render_nested_node(
     if !has_header && !is_label_sized {
         // Sub-label cells are texture, not blocks with missing content. The
         // core keeps these rare by folding anything this small into a summary.
-        push_flat_fill(elements, display, texture_fill, dimmed);
+        push_flat_fill(elements, display, texture_fill, rcx.palette, dimmed);
         return;
     }
 
@@ -1783,7 +1782,10 @@ fn render_nested_node(
         args.set("count", node.aggregate_count as i64);
         args.set("count_text", format_count(node.aggregate_count));
         let label = rcx.i18n.get_text_with_args("treemap_aggregate", &args);
-        let tooltip = SharedString::from(format!("{label}\n{size_str}"));
+        let tooltip = SharedString::from(format!(
+            "{label}
+{size_str}"
+        ));
         let content = compact_block_content(
             IconName::FileStack,
             label,
@@ -1796,13 +1798,17 @@ fn render_nested_node(
         let aggregate_view = rcx.view.clone();
         let aggregate_path = full_path.clone();
         let aggregate_parent = aggregate_parent_path(&full_path).map(str::to_string);
+        let block_bg = if dimmed {
+            rcx.palette.dimmed_fill(header_bg)
+        } else {
+            header_bg
+        };
         let block = div()
             .id(element_id("treemap-aggregate", &node.path))
             .rounded(px(TREEMAP_RADIUS))
-            .bg(header_bg)
+            .bg(block_bg)
             .overflow_hidden()
             .cursor_pointer()
-            .when(dimmed, |this| this.opacity(0.35))
             .when(!rcx.panning, move |this| {
                 this.tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
             })
@@ -1824,7 +1830,7 @@ fn render_nested_node(
                 });
             });
         let block =
-            with_block_fill_interaction(block, header_bg, rcx.palette.is_dark(), is_selected);
+            with_block_fill_interaction(block, block_bg, rcx.palette.is_dark(), is_selected);
         elements.push(place_treemap_node(block.child(content), paint));
         if is_selected {
             push_selection_ring(elements, display, rcx.palette.selection(category));
@@ -1836,10 +1842,10 @@ fn render_nested_node(
             // The layout band is 20px; the header stops one painted gutter above the first content
             // row, so the band's gap is the same even device-pixel gutter as every other seam.
             // The gutter is a device quantity, so it is converted back to view pixels here.
-            let scale_factor = rcx.window.scale_factor();
+            let scale = canvas_scale(rcx.window);
             let header_height = (header.height * viewport.scale()
-                - painted_gutter_device(scale_factor) / scale_factor.max(1.0))
-            .max(12.0 * viewport.scale());
+                - painted_gutter_device(scale) / scale)
+                .max(12.0 * viewport.scale());
             let header_view = rcx.view.clone();
             let full_path_drill = full_path.clone();
             let header_size_label = size_str.clone();
@@ -1856,12 +1862,16 @@ fn render_nested_node(
             // carry the grouping, so no nesting level adds another frame. The
             // selection ring is painted last, above every child, so no nested
             // tile edge can clip or shift it.
+            let container_bg = if dimmed {
+                rcx.palette.dimmed_fill(rcx.tokens.background)
+            } else {
+                rcx.tokens.background
+            };
             let container = div()
                 .id(element_id("treemap-dir-box", &full_path))
                 .rounded(px(TREEMAP_RADIUS))
-                .bg(rcx.tokens.background)
+                .bg(container_bg)
                 .overflow_hidden()
-                .when(dimmed, |this| this.opacity(0.35))
                 .on_mouse_down(MouseButton::Left, {
                     let fp = full_path_drill.clone();
                     let cv = header_view.clone();
@@ -1978,6 +1988,11 @@ fn render_nested_node(
         category_icon(node.item.category)
     };
 
+    let leaf_bg = if dimmed {
+        rcx.palette.dimmed_fill(leaf_fill)
+    } else {
+        leaf_fill
+    };
     let block = div()
         .id(element_id(
             if is_dir {
@@ -1988,15 +2003,14 @@ fn render_nested_node(
             &full_path,
         ))
         .rounded(px(TREEMAP_RADIUS))
-        .bg(leaf_fill)
+        .bg(leaf_bg)
         .overflow_hidden()
-        .when(dimmed, |this| this.opacity(0.35))
         .cursor_pointer()
         // A leaf shows a single clipped line; hovering names the whole item.
         .when(!rcx.panning, move |this| {
             this.tooltip(move |window, cx| Tooltip::new(leaf_tooltip.clone()).build(window, cx))
         });
-    let block = with_block_fill_interaction(block, leaf_fill, rcx.palette.is_dark(), is_selected)
+    let block = with_block_fill_interaction(block, leaf_bg, rcx.palette.is_dark(), is_selected)
         .on_mouse_down(MouseButton::Left, {
             let fp = leaf_path.clone();
             let lv = leaf_view.clone();
@@ -2183,8 +2197,9 @@ mod tests {
     /// enter. A sibling file never becomes a row.
     #[test]
     fn the_path_menu_lists_child_directories_in_display_order() {
-        let root = std::env::temp_dir().join(format!("cairn_path_menu_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        // One temp root per test: it removes itself on drop, including when an assertion fails.
+        let temp = tempfile::tempdir().expect("a temp root for the menu fixture");
+        let root = temp.path().join("menu");
         std::fs::create_dir_all(&root).expect("the temp root exists");
         for name in ["Windows", "Users", "Program Files"] {
             std::fs::create_dir(root.join(name)).expect("a child directory exists");
@@ -2206,7 +2221,6 @@ mod tests {
                 ("Windows".to_string(), format!(r"{base}\Windows")),
             ]
         );
-        std::fs::remove_dir_all(&root).expect("the temp root is removed");
     }
 
     /// The scan stops at the menu's cap rather than materializing a whole directory: a folder
@@ -2214,8 +2228,8 @@ mod tests {
     /// one extra row is what tells the menu to offer the truncation note.
     #[test]
     fn the_path_menu_scan_stops_once_it_passes_the_cap() {
-        let root = std::env::temp_dir().join(format!("cairn_path_menu_cap_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let temp = tempfile::tempdir().expect("a temp root for the cap fixture");
+        let root = temp.path().join("cap");
         std::fs::create_dir_all(&root).expect("the temp root exists");
         for index in 0..PATH_MENU_LIMIT + 5 {
             std::fs::create_dir(root.join(format!("folder-{index:03}")))
@@ -2229,13 +2243,8 @@ mod tests {
         let listed = path_menu_directories(&base);
         assert_eq!(listed.len(), PATH_MENU_LIMIT + 1);
         assert!(listed.windows(2).all(|pair| pair[0].0 <= pair[1].0));
-
-        std::fs::remove_dir_all(&root).expect("the temp root is removed");
     }
-    /// per line, and Windows reports one notch as three lines, so Lines is
-    /// divided by three. Horizontal movement never zooms.
-    /// A root-owned summary has no parent to enter; drilling would reload the
-    /// same directory and trigger the loading flash.
+
     #[test]
     fn same_directory_compares_drive_roots_and_trailing_separators() {
         assert!(same_directory(r"C:\", r"C:\"));
@@ -2268,24 +2277,17 @@ mod tests {
     }
 
     #[test]
-    fn scan_overlay_and_fade_flow() {
+    fn revealing_a_finished_scan_keys_the_dissolve_to_that_generation() {
         let mut state = crate::treemap::state::TreemapViewState::new_for_test('C');
-        assert!(!state.is_scanning());
-        assert_eq!(state.scan_fade_epoch, 0);
-
-        // 1. Scan started: is_scanning active, scan_fade_epoch reset
         state.is_scanning = true;
-        state.scan_fade_epoch = 0;
-        assert!(state.is_scanning());
-        assert_eq!(state.scan_fade_epoch, 0);
-
-        // 2. Tree revealed: content_revealed true, scan_fade_epoch activated
         state.reveal_content();
-        assert_eq!(state.scan_fade_epoch, state.reveal_generation);
-        assert!(state.scan_fade_epoch > 0);
-
-        // 3. 160ms dissolve settles: scan_fade_epoch cleared
-        state.scan_fade_epoch = 0;
-        assert_eq!(state.scan_fade_epoch, 0);
+        assert!(
+            state.scan_fade_epoch > 0,
+            "a revealed scan starts the dissolve"
+        );
+        assert_eq!(
+            state.scan_fade_epoch, state.reveal_generation,
+            "the dissolve belongs to the generation it reveals"
+        );
     }
 }

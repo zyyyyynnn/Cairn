@@ -29,6 +29,20 @@ impl TreemapNavigation {
         }
     }
 
+    /// Opens the view already inside `path` with no drill history of its own, the way navigation
+    /// history restores a recorded directory: Back from there leaves the view rather than replaying
+    /// steps nobody walked. `path` is a directory this view has already shown, so it is used as-is.
+    pub(super) fn at_directory(drive: char, path: &str) -> Self {
+        if parent_directory(path).is_none() {
+            return Self::at_drive_root(drive);
+        }
+        Self {
+            current_dir: path.to_string(),
+            previous: Vec::new(),
+            forward: Vec::new(),
+        }
+    }
+
     pub(super) fn current_dir(&self) -> &str {
         &self.current_dir
     }

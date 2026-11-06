@@ -301,13 +301,14 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         named_by: "treemap_path_menu_for",
         requirement: "DSV-04",
     },
-    // A path menu row is a repeated family named by the folder it opens, so a
-    // screen reader reads the folder rather than an empty menu item.
+    // A path menu row commands on the folder it names, so it reports as a menu item
+    // whose accessible name carries the verb; the framework's own wrapper keeps the
+    // selection semantics.
     KeyControl {
         key: "treemap-path-menu-row",
         element: "treemap-path-menu-row",
         indexed: true,
-        role: Role::ListItem,
+        role: Role::MenuItem,
         messages: EMPTY,
         named_by: "path_menu_option",
         requirement: "DSV-04",

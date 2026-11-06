@@ -173,9 +173,8 @@ mod tests {
         header[44..48].copy_from_slice(&(arena_bytes.len() as u32).to_le_bytes());
         header[48..52].copy_from_slice(&(folded_bytes.len() as u32).to_le_bytes());
 
-        let temp_dir =
-            std::env::temp_dir().join(format!("cairn_treemap_idx_test_{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&temp_dir);
+        let temp = tempfile::tempdir().expect("a temp root for the index fixture");
+        let temp_dir = temp.path();
         let idx_path = temp_dir.join("vol_C.idx");
 
         {
@@ -199,7 +198,5 @@ mod tests {
         let truncated_path = temp_dir.join("truncated.idx");
         std::fs::write(&truncated_path, header).unwrap();
         assert!(load_index_file(&truncated_path).is_none());
-
-        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

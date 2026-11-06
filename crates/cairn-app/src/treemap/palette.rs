@@ -178,6 +178,17 @@ impl TreemapPalette {
         mix(self.canvas(), self.fill(category, depth), amount)
     }
 
+    /// A fill with a filtered-out category's weight: what the fill itself would paint
+    /// at [`Self::DIMMED_FILL`] alpha over the canvas. Dimming a block this way keeps
+    /// the category hue readable while its name and size stay fully opaque, so a
+    /// filter never costs legibility (WCAG 1.4.3).
+    pub fn dimmed_fill(&self, fill: Hsla) -> Hsla {
+        mix(self.canvas(), fill, Self::DIMMED_FILL)
+    }
+
+    /// How much of a dimmed block's fill is the category itself.
+    pub const DIMMED_FILL: f32 = 0.35;
+
     fn canvas(&self) -> Hsla {
         if self.is_dark {
             DARK_BACKGROUND
@@ -306,6 +317,30 @@ mod tests {
                     assert!(
                         ratio >= 7.0,
                         "ink on {category:?} at depth {depth} (dark={is_dark}) measured {ratio:.2}:1"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A filtered-out category recedes by moving its fill toward the canvas, never by
+    /// fading the label: the same inks must still clear their floors on the dimmed fill.
+    #[test]
+    fn dimmed_fills_keep_both_inks_readable() {
+        for is_dark in [false, true] {
+            let palette = TreemapPalette::for_mode(is_dark);
+            for category in CATEGORIES {
+                for depth in DEPTHS {
+                    let dimmed = palette.dimmed_fill(palette.fill(category, depth));
+                    let name = contrast_ratio(palette.ink(), dimmed);
+                    let size = contrast_ratio(palette.ink_secondary(), dimmed);
+                    assert!(
+                        name >= 7.0,
+                        "name ink on a dimmed {category:?} at depth {depth} (dark={is_dark}) measured {name:.2}:1"
+                    );
+                    assert!(
+                        size >= 4.5,
+                        "size ink on a dimmed {category:?} at depth {depth} (dark={is_dark}) measured {size:.2}:1"
                     );
                 }
             }

@@ -308,7 +308,7 @@ impl CairnApp {
             // The new result set has no completed count yet; the band shows only its loading
             // control until the query and any index build settle.
             self.service.status.clear_objects_count();
-            self.table_reveal_pending = true;
+            self.begin_table_session();
         }
 
         // An empty query is not an idle state: it is the "所有文件" view. The service answers it
@@ -602,7 +602,7 @@ mod tests {
         assert!(narrows_the_result_set("", Some('c'), None));
         assert!(
             !narrows_the_result_set("", None, None),
-            "no text, no scope and 所有文件 is the idle state"
+            "no text, no scope, no filter and no category is the idle state"
         );
         assert!(
             !narrows_the_result_set("   ", None, None),

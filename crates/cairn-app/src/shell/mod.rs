@@ -28,3 +28,4 @@ pub(crate) mod status_bar_view;
 pub(crate) mod theme;
 pub(crate) mod toast;
 pub(crate) mod update;
+pub(crate) mod window_resize;

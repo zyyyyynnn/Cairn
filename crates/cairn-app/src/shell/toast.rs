@@ -34,9 +34,6 @@ const TOAST_WIDTH_REM: f32 = 24.0;
 /// Every toast shares one compact minimum height; a two-line explanation grows the
 /// card instead of leaving a fixed-height gap under it.
 const TOAST_MIN_HEIGHT_REM: f32 = 5.5;
-/// Enter and exit share one short settle. Reduced motion skips the frames and
-/// removes the card without delay.
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ToastKind {
     Error,

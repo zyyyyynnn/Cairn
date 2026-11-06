@@ -162,6 +162,24 @@ impl TreemapCategory {
     /// Number of categories, for fixed-size category filters in the view.
     pub const COUNT: usize = CATEGORY_COUNT;
 
+    /// Locale-independent identity of a category, used by a summary block's path so the same
+    /// category keeps one identity across canvas sizes. It is never translated and never derived
+    /// from the display label.
+    pub fn machine_key(self) -> &'static str {
+        match self {
+            Self::Folder => "folder",
+            Self::System => "system",
+            Self::Applications => "applications",
+            Self::Document => "document",
+            Self::Archive => "archive",
+            Self::Image => "image",
+            Self::Code => "code",
+            Self::Audio => "audio",
+            Self::Video => "video",
+            Self::Other => "other",
+        }
+    }
+
     /// Classifies one directory entry.
     ///
     /// `is_dir` wins over the name, so a folder called `photos.jpg` is still

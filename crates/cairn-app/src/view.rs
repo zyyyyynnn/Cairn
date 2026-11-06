@@ -22,6 +22,7 @@ use crate::shell::accessibility::{self, ControlElement, KeyControl};
 use crate::shell::command_groups::{menu_groups, GroupCommand, MenuGroup};
 use crate::shell::commands::{self, WINDOW_CONTEXT, WINDOW_CONTROL_CONTEXT};
 use crate::shell::theme::{self, ShellTokens};
+use crate::shell::window_resize::{WindowResizeTracker, SETTLE_POLL};
 use gpui_kit::assets::IconName as AssetIconName;
 use gpui_kit::base::motion::{transition_with_status, MotionStatus, Transition};
 use gpui_kit::base::Disableable;
@@ -35,6 +36,7 @@ use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::*;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 /// The focus frame's box around the caption glyph. It stays clear of the native window frame and
 /// the rounded window corner, and leaves the full-cell hover surface untouched. The size is chosen
@@ -257,7 +259,10 @@ pub(crate) fn treemap_path_clear_button(
 
 /// The one rounded content panel used by the result table and the Treemap:
 /// the 4px frame gap, the panel surface and the corner crescent overlay.
-fn content_panel(tokens: &ShellTokens, child: impl IntoElement) -> Div {
+///
+/// `cover` is painted over the panel's content but under the crescents, so a
+/// covering surface cannot square off the panel's rounded corners.
+fn content_panel(tokens: &ShellTokens, child: impl IntoElement, cover: Option<AnyElement>) -> Div {
     v_flex()
         .flex_1()
         .min_w_0()
@@ -269,6 +274,7 @@ fn content_panel(tokens: &ShellTokens, child: impl IntoElement) -> Div {
         .rounded(tokens.radius)
         .overflow_hidden()
         .child(child)
+        .when_some(cover, |this, cover| this.child(cover))
         .child(rounded_panel_corners(tokens.radius, tokens.chrome))
 }
 
@@ -361,6 +367,9 @@ struct TableBand {
 /// the canvas origin, so both regions share one motion value.
 struct SidebarBand {
     width: f32,
+    /// The width the sidebar holds once its motion stops. The Treemap sizes labels by this rather
+    /// than by the animated width, so a collapse reveals titles without reshuffling the layout.
+    settled_width: f32,
     animating: bool,
 }
 
@@ -471,6 +480,7 @@ impl Render for CairnApp {
             },
             SidebarBand {
                 width: sidebar_motion.value,
+                settled_width: target_sidebar_width,
                 animating: sidebar_animating,
             },
             window,
@@ -970,6 +980,95 @@ impl CairnApp {
             )
     }
 
+    // ---- window resize cover -------------------------------------------------------
+
+    /// Drops a resize cover once the window's size has stopped changing.
+    ///
+    /// GPUI consumes `WM_EXITSIZEMOVE` inside its own modal-loop handling and never
+    /// redispatches it, so no event marks the end of a drag and nothing repaints after
+    /// the last size change: a timer has to make the settle call. It only ever settles
+    /// the generation it was armed for, and the poll ceiling bounds a window whose
+    /// geometry never goes quiet.
+    pub(crate) fn watch_window_resize(&mut self, epoch: u64, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            for _ in 0..WindowResizeTracker::max_polls() {
+                cx.background_executor().timer(SETTLE_POLL).await;
+                let quiet = this.update(cx, |this, _| {
+                    this.window_resize.active_epoch() == Some(epoch)
+                        && this.window_resize.is_quiet(Instant::now())
+                });
+                if matches!(quiet, Ok(true)) {
+                    break;
+                }
+            }
+            let settled = this.update(cx, |this, cx| {
+                if this.window_resize.settle(epoch) {
+                    cx.notify();
+                    true
+                } else {
+                    false
+                }
+            });
+            if !matches!(settled, Ok(true)) {
+                return;
+            }
+            cx.background_executor()
+                .timer(crate::shell::motion::MASK_DISSOLVE_CLEANUP)
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.window_resize.clear_fade(epoch) {
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// The plate a live resize puts over the content panel, so the reflowing table or
+    /// Treemap stays one stable surface while the window is being dragged. It dissolves
+    /// over `motion::MASK_DISSOLVE` once the geometry has settled and the layout reflowed.
+    fn render_window_resize_cover(
+        &self,
+        tokens: &ShellTokens,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if self.window_resize.is_covered() {
+            return Some(
+                div()
+                    .id("panel-resize-overlay")
+                    .absolute()
+                    .inset_0()
+                    .bg(tokens.muted)
+                    .into_any_element(),
+            );
+        }
+        let epoch = self.window_resize.fading_epoch();
+        if epoch == 0 {
+            return None;
+        }
+        let reduce_motion = cx.reduce_motion();
+        Some(
+            div()
+                .id("panel-resize-fade-overlay")
+                .absolute()
+                .inset_0()
+                .bg(tokens.muted)
+                .with_animation(
+                    format!("window-resize-fade-{epoch}"),
+                    Animation::new(crate::shell::motion::MASK_DISSOLVE)
+                        .with_easing(ease_out_quint()),
+                    move |element, delta| {
+                        if reduce_motion {
+                            element.opacity(0.0)
+                        } else {
+                            element.opacity(1.0 - delta)
+                        }
+                    },
+                )
+                .into_any_element(),
+        )
+    }
+
     // ---- content column ----------------------------------------------------------
 
     fn render_content_column(
@@ -981,13 +1080,22 @@ impl CairnApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        // Taken before the views borrow the app mutably: the cover only reads the
+        // resize tracker, and it belongs to the panel rather than to the window.
+        let resize_cover = self.render_window_resize_cover(tokens, cx);
         let column = if self.drive_view.is_some() {
             let path_band = self.render_treemap_path_band(tokens, band.view.clone(), window, cx);
-            let body =
-                self.render_treemap_body(tokens, sidebar.width, sidebar.animating, window, cx);
+            let body = self.render_treemap_body(
+                tokens,
+                sidebar.width,
+                sidebar.settled_width,
+                sidebar.animating,
+                window,
+                cx,
+            );
             // The path band's bottom inset is this panel's top gap, the same
             // relationship the search band has with the result panel.
-            let body_surface = content_panel(tokens, body);
+            let body_surface = content_panel(tokens, body, resize_cover);
             v_flex()
                 .flex_1()
                 .min_w_0()
@@ -1014,7 +1122,7 @@ impl CairnApp {
 
             // The search band's own bottom inset is this panel's top gap. Repeating it as a margin
             // would space the same boundary twice and push the heading off the row band.
-            let results_surface = content_panel(tokens, results);
+            let results_surface = content_panel(tokens, results, resize_cover);
             v_flex()
                 .flex_1()
                 .min_w_0()

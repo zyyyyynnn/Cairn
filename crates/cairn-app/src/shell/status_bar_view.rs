@@ -19,7 +19,6 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::status_bar::StatusBar;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{h_flex, Sizable as _};
-use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::*;
 
 fn treemap_category_key(category: TreemapCategory) -> &'static str {
@@ -441,7 +440,6 @@ impl CairnApp {
                     .text_sm()
                     .text_color(tokens.muted_foreground)
                     .hover(move |this| this.bg(tokens.row_hover).text_color(tokens.foreground))
-                    .when(!visible, |this| this.opacity(0.35))
                     .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
                     .on_mouse_down(
                         MouseButton::Left,
@@ -471,7 +469,14 @@ impl CairnApp {
                             .rounded(tokens.radius)
                             .border_1()
                             .border_color(tokens.border)
-                            .bg(palette.fill(category, 0)),
+                            // A hidden category recedes in its swatch only; the label stays
+                            // fully opaque so the row remains readable while it is a live
+                            // toggle (WCAG 1.4.3).
+                            .bg(if visible {
+                                palette.fill(category, 0)
+                            } else {
+                                palette.dimmed_fill(palette.fill(category, 0))
+                            }),
                     )
                     .child(div().whitespace_nowrap().child(label)),
             );
@@ -502,7 +507,8 @@ impl CairnApp {
     /// a new bin listing, or a service probe instead of animating a value.
     pub(crate) fn refresh_current_view(&mut self, cx: &mut Context<Self>) {
         if self.recycle_bin.is_open() {
-            self.table_reveal_pending = true;
+            // The bin loader owns the session; setting the flag again would make two
+            // authors of the same fact.
             self.begin_recycle_bin_load(cx);
             cx.notify();
             return;
@@ -521,7 +527,7 @@ impl CairnApp {
             self.check_service_connection(cx);
             return;
         }
-        self.table_reveal_pending = true;
+        self.begin_table_session();
         self.trigger_search(cx);
         cx.notify();
     }

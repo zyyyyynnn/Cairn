@@ -114,7 +114,7 @@ delete_failed_title = 无法删除所选项目
 
 service_not_running_title = 后台服务未运行，文件索引和内容搜索暂不可用
 service_not_installed_title = 后台服务未安装，重新运行安装程序
-service_incompatible_title = 后台服务版本不兼容，重新安装 Cairn
+service_incompatible_title = 后台服务版本不兼容，请在帮助菜单检查更新并重新安装
 service_unauthorized_title = 当前账户无权使用后台服务，改用授权账户
 # 故障说明都承诺"再试一次"，所以承诺要有一个指针和键盘都能按的按钮。
 service_probe_label = 正在连接后台服务
@@ -231,6 +231,7 @@ treemap_path_placeholder = C:\Users
 treemap_path_label = 路径
 treemap_path_clear = 清除路径
 treemap_path_menu_for = 显示“{ $label }”下的文件夹
+treemap_path_menu_row = 转到 “{ $label }”
 treemap_path_menu_empty = 没有可切换的子文件夹
 treemap_path_menu_truncated = 仅列出前 { $count } 个文件夹
 treemap_crumb_label = 转到 { $label }（{ $path }）

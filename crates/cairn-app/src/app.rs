@@ -23,6 +23,7 @@ use crate::shell::i18n::I18nManager;
 use crate::shell::menu_actions::sort_column_from_key;
 use crate::shell::settings::AppSettings;
 use crate::shell::status_bar::StatusBarModel;
+use crate::shell::window_resize::Observed;
 use crate::table::model::{ColumnBoundary, ColumnWidths, TableState};
 use cairn_protocol::status::ContentIndexStatus;
 use gpui_kit::component::input::{InputEvent, InputState};
@@ -32,6 +33,7 @@ use std::cell::RefCell;
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Instant;
 
 /// Every repeated distance and size in the shell, as a multiple of the window's `rem` — which is
 /// the theme's base font, so zoom moves spacing, type and control frames together. The title-bar
@@ -382,7 +384,9 @@ pub struct CairnApp {
     /// The segment whose arrow is being pressed. The open menu sees that press
     /// as an outside click, so its dismissal must not erase the segment the
     /// same press is about to toggle closed.
-    pub(crate) treemap_path_menu_press: Option<String>,
+    /// The breadcrumb segment whose arrow opened the menu, so dismissing the menu
+    /// can hand focus back to its trigger.
+    pub(crate) treemap_path_menu_focus: Option<FocusHandle>,
     pub(crate) treemap_path_menu_dismiss: Option<Subscription>,
     /// The Recycle Bin view. The bin is a location, not a search scope: the view owns its rows,
     /// its selection and its error band together, so any query or drive switch releases the whole
@@ -401,12 +405,13 @@ pub struct CairnApp {
     /// the entrance starts with content instead of running while the query is
     /// still in flight.
     pub table_reveal_pending: bool,
-    /// New content paints hidden for one frame; a deferred pass then starts
-    /// the fade only after that frame has been laid out and painted.
-    pub table_reveal_ready: bool,
     /// True while the GitHub release check is in flight. The Help menu trigger carries the
     /// loading icon; no separate waiting dialog is opened.
     pub(crate) is_checking_update: bool,
+    /// The live window resize and the cover it owns, judged by this window's own geometry.
+    pub(crate) window_resize: crate::shell::window_resize::WindowResizeTracker,
+    /// Keeps the bounds observer alive for the window's lifetime.
+    window_resize_subscription: Option<Subscription>,
 }
 
 impl CairnApp {
@@ -518,6 +523,7 @@ impl CairnApp {
                 text: String::new(),
                 drive: None,
                 filter: FilterCategory::All,
+                visualization: None,
             }],
             nav_history_index: 0,
             sidebar_scroll: ScrollHandle::default(),
@@ -531,7 +537,7 @@ impl CairnApp {
             },
             treemap_path_menu: None,
             treemap_path_menu_for: None,
-            treemap_path_menu_press: None,
+            treemap_path_menu_focus: None,
             treemap_path_menu_dismiss: None,
             recycle_bin: crate::shell::recycle_bin::RecycleBinView::closed(),
             delete_in_flight: false,
@@ -540,20 +546,41 @@ impl CairnApp {
             table_reveal_generation: 0,
             table_reveal_fade_epoch: 0,
             table_reveal_pending: true,
-            table_reveal_ready: true,
             is_checking_update: false,
+            window_resize: Default::default(),
+            window_resize_subscription: None,
         };
         window.focus(&app.query.search_focus, cx);
+        // The window's own bounds event is the only trustworthy signal that a resize is
+        // happening: a drag runs inside the system's modal loop, GPUI consumes the end of it
+        // internally, and nothing repaints once the geometry goes quiet. Observing it here
+        // keeps the cover out of `render`, which must not mutate state or start tasks.
+        app.window_resize_subscription =
+            Some(cx.observe_window_bounds(window, |this, window, cx| {
+                let size = (
+                    f32::from(window.bounds().size.width),
+                    f32::from(window.bounds().size.height),
+                );
+                if let Observed::Started(epoch) = this.window_resize.observe(size, Instant::now()) {
+                    this.watch_window_resize(epoch, cx);
+                    cx.notify();
+                }
+            }));
         app.consume_update_notice(cx);
         app.check_service_connection(cx);
         app
+    }
+
+    /// Opens a fresh table session. Every entry point that replaces the result set starts
+    /// one, so the entrance waits for real content instead of firing over an empty frame.
+    pub(crate) fn begin_table_session(&mut self) {
+        self.table_reveal_pending = true;
     }
 
     /// Starts the results panel's entrance and closes the pending session.
     pub(crate) fn bump_table_reveal(&mut self) {
         self.table_reveal_generation = self.table_reveal_generation.wrapping_add(1);
         self.table_reveal_pending = false;
-        self.table_reveal_ready = false;
         self.table_reveal_fade_epoch = self.table_reveal_generation;
     }
 
@@ -561,9 +588,10 @@ impl CairnApp {
     /// fresh panel entrance instead of reviving the hidden table in place.
     pub(crate) fn leave_drive_view(&mut self) {
         if self.drive_view.take().is_some() {
+            self.sync_visualization_dir();
             self.clear_treemap_path_menu();
             self.treemap_state = None;
-            self.table_reveal_pending = true;
+            self.begin_table_session();
         }
     }
 

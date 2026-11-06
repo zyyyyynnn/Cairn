@@ -17,31 +17,21 @@ pub(super) const TREEMAP_RADIUS: f32 = 3.0;
 
 /// Snaps a logical pixel coordinate to the window's device-pixel grid using the
 /// same half-toward-zero rule GPUI's Taffy layout converter applies.
+///
+/// The scale arrives already clamped by the view's `canvas_scale`, the one reader of
+/// the window's factor: re-guarding it here would only hide a caller that skipped it.
 fn snap_to_device_pixel(value: f32, scale_factor: f32) -> f32 {
-    let sf = if scale_factor.is_finite() && scale_factor > 0.0 {
-        scale_factor
-    } else {
-        1.0
-    };
-    let scaled = value * sf;
+    let scaled = value * scale_factor;
     if scaled.is_finite() {
-        (scaled.signum() * (scaled.abs() + 0.5).next_down().floor()) / sf
+        (scaled.signum() * (scaled.abs() + 0.5).next_down().floor()) / scale_factor
     } else {
         value
     }
 }
 
-/// Snaps all four coordinates of a painted rect to the device-pixel grid. The
-/// snapped rect is what the canvas actually paints, so label thresholds, the
-/// selection ring and hit testing all agree with the pixels on screen.
 /// The painted gutter between two cells, in device pixels: an even number at every scale.
 pub(super) fn painted_gutter_device(scale_factor: f32) -> f32 {
-    let sf = if scale_factor.is_finite() && scale_factor > 0.0 {
-        scale_factor
-    } else {
-        1.0
-    };
-    (2.0 * (TREEMAP_TILE_INSET * sf).round()).max(2.0)
+    (2.0 * (TREEMAP_TILE_INSET * scale_factor).round()).max(2.0)
 }
 
 /// Insets an already snapped cell by a fixed number of device pixels.
@@ -51,19 +41,13 @@ pub(super) fn painted_gutter_device(scale_factor: f32) -> f32 {
 /// under a squeezed projection 2 logical pixels are 2.85 device pixels, which rounds to 2 at some
 /// phases and 3 at others, so one column of the canvas reads thinner than the rest.
 pub(super) fn inset_device_pixels(rect: TreemapRect, scale_factor: f32) -> TreemapRect {
-    let sf = if scale_factor.is_finite() && scale_factor > 0.0 {
-        scale_factor
-    } else {
-        1.0
-    };
-    let gutter_device = painted_gutter_device(sf);
-    let leading_device = gutter_device / 2.0;
-    let inset = leading_device / sf;
+    let gutter_device = painted_gutter_device(scale_factor);
+    let inset = gutter_device / 2.0 / scale_factor;
     TreemapRect::new(
         rect.x + inset,
         rect.y + inset,
-        (rect.width - gutter_device / sf).max(0.0),
-        (rect.height - gutter_device / sf).max(0.0),
+        (rect.width - gutter_device / scale_factor).max(0.0),
+        (rect.height - gutter_device / scale_factor).max(0.0),
     )
 }
 
@@ -74,20 +58,15 @@ pub(super) fn inset_device_pixels(rect: TreemapRect, scale_factor: f32) -> Treem
 /// Snapping the edges keeps every shared boundary on one pixel, so a 2px logical gutter is exactly
 /// 3 device pixels at 150%.
 pub(super) fn snap_rect_to_device_pixels(rect: TreemapRect, scale_factor: f32) -> TreemapRect {
-    let sf = if scale_factor.is_finite() && scale_factor > 0.0 {
-        scale_factor
-    } else {
-        1.0
-    };
     let min_px = if rect.width > 0.0 && rect.height > 0.0 {
-        1.0 / sf
+        1.0 / scale_factor
     } else {
         0.0
     };
-    let left = snap_to_device_pixel(rect.x, sf);
-    let top = snap_to_device_pixel(rect.y, sf);
-    let right = snap_to_device_pixel(rect.x + rect.width, sf);
-    let bottom = snap_to_device_pixel(rect.y + rect.height, sf);
+    let left = snap_to_device_pixel(rect.x, scale_factor);
+    let top = snap_to_device_pixel(rect.y, scale_factor);
+    let right = snap_to_device_pixel(rect.x + rect.width, scale_factor);
+    let bottom = snap_to_device_pixel(rect.y + rect.height, scale_factor);
     TreemapRect::new(
         left,
         top,
