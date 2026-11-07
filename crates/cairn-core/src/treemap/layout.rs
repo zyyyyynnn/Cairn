@@ -525,8 +525,9 @@ mod tests {
         ));
         root.children.push(photos);
         root.compute_aggregated_sizes();
+        root.propagate_content_categories();
 
-        assert_eq!(root.category, TreemapCategory::Folder);
+        assert_eq!(root.category, TreemapCategory::Image);
         assert_eq!(root.children[0].category, TreemapCategory::Image);
         assert_eq!(
             root.children[0].children[0].category,
@@ -921,8 +922,8 @@ mod tests {
         assert_eq!(block.aggregate_count, children.len() - tiles);
         assert_eq!(
             block.item.category,
-            TreemapCategory::Code,
-            "the folded bytes are code, so the block carries the code tone"
+            TreemapCategory::Documents,
+            "the folded bytes are documents, so the block carries the documents tone"
         );
         assert_eq!(layout.iter().map(|node| node.item.size).sum::<u64>(), total);
     }
@@ -1106,7 +1107,7 @@ mod tests {
     #[test]
     fn an_aggregate_parent_is_the_real_directory_that_owns_the_tail() {
         assert_eq!(
-            aggregate_parent_path(&aggregate_path(r"C:\Users\ZYN", TreemapCategory::Folder)),
+            aggregate_parent_path(&aggregate_path(r"C:\Users\ZYN", TreemapCategory::Other)),
             Some(r"C:\Users\ZYN")
         );
         assert_eq!(
@@ -1121,18 +1122,18 @@ mod tests {
     /// categories never share one block.
     #[test]
     fn a_block_identity_is_its_directory_and_category() {
-        let first = aggregate_path(r"C:\Windows\WinSxS", TreemapCategory::Folder);
+        let first = aggregate_path(r"C:\Windows\WinSxS", TreemapCategory::Other);
         assert_eq!(
             first,
-            aggregate_path(r"C:\Windows\WinSxS", TreemapCategory::Folder)
+            aggregate_path(r"C:\Windows\WinSxS", TreemapCategory::Other)
         );
         assert_ne!(
             first,
-            aggregate_path(r"C:\Windows\WinSxS", TreemapCategory::Code)
+            aggregate_path(r"C:\Windows\WinSxS", TreemapCategory::Image)
         );
         assert_ne!(
             first,
-            aggregate_path(r"C:\Windows\System32", TreemapCategory::Folder)
+            aggregate_path(r"C:\Windows\System32", TreemapCategory::Other)
         );
     }
 }

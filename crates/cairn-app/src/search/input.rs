@@ -240,6 +240,71 @@ impl SearchInputState {
         self.selection = 0..self.text.len();
     }
 
+    /// Selects the word, whitespace run, or punctuation sequence enclosing `byte_idx` (Double-click).
+    pub fn select_word_at(&mut self, byte_idx: usize) {
+        if self.text.is_empty() {
+            self.selection = 0..0;
+            return;
+        }
+        let len = self.text.len();
+        let idx = byte_idx.min(len);
+
+        let target_idx = if idx < len {
+            let mut i = idx;
+            while i > 0 && !self.text.is_char_boundary(i) {
+                i -= 1;
+            }
+            i
+        } else {
+            let mut i = len.saturating_sub(1);
+            while i > 0 && !self.text.is_char_boundary(i) {
+                i -= 1;
+            }
+            i
+        };
+
+        let target_ch = self.text[target_idx..].chars().next().unwrap_or(' ');
+        let is_alphanumeric_or_cjk =
+            |c: char| c.is_alphanumeric() || (c as u32) >= 0x4E00 || c == '_';
+        let is_target_whitespace = target_ch.is_whitespace();
+        let is_target_alnum = is_alphanumeric_or_cjk(target_ch);
+
+        let mut start = target_idx;
+        for (i, c) in self.text[..target_idx].char_indices().rev() {
+            let matches = if is_target_whitespace {
+                c.is_whitespace()
+            } else if is_target_alnum {
+                is_alphanumeric_or_cjk(c)
+            } else {
+                !c.is_whitespace() && !is_alphanumeric_or_cjk(c)
+            };
+            if matches {
+                start = i;
+            } else {
+                break;
+            }
+        }
+
+        let mut end = target_idx + target_ch.len_utf8();
+        for (_, c) in self.text[end..].char_indices() {
+            let matches = if is_target_whitespace {
+                c.is_whitespace()
+            } else if is_target_alnum {
+                is_alphanumeric_or_cjk(c)
+            } else {
+                !c.is_whitespace() && !is_alphanumeric_or_cjk(c)
+            };
+            if matches {
+                end += c.len_utf8();
+            } else {
+                break;
+            }
+        }
+
+        self.selection = start..end;
+        self.marked_range = None;
+    }
+
     pub fn clear(&mut self) {
         if !self.text.is_empty() {
             self.push_undo_snapshot();
@@ -798,5 +863,37 @@ mod tests {
         // Undo -> back to "cairn ext:rs"
         assert!(state.undo());
         assert_eq!(state.text, "cairn ext:rs");
+    }
+
+    #[test]
+    fn test_select_word_at() {
+        let mut state = SearchInputState::default();
+        state.handle_replace_text_in_range(None, r#"cargo run --release "c:\test path\file.rs""#);
+
+        // Double click on 'c' in "cargo"
+        state.select_word_at(0);
+        assert_eq!(&state.text[state.selection.clone()], "cargo");
+
+        // Double click on 'g' in "cargo"
+        state.select_word_at(3);
+        assert_eq!(&state.text[state.selection.clone()], "cargo");
+
+        // Double click on space after "cargo"
+        state.select_word_at(5);
+        assert_eq!(&state.text[state.selection.clone()], " ");
+
+        // Double click on "--"
+        state.select_word_at(10);
+        assert_eq!(&state.text[state.selection.clone()], "--");
+
+        // Double click on "release"
+        state.select_word_at(13);
+        assert_eq!(&state.text[state.selection.clone()], "release");
+
+        // Test with Chinese text
+        state.clear();
+        state.handle_replace_text_in_range(None, "测试搜索 文件.txt");
+        state.select_word_at(6); // inside "测试搜索"
+        assert_eq!(&state.text[state.selection.clone()], "测试搜索");
     }
 }

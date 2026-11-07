@@ -443,11 +443,11 @@ mod tests {
         assert_eq!(system32_node.descendant_count(), 1);
         assert_eq!(system32_node.size, 3000);
         assert!(system32_node.is_dir);
-        assert_eq!(system32_node.category, TreemapCategory::System);
+        assert_eq!(system32_node.category, TreemapCategory::Programs);
         let notepad_node = child(windows_node, "notepad.exe");
         assert_eq!(notepad_node.size, 1000);
         assert!(!notepad_node.is_dir);
-        assert_eq!(notepad_node.category, TreemapCategory::Code);
+        assert_eq!(notepad_node.category, TreemapCategory::Programs);
     }
 
     #[test]

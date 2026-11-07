@@ -583,7 +583,7 @@ impl Render for CairnApp {
             .child(status_line)
             .when_some(toast, |this, toast| this.child(toast))
             .when(self.results.column_drag.is_some(), |this| {
-                let view = drag_paint_view;
+                let view = drag_paint_view.clone();
                 this.child(
                     canvas(
                         |_, _, _| {},
@@ -631,6 +631,54 @@ impl Render for CairnApp {
                                     }
                                 });
                             });
+                        },
+                    )
+                    .absolute()
+                    .inset_0(),
+                )
+            })
+            .when(self.query.text_selection_anchor.is_some(), |this| {
+                let view = drag_paint_view;
+                this.child(
+                    canvas(
+                        |_, _, _| {},
+                        move |_bounds, _, window, _cx| {
+                            let move_view = view.clone();
+                            window.on_mouse_event(
+                                move |event: &MouseMoveEvent, phase, window, cx| {
+                                    if phase == DispatchPhase::Capture {
+                                        return;
+                                    }
+                                    move_view.update(cx, |this, cx| {
+                                        let Some(anchor) = this.query.text_selection_anchor else {
+                                            return;
+                                        };
+                                        let current_idx =
+                                            this.query_byte_index_for_point(event.position, window);
+                                        let sel = anchor.min(current_idx)..anchor.max(current_idx);
+                                        if this.query.search_input.selection != sel {
+                                            this.query.search_input.selection = sel;
+                                            cx.notify();
+                                        }
+                                    });
+                                },
+                            );
+
+                            let up_view = view.clone();
+                            window.on_mouse_event(
+                                move |event: &MouseUpEvent, phase, _window, cx| {
+                                    if phase == DispatchPhase::Capture {
+                                        return;
+                                    }
+                                    if event.button == MouseButton::Left {
+                                        up_view.update(cx, |this, cx| {
+                                            if this.query.text_selection_anchor.take().is_some() {
+                                                cx.notify();
+                                            }
+                                        });
+                                    }
+                                },
+                            );
                         },
                     )
                     .absolute()
@@ -1121,8 +1169,14 @@ impl CairnApp {
                 search_focus,
                 view,
             } = band;
-            let query =
-                self.render_search_band(tokens, is_query_focused, search_focus, view.clone(), cx);
+            let query = self.render_search_band(
+                tokens,
+                is_query_focused,
+                search_focus,
+                view.clone(),
+                window,
+                cx,
+            );
             let results = self.render_results(
                 tokens,
                 table_band.visible,

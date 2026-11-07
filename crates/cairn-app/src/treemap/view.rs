@@ -9,6 +9,7 @@ use crate::app::{element_id, layout, CairnApp};
 use crate::search::filters::FilterCategory;
 use crate::service::ipc_tasks::get_tokio_runtime;
 use crate::shell::accessibility;
+use crate::shell::file_icon::file_kind_icon;
 use crate::shell::os::{open_file, open_folder_and_select, show_properties_dialog};
 use crate::shell::state_view::{icon_action, render_state_band};
 use crate::shell::status_bar::format_count;
@@ -26,7 +27,7 @@ use crate::treemap::state::{
 use crate::treemap::zoom::TreemapViewport;
 use cairn_core::format_size_bytes;
 use cairn_core::treemap::{
-    aggregate_parent_path, NestedTreemapLayoutNode, TreemapCategory, TreemapRect,
+    aggregate_parent_path, FileKind, NestedTreemapLayoutNode, TreemapCategory, TreemapRect,
 };
 use cairn_protocol::message::{ResponsePayload, MAX_TREE_DEPTH};
 use fluent_bundle::FluentArgs;
@@ -1220,7 +1221,6 @@ impl CairnApp {
         let is_scanning = state.is_scanning;
 
         let render_cx = TreemapRenderContext {
-            tokens,
             palette: TreemapPalette::for_mode(is_dark),
             selected_path: state.selected_path.as_deref(),
             category_filter: state.category_filter,
@@ -1229,6 +1229,8 @@ impl CairnApp {
             window,
             label_stretch_x,
             panning,
+            suppress_tooltip: state.suppress_tooltip,
+            selection_active: state.selected_path.is_some(),
         };
 
         // An empty directory is content, not a separate surface: it must keep
@@ -1562,7 +1564,6 @@ impl CairnApp {
 }
 
 struct TreemapRenderContext<'a> {
-    tokens: &'a ShellTokens,
     /// Data-plane category fills. Resolved once per frame from the theme mode;
     /// the shell tokens never carry a category color.
     palette: TreemapPalette,
@@ -1579,6 +1580,8 @@ struct TreemapRenderContext<'a> {
     /// A middle-button drag owns the pointer; hover tooltips would otherwise
     /// pop up under the cursor while the content moves.
     panning: bool,
+    suppress_tooltip: bool,
+    selection_active: bool,
 }
 
 /// Places a rendered node at its exact projected layout rect. Blocks appear
@@ -1598,9 +1601,9 @@ where
 
 /// The one interaction response shared by header surfaces, file leaves and
 /// compact directory leaves: hover and press darken the surface itself, keeping
-/// its category hue and saturation. Selection owns the 2px `ring`, so neither
-/// state is installed on a selected block. Directory containers themselves never
-/// use this, so hovering a child cannot light up its ancestors.
+/// its category hue and saturation. Selection keeps full fill brightness while outside
+/// regions are dimmed, so neither state is installed on a selected block. Directory
+/// containers themselves never use this, so hovering a child cannot light up its ancestors.
 fn with_block_fill_interaction<E>(element: E, base: Hsla, is_dark: bool, is_selected: bool) -> E
 where
     E: StatefulInteractiveElement,
@@ -1641,30 +1644,6 @@ fn push_flat_fill(
             .w(px(rect.width))
             .h(px(rect.height))
             .bg(background)
-            .into_any_element(),
-    );
-}
-
-/// Paints the selection ring above the tile and its children. A border on the
-/// tile itself would inset the header and content by 2px, and nested child
-/// rects would clip its inner edge; an overlay keeps the tile geometry exact
-/// and the ring uniform on all four sides.
-fn push_selection_ring(elements: &mut Vec<AnyElement>, rect: TreemapRect, color: Hsla) {
-    if rect.width < 1.0 || rect.height < 1.0 {
-        return;
-    }
-    // The ring is a selection state: paint it directly at the block's snapped
-    // paint rect, above the tile and every child.
-    elements.push(
-        div()
-            .absolute()
-            .left(px(rect.x))
-            .top(px(rect.y))
-            .w(px(rect.width))
-            .h(px(rect.height))
-            .rounded(px(TREEMAP_RADIUS))
-            .border_2()
-            .border_color(color)
             .into_any_element(),
     );
 }
@@ -1754,7 +1733,7 @@ fn render_nested_node(
     let is_dir = node.item.is_dir;
 
     // Paint geometry is the single source for painting, hit surfaces, tooltips
-    // and the selection ring. The project step is the only difference between
+    // and selection highlight. The project step is the only difference between
     // the identity view and a zoomed one.
     let scale = canvas_scale(rcx.window);
     let paint = inset_device_pixels(
@@ -1773,6 +1752,7 @@ fn render_nested_node(
         // screen and can be skipped.
         return;
     }
+
     // Content decisions run on the rect that will actually be painted, not on
     // the fractional layout value; otherwise a label/size threshold can flip
     // on a device-pixel boundary.
@@ -1791,12 +1771,24 @@ fn render_nested_node(
     let category = node.item.category;
     // Filtered categories dim in place; the layout and selection path never
     // move. A selected node stays at full strength so it remains findable.
-    let dimmed = !rcx.category_filter[category as usize] && !is_selected;
-    // Every directory uses its category color, including Folder and Other; an unknown folder
-    // falls back to the Folder tint.
-    let header_bg = rcx.palette.directory_header(category);
+    let filtered = !rcx.category_filter[category as usize] && !is_selected;
+    // Selecting a container focuses its whole subtree: the container's own header and every
+    // descendant stay at full tone, and only what lies outside dims.
+    let in_selected = rcx
+        .selected_path
+        .is_some_and(|selected| path_is_within(&node.path, selected));
+    let unfocused = rcx.selection_active && !in_selected;
+    let dimmed = filtered || unfocused;
+    // Every directory uses its resolved category color; a directory whose content carries no
+    // signal keeps the Other tint.
+    let base_header = rcx.palette.directory_header(category);
+    let header_bg = if dimmed {
+        rcx.palette.dimmed_fill(base_header)
+    } else {
+        base_header
+    };
     let texture_fill = if is_dir || node.is_aggregate() {
-        header_bg
+        base_header
     } else {
         rcx.palette.fill(category)
     };
@@ -1838,12 +1830,7 @@ fn render_nested_node(
         );
         let aggregate_view = rcx.view.clone();
         let aggregate_path = full_path.clone();
-        let block_bg = if dimmed {
-            rcx.palette.dimmed_fill(header_bg)
-        } else {
-            header_bg
-        };
-        let menu_label = aggregate_label_text.clone();
+        let block_bg = header_bg;
         let menu_parent = aggregate_parent_path(&full_path).map(str::to_string);
         let block = div()
             .id(element_id("treemap-aggregate", &node.path))
@@ -1851,13 +1838,25 @@ fn render_nested_node(
             .bg(block_bg)
             .overflow_hidden()
             .cursor_pointer()
-            .when(!rcx.panning, move |this| {
+            .when(!rcx.panning && !rcx.suppress_tooltip, move |this| {
                 this.tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+            })
+            .on_mouse_down(MouseButton::Right, {
+                let v = aggregate_view.clone();
+                move |_, _, cx| {
+                    v.update(cx, |this, cx| {
+                        if let Some(st) = this.treemap_state.as_mut() {
+                            st.suppress_tooltip = true;
+                        }
+                        cx.notify();
+                    });
+                }
             })
             .on_mouse_down(MouseButton::Left, move |event, window, cx| {
                 aggregate_view.update(cx, |this, cx| {
                     if let Some(ref mut st) = this.treemap_state {
                         st.selected_path = Some(aggregate_path.clone());
+                        st.suppress_tooltip = false;
                         st.request_focus(window, cx);
                         // A block is a container: the same double click that enters a directory
                         // opens its folded items as a canvas layer.
@@ -1873,15 +1872,10 @@ fn render_nested_node(
             with_block_fill_interaction(block, block_bg, rcx.palette.is_dark(), is_selected)
                 .context_menu(build_block_context_menu(
                     rcx.view.clone(),
-                    full_path.clone(),
-                    menu_label,
                     menu_parent,
                     rcx.i18n,
                 ));
         elements.push(place_treemap_node(block.child(content), paint));
-        if is_selected {
-            push_selection_ring(elements, display, rcx.palette.selection(category));
-        }
         return;
     }
     if is_dir {
@@ -1905,14 +1899,13 @@ fn render_nested_node(
                 >= TREEMAP_ICON_SPACE + TREEMAP_MIN_HEADER_NAME_WIDTH + 2.0 + size_width;
             let header_tooltip = SharedString::from(format!("{full_path_drill}\n{size_str}"));
 
-            // Directory containers are flat: the header and the quieter fill
-            // carry the grouping, so no nesting level adds another frame. The
-            // selection ring is painted last, above every child, so no nested
-            // tile edge can clip or shift it.
+            // A container body is a low-share plate of the same tone, so nesting reads as tonal
+            // plates instead of white boxes; it dims with its header when the node is out of focus.
+            let body = rcx.palette.body_fill();
             let container_bg = if dimmed {
-                rcx.palette.dimmed_fill(rcx.tokens.background)
+                rcx.palette.dimmed_fill(body)
             } else {
-                rcx.tokens.background
+                body
             };
             let container = div()
                 .id(element_id("treemap-dir-box", &full_path))
@@ -2003,15 +1996,11 @@ fn render_nested_node(
                 true,
                 rcx.i18n,
             ));
-
             elements.push(place_treemap_node(container.child(header_bar), paint));
 
             // Recursively render child layout nodes
             for child in &node.children {
                 render_nested_node(child, rcx, viewport, canvas, elements);
-            }
-            if is_selected {
-                push_selection_ring(elements, display, rcx.palette.selection(category));
             }
             return;
         }
@@ -2019,20 +2008,20 @@ fn render_nested_node(
 
     // Leaf block (file or compact directory). A file carries its category fill; a
     // compact directory uses the quieter header share of the same category, so a
-    // directory without a header strip still reads as what it holds. Directories
-    // without a category signal stay on the neutral header surface.
+    // directory without a header strip still reads as what it holds. A directory
+    // whose content carries no category signal keeps the Other tint.
     let leaf_path = full_path.clone();
     let leaf_view = rcx.view.clone();
     let leaf_tooltip = SharedString::from(format!("{full_path}\n{size_str}"));
     let leaf_fill = if is_dir {
-        header_bg
+        base_header
     } else {
         rcx.palette.fill(node.item.category)
     };
     let leaf_icon = if is_dir {
         IconName::Folder
     } else {
-        category_icon(node.item.category)
+        file_kind_icon(FileKind::classify_file(&node.item.name))
     };
 
     let leaf_bg = if dimmed {
@@ -2054,8 +2043,19 @@ fn render_nested_node(
         .overflow_hidden()
         .cursor_pointer()
         // A leaf shows a single clipped line; hovering names the whole item.
-        .when(!rcx.panning, move |this| {
+        .when(!rcx.panning && !rcx.suppress_tooltip, move |this| {
             this.tooltip(move |window, cx| Tooltip::new(leaf_tooltip.clone()).build(window, cx))
+        })
+        .on_mouse_down(MouseButton::Right, {
+            let v = leaf_view.clone();
+            move |_, _, cx| {
+                v.update(cx, |this, cx| {
+                    if let Some(st) = this.treemap_state.as_mut() {
+                        st.suppress_tooltip = true;
+                    }
+                    cx.notify();
+                });
+            }
         });
     let block = with_block_fill_interaction(block, leaf_bg, rcx.palette.is_dark(), is_selected)
         .on_mouse_down(MouseButton::Left, {
@@ -2065,6 +2065,7 @@ fn render_nested_node(
                 lv.update(cx, |this, cx| {
                     if let Some(ref mut st) = this.treemap_state {
                         st.selected_path = Some(fp.clone());
+                        st.suppress_tooltip = false;
                         st.request_focus(window, cx);
                         if event.click_count == 2 {
                             if is_dir {
@@ -2095,29 +2096,28 @@ fn render_nested_node(
         rcx.palette.ink(),
         rcx.palette.ink_secondary(),
     );
-
     elements.push(place_treemap_node(block.child(content), paint));
-    if is_selected {
-        push_selection_ring(elements, display, rcx.palette.selection(category));
-    }
 }
 
-/// The file shape that repeats the category already carried by the fill, label
-/// and tooltip. `main.rs` installs the complete icon catalog, so this mapping
-/// never renders a zero-width icon.
-fn category_icon(category: TreemapCategory) -> IconName {
-    match category {
-        TreemapCategory::Folder => IconName::Folder,
-        TreemapCategory::System => IconName::HardDrive,
-        TreemapCategory::Applications => IconName::Package,
-        TreemapCategory::Document => IconName::FileText,
-        TreemapCategory::Archive => IconName::FileArchive,
-        TreemapCategory::Image => IconName::FileImage,
-        TreemapCategory::Code => IconName::FileCode,
-        TreemapCategory::Audio => IconName::FileMusic,
-        TreemapCategory::Video => IconName::FileVideoCamera,
-        TreemapCategory::Other => IconName::File,
+/// Whether `candidate` is `ancestor` itself or a path beneath it. Comparison is ASCII
+/// case-insensitive and requires a separator boundary, so `C:\Windows` does not contain
+/// `C:\WindowsApps`.
+fn path_is_within(candidate: &str, ancestor: &str) -> bool {
+    let ancestor = ancestor.trim_end_matches('\\');
+    if candidate.eq_ignore_ascii_case(ancestor) {
+        return true;
     }
+    if candidate.len() <= ancestor.len() {
+        return false;
+    }
+    let Some(prefix) = candidate.get(..ancestor.len()) else {
+        return false;
+    };
+    if !prefix.eq_ignore_ascii_case(ancestor) {
+        return false;
+    }
+    let rest = &candidate[ancestor.len()..];
+    rest.starts_with('\\') || rest.starts_with("::")
 }
 
 fn same_directory(left: &str, right: &str) -> bool {
@@ -2125,44 +2125,26 @@ fn same_directory(left: &str, right: &str) -> bool {
         .eq_ignore_ascii_case(right.trim_end_matches('\\'))
 }
 
-/// The menu a summary block can honour: it opens its folded items as a canvas layer and lists
-/// its owning directory in the table. The block has no filesystem path of its own, so path-based
-/// commands do not apply.
+/// The menu a summary block can honour: it lists its owning directory in the table.
 fn build_block_context_menu(
     view: Entity<CairnApp>,
-    path: String,
-    label: String,
     parent_path: Option<String>,
     i18n: &Rc<crate::shell::i18n::I18nManager>,
 ) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
     let i18n = i18n.clone();
     move |menu: PopupMenu, _window: &mut Window, _cx: &mut Context<PopupMenu>| {
-        let open_view = view.clone();
-        let open_path = path.clone();
-        let open_label = label.clone();
         let table_view = view.clone();
         let table_parent = parent_path.clone();
-        menu.item(
-            PopupMenuItem::new(i18n.get_text("ctx_open")).on_click(move |_, _, cx| {
-                open_view.update(cx, |this, cx| {
-                    if let Some(st) = this.treemap_state.as_mut() {
-                        st.open_block(&open_path, open_label.clone());
-                    }
-                    cx.notify();
-                });
-            }),
-        )
-        .separator()
-        .item(
-            PopupMenuItem::new(i18n.get_text("view_in_table")).on_click(move |_, window, cx| {
+        menu.item(PopupMenuItem::new(i18n.get_text("view_in_table")).on_click(
+            move |_, window, cx| {
                 if let Some(ref dir) = table_parent {
                     let dir = dir.clone();
                     table_view.update(cx, |this, cx| {
                         this.switch_to_table_with_path(&dir, window, cx);
                     });
                 }
-            }),
-        )
+            },
+        ))
     }
 }
 
@@ -2264,6 +2246,22 @@ mod tests {
 
     use super::*;
 
+    /// Selecting a directory keeps its whole subtree in focus; only the separator boundary
+    /// decides, so a sibling whose name shares a prefix is outside.
+    #[test]
+    fn a_path_contains_itself_and_its_descendants_only() {
+        assert!(path_is_within(r"C:\Windows", r"C:\Windows"));
+        assert!(path_is_within(r"C:\Windows\System32", r"C:\Windows"));
+        assert!(path_is_within(r"C:\Windows::<tail:Other>", r"C:\Windows"));
+        assert!(!path_is_within(r"C:\Windows", r"C:\Windows\System32"));
+        assert!(path_is_within(
+            r"C:\Users\ZYN\AppData",
+            r"C:\Users\ZYN\AppData\"
+        ));
+        assert!(!path_is_within(r"C:\WindowsApps", r"C:\Windows"));
+        assert!(!path_is_within(r"C:\Win", r"C:\Windows"));
+    }
+
     /// The table hand-off must search the directory's own children. A drive root keeps the
     /// separator the query syntax needs; a nested path is used as written.
     #[test]
@@ -2331,6 +2329,37 @@ mod tests {
         let listed = path_menu_directories(&base);
         assert_eq!(listed.len(), PATH_MENU_LIMIT + 1);
         assert!(listed.windows(2).all(|pair| pair[0].0 <= pair[1].0));
+    }
+
+    #[test]
+    fn dimmed_leaf_and_header_fills_match_for_directory_and_file() {
+        for is_dark in [false, true] {
+            let palette = TreemapPalette::for_mode(is_dark);
+            for category in [
+                cairn_core::treemap::TreemapCategory::System,
+                cairn_core::treemap::TreemapCategory::Programs,
+                cairn_core::treemap::TreemapCategory::Documents,
+                cairn_core::treemap::TreemapCategory::Image,
+                cairn_core::treemap::TreemapCategory::Video,
+                cairn_core::treemap::TreemapCategory::Audio,
+                cairn_core::treemap::TreemapCategory::Archive,
+                cairn_core::treemap::TreemapCategory::Other,
+            ] {
+                let base_header = palette.directory_header(category);
+                let header_bg_dimmed = palette.dimmed_fill(base_header);
+                let dir_leaf_bg_dimmed = palette.dimmed_fill(base_header);
+                let file_leaf_bg_dimmed = palette.dimmed_fill(palette.fill(category));
+
+                assert_eq!(
+                    dir_leaf_bg_dimmed, header_bg_dimmed,
+                    "compact directory leaf and header must match when dimmed (category {category:?}, is_dark={is_dark})"
+                );
+                assert_eq!(
+                    dir_leaf_bg_dimmed, file_leaf_bg_dimmed,
+                    "compact directory leaf and file leaf must match when dimmed (category {category:?}, is_dark={is_dark})"
+                );
+            }
+        }
     }
 
     #[test]

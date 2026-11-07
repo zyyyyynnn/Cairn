@@ -2073,19 +2073,34 @@ impl CairnApp {
             return;
         }
 
-        let mut edited = true;
+        // Cursor navigation and selection updates adjust cursor/highlight only.
+        // Redrawing requires `cx.notify()`, but must NEVER trigger a background query refresh.
         match key {
+            "left" => {
+                self.query.search_input.move_cursor_left(shift);
+                cx.notify();
+                return;
+            }
+            "right" => {
+                self.query.search_input.move_cursor_right(shift);
+                cx.notify();
+                return;
+            }
+            "home" => {
+                self.query.search_input.move_cursor_home(shift);
+                cx.notify();
+                return;
+            }
+            "end" => {
+                self.query.search_input.move_cursor_end(shift);
+                cx.notify();
+                return;
+            }
             "backspace" => self.query.search_input.delete_backward(),
             "delete" => self.query.search_input.delete_forward(),
-            "left" => self.query.search_input.move_cursor_left(shift),
-            "right" => self.query.search_input.move_cursor_right(shift),
-            "home" => self.query.search_input.move_cursor_home(shift),
-            "end" => self.query.search_input.move_cursor_end(shift),
-            _ => edited = false,
+            _ => return,
         }
-        if !edited {
-            return;
-        }
+
         self.trigger_search(cx);
         cx.notify();
     }

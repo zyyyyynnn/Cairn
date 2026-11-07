@@ -2,35 +2,33 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! What a Treemap tile holds: name-based classification of files and
-//! directories, and the dominant category of a set of sized children.
+//! What a Treemap tile holds: the category a tile encodes, the file kind behind
+//! a file's name, and the dominant category of a set of sized children.
 
 /// The data category a Treemap tile encodes.
 ///
 /// This is a data-model value, not a color: the app decides how a category is
-/// painted. Known directory names carry the category of what they usually hold
-/// (`Windows` is system, `Program Files` is applications, `Users` is documents,
-/// and so on); an unrecognized directory starts as [`TreemapCategory::Folder`]
-/// and later inherits its dominant content category. Files are classified from
-/// their name once, when the item is built, so the render path only reads the
-/// stored value instead of parsing names every frame.
+/// painted. The variant order defines the palette slots and the legend order.
+///
+/// Only files are classified from their name. A directory starts as
+/// [`TreemapCategory::Other`] and later inherits the category holding most of
+/// its bytes, so a folder of photos is images whatever the folder is called.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum TreemapCategory {
-    /// Structural category for a directory whose content carries no signal yet.
-    Folder,
-    /// Operating-system files and directories (`Windows`, page and hibernation
-    /// files, drivers, EFI binaries).
+    /// Operating-system binaries: drivers, system resources and paging files.
     System,
-    /// Installed application trees (`Program Files`, `Applications`).
-    Applications,
-    Document,
-    Archive,
+    /// Executables, installers and shared libraries.
+    Programs,
+    /// Text, office files, source code, configuration and scripts.
+    Documents,
     Image,
-    Code,
-    Audio,
     Video,
-    /// Unrecognized extension or no extension at all. It still receives a quiet
-    /// tint so no data tile collapses into neutral gray.
+    Audio,
+    /// Compressed archives and disk images.
+    Archive,
+    /// Unrecognized extension or no extension at all. A directory whose content
+    /// carries no category signal stays here; it still receives a quiet tint so
+    /// no data tile collapses into neutral gray.
     #[default]
     Other,
 }
@@ -38,12 +36,61 @@ pub enum TreemapCategory {
 /// Number of [`TreemapCategory`] variants. Content propagation sizes one stack
 /// array with it and indexes it by the enum discriminant, so the order of
 /// [`TreemapCategory::ALL`] matters.
-const CATEGORY_COUNT: usize = 10;
+const CATEGORY_COUNT: usize = 8;
 
-/// Build files whose extension would otherwise point at another category
+/// The concrete kind of a file, resolved from its name. A kind is finer than a
+/// category: the app paints a row or tile with the kind's icon, while the
+/// Treemap tallies bytes by category.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FileKind {
+    /// Kernel drivers and EFI images.
+    Driver,
+    /// System resources: message tables, catalogs and setup information.
+    SystemFile,
+    /// Executables that run on their own.
+    Application,
+    /// Installation packages for an application.
+    Installer,
+    /// Shared libraries and their registrable controls.
+    Library,
+    /// Text and general office documents.
+    Document,
+    /// Slide decks.
+    Presentation,
+    /// Row-and-column data files.
+    Spreadsheet,
+    /// Source code and build files.
+    SourceCode,
+    /// Structured or key/value configuration files.
+    Config,
+    /// Shell and scripting-language programs.
+    Script,
+    /// Compressed archives.
+    Archive,
+    /// Whole-disk and whole-volume images.
+    DiscImage,
+    /// Photographs and general-purpose graphics.
+    Image,
+    /// Design and layout source files.
+    Design,
+    Video,
+    Audio,
+    /// Typeface files.
+    Font,
+    /// Database files.
+    Database,
+    /// Links to another file, folder or site.
+    Shortcut,
+    /// Recorded runtime logs.
+    Log,
+    /// Unrecognized extension or no extension at all.
+    Other,
+}
+
+/// Build files whose extension would otherwise point at another kind
 /// (`CMakeLists.txt` would read as a document, `Cargo.toml`/`package.json` as
 /// unknown configuration).
-const CODE_FILE_NAMES: &[&str] = &[
+const SOURCE_FILE_NAMES: &[&str] = &[
     "Makefile",
     "Dockerfile",
     "CMakeLists.txt",
@@ -52,159 +99,154 @@ const CODE_FILE_NAMES: &[&str] = &[
 ];
 
 /// Files named after their role rather than their format; matched on the stem so
-/// `README`, `README.md` and `LICENSE.txt` all land in the same category.
+/// `README`, `README.md` and `LICENSE.txt` all resolve to the same kind.
 const DOCUMENT_FILE_STEMS: &[&str] = &["README", "LICENSE", "NOTICE"];
 
-/// Well-known directory names, grouped by what the directory usually contains.
-/// Matching is ASCII case-insensitive and applies at any depth, so the same
-/// `System32`, `Pictures` or `target` keeps its meaning wherever it appears.
-/// A directory that is not listed here stays [`TreemapCategory::Folder`], which
-/// is the neutral structural category — not a generic catch-all color. Its
-/// category can later be inherited from its content.
-const SYSTEM_DIRECTORY_NAMES: &[&str] = &[
-    "Windows",
-    "System32",
-    "SysWOW64",
-    "WinSxS",
-    "DriverStore",
-    "Drivers",
-    "Recovery",
-    "$SysReset",
-    "System Volume Information",
+/// The extension table is the only extension source: the last dot-separated
+/// segment of a name selects the first kind whose list contains it, compared
+/// ASCII case-insensitively.
+const EXTENSION_TABLE: &[(FileKind, &[&str])] = &[
+    (FileKind::Driver, &["sys", "drv", "efi"]),
+    (FileKind::SystemFile, &["mui", "cat", "inf", "pnf"]),
+    (FileKind::Application, &["exe", "com", "cpl", "scr"]),
+    (
+        FileKind::Installer,
+        &["msi", "msix", "msixbundle", "appx", "appxbundle"],
+    ),
+    (FileKind::Library, &["dll", "ocx", "ax", "tlb"]),
+    (
+        FileKind::Document,
+        &[
+            "doc", "docx", "odt", "rtf", "txt", "md", "pdf", "epub", "mobi", "xps", "one",
+            "onenote", "pages", "tex",
+        ],
+    ),
+    (FileKind::Presentation, &["ppt", "pptx", "odp", "key"]),
+    (
+        FileKind::Spreadsheet,
+        &["xls", "xlsx", "xlsm", "ods", "csv", "tsv", "numbers"],
+    ),
+    (
+        FileKind::SourceCode,
+        &[
+            "rs", "ts", "tsx", "js", "jsx", "mjs", "cjs", "vue", "svelte", "py", "pyi", "go",
+            "java", "kt", "kts", "c", "cc", "cpp", "cxx", "h", "hpp", "cs", "rb", "php", "swift",
+            "m", "mm", "scala", "dart", "lua", "r", "jl", "pl", "ex", "exs", "erl", "hs", "clj",
+            "fs", "html", "htm", "css", "scss", "sass", "less", "sql", "proto", "graphql", "ipynb",
+        ],
+    ),
+    (
+        FileKind::Config,
+        &[
+            "json",
+            "toml",
+            "yaml",
+            "yml",
+            "ini",
+            "cfg",
+            "conf",
+            "xml",
+            "plist",
+            "env",
+            "properties",
+        ],
+    ),
+    (
+        FileKind::Script,
+        &[
+            "sh", "bash", "zsh", "fish", "bat", "cmd", "ps1", "psm1", "vbs",
+        ],
+    ),
+    (
+        FileKind::Archive,
+        &[
+            "zip", "7z", "rar", "tar", "gz", "tgz", "bz2", "xz", "zst", "lz4", "cab", "arj", "lzh",
+            "war", "jar",
+        ],
+    ),
+    (
+        FileKind::DiscImage,
+        &["iso", "dmg", "vhd", "vhdx", "vmdk", "img", "wim", "esd"],
+    ),
+    (
+        FileKind::Image,
+        &[
+            "jpg", "jpeg", "png", "gif", "webp", "bmp", "tif", "tiff", "svg", "heic", "heif",
+            "avif", "ico", "jfif",
+        ],
+    ),
+    (
+        FileKind::Design,
+        &["psd", "psb", "ai", "fig", "sketch", "xd", "indd", "eps"],
+    ),
+    (
+        FileKind::Video,
+        &[
+            "mp4", "mkv", "avi", "mov", "wmv", "webm", "m4v", "flv", "mpg", "mpeg", "m2ts", "3gp",
+            "vob", "rmvb",
+        ],
+    ),
+    (
+        FileKind::Audio,
+        &[
+            "mp3", "flac", "wav", "aac", "ogg", "opus", "m4a", "wma", "aiff", "mid", "midi", "ape",
+        ],
+    ),
+    (
+        FileKind::Font,
+        &["ttf", "otf", "woff", "woff2", "fon", "fnt"],
+    ),
+    (
+        FileKind::Database,
+        &["db", "sqlite", "sqlite3", "mdb", "accdb", "dbf"],
+    ),
+    (
+        FileKind::Shortcut,
+        &["lnk", "url", "appref-ms", "website", "webloc"],
+    ),
+    (FileKind::Log, &["log"]),
 ];
 
-const APPLICATION_DIRECTORY_NAMES: &[&str] = &[
-    "Program Files",
-    "Program Files (x86)",
-    "Applications",
-    "Apps",
-];
-
-const CODE_DIRECTORY_NAMES: &[&str] = &[
-    "src",
-    "tools",
-    "node_modules",
-    ".git",
-    "target",
-    ".cargo",
-    "Workspace",
-    "Projects",
-    "repos",
-];
-
-const DOCUMENT_DIRECTORY_NAMES: &[&str] = &[
-    "Users",
-    "Documents",
-    "Desktop",
-    "Downloads",
-    "Public",
-    "Books",
-    "Notes",
-];
-
-const IMAGE_DIRECTORY_NAMES: &[&str] = &["Pictures", "Photos", "Images"];
-const AUDIO_DIRECTORY_NAMES: &[&str] = &["Music"];
-const VIDEO_DIRECTORY_NAMES: &[&str] = &["Videos", "Movies"];
-const ARCHIVE_DIRECTORY_NAMES: &[&str] = &["Archive", "Backups", "Backup"];
-const OTHER_DIRECTORY_NAMES: &[&str] = &["ProgramData", "AppData", "Temp", "Cache", "$Recycle.Bin"];
-
-const DOCUMENT_EXTENSIONS: &[&str] = &[
-    "doc", "docx", "odt", "rtf", "txt", "md", "pdf", "epub", "mobi", "xls", "xlsx", "ppt", "pptx",
-    "csv", "tsv",
-];
-
-const IMAGE_EXTENSIONS: &[&str] = &[
-    "jpg", "jpeg", "png", "gif", "webp", "bmp", "tif", "tiff", "svg", "heic", "avif", "ico", "psd",
-    "cr2", "nef", "arw", "dng",
-];
-
-const AUDIO_EXTENSIONS: &[&str] = &[
-    "mp3", "flac", "wav", "aac", "ogg", "opus", "m4a", "wma", "aiff", "midi",
-];
-
-const VIDEO_EXTENSIONS: &[&str] = &[
-    "mp4", "mkv", "avi", "mov", "wmv", "webm", "m4v", "flv", "mpg", "mpeg", "m2ts", "3gp",
-];
-
-const ARCHIVE_EXTENSIONS: &[&str] = &[
-    "zip", "7z", "rar", "tar", "gz", "tgz", "bz2", "xz", "zst", "lz4", "cab", "iso", "dmg", "jar",
-];
-
-/// Operating-system binaries: drivers, kernel modules, EFI images and paging
-/// files. Checked before [`CODE_EXTENSIONS`] so `.sys` is system, not code.
-const SYSTEM_EXTENSIONS: &[&str] = &["sys", "drv", "efi"];
-
-/// Source, configuration and program assets. `.ts` is TypeScript here, not an
-/// MPEG transport stream; `m2ts` stays the video container.
-const CODE_EXTENSIONS: &[&str] = &[
-    "rs", "ts", "tsx", "js", "jsx", "py", "go", "java", "c", "cpp", "h", "hpp", "cs", "rb", "php",
-    "swift", "kt", "sh", "html", "css", "scss", "json", "toml", "yaml", "yml", "xml", "sql", "exe",
-    "dll", "msi", "msix", "com", "bat", "cmd", "ps1",
-];
-
-impl TreemapCategory {
-    /// Every category in discriminant order. Content propagation indexes its
-    /// per-directory byte totals with the discriminant, so variants must not be
-    /// reordered without updating `CATEGORY_COUNT`.
-    pub const ALL: [Self; CATEGORY_COUNT] = [
-        Self::Folder,
-        Self::System,
-        Self::Applications,
-        Self::Document,
-        Self::Archive,
-        Self::Image,
-        Self::Code,
-        Self::Audio,
-        Self::Video,
-        Self::Other,
-    ];
-
-    /// Number of categories, for fixed-size category filters in the view.
-    pub const COUNT: usize = CATEGORY_COUNT;
-
-    /// Locale-independent identity of a category, used by a summary block's path so the same
-    /// category keeps one identity across canvas sizes. It is never translated and never derived
-    /// from the display label.
-    pub fn machine_key(self) -> &'static str {
+impl FileKind {
+    /// The Treemap category this kind is tallied under.
+    pub fn category(self) -> TreemapCategory {
         match self {
-            Self::Folder => "folder",
-            Self::System => "system",
-            Self::Applications => "applications",
-            Self::Document => "document",
-            Self::Archive => "archive",
-            Self::Image => "image",
-            Self::Code => "code",
-            Self::Audio => "audio",
-            Self::Video => "video",
-            Self::Other => "other",
+            Self::Driver | Self::SystemFile => TreemapCategory::System,
+            Self::Application | Self::Installer | Self::Library => TreemapCategory::Programs,
+            Self::Document
+            | Self::Presentation
+            | Self::Spreadsheet
+            | Self::SourceCode
+            | Self::Config
+            | Self::Script => TreemapCategory::Documents,
+            Self::Archive | Self::DiscImage => TreemapCategory::Archive,
+            Self::Image | Self::Design => TreemapCategory::Image,
+            Self::Video => TreemapCategory::Video,
+            Self::Audio => TreemapCategory::Audio,
+            Self::Font | Self::Database | Self::Shortcut | Self::Log | Self::Other => {
+                TreemapCategory::Other
+            }
         }
     }
 
-    /// Classifies one directory entry.
+    /// Classifies a file name.
     ///
-    /// `is_dir` wins over the name, so a folder called `photos.jpg` is still
-    /// classified by its directory name (unknown names remain
-    /// [`Self::Folder`]). For files the last dot-separated segment wins
-    /// (`archive.tar.gz` is an archive), comparison is ASCII case-insensitive,
-    /// and a name whose only dot is the leading one (`.gitignore`, `.env`) is
-    /// treated as a tool configuration file.
-    pub fn classify(name: &str, is_dir: bool) -> Self {
-        if is_dir {
-            return Self::from_directory_name(name).unwrap_or(Self::Folder);
-        }
-
-        if CODE_FILE_NAMES
+    /// The last dot-separated segment wins (`archive.tar.gz` is an archive) and
+    /// comparison is ASCII case-insensitive. A known build file name outranks
+    /// its extension; a name whose only dot is the leading one (`.gitignore`,
+    /// `.env`) is configuration; and `README`, `LICENSE` and `NOTICE` resolve by
+    /// stem, so their extension never decides.
+    pub fn classify_file(name: &str) -> Self {
+        if SOURCE_FILE_NAMES
             .iter()
             .any(|known| name.eq_ignore_ascii_case(known))
         {
-            return Self::Code;
+            return Self::SourceCode;
         }
 
-        // A bare dotfile is configuration, not an unknown binary. A dotted name
-        // with a real extension still goes through the extension table below.
         if let Some(rest) = name.strip_prefix('.') {
             if !rest.is_empty() && !rest.contains('.') {
-                return Self::Code;
+                return Self::Config;
             }
         }
 
@@ -220,63 +262,70 @@ impl TreemapCategory {
         }
 
         match name.rsplit_once('.') {
-            Some((_, extension)) if !extension.is_empty() => {
-                Self::from_extension(extension).unwrap_or_default()
-            }
+            Some((_, extension)) if !extension.is_empty() => Self::from_extension(extension),
             _ => Self::Other,
         }
     }
 
-    fn from_directory_name(name: &str) -> Option<Self> {
-        let matches = |table: &[&str]| table.iter().any(|known| name.eq_ignore_ascii_case(known));
+    fn from_extension(extension: &str) -> Self {
+        EXTENSION_TABLE
+            .iter()
+            .find(|(_, extensions)| {
+                extensions
+                    .iter()
+                    .any(|known| extension.eq_ignore_ascii_case(known))
+            })
+            .map(|(kind, _)| *kind)
+            .unwrap_or(Self::Other)
+    }
+}
 
-        if matches(SYSTEM_DIRECTORY_NAMES) {
-            Some(Self::System)
-        } else if matches(APPLICATION_DIRECTORY_NAMES) {
-            Some(Self::Applications)
-        } else if matches(CODE_DIRECTORY_NAMES) {
-            Some(Self::Code)
-        } else if matches(DOCUMENT_DIRECTORY_NAMES) {
-            Some(Self::Document)
-        } else if matches(IMAGE_DIRECTORY_NAMES) {
-            Some(Self::Image)
-        } else if matches(AUDIO_DIRECTORY_NAMES) {
-            Some(Self::Audio)
-        } else if matches(VIDEO_DIRECTORY_NAMES) {
-            Some(Self::Video)
-        } else if matches(ARCHIVE_DIRECTORY_NAMES) {
-            Some(Self::Archive)
-        } else if matches(OTHER_DIRECTORY_NAMES) {
-            Some(Self::Other)
-        } else {
-            None
+impl TreemapCategory {
+    /// Every category in discriminant order. Content propagation indexes its
+    /// per-directory byte totals with the discriminant, and the palette and the
+    /// legend follow the same order.
+    pub const ALL: [Self; CATEGORY_COUNT] = [
+        Self::System,
+        Self::Programs,
+        Self::Documents,
+        Self::Image,
+        Self::Video,
+        Self::Audio,
+        Self::Archive,
+        Self::Other,
+    ];
+
+    /// Number of categories, for fixed-size category filters in the view.
+    pub const COUNT: usize = CATEGORY_COUNT;
+
+    /// Locale-independent identity of a category, used by a summary block's path so the same
+    /// category keeps one identity across canvas sizes. It is never translated and never derived
+    /// from the display label.
+    pub fn machine_key(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::Programs => "programs",
+            Self::Documents => "documents",
+            Self::Image => "image",
+            Self::Video => "video",
+            Self::Audio => "audio",
+            Self::Archive => "archive",
+            Self::Other => "other",
         }
     }
 
-    fn from_extension(extension: &str) -> Option<Self> {
-        let matches = |table: &[&str]| {
-            table
-                .iter()
-                .any(|known| extension.eq_ignore_ascii_case(known))
-        };
-
-        if matches(SYSTEM_EXTENSIONS) {
-            Some(Self::System)
-        } else if matches(DOCUMENT_EXTENSIONS) {
-            Some(Self::Document)
-        } else if matches(IMAGE_EXTENSIONS) {
-            Some(Self::Image)
-        } else if matches(AUDIO_EXTENSIONS) {
-            Some(Self::Audio)
-        } else if matches(VIDEO_EXTENSIONS) {
-            Some(Self::Video)
-        } else if matches(ARCHIVE_EXTENSIONS) {
-            Some(Self::Archive)
-        } else if matches(CODE_EXTENSIONS) {
-            Some(Self::Code)
-        } else {
-            None
+    /// Classifies one directory entry.
+    ///
+    /// A directory carries no category from its name: it starts at
+    /// [`Self::Other`] and content propagation later assigns the category
+    /// holding most of its bytes. A file's kind is resolved from its name by
+    /// [`FileKind::classify_file`] and then mapped through
+    /// [`FileKind::category`].
+    pub fn classify(name: &str, is_dir: bool) -> Self {
+        if is_dir {
+            return Self::Other;
         }
+        FileKind::classify_file(name).category()
     }
 }
 
@@ -291,17 +340,13 @@ impl CategoryBytes {
         *slot = slot.saturating_add(bytes);
     }
 
-    /// The content category holding the most bytes. Structural
-    /// [`TreemapCategory::Folder`] and [`TreemapCategory::Other`] never win; a
-    /// tie keeps the category listed first in [`TreemapCategory::ALL`]. `None`
-    /// when no content category holds a byte.
+    /// The category holding the most bytes, [`TreemapCategory::Other`] included.
+    /// A tie keeps the category listed first in [`TreemapCategory::ALL`].
+    /// `None` when no category holds a byte.
     pub(super) fn dominant(&self) -> Option<TreemapCategory> {
         let mut dominant = None;
         let mut dominant_bytes = 0u64;
         for category in TreemapCategory::ALL {
-            if matches!(category, TreemapCategory::Folder | TreemapCategory::Other) {
-                continue;
-            }
             let bytes = self.0[category as usize];
             if bytes > dominant_bytes {
                 dominant = Some(category);
@@ -317,121 +362,150 @@ mod tests {
     use super::*;
 
     #[test]
-    fn directory_names_win_over_file_extensions() {
-        assert_eq!(
-            TreemapCategory::classify("photos.jpg", true),
-            TreemapCategory::Folder
-        );
-        // `.git` is a known directory name, not a dotfile extension.
-        assert_eq!(
-            TreemapCategory::classify(".git", true),
-            TreemapCategory::Code
-        );
-        assert_eq!(
-            TreemapCategory::classify("archive.tar.gz", true),
-            TreemapCategory::Folder
-        );
-    }
-
-    #[test]
-    fn known_directory_names_carry_their_category() {
-        for (name, expected) in [
-            ("Program Files", TreemapCategory::Applications),
-            ("program files (x86)", TreemapCategory::Applications),
-            ("Applications", TreemapCategory::Applications),
-            ("Apps", TreemapCategory::Applications),
-            ("Windows", TreemapCategory::System),
-            ("System32", TreemapCategory::System),
-            ("SysWOW64", TreemapCategory::System),
-            ("WinSxS", TreemapCategory::System),
-            ("DriverStore", TreemapCategory::System),
-            ("Drivers", TreemapCategory::System),
-            ("Recovery", TreemapCategory::System),
-            ("$SysReset", TreemapCategory::System),
-            ("System Volume Information", TreemapCategory::System),
-            ("src", TreemapCategory::Code),
-            ("tools", TreemapCategory::Code),
-            ("node_modules", TreemapCategory::Code),
-            (".git", TreemapCategory::Code),
-            ("target", TreemapCategory::Code),
-            (".cargo", TreemapCategory::Code),
-            ("Workspace", TreemapCategory::Code),
-            ("workspace", TreemapCategory::Code),
-            ("Projects", TreemapCategory::Code),
-            ("repos", TreemapCategory::Code),
-            ("Users", TreemapCategory::Document),
-            ("Documents", TreemapCategory::Document),
-            ("Desktop", TreemapCategory::Document),
-            ("Downloads", TreemapCategory::Document),
-            ("Public", TreemapCategory::Document),
-            ("Books", TreemapCategory::Document),
-            ("Notes", TreemapCategory::Document),
-            ("Pictures", TreemapCategory::Image),
-            ("Photos", TreemapCategory::Image),
-            ("Images", TreemapCategory::Image),
-            ("Music", TreemapCategory::Audio),
-            ("Videos", TreemapCategory::Video),
-            ("Movies", TreemapCategory::Video),
-            ("Archive", TreemapCategory::Archive),
-            ("Backups", TreemapCategory::Archive),
-            ("Backup", TreemapCategory::Archive),
-            ("ProgramData", TreemapCategory::Other),
-            ("AppData", TreemapCategory::Other),
-            ("Temp", TreemapCategory::Other),
-            ("Cache", TreemapCategory::Other),
-            ("$Recycle.Bin", TreemapCategory::Other),
+    fn a_directory_name_never_decides_its_category() {
+        for name in [
+            "Windows",
+            "Program Files",
+            "Users",
+            "Pictures",
+            "Music",
+            "Videos",
+            "Backups",
+            ".git",
+            "photos.jpg",
+            "archive.tar.gz",
         ] {
             assert_eq!(
                 TreemapCategory::classify(name, true),
-                expected,
-                "{name} must classify as {expected:?}"
-            );
-        }
-
-        // An unrecognized directory stays structural: it must not borrow a
-        // category color just because every directory has to have one.
-        for name in ["C:", "C:\\", "ZYN", "New Folder"] {
-            assert_eq!(
-                TreemapCategory::classify(name, true),
-                TreemapCategory::Folder,
-                "{name} must stay a neutral folder"
+                TreemapCategory::Other,
+                "{name} must start uncategorized"
             );
         }
     }
 
     #[test]
-    fn extension_match_ignores_ascii_case() {
-        assert_eq!(
-            TreemapCategory::classify("PHOTO.JPG", false),
-            TreemapCategory::Image
-        );
-        assert_eq!(
-            TreemapCategory::classify("Track.FLAC", false),
-            TreemapCategory::Audio
-        );
-        assert_eq!(
-            TreemapCategory::classify("KERNEL32.DLL", false),
-            TreemapCategory::Code
-        );
-        for name in ["pagefile.sys", "hiberfil.sys", "swapfile.sys"] {
+    fn extension_tables_cover_every_kind() {
+        for (kind, extensions) in EXTENSION_TABLE {
+            for extension in *extensions {
+                let name = format!("sample.{extension}");
+                assert_eq!(
+                    FileKind::classify_file(&name),
+                    *kind,
+                    "{name} must classify as {kind:?}"
+                );
+                let upper = format!("SAMPLE.{}", extension.to_ascii_uppercase());
+                assert_eq!(
+                    FileKind::classify_file(&upper),
+                    *kind,
+                    "{upper} must classify as {kind:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn file_kinds_map_to_the_eight_categories() {
+        for (kind, category) in [
+            (FileKind::Driver, TreemapCategory::System),
+            (FileKind::SystemFile, TreemapCategory::System),
+            (FileKind::Application, TreemapCategory::Programs),
+            (FileKind::Installer, TreemapCategory::Programs),
+            (FileKind::Library, TreemapCategory::Programs),
+            (FileKind::Document, TreemapCategory::Documents),
+            (FileKind::Presentation, TreemapCategory::Documents),
+            (FileKind::Spreadsheet, TreemapCategory::Documents),
+            (FileKind::SourceCode, TreemapCategory::Documents),
+            (FileKind::Config, TreemapCategory::Documents),
+            (FileKind::Script, TreemapCategory::Documents),
+            (FileKind::Archive, TreemapCategory::Archive),
+            (FileKind::DiscImage, TreemapCategory::Archive),
+            (FileKind::Image, TreemapCategory::Image),
+            (FileKind::Design, TreemapCategory::Image),
+            (FileKind::Video, TreemapCategory::Video),
+            (FileKind::Audio, TreemapCategory::Audio),
+            (FileKind::Font, TreemapCategory::Other),
+            (FileKind::Database, TreemapCategory::Other),
+            (FileKind::Shortcut, TreemapCategory::Other),
+            (FileKind::Log, TreemapCategory::Other),
+            (FileKind::Other, TreemapCategory::Other),
+        ] {
+            assert_eq!(kind.category(), category, "{kind:?} maps to {category:?}");
+        }
+    }
+
+    #[test]
+    fn known_kinds_classify_from_names() {
+        for (name, kind) in [
+            ("pagefile.sys", FileKind::Driver),
+            ("hiberfil.sys", FileKind::Driver),
+            ("nvlddmkm.drv", FileKind::Driver),
+            ("boot.efi", FileKind::Driver),
+            ("explorer.exe", FileKind::Application),
+            ("setup.msix", FileKind::Installer),
+            ("KERNEL32.DLL", FileKind::Library),
+            ("report.xlsx", FileKind::Spreadsheet),
+            ("deck.pptx", FileKind::Presentation),
+            ("notes.final.txt", FileKind::Document),
+            ("main.rs", FileKind::SourceCode),
+            ("settings.json", FileKind::Config),
+            ("build.ps1", FileKind::Script),
+            ("archive.tar.gz", FileKind::Archive),
+            ("disc.vhdx", FileKind::DiscImage),
+            ("photo.PSD", FileKind::Design),
+            ("scan.PNG", FileKind::Image),
+            ("clip.mkv", FileKind::Video),
+            ("Track.FLAC", FileKind::Audio),
+            ("text.ttf", FileKind::Font),
+            ("app.sqlite3", FileKind::Database),
+            ("Deploy.lnk", FileKind::Shortcut),
+            ("build.log", FileKind::Log),
+        ] {
+            assert_eq!(
+                FileKind::classify_file(name),
+                kind,
+                "{name} must classify as {kind:?}"
+            );
             assert_eq!(
                 TreemapCategory::classify(name, false),
-                TreemapCategory::System,
-                "{name} must be a system file"
+                kind.category(),
+                "{name} must take its kind's category"
             );
         }
-        assert_eq!(
-            TreemapCategory::classify("PAGEFILE.SYS", false),
-            TreemapCategory::System
-        );
-        assert_eq!(
-            TreemapCategory::classify("nvlddmkm.drv", false),
-            TreemapCategory::System
-        );
-        assert_eq!(
-            TreemapCategory::classify("boot.efi", false),
-            TreemapCategory::System
-        );
+    }
+
+    #[test]
+    fn build_files_documents_and_dotfiles_beat_their_extension() {
+        for name in [
+            "Makefile",
+            "dockerfile",
+            "CMakeLists.txt",
+            "Cargo.toml",
+            "package.json",
+        ] {
+            assert_eq!(
+                FileKind::classify_file(name),
+                FileKind::SourceCode,
+                "{name} must be source code"
+            );
+            assert_eq!(
+                TreemapCategory::classify(name, false),
+                TreemapCategory::Documents
+            );
+        }
+        for name in ["README", "readme", "README.md", "LICENSE.txt", "NOTICE"] {
+            assert_eq!(
+                FileKind::classify_file(name),
+                FileKind::Document,
+                "{name} must be a document"
+            );
+        }
+        for name in [".gitignore", ".editorconfig", ".env"] {
+            assert_eq!(
+                FileKind::classify_file(name),
+                FileKind::Config,
+                "{name} must be configuration"
+            );
+        }
     }
 
     #[test]
@@ -442,44 +516,11 @@ mod tests {
         );
         assert_eq!(
             TreemapCategory::classify("notes.final.txt", false),
-            TreemapCategory::Document
+            TreemapCategory::Documents
         );
         assert_eq!(
             TreemapCategory::classify("trailing.", false),
             TreemapCategory::Other
-        );
-    }
-
-    #[test]
-    fn known_file_names_beat_their_extension() {
-        for name in [
-            "Makefile",
-            "dockerfile",
-            "CMakeLists.txt",
-            "Cargo.toml",
-            "package.json",
-        ] {
-            assert_eq!(
-                TreemapCategory::classify(name, false),
-                TreemapCategory::Code,
-                "{name} must be code"
-            );
-        }
-        for name in ["README", "readme", "README.md", "LICENSE.txt", "NOTICE"] {
-            assert_eq!(
-                TreemapCategory::classify(name, false),
-                TreemapCategory::Document,
-                "{name} must be a document"
-            );
-        }
-        // A name whose only dot is the leading one is tool configuration.
-        assert_eq!(
-            TreemapCategory::classify(".gitignore", false),
-            TreemapCategory::Code
-        );
-        assert_eq!(
-            TreemapCategory::classify(".editorconfig", false),
-            TreemapCategory::Code
         );
     }
 
@@ -496,13 +537,16 @@ mod tests {
     }
 
     #[test]
-    fn dominant_category_ignores_structural_bytes_and_keeps_the_first_tie() {
+    fn dominant_considers_every_category_and_keeps_the_first_tie() {
         let mut bytes = CategoryBytes::default();
         assert_eq!(bytes.dominant(), None);
 
-        bytes.add(TreemapCategory::Folder, 10_000);
-        bytes.add(TreemapCategory::Other, 10_000);
-        assert_eq!(bytes.dominant(), None, "structural bytes never dominate");
+        bytes.add(TreemapCategory::Other, 100);
+        assert_eq!(
+            bytes.dominant(),
+            Some(TreemapCategory::Other),
+            "unknown bytes are still a measured total"
+        );
 
         bytes.add(TreemapCategory::Video, 300);
         bytes.add(TreemapCategory::Image, 300);
@@ -514,5 +558,40 @@ mod tests {
 
         bytes.add(TreemapCategory::Video, 1);
         assert_eq!(bytes.dominant(), Some(TreemapCategory::Video));
+    }
+
+    #[test]
+    fn category_order_is_the_documented_one() {
+        assert_eq!(TreemapCategory::COUNT, 8);
+        assert_eq!(
+            TreemapCategory::ALL,
+            [
+                TreemapCategory::System,
+                TreemapCategory::Programs,
+                TreemapCategory::Documents,
+                TreemapCategory::Image,
+                TreemapCategory::Video,
+                TreemapCategory::Audio,
+                TreemapCategory::Archive,
+                TreemapCategory::Other,
+            ]
+        );
+        let keys: Vec<&str> = TreemapCategory::ALL
+            .iter()
+            .map(|category| category.machine_key())
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "system",
+                "programs",
+                "documents",
+                "image",
+                "video",
+                "audio",
+                "archive",
+                "other",
+            ]
+        );
     }
 }

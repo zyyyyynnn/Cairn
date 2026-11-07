@@ -9,7 +9,6 @@ use crate::app::{layout, CairnApp};
 use crate::shell::accessibility::{self, ControlElement};
 use crate::shell::status_bar::format_count;
 use crate::shell::theme::{self, ShellTokens};
-use crate::treemap::palette::TreemapPalette;
 use cairn_core::format_size_bytes;
 use cairn_core::treemap::TreemapCategory;
 use fluent_bundle::FluentArgs;
@@ -23,15 +22,13 @@ use gpui_kit::gpui::*;
 
 fn treemap_category_key(category: TreemapCategory) -> &'static str {
     match category {
-        TreemapCategory::Folder => "treemap_category_folder",
         TreemapCategory::System => "treemap_category_system",
-        TreemapCategory::Applications => "treemap_category_applications",
-        TreemapCategory::Document => "treemap_category_document",
-        TreemapCategory::Archive => "treemap_category_archive",
+        TreemapCategory::Programs => "treemap_category_programs",
+        TreemapCategory::Documents => "treemap_category_documents",
         TreemapCategory::Image => "treemap_category_image",
-        TreemapCategory::Code => "treemap_category_code",
-        TreemapCategory::Audio => "treemap_category_audio",
         TreemapCategory::Video => "treemap_category_video",
+        TreemapCategory::Audio => "treemap_category_audio",
+        TreemapCategory::Archive => "treemap_category_archive",
         TreemapCategory::Other => "treemap_category_other",
     }
 }
@@ -382,7 +379,6 @@ impl CairnApp {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let state = self.treemap_state.as_ref()?;
-        let palette = TreemapPalette::for_mode(self.settings.is_dark(self.system_dark));
         let mut row = h_flex()
             .flex_shrink_0()
             .items_center()
@@ -461,24 +457,18 @@ impl CairnApp {
                             cx.notify();
                         }
                     }))
+                    // Colour no longer encodes a category, so the legend row carries the name and its
+                    // toggle state only: a hidden category dims its label instead of a swatch.
                     .child(
                         div()
-                            .w(rems(layout::LEGEND_SWATCH))
-                            .h(rems(layout::LEGEND_SWATCH))
-                            .flex_shrink_0()
-                            .rounded(tokens.radius)
-                            .border_1()
-                            .border_color(tokens.border)
-                            // A hidden category recedes in its swatch only; the label stays
-                            // fully opaque so the row remains readable while it is a live
-                            // toggle (WCAG 1.4.3).
-                            .bg(if visible {
-                                palette.fill(category)
+                            .whitespace_nowrap()
+                            .text_color(if visible {
+                                tokens.foreground
                             } else {
-                                palette.dimmed_fill(palette.fill(category))
-                            }),
-                    )
-                    .child(div().whitespace_nowrap().child(label)),
+                                tokens.muted_foreground
+                            })
+                            .child(label),
+                    ),
             );
         }
         // The reset is permanent at the end of the legend, whether or not a category is

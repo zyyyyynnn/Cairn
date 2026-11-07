@@ -420,7 +420,7 @@ mod tests {
                 size: 1,
                 is_dir,
                 modified_ts: 0,
-                category: TreemapCategory::Folder,
+                category: TreemapCategory::Other,
             },
             path: path.to_string(),
             rect: bounds,

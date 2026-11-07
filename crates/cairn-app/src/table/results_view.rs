@@ -9,13 +9,14 @@ use crate::service::service_issue::{self, ServiceBandAction, ServiceIssue};
 use crate::shell::accessibility::{self, ControlElement};
 use crate::shell::command_groups::GroupCommand;
 use crate::shell::commands::RESULTS_CONTEXT;
+use crate::shell::file_icon::file_kind_icon;
 use crate::shell::menu_rules::IndexMenuState;
 use crate::shell::state_view::{icon_action, render_state_band};
 use crate::shell::theme::{self, ShellTokens};
 use crate::table::model::{format_timestamp, ColumnBoundary, SortColumn};
 use crate::view::announce_shortcut;
 use cairn_core::format_size_bytes;
-use cairn_core::treemap::TreemapCategory;
+use cairn_core::treemap::FileKind;
 use cairn_protocol::message::FileRowData;
 use cairn_protocol::status::ContentIndexState;
 use gpui_kit::assets::IconName as AssetIconName;
@@ -147,27 +148,37 @@ fn rows_to_paint(
     }
 }
 
-/// Broad file kind behind a result row's icon, from the taxonomy the Treemap already uses.
+/// The file kind behind a result row's icon.
 ///
 /// A recovered suffix matters when the display name hides or differs from it. In that case the
 /// suffix is carried through the taxonomy's name entry point with a synthetic name instead of a
 /// second extension table. When the name already ends in the same suffix — or no suffix was
-/// recovered — the taxonomy's own name rules stay in charge, so `CMakeLists.txt` stays code and a
-/// bare dotfile stays configuration.
-fn broad_file_category(name: &str, resolved_extension: &str) -> TreemapCategory {
+/// recovered — the taxonomy's own name rules stay in charge, so `CMakeLists.txt` stays source code
+/// and a bare dotfile stays configuration.
+fn row_file_kind(name: &str, resolved_extension: &str) -> FileKind {
     let name_extension = name.rsplit_once('.').map(|(_, extension)| extension);
     let name_names_the_suffix =
         name_extension.is_some_and(|extension| extension.eq_ignore_ascii_case(resolved_extension));
     if resolved_extension.is_empty() || name_names_the_suffix {
-        return TreemapCategory::classify(name, false);
+        return FileKind::classify_file(name);
     }
-    let category = TreemapCategory::classify(&format!("file.{resolved_extension}"), false);
-    if category == TreemapCategory::Other {
+    let kind = FileKind::classify_file(&format!("file.{resolved_extension}"));
+    if kind == FileKind::Other {
         // An unknown recovered suffix cannot improve on what the name itself says.
-        TreemapCategory::classify(name, false)
+        FileKind::classify_file(name)
     } else {
-        category
+        kind
     }
+}
+
+/// The icon a result row shows: a directory is always a folder; a file is
+/// classified by its name and the recovered Shell suffix, then mapped through
+/// the shared file-kind icon table.
+fn result_row_icon(name: &str, resolved_extension: &str, is_dir: bool) -> AssetIconName {
+    if is_dir {
+        return AssetIconName::Folder;
+    }
+    file_kind_icon(row_file_kind(name, resolved_extension))
 }
 
 /// One proportional text lane. `flex_basis` at zero makes the grow factors divide the surplus
@@ -1014,64 +1025,6 @@ impl CairnApp {
             .into_any_element()
     }
 
-    /// File semantics are resolved from the name's final extension. The broad
-    /// document/image/archive groups reuse [`TreemapCategory`] — including an extension recovered
-    /// from a display name that hides it — while types that need a distinct silhouette in a result
-    /// row (shortcuts, spreadsheets, binaries, scripts, fonts) get a dedicated glyph before that
-    /// fallback.
-    fn result_file_icon(name: &str, extension: &str, is_dir: bool) -> AssetIconName {
-        if is_dir {
-            return AssetIconName::Folder;
-        }
-        // The argument is the suffix recovered from the Shell payload; the local copy also falls
-        // back to the name's own last segment for the specific glyph groups below.
-        let resolved_extension = extension;
-        let extension = if extension.is_empty() {
-            name.rsplit_once('.')
-                .map(|(_, extension)| extension)
-                .unwrap_or("")
-        } else {
-            extension
-        };
-        let matches = |known: &[&str]| {
-            known
-                .iter()
-                .any(|candidate| candidate.eq_ignore_ascii_case(extension))
-        };
-        if matches(&["lnk", "url", "appref-ms", "website", "webloc"]) {
-            return AssetIconName::FileSymlink;
-        }
-        if matches(&["xls", "xlsx", "csv", "tsv"]) {
-            return AssetIconName::FileSpreadsheet;
-        }
-        if matches(&["ttf", "otf", "woff", "woff2", "fon"]) {
-            return AssetIconName::FileType;
-        }
-        if matches(&["exe", "msi", "msix", "com"]) {
-            return AssetIconName::AppWindow;
-        }
-        if matches(&["bat", "cmd", "ps1", "sh"]) {
-            return AssetIconName::FileTerminal;
-        }
-        if matches(&["json", "toml", "yaml", "yml", "xml"]) {
-            return AssetIconName::FileBraces;
-        }
-        if matches(&["dll", "sys", "drv", "efi"]) {
-            return AssetIconName::FileCog;
-        }
-        match broad_file_category(name, resolved_extension) {
-            TreemapCategory::Document => AssetIconName::FileText,
-            TreemapCategory::Archive => AssetIconName::FileArchive,
-            TreemapCategory::Image => AssetIconName::FileImage,
-            TreemapCategory::Code => AssetIconName::FileCode,
-            TreemapCategory::Audio => AssetIconName::FileMusic,
-            TreemapCategory::Video => AssetIconName::FileVideoCamera,
-            TreemapCategory::System => AssetIconName::FileCog,
-            TreemapCategory::Applications => AssetIconName::AppWindow,
-            TreemapCategory::Folder | TreemapCategory::Other => AssetIconName::File,
-        }
-    }
-
     /// A name cell is one truncated text run, not a row of independent spans: only a single run can
     /// put the ellipsis where the lane actually ends. The full name is available on hover, so a
     /// clipped value is never the only copy. The element id is the row's full path, which stays the
@@ -1113,7 +1066,7 @@ impl CairnApp {
             .items_center()
             .gap(rems(layout::INNER_SPACING))
             .child(
-                Icon::new(Self::result_file_icon(&row.name, extension, row.is_dir))
+                Icon::new(result_row_icon(&row.name, extension, row.is_dir))
                     .small()
                     // The glyph already distinguishes the file kind. Selection is the only thing
                     // that should raise the icon, together with the row's text.
@@ -1532,10 +1485,9 @@ mod tests {
     use core::prelude::rust_2021::test;
 
     use super::{
-        column_label_key, content_query_notice, result_command_label_key, result_surface,
-        rows_band_local_top, rows_to_paint, ContentQueryNotice, ResultSurface,
+        column_label_key, content_query_notice, result_command_label_key, result_row_icon,
+        result_surface, rows_band_local_top, rows_to_paint, ContentQueryNotice, ResultSurface,
     };
-    use crate::app::CairnApp;
     use crate::shell::command_groups::GroupCommand;
     use crate::table::model::SortColumn;
     use cairn_protocol::status::ContentIndexState;
@@ -1555,55 +1507,52 @@ mod tests {
     #[test]
     fn result_rows_use_the_file_semantics_they_can_show() {
         assert_eq!(
-            CairnApp::result_file_icon("Deploy.lnk", "", false),
+            result_row_icon("Deploy.lnk", "", false),
             AssetIconName::FileSymlink
         );
         assert_eq!(
-            CairnApp::result_file_icon("BOOKMARKS.URL", "", false),
+            result_row_icon("BOOKMARKS.URL", "", false),
             AssetIconName::FileSymlink
         );
         assert_eq!(
-            CairnApp::result_file_icon("budget.xlsx", "", false),
+            result_row_icon("budget.xlsx", "", false),
             AssetIconName::FileSpreadsheet
         );
         assert_eq!(
-            CairnApp::result_file_icon("photo.PNG", "", false),
+            result_row_icon("photo.PNG", "", false),
             AssetIconName::FileImage
         );
         assert_eq!(
-            CairnApp::result_file_icon("Cairn.exe", "", false),
+            result_row_icon("Cairn.exe", "", false),
             AssetIconName::AppWindow
         );
         assert_eq!(
-            CairnApp::result_file_icon("build.ps1", "", false),
+            result_row_icon("build.ps1", "", false),
             AssetIconName::FileTerminal
         );
         assert_eq!(
-            CairnApp::result_file_icon("notes.unknown", "", false),
+            result_row_icon("notes.unknown", "", false),
             AssetIconName::File
         );
-        assert_eq!(
-            CairnApp::result_file_icon("Reports", "", true),
-            AssetIconName::Folder
-        );
+        assert_eq!(result_row_icon("Reports", "", true), AssetIconName::Folder);
 
         assert_eq!(
-            CairnApp::result_file_icon("Grok Bot", "lnk", false),
+            result_row_icon("Grok Bot", "lnk", false),
             AssetIconName::FileSymlink,
             "a Shell row hides the .lnk suffix from its display name"
         );
         assert_eq!(
-            CairnApp::result_file_icon("Screenshot", "png", false),
+            result_row_icon("Screenshot", "png", false),
             AssetIconName::FileImage,
             "a display name that hides its suffix still resolves through the recovered extension"
         );
         assert_eq!(
-            CairnApp::result_file_icon(".gitignore", "gitignore", false),
-            AssetIconName::FileCode,
+            result_row_icon(".gitignore", "gitignore", false),
+            AssetIconName::FileBraces,
             "a bare dotfile keeps the taxonomy's configuration meaning"
         );
         assert_eq!(
-            CairnApp::result_file_icon("CMakeLists.txt", "txt", false),
+            result_row_icon("CMakeLists.txt", "txt", false),
             AssetIconName::FileCode,
             "a name the taxonomy already knows outranks its ordinary suffix"
         );

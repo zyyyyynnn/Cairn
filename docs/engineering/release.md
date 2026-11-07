@@ -24,11 +24,11 @@ cargo run -p xtask -- package
 - 默认输出目录：`dist/`。
 - `xtask` 生成 `cairn.wxs`，调用 WiX v5 构建 MSI，把 MSI 追加到 GPUI `CairnSetup.exe`，并写出 `SHA256SUMS.txt`；任一步失败都必须保留上一次成功产物。
 - 真实 WiX 构建测试需要 WiX 5、`mt.exe` 与 release 二进制，默认标记为 ignored；其余打包测试覆盖旧产物保留、校验和与失败路径。
-- 安装包必须包含 `Cairn.exe`、`CairnService.exe`、`CairnCli.exe`、`CairnWorker.exe`、`CairnSetup.exe`、`CairnUninstall.exe`、`CairnInstallGuard.exe` 与 `cairn.ico`；禁止用改名或伪造脚本冒充安装器。
+- 安装包必须完整封装 `Cairn.exe`、`CairnService.exe`、`CairnCli.exe`、`CairnWorker.exe`、`CairnSetup.exe`、`CairnUninstall.exe`、`CairnInstallGuard.exe` 与 `cairn.ico` 资产。
 
 ## 3. 安装模式与服务
 
-- 安装包是每机器安装，`CairnSetup.exe` 声明 `requireAdministrator`；不提供标准用户安装或便携版 ZIP。
+- 安装包采用每机器（Per-Machine）安装模式，`CairnSetup.exe` 声明 `requireAdministrator`。
 - MSI 注册服务 `CairnService`（LocalSystem），数据目录 `%ProgramData%\Cairn` 只允许 SYSTEM/Administrators。
 - 安装器暂存目录 `%ProgramData%\CairnSetup` 使用受保护 DACL（SYSTEM/Administrators，所有者 Administrators）；已存在目录会按句柄重新加固，无法加固时 release 拒绝继续。
 - 卸载必须停止并移除服务注册、关闭 IPC 监听、删除程序目录与产品数据；机器级产品数据会覆盖所有本地 profile。

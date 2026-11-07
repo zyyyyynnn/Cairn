@@ -97,11 +97,10 @@ pub mod layout {
     /// physical step, so a menu row the application draws itself has to match it rather than take
     /// the 28px data-row step, which would leave two menu row heights in one product.
     pub const MENU_ROW_HEIGHT: Pixels = gpui_kit::gpui::px(26.0);
-    /// The Treemap category legend is a compact status item: one 12px swatch plus a text_sm
-    /// label inside a 20px hit row. Its 2px horizontal inset is an optical exception and stays
+    /// The Treemap category legend is a compact status item: a text_sm label button inside
+    /// a 20px hit row. Its 2px horizontal inset is an optical exception and stays
     /// off the 4px ladder.
     pub const LEGEND_ROW: f32 = 5.0 * STEP;
-    pub const LEGEND_SWATCH: f32 = 3.0 * STEP;
     pub const LEGEND_INSET: f32 = 0.5 * STEP;
 
     // ---- column lanes, in 4px steps ------------------------------------------------
@@ -281,6 +280,8 @@ pub struct QueryDomain {
     pub active_session_id: Option<u64>,
     pub is_fetching_more: bool,
     pub is_searching: bool,
+    /// Byte offset where mouse text drag selection started, if a drag is in progress.
+    pub text_selection_anchor: Option<usize>,
 }
 
 /// The result table: focus, scroll owners, viewport state and lane geometry.
@@ -484,6 +485,7 @@ impl CairnApp {
                 active_session_id: None,
                 is_fetching_more: false,
                 is_searching: false,
+                text_selection_anchor: None,
             },
             results: ResultsDomain {
                 results_focus,
@@ -634,7 +636,7 @@ impl CairnApp {
 
     /// Shapes the query as one line. A `LineLayout` reports byte offsets into this same string,
     /// which is the unit the selection range and [`crate::search::input::Utf16Utf8Mapper`] use.
-    fn query_text_layout(&self, window: &Window) -> Arc<LineLayout> {
+    pub(crate) fn query_text_layout(&self, window: &Window) -> Arc<LineLayout> {
         let text = &self.query.search_input.text;
         let (font_size, style) = self.query_text_style(window);
         window
@@ -862,7 +864,6 @@ mod tests {
             layout::HEADER_HEIGHT,
             layout::STATUS_HEIGHT,
             layout::LEGEND_ROW,
-            layout::LEGEND_SWATCH,
             layout::NAME_MIN_COLUMN,
             layout::PATH_MIN_COLUMN,
             layout::SIZE_COLUMN,
