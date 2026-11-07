@@ -8,11 +8,6 @@ use super::{MultiVolumeEngine, VolumeIndex};
 use cairn_core::sort::SortColumn;
 
 impl VolumeIndex {
-    /// Ensures presorted indices are up-to-date for the requested column, lazily rebuilding if dirty.
-    pub fn ensure_presorted(&mut self) {
-        self.ensure_presorted_column(SortColumn::Name);
-    }
-
     /// Ensures a specific presorted column is up-to-date, lazily rebuilding if dirty.
     pub fn ensure_presorted_column(&mut self, col: SortColumn) {
         if self.presorted_dirty {

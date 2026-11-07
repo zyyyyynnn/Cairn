@@ -29,6 +29,7 @@ impl CairnApp {
         is_focused: bool,
         focus_handle: FocusHandle,
         view: Entity<CairnApp>,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Div {
         h_flex()
@@ -40,7 +41,7 @@ impl CairnApp {
             // The search band is part of the window frame, so the title bar and the query row
             // read as one toolbar instead of a bright strip between two gray bands.
             .bg(tokens.chrome)
-            .child(self.render_query_box(tokens, is_focused, focus_handle, view, cx))
+            .child(self.render_query_box(tokens, is_focused, focus_handle, view, window, cx))
     }
 
     /// The query box stays drawn here rather than using the `Input` component for one reason: the
@@ -55,6 +56,7 @@ impl CairnApp {
         is_focused: bool,
         focus_handle: FocusHandle,
         view: Entity<CairnApp>,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> ControlElement {
         let control = accessibility::control("search-input");
@@ -130,14 +132,48 @@ impl CairnApp {
                         cx.listener(|this, event: &MouseDownEvent, window, cx| {
                             this.dismiss_result_selection_on_chrome_press(cx);
                             this.query.search_focus.focus(window, cx);
-                            // Measure from the text area's own painted origin, not the query box's:
-                            // the box origin includes the search glyph and its padding, which put
-                            // every click several characters late. The shared helper also shapes
-                            // the line with the same font the frame drew, so CJK and emoji land on
-                            // the glyph under the pointer rather than an 8px-per-character guess.
                             let byte_idx = this.query_byte_index_for_point(event.position, window);
-                            this.query.search_input.selection = byte_idx..byte_idx;
+                            if event.click_count == 1 {
+                                if event.modifiers.shift {
+                                    let anchor = this
+                                        .query
+                                        .text_selection_anchor
+                                        .unwrap_or(this.query.search_input.selection.start);
+                                    this.query.text_selection_anchor = Some(anchor);
+                                    this.query.search_input.selection =
+                                        anchor.min(byte_idx)..anchor.max(byte_idx);
+                                } else {
+                                    this.query.text_selection_anchor = Some(byte_idx);
+                                    this.query.search_input.selection = byte_idx..byte_idx;
+                                }
+                            } else if event.click_count == 2 {
+                                this.query.search_input.select_word_at(byte_idx);
+                                this.query.text_selection_anchor =
+                                    Some(this.query.search_input.selection.start);
+                            } else if event.click_count >= 3 {
+                                this.query.search_input.select_all();
+                                this.query.text_selection_anchor = Some(0);
+                            }
                             cx.notify();
+                        }),
+                    )
+                    .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                        if let Some(anchor) = this.query.text_selection_anchor {
+                            let current_idx =
+                                this.query_byte_index_for_point(event.position, window);
+                            let sel = anchor.min(current_idx)..anchor.max(current_idx);
+                            if this.query.search_input.selection != sel {
+                                this.query.search_input.selection = sel;
+                                cx.notify();
+                            }
+                        }
+                    }))
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            if this.query.text_selection_anchor.take().is_some() {
+                                cx.notify();
+                            }
                         }),
                     )
                     .child(
@@ -165,7 +201,7 @@ impl CairnApp {
                         .absolute()
                         .size_full(),
                     )
-                    .child(self.render_query_text(tokens, is_focused)),
+                    .child(self.render_query_text(tokens, is_focused, window)),
             )
             .when(show_clear, |this| {
                 this.child(
@@ -185,7 +221,12 @@ impl CairnApp {
             })
     }
 
-    pub(crate) fn render_query_text(&self, tokens: &ShellTokens, is_focused: bool) -> Div {
+    pub(crate) fn render_query_text(
+        &self,
+        tokens: &ShellTokens,
+        is_focused: bool,
+        window: &Window,
+    ) -> Div {
         if self.query.search_input.text.is_empty() {
             let placeholder = div()
                 .text_color(tokens.muted_foreground)
@@ -200,46 +241,86 @@ impl CairnApp {
                 })
                 .child(placeholder);
         }
-        if !is_focused {
+        let text = &self.query.search_input.text;
+        let sel = &self.query.search_input.selection;
+        let sel_start = sel.start.min(sel.end).min(text.len());
+        let sel_end = sel.start.max(sel.end).min(text.len());
+        let has_selection = sel_start < sel_end;
+
+        if !is_focused && !has_selection && self.query.search_input.marked_range.is_none() {
             return div()
                 .flex()
                 .items_center()
                 .min_w_0()
                 .overflow_hidden()
-                .child(self.query.search_input.text.clone());
+                .child(div().whitespace_nowrap().child(text.clone()));
         }
 
-        let text = &self.query.search_input.text;
-        let sel = &self.query.search_input.selection;
-        let cursor_start = sel.start.min(text.len());
-        let cursor_end = sel.end.min(text.len());
-        let prefix = &text[..cursor_start];
-        let selected = &text[cursor_start..cursor_end];
-        let suffix = &text[cursor_end..];
-        let is_composing = self.query.search_input.marked_range.is_some();
-        let caret = if cursor_start < cursor_end {
-            div().bg(tokens.selection).child(selected.to_string())
-        } else {
-            // A caret is one device column wide and as tall as the line: physical, not a `rem` step.
-            div().w(HAIRLINE).h_5().bg(tokens.caret)
-        };
-        let suffix_el = if is_composing {
-            div()
-                .border_b_1()
-                .border_color(tokens.ring)
-                .child(suffix.to_string())
-        } else {
-            div().child(suffix.to_string())
-        };
+        let layout = self.query_text_layout(window);
 
-        div()
+        let mut container = div()
+            .relative()
             .flex()
             .items_center()
             .min_w_0()
-            .overflow_hidden()
-            .child(prefix.to_string())
-            .child(caret)
-            .child(suffix_el)
+            .overflow_hidden();
+
+        if has_selection {
+            let sel_x1 = layout.x_for_index(sel_start);
+            let sel_x2 = layout.x_for_index(sel_end);
+            let (sel_left, sel_width) = if sel_x2 >= sel_x1 {
+                (sel_x1, sel_x2 - sel_x1)
+            } else {
+                (sel_x2, sel_x1 - sel_x2)
+            };
+            container = container.child(
+                div()
+                    .absolute()
+                    .left(sel_left)
+                    .w(sel_width)
+                    .h_5()
+                    .bg(tokens.selection),
+            );
+        }
+
+        if let Some(ref range) = self.query.search_input.marked_range {
+            let mark_start = range.start.min(range.end).min(text.len());
+            let mark_end = range.start.max(range.end).min(text.len());
+            if mark_start < mark_end {
+                let mark_x1 = layout.x_for_index(mark_start);
+                let mark_x2 = layout.x_for_index(mark_end);
+                let (mark_left, mark_width) = if mark_x2 >= mark_x1 {
+                    (mark_x1, mark_x2 - mark_x1)
+                } else {
+                    (mark_x2, mark_x1 - mark_x2)
+                };
+                container = container.child(
+                    div()
+                        .absolute()
+                        .left(mark_left)
+                        .w(mark_width)
+                        .bottom_0()
+                        .h(px(1.0))
+                        .bg(tokens.ring),
+                );
+            }
+        }
+
+        container = container.child(div().whitespace_nowrap().child(text.clone()));
+
+        if is_focused && !has_selection {
+            let caret_x = layout.x_for_index(sel_start);
+            container = container.child(
+                div()
+                    .absolute()
+                    .left(caret_x)
+                    .w(HAIRLINE)
+                    .h_5()
+                    .bg(tokens.caret),
+            );
+        }
+
+        container
     }
 
     /// Normal queries match names and paths; body search is the explicit `content:` term, so the

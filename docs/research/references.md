@@ -1,6 +1,6 @@
 # 权威出处与外部基准
 
-> 研究溯源，不构成当前实现承诺。
+> 本文档汇总外部一手基准文献、开源工程参照与权威出处。
 
 ## 1. 权威出处与外部一手基准文献（Authoritative References）
 
@@ -24,7 +24,7 @@
 - [junegunn/fzf](https://github.com/junegunn/fzf)：交互式即时过滤算子、`--tiebreak` 相关性排序与管道无头供数参考。
 - [jhspetersson/fselect](https://github.com/jhspetersson/fselect)：基于元数据与派生属性的结构化查询参考。
 - [Canop/broot](https://github.com/Canop/broot)：紧凑树状呈现与自定义动词快捷流转参考。
-- [sxyazi/yazi](https://github.com/sxyazi/yazi) 与 [jarun/nnn](https://github.com/jarun/nnn)：全异步 I/O、极致内存控制与纯键盘高效表格排版基准。
+- [sxyazi/yazi](https://github.com/sxyazi/yazi) 与 [jarun/nnn](https://github.com/jarun/nnn)：全异步 I/O、严苛内存控制与纯键盘高效表格排版基准。
 - [eza-community/eza](https://github.com/eza-community/eza)：现代化列元数据展示与时间格式化标准。
 
 ### 1.3 Rust 生态底层依赖与参考实现
@@ -42,6 +42,6 @@
 - **SpaceSniffer（Uderzo Software）**：[官方支持与用户手册](http://www.uderzo.it/main_products/space_sniffer/)。层级嵌套矩形树图（Nested Treemap）、动态扫描流式分区、细节级别（Level of Detail, LoD）阈值与过滤语法体系标杆。
 - **WizTree（Antibody Software）**：[官方主站与 MFT 技术解析](https://diskanalyzer.com/)。直接流式解析 NTFS `$MFT` 裸卷记录，配合在内存中沿 `parent_idx` 自底向上（Bottom-up Rollup）极速聚合目录尺寸与即时 Treemap 视口投影。
 - **Treemap 算法经典论文**：
-  - Ben Shneiderman (1992). *Tree visualization with tree-maps: 2-d space-filling approach*. ACM Transactions on Graphics (TOG), 11(1), 92-99.
-  - Mark Bruls, Kees Huizing, & Jarke J. van Wijk (2000). *Squarified Treemaps*. In Joint Eurographics and IEEE TCVG Symposium on Visualization (pp. 33-42).
-  - Jarke J. van Wijk & Huub van de Wetering (1999). *Cushion Treemaps: Visualization of Hierarchical Information*. IEEE Symposium on Information Visualization (InfoVis).
+  - Ben Shneiderman (1992). `Tree visualization with tree-maps: 2-d space-filling approach`. ACM Transactions on Graphics (TOG), 11(1), 92-99.
+  - Mark Bruls, Kees Huizing, & Jarke J. van Wijk (2000). `Squarified Treemaps`. In Joint Eurographics and IEEE TCVG Symposium on Visualization (pp. 33-42).
+  - Jarke J. van Wijk & Huub van de Wetering (1999). `Cushion Treemaps: Visualization of Hierarchical Information`. IEEE Symposium on Information Visualization (InfoVis).

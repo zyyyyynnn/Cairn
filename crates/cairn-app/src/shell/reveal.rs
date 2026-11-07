@@ -7,6 +7,10 @@
 use std::collections::HashSet;
 use std::path::Path;
 
+/// One bulk reveal opens at most this many Explorer windows. A larger spread
+/// is refused with a recovery message instead of launching an unbounded batch.
+pub(crate) const MAX_REVEAL_TARGETS: usize = 8;
+
 /// One Explorer target per unique parent directory, in selection order. Keeping the first file in
 /// each directory lets `/select` highlight a real row while a multi-folder selection opens every
 /// folder instead of silently showing only the focused one.

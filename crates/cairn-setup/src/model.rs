@@ -100,6 +100,19 @@ impl InstalledProduct {
     pub fn is_same_as_package(&self) -> bool {
         compare_versions(&self.version, PRODUCT_VERSION) == Ordering::Equal
     }
+
+    /// True when the installed copy is this exact build: same version and same ProductCode. A
+    /// package built from another commit keeps the version but carries a new ProductCode, so it is
+    /// not "already installed" and has to be installed over the copy on disk.
+    pub fn is_same_build(&self, package_product_code: Option<&str>) -> bool {
+        if !self.is_same_as_package() {
+            return false;
+        }
+        match (self.product_code.as_deref(), package_product_code) {
+            (Some(installed), Some(package)) => installed.eq_ignore_ascii_case(package),
+            _ => false,
+        }
+    }
 }
 
 /// What the first screen should be, given what the machine already has.
@@ -220,6 +233,26 @@ mod tests {
         InstalledProduct, Launch, PathProblem, Screen,
     };
     use std::cmp::Ordering;
+
+    /// An equal version is not enough: a build from another commit carries a new ProductCode and
+    /// must be installed over the copy on disk.
+    #[test]
+    fn a_same_version_build_is_only_up_to_date_with_the_same_product_code() {
+        let installed = InstalledProduct {
+            version: super::PRODUCT_VERSION.to_string(),
+            install_dir: std::path::PathBuf::from(r"C:\Program Files\Cairn"),
+            product_code: Some("{AAAA}".to_string()),
+        };
+        assert!(installed.is_same_build(Some("{aaaa}")));
+        assert!(!installed.is_same_build(Some("{BBBB}")));
+        assert!(!installed.is_same_build(None));
+
+        let older = InstalledProduct {
+            version: "0.0.9".to_string(),
+            ..installed.clone()
+        };
+        assert!(!older.is_same_build(Some("{AAAA}")));
+    }
     use std::path::PathBuf;
 
     fn product(version: &str) -> InstalledProduct {

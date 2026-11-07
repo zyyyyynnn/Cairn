@@ -10,7 +10,7 @@
 //! of them. Every elevated command therefore goes through this one function, so the UAC prompt,
 //! the wait and the exit-code reading behave identically every time.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[cfg(windows)]
 use crate::win32::{to_wide_literal, win32_code_from_hresult, WIN32_ERROR_USER_CANCELLED};
@@ -31,14 +31,13 @@ pub enum ElevationError {
     },
 }
 
-/// Runs `program` with `parameters` through one UAC elevation and waits for it to finish.
+/// Runs this same executable once, elevated, with `parameters`, and waits for it to finish.
 ///
-/// The program is resolved inside the system directory, so the elevated command is the one Windows
-/// ships and not whatever happens to be on the current path. The exit code is returned as it came
-/// back: this module does not decide what a non-zero code means, because only the caller knows
-/// which command it asked for.
+/// The image is the one this window is already running from, so the consent dialog names Cairn and
+/// shows its icon. The path comes from the process itself, never from `PATH` or from an argument,
+/// and the elevated copy accepts exactly one action and refuses anything else.
 #[cfg(windows)]
-pub fn run_elevated(program: &str, parameters: &str) -> Result<u32, ElevationError> {
+pub fn run_elevated_self(parameters: &str) -> Result<u32, ElevationError> {
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{CloseHandle, GetLastError, WAIT_OBJECT_0};
     use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject, INFINITE};
@@ -48,13 +47,12 @@ pub fn run_elevated(program: &str, parameters: &str) -> Result<u32, ElevationErr
     let helper_failed =
         |os_error: Option<u32>, message: String| ElevationError::Failed { os_error, message };
 
-    let executable = system32(program);
-    if !executable.is_file() {
+    let Ok(executable) = std::env::current_exe() else {
         return Err(helper_failed(
             None,
-            format!("{} was not found at {}", program, executable.display()),
+            "this executable could not be located".to_string(),
         ));
-    }
+    };
 
     let wide_file = to_wide_literal(&executable.to_string_lossy());
     let wide_parameters = to_wide_literal(parameters);
@@ -126,7 +124,7 @@ pub fn run_elevated(program: &str, parameters: &str) -> Result<u32, ElevationErr
 }
 
 #[cfg(not(windows))]
-pub fn run_elevated(_program: &str, _parameters: &str) -> Result<u32, ElevationError> {
+pub fn run_elevated_self(_parameters: &str) -> Result<u32, ElevationError> {
     Err(ElevationError::Failed {
         os_error: None,
         message: "elevating a command is only available on Windows".to_string(),
@@ -240,44 +238,9 @@ pub fn launch_elevated_installer(
     })
 }
 
-/// Resolves an executable in the system directory.
-///
-/// The system directory comes from the OS, not from `SystemRoot`: a user-writable environment
-/// variable must not be able to redirect an elevated command to another executable.
-pub fn system32(executable: &str) -> PathBuf {
-    #[cfg(windows)]
-    {
-        use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
-
-        let mut buffer = [0u16; 260];
-        let length = unsafe { GetSystemDirectoryW(Some(&mut buffer)) } as usize;
-        if length > 0 && length < buffer.len() {
-            return PathBuf::from(String::from_utf16_lossy(&buffer[..length])).join(executable);
-        }
-        PathBuf::from(r"C:\Windows\System32").join(executable)
-    }
-    #[cfg(not(windows))]
-    {
-        PathBuf::from(r"C:\Windows\System32").join(executable)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn an_executable_is_resolved_inside_the_system_directory() {
-        let path = system32("cmd.exe");
-        assert!(
-            path.to_string_lossy()
-                .to_ascii_lowercase()
-                .ends_with("system32\\cmd.exe"),
-            "{path:?}"
-        );
-        assert!(path.is_absolute());
-        assert!(path.is_file(), "{path:?}");
-    }
 
     #[test]
     fn the_installer_handoff_passes_the_verified_hash() {

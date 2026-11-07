@@ -9,7 +9,6 @@ use crate::app::{layout, CairnApp};
 use crate::shell::accessibility::{self, ControlElement};
 use crate::shell::status_bar::format_count;
 use crate::shell::theme::{self, ShellTokens};
-use crate::treemap::palette::TreemapPalette;
 use cairn_core::format_size_bytes;
 use cairn_core::treemap::TreemapCategory;
 use fluent_bundle::FluentArgs;
@@ -19,20 +18,17 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::status_bar::StatusBar;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{h_flex, Sizable as _};
-use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::*;
 
 fn treemap_category_key(category: TreemapCategory) -> &'static str {
     match category {
-        TreemapCategory::Folder => "treemap_category_folder",
         TreemapCategory::System => "treemap_category_system",
-        TreemapCategory::Applications => "treemap_category_applications",
-        TreemapCategory::Document => "treemap_category_document",
-        TreemapCategory::Archive => "treemap_category_archive",
+        TreemapCategory::Programs => "treemap_category_programs",
+        TreemapCategory::Documents => "treemap_category_documents",
         TreemapCategory::Image => "treemap_category_image",
-        TreemapCategory::Code => "treemap_category_code",
-        TreemapCategory::Audio => "treemap_category_audio",
         TreemapCategory::Video => "treemap_category_video",
+        TreemapCategory::Audio => "treemap_category_audio",
+        TreemapCategory::Archive => "treemap_category_archive",
         TreemapCategory::Other => "treemap_category_other",
     }
 }
@@ -225,6 +221,25 @@ impl CairnApp {
             }
         }
 
+        // A selection replaces the total summary with the count the next bulk action will
+        // actually receive. Treemap selection is reported by its own node summary.
+        if !summary_loading && !self.results.table.selected_indices.is_empty() {
+            let selected = self.results.table.selected_indices.len();
+            let mut args = FluentArgs::new();
+            args.set("count", selected as i64);
+            args.set("count_text", format_count(selected));
+            let text = self.i18n.get_text_with_args("status_selected_count", &args);
+            summary_aria = Some(text.clone());
+            summary = Some(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .font_features(theme::tabular_figures())
+                    .child(text)
+                    .into_any_element(),
+            );
+        }
+
         // The native xsmall body is 20px; a 24px minimum would let the hover surface
         // extend a row above/below the status line.
         //
@@ -337,9 +352,7 @@ impl CairnApp {
             // The summary can carry a full path; let it ellipsize before it
             // pushes the category legend out of the bar.
             .left(left);
-        let right = self
-            .render_treemap_legend(tokens, window, cx)
-            .or_else(|| self.render_empty_bin_action(cx));
+        let right = self.render_treemap_legend(tokens, window, cx);
         if let Some(right) = right {
             status_bar = status_bar.right(right);
         }
@@ -357,32 +370,6 @@ impl CairnApp {
             .child(status_bar)
     }
 
-    /// The Recycle Bin's one location-wide action. It lives in the status band
-    /// because the bin has no toolbar, and it is absent while the listing is
-    /// loading, unreadable or genuinely empty.
-    fn render_empty_bin_action(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.recycle_bin.is_open()
-            || self.recycle_bin.is_loading()
-            || self.recycle_bin.error().is_some()
-            || self.recycle_bin.all().is_empty()
-        {
-            return None;
-        }
-        let control = accessibility::control("empty-recycle-bin");
-        let label = accessibility::name(control, &self.i18n);
-        Some(
-            Button::new(control.element)
-                .small()
-                .font_weight(FontWeight::MEDIUM)
-                .ghost()
-                .min_h(rems(layout::SPACE_24))
-                .label(label.clone())
-                .accessibility_label(label)
-                .on_click(cx.listener(|this, _, window, cx| this.empty_bin(window, cx)))
-                .into_any_element(),
-        )
-    }
-
     /// A compact labeled legend doubles as the category filter: clicking an
     /// entry dims that category in place, preserving tile geometry and selection.
     fn render_treemap_legend(
@@ -392,7 +379,6 @@ impl CairnApp {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let state = self.treemap_state.as_ref()?;
-        let palette = TreemapPalette::for_mode(self.settings.is_dark(self.system_dark));
         let mut row = h_flex()
             .flex_shrink_0()
             .items_center()
@@ -450,7 +436,6 @@ impl CairnApp {
                     .text_sm()
                     .text_color(tokens.muted_foreground)
                     .hover(move |this| this.bg(tokens.row_hover).text_color(tokens.foreground))
-                    .when(!visible, |this| this.opacity(0.35))
                     .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
                     .on_mouse_down(
                         MouseButton::Left,
@@ -472,17 +457,18 @@ impl CairnApp {
                             cx.notify();
                         }
                     }))
+                    // Colour no longer encodes a category, so the legend row carries the name and its
+                    // toggle state only: a hidden category dims its label instead of a swatch.
                     .child(
                         div()
-                            .w(rems(layout::LEGEND_SWATCH))
-                            .h(rems(layout::LEGEND_SWATCH))
-                            .flex_shrink_0()
-                            .rounded(tokens.radius)
-                            .border_1()
-                            .border_color(tokens.border)
-                            .bg(palette.fill(category, 0)),
-                    )
-                    .child(div().whitespace_nowrap().child(label)),
+                            .whitespace_nowrap()
+                            .text_color(if visible {
+                                tokens.foreground
+                            } else {
+                                tokens.muted_foreground
+                            })
+                            .child(label),
+                    ),
             );
         }
         // The reset is permanent at the end of the legend, whether or not a category is
@@ -511,7 +497,10 @@ impl CairnApp {
     /// a new bin listing, or a service probe instead of animating a value.
     pub(crate) fn refresh_current_view(&mut self, cx: &mut Context<Self>) {
         if self.recycle_bin.is_open() {
+            // The bin loader owns the session; setting the flag again would make two
+            // authors of the same fact.
             self.begin_recycle_bin_load(cx);
+            cx.notify();
             return;
         }
         if self.drive_view.is_some() {
@@ -528,7 +517,9 @@ impl CairnApp {
             self.check_service_connection(cx);
             return;
         }
+        self.begin_table_session();
         self.trigger_search(cx);
+        cx.notify();
     }
 }
 

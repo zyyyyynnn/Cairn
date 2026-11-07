@@ -8,11 +8,36 @@ use crate::status::{ContentIndexStatus, VolumeStatusSummary};
 pub use cairn_core::syntax::QueryDefaults;
 use serde::{Deserialize, Serialize};
 
-/// The version both ends negotiate before any request is accepted. postcard is not
-/// self-describing, so an older frame would decode into shifted fields rather than fail, and the
-/// handshake gate is the only thing that can catch that. Any request/response or row-layout change
-/// requires a coordinated client+service bump.
-pub const PROTOCOL_VERSION: u16 = 6;
+/// The product version both ends are built from, e.g. `0.1.0`. Cargo owns this string; no part of
+/// it is maintained by hand.
+pub const PRODUCT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// The guard both ends exchange before any request is accepted: the product version's major and
+/// minor. postcard is not self-describing, so a frame from another layout would decode into shifted
+/// fields rather than fail, and this guard is the only thing that can catch that (SVC-03).
+///
+/// It is derived, never written. A patch release cannot change the wire, so two builds agree exactly
+/// when their `major.minor` agree, and a layout change ships as a product version change instead of
+/// a hand-incremented counter that someone has to remember.
+pub const WIRE_GUARD: u16 = pack_major_minor(PRODUCT_VERSION);
+
+const fn pack_major_minor(version: &str) -> u16 {
+    let bytes = version.as_bytes();
+    let mut major = 0u32;
+    let mut minor = 0u32;
+    let mut index = 0usize;
+    while index < bytes.len() && bytes[index] != b'.' {
+        major = major * 10 + (bytes[index] - b'0') as u32;
+        index += 1;
+    }
+    index += 1;
+    while index < bytes.len() && bytes[index] != b'.' {
+        minor = minor * 10 + (bytes[index] - b'0') as u32;
+        index += 1;
+    }
+    ((major << 8) | minor) as u16
+}
+
 pub const PIPE_NAME: &str = r"\\.\pipe\Cairn.Service";
 
 /// Machine-readable `ResponsePayload::Error` codes. Text stays in English and technical:
@@ -33,6 +58,15 @@ pub const ERROR_CODE_TREE_NOT_INDEXED: u32 = 413;
 pub const ERROR_CODE_TREE_NOT_DIRECTORY: u32 = 414;
 /// The directory tree exceeds the one-response entry or payload budget.
 pub const ERROR_CODE_TREE_TOO_LARGE: u32 = 415;
+
+/// The deepest tree one response may carry: three levels stay inside the entry and frame budgets
+/// on a full drive (about 42k entries on a 1.8M-record index). A subtree that still overflows is
+/// answered one level shallower with exact totals on the capped nodes, and deeper levels are
+/// requested per directory as the reader drills in.
+///
+/// The service clamps every `GetTree` to it and the client asks for exactly it, so a request is
+/// never silently answered shallower than the layout it was built for.
+pub const MAX_TREE_DEPTH: usize = 3;
 
 /// Requests accepted from a pipe client.
 ///
@@ -253,7 +287,7 @@ mod tests {
             (
                 "hello_ack",
                 ResponsePayload::HelloAck {
-                    server_version: PROTOCOL_VERSION as u32,
+                    server_version: WIRE_GUARD as u32,
                     caller_is_admin: false,
                 },
             ),
@@ -341,7 +375,7 @@ mod tests {
             (
                 "hello",
                 ClientRequest::Hello {
-                    client_version: PROTOCOL_VERSION as u32,
+                    client_version: WIRE_GUARD as u32,
                     pid: 1,
                 },
             ),
@@ -442,6 +476,17 @@ mod tests {
                 "{name} moved off its published wire slot"
             );
         }
+    }
+
+    /// The guard is derived from the product version, so it cannot drift from it and nobody has to
+    /// remember to raise a counter: a patch release keeps the wire, a minor release changes it.
+    #[test]
+    fn the_wire_guard_is_the_product_versions_major_and_minor() {
+        assert_eq!(pack_major_minor("0.1.0"), 0x0001);
+        assert_eq!(pack_major_minor("0.1.9"), 0x0001);
+        assert_eq!(pack_major_minor("1.2.3"), 0x0102);
+        assert_eq!(pack_major_minor("0.10.5"), 0x000A);
+        assert_eq!(WIRE_GUARD, pack_major_minor(PRODUCT_VERSION));
     }
 
     /// The rejection is the one payload a peer of another protocol version must be able to read:

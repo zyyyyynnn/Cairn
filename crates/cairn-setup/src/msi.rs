@@ -450,6 +450,49 @@ unsafe extern "system" fn external_ui_handler(
     0
 }
 
+/// The ProductCode a package carries. It is generated per build, so it names the build rather than
+/// the product version: two packages of the same version carry different codes.
+pub fn package_product_code(package: &std::path::Path) -> Option<String> {
+    use windows::Win32::System::ApplicationInstallationAndServicing::{
+        MsiCloseHandle, MsiDatabaseOpenViewW, MsiOpenDatabaseW, MsiViewExecute, MsiViewFetch,
+        MSIDBOPEN_READONLY,
+    };
+
+    let path = wide(package.as_os_str());
+    let query = wide(std::ffi::OsStr::new(
+        "SELECT `Value` FROM `Property` WHERE `Property`='ProductCode'",
+    ));
+    // SAFETY: every handle opened here is closed before returning, and both wide strings stay
+    // alive for the calls that read them.
+    unsafe {
+        let mut database = MSIHANDLE(0);
+        if MsiOpenDatabaseW(PCWSTR(path.as_ptr()), MSIDBOPEN_READONLY, &mut database)
+            != ERROR_SUCCESS
+        {
+            return None;
+        }
+        let mut view = MSIHANDLE(0);
+        let code = if MsiDatabaseOpenViewW(database, PCWSTR(query.as_ptr()), &mut view)
+            == ERROR_SUCCESS
+            && MsiViewExecute(view, MSIHANDLE(0)) == ERROR_SUCCESS
+        {
+            let mut record = MSIHANDLE(0);
+            let code = if MsiViewFetch(view, &mut record) == ERROR_SUCCESS {
+                record_string(record, 1)
+            } else {
+                None
+            };
+            let _ = MsiCloseHandle(record);
+            code
+        } else {
+            None
+        };
+        let _ = MsiCloseHandle(view);
+        let _ = MsiCloseHandle(database);
+        code
+    }
+}
+
 unsafe fn record_string(record: MSIHANDLE, field: u32) -> Option<String> {
     let mut buffer = vec![0u16; 512];
     let mut length = buffer.len() as u32;

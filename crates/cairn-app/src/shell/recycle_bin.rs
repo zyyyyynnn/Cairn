@@ -246,6 +246,42 @@ pub(crate) fn row_for(item: &RecycleBinItem) -> FileRowData {
     }
 }
 
+/// Byte ranges of every case-sensitive or case-insensitive occurrence of the bin filter.
+/// Case folding that changes byte length is skipped rather than mapped to a wrong range;
+/// the row still matches, it simply carries no highlight.
+fn filter_highlight_ranges(text: &str, needle: &str, case_sensitive: bool) -> Vec<(usize, usize)> {
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    if case_sensitive {
+        return text
+            .match_indices(needle)
+            .map(|(start, matched)| (start, start + matched.len()))
+            .collect();
+    }
+    let lower = text.to_lowercase();
+    if lower.len() != text.len() {
+        return Vec::new();
+    }
+    let needle = needle.to_lowercase();
+    lower
+        .match_indices(&needle)
+        .map(|(start, matched)| (start, start + matched.len()))
+        .collect()
+}
+
+/// A bin row with the current local filter's matches marked for the table's text runs.
+pub(crate) fn row_for_filtered(
+    item: &RecycleBinItem,
+    needle: &str,
+    case_sensitive: bool,
+) -> FileRowData {
+    let mut row = row_for(item);
+    row.name_highlights = filter_highlight_ranges(&item.name, needle, case_sensitive);
+    row.path_highlights = filter_highlight_ranges(&item.original_dir, needle, case_sensitive);
+    row
+}
+
 /// Orders bin items by a table column. The comparison is independent of the shell's listing
 /// order, so the header the person clicked always describes the order they see. Name and path
 /// sort keys are lowercased once per item instead of twice per comparison.
@@ -442,12 +478,18 @@ impl CairnApp {
         };
         let total = items.len();
         let first_len = total.min(layout::RESULT_PAGE_SIZE);
+        let needle = self.query.search_input.text.trim();
+        let case_sensitive = self.query.case_sensitive;
         let rows: Vec<FileRowData> = items[..first_len]
             .iter()
-            .map(|item| row_for(item))
+            .map(|item| row_for_filtered(item, needle, case_sensitive))
             .collect();
         let saved_scroll = self.results.table.scroll_top;
         self.results.table.set_rows(rows, total);
+        self.note_table_content();
+        if total == 0 {
+            self.note_table_empty();
+        }
         if reset_scroll {
             self.results.rows_scroll.set_offset(Point::default());
             self.results.table.scroll_top = 0.0;
@@ -481,9 +523,11 @@ impl CairnApp {
             return;
         }
         let end = offset.saturating_add(limit).min(items.len());
+        let needle = self.query.search_input.text.trim();
+        let case_sensitive = self.query.case_sensitive;
         let rows: Vec<FileRowData> = items[offset..end]
             .iter()
-            .map(|item| row_for(item))
+            .map(|item| row_for_filtered(item, needle, case_sensitive))
             .collect();
         self.results.table.apply_page(offset, rows);
         cx.notify();
@@ -513,12 +557,13 @@ impl CairnApp {
         cx.notify();
     }
 
-    /// Starts a background shell read for the current bin location. The GPUI thread keeps painting
-    /// the skeleton while a dedicated COM apartment walks the shell; the generation token discards
+    /// Starts a background shell read for the current bin location. The GPUI thread remains responsive
+    /// while a dedicated COM apartment walks the shell; the generation token discards
     /// a result that arrives after the person has left or reloaded the location.
     pub(crate) fn begin_recycle_bin_load(&mut self, cx: &mut Context<Self>) {
         let generation = self.recycle_bin.begin_load();
-        self.install_recycle_bin_rows(true);
+        self.begin_table_session();
+        self.results.table.set_rows(Vec::new(), 0);
         cx.notify();
 
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -748,7 +793,8 @@ mod tests {
 
     use super::{
         bin_icon_extensions, bin_icon_key, filter_items, item_names_summary,
-        merge_bin_selection_keys, row_for, shell_reason_key, sort_items, RecycleBinView,
+        merge_bin_selection_keys, row_for, row_for_filtered, shell_reason_key, sort_items,
+        RecycleBinView,
     };
     use crate::shell::i18n::I18nManager;
     use crate::shell::os::RecycleBinItem;
@@ -917,6 +963,24 @@ mod tests {
         assert_eq!(by_path[0].name, "photo.png");
         assert_eq!(filter_items(&items, "", false).len(), 3);
         assert_eq!(filter_items(&items, "REPORT", true).len(), 0);
+    }
+
+    #[test]
+    fn the_bin_filter_marks_matching_name_and_location_ranges() {
+        let report = item("Report-final.txt", r"C:\work\reports", 30, 10);
+        let case_insensitive = row_for_filtered(&report, "report", false);
+        assert_eq!(case_insensitive.name_highlights, vec![(0, 6)]);
+        assert_eq!(case_insensitive.path_highlights, vec![(8, 14)]);
+        assert!(row_for_filtered(&report, "report", true)
+            .name_highlights
+            .is_empty());
+
+        let chinese = item("屏幕录制 2026.mp4", r"C:\视频\屏幕录制", 40, 20);
+        let row = row_for_filtered(&chinese, "屏幕", false);
+        let (start, end) = row.name_highlights[0];
+        assert_eq!(&row.name[start..end], "屏幕");
+        let (start, end) = row.path_highlights[0];
+        assert_eq!(&row.path[start..end], "屏幕");
     }
 
     #[test]

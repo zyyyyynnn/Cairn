@@ -31,11 +31,19 @@ pub fn quiet_setup(restart_app: bool, expected_sha256: Option<String>) -> i32 {
     let installed = installed::installed_product();
     let legacy = installed::legacy_burn_uninstallers();
 
+    // The payload is extracted before the up-to-date answer because that answer depends on the
+    // build the payload carries: equal versions with different ProductCodes are different builds.
+    let (msi, payload_dir) = match msi_for_this_build(expected_sha256.as_deref()) {
+        Ok(value) => value,
+        Err(_) => return EXIT_ERROR,
+    };
+    let package_code = msi::package_product_code(&msi);
+
     if let Some(product) = &installed {
         if legacy.is_empty()
-            && product.product_code.is_some()
-            && (product.is_same_as_package() || product.is_newer_than_package())
+            && (product.is_same_build(package_code.as_deref()) || product.is_newer_than_package())
         {
+            let _ = std::fs::remove_dir_all(&payload_dir);
             if restart_app {
                 relaunch(&product.install_dir);
             }
@@ -51,10 +59,6 @@ pub fn quiet_setup(restart_app: bool, expected_sha256: Option<String>) -> i32 {
     let app_dir = install_dir.clone();
     let log = match platform::install_log_path() {
         Ok(log) => log,
-        Err(_) => return EXIT_ERROR,
-    };
-    let (msi, payload_dir) = match msi_for_this_build(expected_sha256.as_deref()) {
-        Ok(value) => value,
         Err(_) => return EXIT_ERROR,
     };
 

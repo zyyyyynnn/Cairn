@@ -58,8 +58,8 @@ actions!(
         RedoQueryText,
         /// Cut the selected search box text to clipboard (Ctrl+X, Shift+Delete).
         CutQueryText,
-        /// Replace the query with the whole text (Ctrl+A).
-        SelectAllQueryText,
+        /// Select every loaded result row, or all query text when the search box has focus (Ctrl+A).
+        SelectAll,
         /// Clear the query; hide the window when it is already empty (Escape).
         EscapeQuery,
         /// Move the window's keyboard focus into the search box (Ctrl+F, F3, Alt+D).
@@ -95,6 +95,9 @@ actions!(
         /// Put the selected Recycle Bin items back in their original locations. Only meaningful
         /// while the Recycle Bin view is open; the file and row menus offer it there.
         RestoreSelected,
+        /// Restore all items in the Recycle Bin to their original locations. Only meaningful
+        /// while the Recycle Bin view is open.
+        RestoreAll,
         /// Move the result table one step towards its left edge (Left, while the table has focus).
         ScrollTableLeft,
         /// Move the result table one step towards its right edge (Right, while the table has focus).
@@ -165,7 +168,7 @@ pub fn key_bindings() -> Vec<KeyBindingEntry> {
         bind("ctrl-z", UndoQueryText, WINDOW_CONTEXT),
         bind("ctrl-y", RedoQueryText, WINDOW_CONTEXT),
         bind("ctrl-shift-z", RedoQueryText, WINDOW_CONTEXT),
-        bind("ctrl-a", SelectAllQueryText, WINDOW_CONTEXT),
+        bind("ctrl-a", SelectAll, WINDOW_CONTEXT),
         bind("escape", EscapeQuery, WINDOW_CONTEXT),
         bind("ctrl-f", FocusSearchBox, WINDOW_CONTEXT),
         bind("f3", FocusSearchBox, WINDOW_CONTEXT),

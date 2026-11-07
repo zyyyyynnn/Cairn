@@ -290,6 +290,40 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         named_by: "",
         requirement: "DSV-04",
     },
+    // Each breadcrumb segment owns a menu of its own child folders, so the
+    // trigger is a repeated family named by the segment it opens.
+    KeyControl {
+        key: "treemap-path-menu",
+        element: "treemap-path-menu",
+        indexed: true,
+        role: Role::Button,
+        messages: EMPTY,
+        named_by: "treemap_path_menu_for",
+        requirement: "DSV-04",
+    },
+    // A path menu row commands on the folder it names, so it reports as a menu item
+    // whose accessible name carries the verb; the framework's own wrapper keeps the
+    // selection semantics.
+    KeyControl {
+        key: "treemap-path-menu-row",
+        element: "treemap-path-menu-row",
+        indexed: true,
+        role: Role::MenuItem,
+        messages: EMPTY,
+        named_by: "path_menu_option",
+        requirement: "DSV-04",
+    },
+    // The menu's foot note states what the list leaves out. It is a message,
+    // not an option, and it carries no icon lane of its own.
+    KeyControl {
+        key: "treemap-path-menu-note",
+        element: "treemap-path-menu-note",
+        indexed: true,
+        role: Role::Status,
+        messages: EMPTY,
+        named_by: "path_menu_note",
+        requirement: "DSV-04",
+    },
     // ---- title-bar menu bar: the six top-level menus (UI-01, UI-03) ----------------
     // Each trigger is a `Button` carrying the element id the view builds, so `element` is exactly what
     // GPUI sees, and `Role::Button` is exactly what a `Button` reports. The popup they open and the
@@ -683,16 +717,6 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         named_by: "legend_accessible_label",
         requirement: "DSV-07",
     },
-    // The location-wide action in the status band while the Recycle Bin holds items.
-    KeyControl {
-        key: "empty-recycle-bin",
-        element: "empty-recycle-bin",
-        indexed: false,
-        role: Role::Button,
-        messages: &["ctx_empty_recycle_bin"],
-        named_by: "",
-        requirement: "UI-01, DSV-08",
-    },
 ];
 
 /// Registry entry for `key`. An unknown key is a programming error, and the tests in this module walk
@@ -991,7 +1015,6 @@ mod tests {
             ("toast-retry", Role::Button),
             ("recycle-bin-error", Role::Alert),
             ("recycle-bin-retry", Role::Button),
-            ("empty-recycle-bin", Role::Button),
             ("service-issue-not-running", Role::Alert),
         ];
         for (key, expected) in expectations {

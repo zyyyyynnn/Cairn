@@ -271,7 +271,7 @@ impl CairnApp {
 
     /// Re-asks the active query while a growing index adds rows, keeping what the table already
     /// shows on screen. Used by the local scan's status refresh: a refresh that cleared the table
-    /// would replace live rows with the skeleton once the query takes longer than the poll
+    /// would flicker once the query takes longer than the poll
     /// interval, which is how a progressive index turns into a loading animation that never ends.
     /// Skipped while a query is already in flight; that answer is newer than the request would be.
     /// A hidden table (Treemap or Recycle Bin) is never refreshed in the background.
@@ -308,11 +308,12 @@ impl CairnApp {
             // The new result set has no completed count yet; the band shows only its loading
             // control until the query and any index build settle.
             self.service.status.clear_objects_count();
+            self.begin_table_session();
         }
 
         // An empty query is not an idle state: it is the "所有文件" view. The service answers it
         // with the whole index, so startup, service reconnect and Escape all land here and show
-        // the table rather than a "start typing" placeholder. The skeleton covers the first page.
+        // the table rather than a "start typing" placeholder.
         self.query.is_searching = true;
         // Any index query leaves the Recycle Bin view: the bin is a location,
         // not a search scope. Its filtered listing is released with the view.
@@ -392,6 +393,13 @@ impl CairnApp {
                                 crate::shell::perf::mark(&format!(
                                     "query applied id={qid} total={total_matches}"
                                 ));
+                                // The entrance starts with the first visible content, not when the
+                                // request left the input handler. An empty answer reveals the state
+                                // band through the same entrance.
+                                this.note_table_content();
+                                if total_matches == 0 {
+                                    this.note_table_empty();
+                                }
                                 // The band shows the exact total only after the result set has
                                 // settled; there is no animated or partial number.
                                 this.service
@@ -594,7 +602,7 @@ mod tests {
         assert!(narrows_the_result_set("", Some('c'), None));
         assert!(
             !narrows_the_result_set("", None, None),
-            "no text, no scope and 所有文件 is the idle state"
+            "no text, no scope, no filter and no category is the idle state"
         );
         assert!(
             !narrows_the_result_set("   ", None, None),

@@ -20,7 +20,7 @@ mod path;
 mod squarify;
 mod tree;
 
-pub use category::TreemapCategory;
+pub use category::{FileKind, TreemapCategory};
 pub use geometry::TreemapRect;
 pub use index::DirectorySizeIndex;
 pub use layout::{

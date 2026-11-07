@@ -22,8 +22,6 @@ pub const NAMESPACE_WIN32_AND_DOS: u8 = 0x03;
 pub enum AttributeParseError {
     #[error("Buffer too small for attribute header: {0} bytes")]
     BufferTooSmall(usize),
-    #[error("Attribute length is zero")]
-    ZeroLength,
 }
 
 #[derive(Clone, Debug)]

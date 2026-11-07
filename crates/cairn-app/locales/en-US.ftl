@@ -55,10 +55,15 @@ query_undo = Undo
 query_redo = Redo
 query_cut = Cut
 query_paste = Paste
-query_select_all_text = Select all query text
+edit_select_all = Select all
 query_clear = Clear search
 sort_reverse = Reverse order
 
+status_selected_count = { $count_text } items selected
+selection_limit_title = Selection limit reached
+selection_limit_message = The first { $count_text } items are selected. Narrow the results and try again.
+reveal_limit_title = Folders not opened
+reveal_limit_message = The selection spans { $count } folders; at most { $limit } can be opened at once. Narrow the selection and try again.
 status_objects_count = { $count ->
     [one] { $count_text } item
    *[other] { $count_text } items
@@ -83,10 +88,11 @@ ctx_open_path = Open containing folder
 ctx_copy_path = Copy full path
 ctx_copy_original_location = Copy original location
 ctx_copy_name = Copy file name
-ctx_delete = Delete…
+ctx_delete = Delete
 ctx_restore = Restore
-ctx_delete_permanently = Delete permanently…
-ctx_empty_recycle_bin = Empty Recycle Bin…
+ctx_restore_all = Restore all items
+ctx_delete_permanently = Delete permanently
+ctx_empty_recycle_bin = Empty Recycle Bin
 ctx_properties = Properties
 delete_confirm_title = Delete “{ $name }”?
 delete_confirm_title_many = Delete { $count } items?
@@ -102,11 +108,14 @@ recycle_bin_delete_confirm_action = Delete permanently
 recycle_bin_empty_confirm_title = Empty Recycle Bin?
 recycle_bin_empty_confirm_description = All items in the Recycle Bin will be permanently deleted and can’t be recovered.
 recycle_bin_empty_confirm_action = Empty Recycle Bin
+recycle_bin_restore_all_confirm_title = Restore all items?
+recycle_bin_restore_all_confirm_description = All items in the Recycle Bin will be restored to their original locations.
+recycle_bin_restore_all_confirm_action = Restore all items
 delete_failed_title = Could not delete the selection
 
 service_not_running_title = The background service is not running; search is unavailable
 service_not_installed_title = The background service is not installed; run the Cairn installer again
-service_incompatible_title = The background service version is incompatible; reinstall Cairn
+service_incompatible_title = The background service is an incompatible build; check for updates in the Help menu and reinstall.
 service_unauthorized_title = This account cannot use the background service; use an authorized account
 # The recovery lines promise another attempt, so the promise needs a button a pointer and a keyboard
 # can both reach.
@@ -229,18 +238,19 @@ treemap_retry = Retry
 treemap_path_placeholder = C:\Users
 treemap_path_label = Path
 treemap_path_clear = Clear path
+treemap_path_menu_for = Show folders under { $label }
+treemap_path_menu_row = Go to "{ $label }"
+treemap_path_menu_empty = No subfolders to switch to
+treemap_path_menu_truncated = Only the first { $count } folders are listed
 treemap_crumb_label = Go to { $label } ({ $path })
 treemap_path_invalid_title = Path format not recognized
 treemap_path_invalid_hint = Enter a drive path such as C:\Users, or a path relative to this folder.
 treemap_unavailable_service = Could not reach the background service
-treemap_unavailable_too_large = This folder is too large for the Treemap; open a subfolder or go up one level
+treemap_unavailable_too_large = This folder has too many direct children to load at once; open a subfolder or go up one level
 treemap_unavailable_not_directory = That path is a file; open a folder or go up one level
 treemap_unavailable_not_indexed = This path is not in the index; check the path or retry later
 treemap_empty_directory = This folder is empty
-treemap_aggregate = { $count ->
-    [one] { $count_text } item
-   *[other] { $count_text } items
-}
+treemap_aggregate = { $count_text } more
 treemap_status_selected = { $name }, { $path }, { $size } ({ $percent }%), { $date }
 treemap_status_summary = { $count ->
     [one] { $count_text } item { $size }
@@ -249,15 +259,13 @@ treemap_status_summary = { $count ->
 treemap_zoom_reset = Reset chart zoom
 treemap_zoom_reset_tooltip = Reset chart zoom (currently { $percent }%)
 treemap_filter_all = Show all categories
-treemap_category_folder = Folder
 treemap_category_system = System
-treemap_category_applications = Applications
-treemap_category_document = Document
-treemap_category_archive = Archive
-treemap_category_image = Image
-treemap_category_code = Code
+treemap_category_programs = Programs
+treemap_category_documents = Documents
+treemap_category_image = Images
+treemap_category_video = Videos
 treemap_category_audio = Audio
-treemap_category_video = Video
+treemap_category_archive = Archives
 treemap_category_other = Other
 treemap_filter_hide = Hide the { $category } category
 treemap_filter_show = Show the { $category } category
@@ -271,7 +279,7 @@ menu_content_search_backfilling = Building the content index { $processed } / { 
 menu_content_search_ready = The content index is ready
 menu_content_search_failed = The content index failed
 menu_content_search_retry = Rebuild the content index
-menu_content_search_clear = Clear the content index…
+menu_content_search_clear = Clear the content index
 index_enable_action = Turn on content search
 index_status_retry = Retry
 menu_content_search_usage = Size: { $size }

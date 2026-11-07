@@ -34,10 +34,6 @@ const TOAST_WIDTH_REM: f32 = 24.0;
 /// Every toast shares one compact minimum height; a two-line explanation grows the
 /// card instead of leaving a fixed-height gap under it.
 const TOAST_MIN_HEIGHT_REM: f32 = 5.5;
-/// Enter and exit share one short settle. Reduced motion skips the frames and
-/// removes the card without delay.
-const TOAST_MOTION: Duration = Duration::from_millis(140);
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ToastKind {
     Error,
@@ -199,7 +195,9 @@ impl CairnApp {
         }
         cx.notify();
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(TOAST_MOTION).await;
+            cx.background_executor()
+                .timer(crate::shell::motion::TOAST)
+                .await;
             let _ = this.update(cx, |this, cx| {
                 let still_closing = this.toast_serial == serial
                     && this.toast.as_ref().is_some_and(|toast| toast.closing);
@@ -251,11 +249,6 @@ impl CairnApp {
 
         let bottom = rems(layout::STATUS_HEIGHT + layout::SPACE_8);
         let reduce_motion = cx.reduce_motion();
-        let travel = if reduce_motion {
-            rems(0.0)
-        } else {
-            rems(layout::SPACE_8)
-        };
         let accessible_name = if toast.message.is_empty() {
             toast.title.clone()
         } else {
@@ -354,7 +347,7 @@ impl CairnApp {
                 } else {
                     format!("toast-in-{serial}")
                 },
-                Animation::new(TOAST_MOTION).with_easing(ease_out_quint()),
+                Animation::new(crate::shell::motion::TOAST).with_easing(ease_out_quint()),
                 move |card, delta| {
                     let progress = if reduce_motion {
                         1.0
@@ -363,8 +356,7 @@ impl CairnApp {
                     } else {
                         delta
                     };
-                    card.bottom(bottom - travel * (1.0 - progress))
-                        .opacity(progress)
+                    card.opacity(progress)
                 },
             )
             .into_any_element()

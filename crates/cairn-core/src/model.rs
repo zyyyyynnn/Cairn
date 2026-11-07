@@ -6,7 +6,6 @@
 
 pub const FLAG_DIRECTORY: u16 = 1 << 0;
 pub const FLAG_TOMBSTONE: u16 = 1 << 1;
-pub const FLAG_READONLY: u16 = 1 << 2;
 pub const FLAG_HIDDEN: u16 = 1 << 3;
 pub const FLAG_SYSTEM: u16 = 1 << 4;
 pub const FLAG_ARCHIVE: u16 = 1 << 5;
@@ -72,11 +71,6 @@ impl FileRecord {
     #[inline(always)]
     pub fn is_system(&self) -> bool {
         (self.flags & FLAG_SYSTEM) != 0
-    }
-
-    #[inline(always)]
-    pub fn is_readonly(&self) -> bool {
-        (self.flags & FLAG_READONLY) != 0
     }
 
     #[inline(always)]

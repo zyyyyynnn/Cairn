@@ -151,6 +151,16 @@ fn init_system_tray() -> Option<tray_icon::TrayIcon> {
 }
 
 fn main() {
+    // The elevated copy of this image has one job and no window. It answers before the single
+    // instance mutex is taken: a copy that found the mutex already held would otherwise return
+    // here and exit as though it had started the service.
+    let request: Vec<String> = std::env::args().skip(1).collect();
+    // The exit code is the Win32 code, bit-for-bit: `GetExitCodeProcess` hands it back to the
+    // waiting window as `u32`, which is what decides success there.
+    if let Some(code) = service::service_control::elevated_start_reply(&request) {
+        std::process::exit(code as i32);
+    }
+
     crate::shell::perf::mark("process main");
     let _ = tracing_subscriber::fmt::try_init();
 
@@ -184,15 +194,13 @@ fn main() {
             // title is still given to the platform: it is what the taskbar and Alt+Tab read, and
             // `hide_title` only removes it from the bar we draw ourselves.
             //
-            // Both sizes are logical pixels and both are read off the shell's own budgets. 1024x640
-            // is the smallest standard desktop rung (1024 / 1280 / 1440 / 1920) whose width still
-            // contains what the shell cannot compress: `SIDEBAR_MIN_WIDTH`, the four column floors
-            // from `crate::app::layout` and their cell padding, about 780px at zoom 1.0. Below that
-            // rung a lane stops narrowing and starts being cut off. Its height leaves the result
-            // band about eighteen rows once the title bar and the three bands of
-            // `crate::app::layout::CHROME_BANDS` have been placed. 1280x800 is the next rung up, and
-            // it is the default because that is where the two growing lanes, name and path, sit
-            // several hundred pixels clear of their floors instead of barely above them.
+            // Both sizes are logical pixels and both are read off the shell's own budgets. One
+            // value serves default and minimum: a window cannot be made smaller than what the
+            // shell cannot compress — `SIDEBAR_WIDTH`, the four column floors from
+            // `crate::app::layout` with their cell padding (about 780px at zoom 1.0) and the bands
+            // of `crate::app::layout::CHROME_BANDS`. 1280x800 clears that floor with the two
+            // growing lanes, name and path, sitting several hundred pixels above their minimums,
+            // and leaves the result band about eighteen rows.
             let base = gpui_kit::component::TitleBar::window_options();
             let window_options = WindowOptions {
                 titlebar: Some(TitlebarOptions {
@@ -210,8 +218,8 @@ fn main() {
                     cx,
                 ))),
                 window_min_size: Some(Size {
-                    width: px(1024.0),
-                    height: px(640.0),
+                    width: px(1280.0),
+                    height: px(800.0),
                 }),
                 ..base
             };
