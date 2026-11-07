@@ -7,7 +7,7 @@
 | 层 | 适用对象 | 位置 | 例子 |
 | --- | --- | --- | --- |
 | 纯逻辑 | 无系统调用、输入输出都是值 | `src` 内 `#[cfg(test)] mod tests` | 预算计算、排序比较、过滤器解析、错误码映射 |
-| 公开入口 | crate 的公开函数，用内存夹具调用 | `src` 内或 `crates/*/tests/` | `SyncEngine::treemap_tree`、`DirectorySizeIndex::build_tree_node` |
+| 公开入口 | crate 的公开函数，用内存夹具调用 | `src` 内或 `crates/*/tests/` | `MultiVolumeEngine::treemap_tree`、`DirectorySizeIndex::build_tree_node` |
 | 协议与管道往返 | 真实帧编解码、真实命名管道上的请求与响应 | `crates/*/tests/` | 请求到响应的完整往返、版本拒绝、超长帧、超时与取消 |
 | 权限与真机 | 裸盘读取、服务安装、UAC、MSI | 不进 `cargo test`，见下节 | 实机索引、服务生命周期、同意对话框 |
 

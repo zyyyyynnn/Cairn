@@ -40,7 +40,9 @@ pub fn quiet_setup(restart_app: bool, expected_sha256: Option<String>) -> i32 {
     let package_code = msi::package_product_code(&msi);
 
     if let Some(product) = &installed {
-        if legacy.is_empty() && product.is_same_build(package_code.as_deref()) {
+        if legacy.is_empty()
+            && (product.is_same_build(package_code.as_deref()) || product.is_newer_than_package())
+        {
             let _ = std::fs::remove_dir_all(&payload_dir);
             if restart_app {
                 relaunch(&product.install_dir);

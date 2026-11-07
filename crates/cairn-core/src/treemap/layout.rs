@@ -62,6 +62,8 @@ pub struct NestedTreemapOptions {
     pub max_children: usize,
     /// A child below this predicted pixel area joins the aggregate tail.
     pub min_tile_area: f32,
+    /// Whether to fold small tail children into aggregate blocks.
+    pub allow_aggregates: bool,
 }
 
 impl Default for NestedTreemapOptions {
@@ -89,6 +91,7 @@ impl NestedTreemapOptions {
             padding: 0.0,
             max_children,
             min_tile_area,
+            allow_aggregates: true,
         }
     }
 }
@@ -467,7 +470,7 @@ pub fn layout_nested_treemap(
     }
 
     let total_size: u64 = nodes.iter().map(|node| node.size).sum();
-    let plan = if nodes.len() > 1 && total_size > 0 {
+    let plan = if nodes.len() > 1 && total_size > 0 && options.allow_aggregates {
         plan_with_tail(nodes, parent, bounds, options, depth, total_size)
     } else {
         DisplayPlan::squarified(
@@ -1134,6 +1137,30 @@ mod tests {
         assert_ne!(
             first,
             aggregate_path(r"C:\Windows\System32", TreemapCategory::Other)
+        );
+    }
+
+    #[test]
+    fn disallowing_secondary_folding_generates_no_aggregates() {
+        let mut children = Vec::new();
+        for index in 0..30 {
+            children.push(TreemapTreeNode::new_file(
+                index as u64 + 1,
+                format!("file_{index}.dat"),
+                100,
+                0,
+            ));
+        }
+        let bounds = TreemapRect::new(0.0, 0.0, 800.0, 600.0);
+        let mut options = NestedTreemapOptions::from_detail_level(3);
+        options.max_children = children.len();
+        options.allow_aggregates = false;
+
+        let layout = layout_nested_treemap(&children, r"C:\Folder", bounds, &options, 0);
+        assert_eq!(layout.len(), children.len());
+        assert!(
+            layout.iter().all(|node| node.aggregate_count == 0),
+            "no aggregate blocks should be generated when allow_aggregates is false"
         );
     }
 }

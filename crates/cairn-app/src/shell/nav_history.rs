@@ -231,62 +231,96 @@ impl CairnApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui_kit::gpui::AppContext as _;
 
     #[test]
     fn nav_history_steps_and_truncates_on_branch() {
-        let mut history = vec![NavState {
-            text: String::new(),
-            drive: None,
-            filter: FilterCategory::All,
-            visualization: None,
-        }];
-        let mut index = 0usize;
+        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
+            gpui_kit::init(cx);
+            let _ = gpui_kit::open_window(
+                gpui_kit::gpui::WindowOptions::default(),
+                cx,
+                |window, cx| {
+                    let app = cx.new(|cx| CairnApp::new(window, cx));
 
-        let can_back = |idx: usize| idx > 0;
-        let can_forward = |idx: usize, len: usize| idx + 1 < len;
+                    app.update(cx, |this, cx| {
+                        // Initially seeded with All at index 0
+                        assert!(!this.can_go_back());
+                        assert!(!this.can_go_forward());
+                        assert_eq!(this.nav_history.len(), 1);
+                        assert_eq!(this.nav_history_index, 0);
+                        assert_eq!(this.nav_history[0].filter, FilterCategory::All);
 
-        assert!(!can_back(index));
-        assert!(!can_forward(index, history.len()));
+                        // Step 1: User navigates to Document filter
+                        this.query.active_filter = FilterCategory::Document;
+                        this.record_nav_state();
 
-        // Step 1: User navigates to Document
-        history.push(NavState {
-            text: String::new(),
-            drive: None,
-            filter: FilterCategory::Document,
-            visualization: None,
+                        assert!(this.can_go_back());
+                        assert!(!this.can_go_forward());
+                        assert_eq!(this.nav_history.len(), 2);
+                        assert_eq!(this.nav_history_index, 1);
+
+                        // Step 2: User navigates to Picture filter
+                        this.query.active_filter = FilterCategory::Picture;
+                        this.record_nav_state();
+
+                        assert!(this.can_go_back());
+                        assert!(!this.can_go_forward());
+                        assert_eq!(this.nav_history.len(), 3);
+                        assert_eq!(this.nav_history_index, 2);
+
+                        // Step 3: Go back to Document
+                        this.go_back(window, cx);
+                        assert_eq!(this.query.active_filter, FilterCategory::Document);
+                        assert_eq!(this.nav_history_index, 1);
+                        assert!(this.can_go_back());
+                        assert!(this.can_go_forward());
+
+                        // Step 4: Branch by navigating to Executable while at Document
+                        this.query.active_filter = FilterCategory::Executable;
+                        this.record_nav_state();
+
+                        // History should now be: All, Document, Executable (Picture dropped)
+                        assert_eq!(this.nav_history.len(), 3);
+                        assert_eq!(this.nav_history_index, 2);
+                        assert_eq!(this.nav_history[0].filter, FilterCategory::All);
+                        assert_eq!(this.nav_history[1].filter, FilterCategory::Document);
+                        assert_eq!(this.nav_history[2].filter, FilterCategory::Executable);
+                        assert!(this.can_go_back());
+                        assert!(!this.can_go_forward());
+
+                        // Step 5: Go back to Document
+                        this.go_back(window, cx);
+                        assert_eq!(this.query.active_filter, FilterCategory::Document);
+                        assert_eq!(this.nav_history_index, 1);
+                        assert!(this.can_go_back());
+                        assert!(this.can_go_forward());
+
+                        // Step 6: Go back to All
+                        this.go_back(window, cx);
+                        assert_eq!(this.query.active_filter, FilterCategory::All);
+                        assert_eq!(this.nav_history_index, 0);
+                        assert!(!this.can_go_back());
+                        assert!(this.can_go_forward());
+
+                        // Step 7: Advance forward back to Executable
+                        this.go_forward(window, cx);
+                        assert_eq!(this.query.active_filter, FilterCategory::Document);
+                        assert_eq!(this.nav_history_index, 1);
+                        assert!(this.can_go_back());
+                        assert!(this.can_go_forward());
+
+                        this.go_forward(window, cx);
+                        assert_eq!(this.query.active_filter, FilterCategory::Executable);
+                        assert_eq!(this.nav_history_index, 2);
+                        assert!(this.can_go_back());
+                        assert!(!this.can_go_forward());
+                    });
+
+                    cx.quit();
+                    app
+                },
+            );
         });
-        index = history.len() - 1;
-        assert!(can_back(index));
-        assert!(!can_forward(index, history.len()));
-        assert_eq!(index, 1);
-
-        // Step 2: User navigates to Picture
-        history.push(NavState {
-            text: String::new(),
-            drive: None,
-            filter: FilterCategory::Picture,
-            visualization: None,
-        });
-        index = history.len() - 1;
-        assert_eq!(index, 2);
-
-        // Step 3: Go back
-        index -= 1;
-        assert_eq!(history[index].filter, FilterCategory::Document);
-        assert!(can_back(index));
-        assert!(can_forward(index, history.len()));
-
-        // Step 4: Branch by navigating to Executable while at Document
-        history.truncate(index + 1);
-        history.push(NavState {
-            text: String::new(),
-            drive: None,
-            filter: FilterCategory::Executable,
-            visualization: None,
-        });
-        index = history.len() - 1;
-        assert_eq!(history.len(), 3); // All, Document, Executable (Picture dropped)
-        assert_eq!(index, 2);
-        assert!(!can_forward(index, history.len()));
     }
 }

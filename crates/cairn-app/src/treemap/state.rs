@@ -94,8 +94,8 @@ pub struct TreemapViewState {
     pub(super) virtual_layer: Option<VirtualLayer>,
     /// The layer Back left, so Forward can enter it again.
     forward_layer: Option<VirtualLayer>,
-    /// A context menu opened on a block: hover tooltips stay hidden until the next left click, so a
-    /// tooltip cannot cover the menu it opened.
+    /// A context menu is open: hover tooltips stay hidden while the menu is active so a
+    /// tooltip cannot cover the menu.
     pub(super) suppress_tooltip: bool,
     /// Level of detail (1 to 5, default 5)
     pub(super) detail_level: usize,
@@ -442,8 +442,11 @@ impl TreemapViewState {
                     })
                     .collect()
             };
+            let mut layer_options = options;
+            layer_options.max_children = members.len();
+            layer_options.allow_aggregates = false;
             self.layout_nodes =
-                layout_nested_treemap(&members, &layer.parent_path, bounds, &options, 0);
+                layout_nested_treemap(&members, &layer.parent_path, bounds, &layer_options, 0);
         } else if let Some(ref tree) = self.root_tree {
             self.layout_nodes = layout_nested_treemap(&tree.children, &parent, bounds, &options, 0);
         } else {
@@ -1448,5 +1451,46 @@ mod tests {
         assert!(state.content_revealed);
         assert!(state.layout_nodes.is_empty());
         assert_eq!(state.total_items(), 0);
+    }
+
+    #[test]
+    fn virtual_layer_disallows_secondary_folding_in_layout() {
+        let mut state = TreemapViewState::new_for_test('C');
+        let mut root = TreemapTreeNode::new_dir(1, "C:".into(), 0);
+        for i in 0..30 {
+            root.children.push(TreemapTreeNode::new_file(
+                i as u64 + 2,
+                format!("item_{i}.txt"),
+                100,
+                0,
+            ));
+        }
+        state.set_tree(root);
+
+        // Create a virtual layer containing all 30 items
+        let layer = VirtualLayer {
+            parent_path: r"C:\".to_string(),
+            members: (0..30).collect(),
+            label: "30 items".to_string(),
+        };
+        state.enter_virtual_layer(layer);
+
+        assert!(state.virtual_layer.is_some());
+        assert_eq!(state.layout_nodes.len(), 30);
+        assert!(
+            state
+                .layout_nodes
+                .iter()
+                .all(|node| node.aggregate_count == 0),
+            "virtual layers must not produce secondary aggregate blocks"
+        );
+    }
+
+    #[test]
+    fn suppress_tooltip_resets_on_navigation() {
+        let mut state = TreemapViewState::new_for_test('C');
+        state.suppress_tooltip = true;
+        state.drill_down(r"C:\Windows");
+        assert!(!state.suppress_tooltip);
     }
 }

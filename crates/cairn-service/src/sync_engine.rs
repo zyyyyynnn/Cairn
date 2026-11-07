@@ -61,9 +61,31 @@ fn budgeted_tree_depth(
     })
 }
 
-/// How far the matched-bytes walk climbs looking for a matched ancestor. NTFS path depth on a real
-/// volume stays well under this, so the cap only exists to end a corrupt parent chain.
-const MAX_ANCESTOR_HOPS: usize = 64;
+struct BitSet {
+    words: Vec<u64>,
+}
+
+impl BitSet {
+    fn with_capacity(bits: usize) -> Self {
+        let word_count = bits.div_ceil(64);
+        Self {
+            words: vec![0; word_count],
+        }
+    }
+
+    #[inline(always)]
+    fn insert(&mut self, bit: usize) -> bool {
+        let word_idx = bit / 64;
+        let bit_mask = 1u64 << (bit % 64);
+        if let Some(word) = self.words.get_mut(word_idx) {
+            let was_set = (*word & bit_mask) != 0;
+            *word |= bit_mask;
+            !was_set
+        } else {
+            false
+        }
+    }
+}
 
 /// A journal backlog beyond this size is cheaper to recover with a fresh `$MFT` scan than by
 /// replaying hundreds of thousands of USN records. It also bounds how long a cold start can show
@@ -975,44 +997,46 @@ impl VolumeIndex {
     ///
     /// Directories are containers: they contribute zero here, so the total always describes the
     /// visible result set and never counts an excluded descendant through an ancestor's aggregate.
-    /// The space the matched items occupy, counted once at the highest matched point of each branch:
-    /// a directory contributes its aggregated size (its descendants are inside it), and a matched
-    /// item with a matched ancestor contributes nothing, so nesting never counts twice. A result set
-    /// of directories therefore reports a real total, the same figure the Treemap shows for that
-    /// content.
+    /// Matched bytes total: each matched file's size is summed once.
+    /// Directories are containers whose recursive aggregates would inflate non-matching
+    /// files, so only matched files contribute their logical size.
     pub(crate) fn calculate_matched_bytes(&self, matched_indices: &[u32]) -> u64 {
-        let matched: HashSet<usize> = matched_indices
-            .iter()
-            .map(|&index| index as usize)
-            .collect();
-        matched
-            .iter()
-            .filter(|&&index| !self.has_matched_ancestor(index, &matched))
-            .fold(0u64, |total, &index| {
-                self.records
-                    .get(index)
-                    .map_or(total, |record| total.saturating_add(record.size))
-            })
-    }
-
-    /// `true` when any ancestor of `index` is itself in `matched`. The walk stops at the volume root
-    /// and at the hop cap, so a self-parented or detached record ends the chain instead of looping.
-    fn has_matched_ancestor(&self, index: usize, matched: &HashSet<usize>) -> bool {
-        let mut current = index;
-        for _ in 0..MAX_ANCESTOR_HOPS {
-            let Some(record) = self.records.get(current) else {
-                return false;
-            };
-            let parent = record.parent_idx;
-            if parent == u32::MAX || parent as usize == current {
-                return false;
-            }
-            if matched.contains(&(parent as usize)) {
-                return true;
-            }
-            current = parent as usize;
+        if matched_indices.is_empty() || self.records.is_empty() {
+            return 0;
         }
-        false
+
+        if matched_indices.len() <= 64 {
+            let mut total: u64 = 0;
+            for (i, &idx) in matched_indices.iter().enumerate() {
+                let index = idx as usize;
+                if matched_indices[..i].contains(&idx) {
+                    continue;
+                }
+                if let Some(record) = self.records.get(index) {
+                    if record.is_file() && !record.is_tombstone() {
+                        total = total.saturating_add(record.size);
+                    }
+                }
+            }
+            return total;
+        }
+
+        let max_idx = matched_indices.iter().copied().max().unwrap_or(0) as usize;
+        let bit_capacity = (max_idx + 1).min(self.records.len());
+        let mut seen = BitSet::with_capacity(bit_capacity);
+        let mut total: u64 = 0;
+
+        for &idx in matched_indices {
+            let index = idx as usize;
+            if index < self.records.len() && seen.insert(index) {
+                let record = &self.records[index];
+                if record.is_file() && !record.is_tombstone() {
+                    total = total.saturating_add(record.size);
+                }
+            }
+        }
+
+        total
     }
 }
 
@@ -3417,8 +3441,8 @@ mod tests {
         assert_eq!(total, 1);
         assert_eq!(bytes, 100);
 
-        // A directory row carries its aggregate, so a folder-only result reports the space those
-        // folders occupy. `C:` covers `folder`, so the set is counted once, at `C:`.
+        // Directories are containers: folder-only results report 0 bytes because files inside
+        // are not matched.
         let (_, total, _, _, bytes) = engine.execute_search_multi(
             "folder:",
             &QueryDefaults::default(),
@@ -3427,10 +3451,7 @@ mod tests {
             &cancel,
         );
         assert_eq!(total, 2, "matches C: and folder");
-        assert_eq!(
-            bytes, 600,
-            "the matched set is counted at its highest matched point"
-        );
+        assert_eq!(bytes, 0, "directories contribute zero bytes");
 
         let (_, total, _, _, bytes) = engine.execute_search_multi(
             "folder",
@@ -3440,10 +3461,7 @@ mod tests {
             &cancel,
         );
         assert_eq!(total, 1, "matches only the folder named 'folder'");
-        assert_eq!(
-            bytes, 300,
-            "the folder's own aggregate, not its matched descendants"
-        );
+        assert_eq!(bytes, 0, "directory contributes zero bytes");
     }
 
     #[test]
@@ -4477,25 +4495,69 @@ mod tests {
         let note_idx = vol.frn_to_idx[&30][0];
         let out_idx = vol.frn_to_idx[&50][0];
 
-        // 1. The root covers every other match, so the whole set is the root's own aggregate.
+        // 1. Folders alone contribute zero bytes.
         let all_folders = vec![root_idx, win_idx, sys_idx, users_idx];
-        assert_eq!(vol.calculate_matched_bytes(&all_folders), 150);
+        assert_eq!(vol.calculate_matched_bytes(&all_folders), 0);
 
-        // 2. Without the root, System32 sits inside the matched Windows and is covered by it.
+        // 2. Subfolders alone contribute zero bytes.
         let subfolders = vec![win_idx, sys_idx, users_idx];
-        assert_eq!(vol.calculate_matched_bytes(&subfolders), 50);
+        assert_eq!(vol.calculate_matched_bytes(&subfolders), 0);
 
-        // 3. Sibling directories each count their own aggregate.
+        // 3. Sibling directories contribute zero bytes.
         let siblings = vec![win_idx, users_idx];
-        assert_eq!(vol.calculate_matched_bytes(&siblings), 50);
+        assert_eq!(vol.calculate_matched_bytes(&siblings), 0);
 
-        // 4. Pure file query: nothing is covered by a match, so each file counts.
+        // 4. Pure file query: files contribute their size.
         let files = vec![note_idx, out_idx];
         assert_eq!(vol.calculate_matched_bytes(&files), 150);
 
-        // 5. A matched directory and its own matched file are counted once, at the directory.
+        // 5. Mixed query: only files contribute size; folders contribute zero.
         let mixed = vec![win_idx, note_idx, out_idx];
         assert_eq!(vol.calculate_matched_bytes(&mixed), 150);
+
+        // 6. Duplicate indices are deduplicated in small sets.
+        let duplicates = vec![note_idx, note_idx, out_idx, out_idx];
+        assert_eq!(vol.calculate_matched_bytes(&duplicates), 150);
+
+        // 7. Tombstoned records contribute zero bytes.
+        vol.records[note_idx as usize].flags |= cairn_core::FLAG_TOMBSTONE;
+        assert_eq!(
+            vol.calculate_matched_bytes(&[note_idx, out_idx]),
+            100,
+            "tombstoned file contributes zero bytes"
+        );
+        vol.records[note_idx as usize].flags &= !cairn_core::FLAG_TOMBSTONE;
+
+        // 8. Large query sets (> 64 items) use BitSet deduplication.
+        let mut large_query = Vec::new();
+        for _ in 0..50 {
+            large_query.push(note_idx);
+            large_query.push(out_idx);
+        }
+        assert!(large_query.len() > 64);
+        assert_eq!(vol.calculate_matched_bytes(&large_query), 150);
+    }
+
+    #[test]
+    fn bitset_operations_and_boundaries() {
+        let mut bs = BitSet::with_capacity(128);
+        assert_eq!(bs.words.len(), 2);
+
+        // Insertion of boundary bits
+        assert!(bs.insert(0));
+        assert!(bs.insert(63));
+        assert!(bs.insert(64));
+        assert!(bs.insert(127));
+
+        // Re-insertion of existing bits returns false
+        assert!(!bs.insert(0));
+        assert!(!bs.insert(63));
+        assert!(!bs.insert(64));
+        assert!(!bs.insert(127));
+
+        // Out of bounds insertion returns false
+        assert!(!bs.insert(128));
+        assert!(!bs.insert(1000));
     }
 
     #[test]

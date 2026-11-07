@@ -241,20 +241,20 @@ impl CairnApp {
                 })
                 .child(placeholder);
         }
-        if !is_focused {
-            return div()
-                .flex()
-                .items_center()
-                .min_w_0()
-                .overflow_hidden()
-                .child(self.query.search_input.text.clone());
-        }
-
         let text = &self.query.search_input.text;
         let sel = &self.query.search_input.selection;
         let sel_start = sel.start.min(sel.end).min(text.len());
         let sel_end = sel.start.max(sel.end).min(text.len());
         let has_selection = sel_start < sel_end;
+
+        if !is_focused && !has_selection && self.query.search_input.marked_range.is_none() {
+            return div()
+                .flex()
+                .items_center()
+                .min_w_0()
+                .overflow_hidden()
+                .child(div().whitespace_nowrap().child(text.clone()));
+        }
 
         let layout = self.query_text_layout(window);
 
@@ -308,7 +308,7 @@ impl CairnApp {
 
         container = container.child(div().whitespace_nowrap().child(text.clone()));
 
-        if !has_selection {
+        if is_focused && !has_selection {
             let caret_x = layout.x_for_index(sel_start);
             container = container.child(
                 div()

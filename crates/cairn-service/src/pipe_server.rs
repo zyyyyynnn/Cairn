@@ -54,6 +54,17 @@ impl PipeServer {
         }
     }
 
+    pub fn with_pipe_name(
+        engine: Arc<MultiVolumeEngine>,
+        sessions: Arc<SessionManager>,
+        pipe_name: impl Into<String>,
+    ) -> Self {
+        Self {
+            pipe_name: pipe_name.into(),
+            ..Self::new(engine, sessions)
+        }
+    }
+
     pub async fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
         info!("Starting Named Pipe server on {}", self.pipe_name);
 
@@ -914,6 +925,28 @@ mod tests {
                 ),
                 other => panic!("unexpected response: {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn pipe_server_with_pipe_name_sets_custom_name() {
+        let engine = Arc::new(MultiVolumeEngine::new());
+        let sessions = Arc::new(SessionManager::new(10));
+        let custom_pipe = format!(r"\\.\pipe\Cairn.TestSeam.{}", std::process::id());
+        let server = PipeServer::with_pipe_name(engine, sessions, &custom_pipe);
+        assert_eq!(server.pipe_name, custom_pipe);
+        #[cfg(windows)]
+        {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_io()
+                .build()
+                .unwrap();
+            let instance = rt.block_on(async { server.create_pipe_instance(true) });
+            assert!(
+                instance.is_ok(),
+                "pipe instance should be created on custom name: {:?}",
+                instance.err()
+            );
         }
     }
 }

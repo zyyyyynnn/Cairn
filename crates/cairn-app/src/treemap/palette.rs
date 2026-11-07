@@ -10,12 +10,9 @@
 //! does or whether it is selected. Nothing here belongs in [`crate::shell::theme::ShellTokens`],
 //! and no control, hover, selected or warning/danger state may read it.
 //!
-//! The palette is a muted graphite band: every category keeps one hue in both modes, chroma never
-//! exceeds `0.040`, and Archive is the single warm accent. Eight near-neutral hues cannot separate on
-//! angle alone, so the categories stagger across two value tiers and every pair of fills clears
-//! `6.0` CIE76 units ([`cairn_ui::theme::perceptual_distance`]), the distance at which two adjacent
-//! tiles read as two surfaces. A directory header is identified by its strip and its name first;
-//! its tint stays `3.0` CIE76 units away from every other category's leaf.
+//! The palette uses a unified neutral graphite tone across categories in each mode (#D9D9D9 in
+//! light, #3A3A3A in dark), keeping visual hierarchy clean while text labels and icons carry
+//! category identity.
 //!
 //! Nesting depth does not change color: depth is expressed by the 2px gutter, the header tint and
 //! the nested rectangle, so one category is one color at every depth.
@@ -66,27 +63,13 @@ fn mix(base: Hsla, tint: Hsla, amount: f32) -> Hsla {
     base.blend(tint)
 }
 
-// ---- light: low-saturation graphite band on #F7F7F7 ---------------------------
+// ---- light: low-saturation graphite tone on #F7F7F7 ---------------------------
 
-const LIGHT_SYSTEM_FILL: Hsla = hsla(0.0000, 0.0000, 0.8510); // #D9D9D9
-const LIGHT_PROGRAMS_FILL: Hsla = hsla(0.0000, 0.0000, 0.8510); // #D9D9D9
-const LIGHT_DOCUMENTS_FILL: Hsla = hsla(0.0000, 0.0000, 0.8510); // #D9D9D9
-const LIGHT_IMAGE_FILL: Hsla = hsla(0.0000, 0.0000, 0.8510); // #D9D9D9
-const LIGHT_VIDEO_FILL: Hsla = hsla(0.0000, 0.0000, 0.8510); // #D9D9D9
-const LIGHT_AUDIO_FILL: Hsla = hsla(0.0000, 0.0000, 0.8510); // #D9D9D9
-const LIGHT_ARCHIVE_FILL: Hsla = hsla(0.0000, 0.0000, 0.8510); // #D9D9D9
-const LIGHT_OTHER_FILL: Hsla = hsla(0.0000, 0.0000, 0.8510); // #D9D9D9
+const LIGHT_TILE_FILL: Hsla = hsla(0.0000, 0.0000, 0.8510); // #D9D9D9
 
-// ---- dark: the same OKLCH hues on #141414 -------------------------------------
+// ---- dark: neutral graphite tone on #141414 -----------------------------------
 
-const DARK_SYSTEM_FILL: Hsla = hsla(0.0000, 0.0000, 0.2275); // #3A3A3A
-const DARK_PROGRAMS_FILL: Hsla = hsla(0.0000, 0.0000, 0.2275); // #3A3A3A
-const DARK_DOCUMENTS_FILL: Hsla = hsla(0.0000, 0.0000, 0.2275); // #3A3A3A
-const DARK_IMAGE_FILL: Hsla = hsla(0.0000, 0.0000, 0.2275); // #3A3A3A
-const DARK_VIDEO_FILL: Hsla = hsla(0.0000, 0.0000, 0.2275); // #3A3A3A
-const DARK_AUDIO_FILL: Hsla = hsla(0.0000, 0.0000, 0.2275); // #3A3A3A
-const DARK_ARCHIVE_FILL: Hsla = hsla(0.0000, 0.0000, 0.2275); // #3A3A3A
-const DARK_OTHER_FILL: Hsla = hsla(0.0000, 0.0000, 0.2275); // #3A3A3A
+const DARK_TILE_FILL: Hsla = hsla(0.0000, 0.0000, 0.2275); // #3A3A3A
 
 /// Secondary ink for sizes: `#3A3A3A` in light, `#CECECE` in dark, both steps of the neutral ramp.
 const LIGHT_INK_SECONDARY: Hsla = hsla(0.0, 0.0, 0x3A as f32 / 255.0);
@@ -176,30 +159,12 @@ impl TreemapPalette {
     }
 }
 
-fn light_fill(category: TreemapCategory) -> Hsla {
-    match category {
-        TreemapCategory::System => LIGHT_SYSTEM_FILL,
-        TreemapCategory::Programs => LIGHT_PROGRAMS_FILL,
-        TreemapCategory::Documents => LIGHT_DOCUMENTS_FILL,
-        TreemapCategory::Archive => LIGHT_ARCHIVE_FILL,
-        TreemapCategory::Image => LIGHT_IMAGE_FILL,
-        TreemapCategory::Audio => LIGHT_AUDIO_FILL,
-        TreemapCategory::Video => LIGHT_VIDEO_FILL,
-        TreemapCategory::Other => LIGHT_OTHER_FILL,
-    }
+fn light_fill(_category: TreemapCategory) -> Hsla {
+    LIGHT_TILE_FILL
 }
 
-fn dark_fill(category: TreemapCategory) -> Hsla {
-    match category {
-        TreemapCategory::System => DARK_SYSTEM_FILL,
-        TreemapCategory::Programs => DARK_PROGRAMS_FILL,
-        TreemapCategory::Documents => DARK_DOCUMENTS_FILL,
-        TreemapCategory::Archive => DARK_ARCHIVE_FILL,
-        TreemapCategory::Image => DARK_IMAGE_FILL,
-        TreemapCategory::Audio => DARK_AUDIO_FILL,
-        TreemapCategory::Video => DARK_VIDEO_FILL,
-        TreemapCategory::Other => DARK_OTHER_FILL,
-    }
+fn dark_fill(_category: TreemapCategory) -> Hsla {
+    DARK_TILE_FILL
 }
 
 /// Hover and press surfaces for an interactive Treemap block. Both keep the base surface's category

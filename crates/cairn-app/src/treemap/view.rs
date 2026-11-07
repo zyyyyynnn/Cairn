@@ -1950,10 +1950,21 @@ fn render_nested_node(
                 .bg(header_bg)
                 .overflow_hidden()
                 .cursor_pointer()
-                .when(!rcx.panning, move |this| {
+                .when(!rcx.panning && !rcx.suppress_tooltip, move |this| {
                     this.tooltip(move |window, cx| {
                         Tooltip::new(header_tooltip.clone()).build(window, cx)
                     })
+                })
+                .on_mouse_down(MouseButton::Right, {
+                    let v = header_view.clone();
+                    move |_, _, cx| {
+                        v.update(cx, |this, cx| {
+                            if let Some(st) = this.treemap_state.as_mut() {
+                                st.suppress_tooltip = true;
+                            }
+                            cx.notify();
+                        });
+                    }
                 })
                 .child(
                     Icon::new(IconName::Folder)
@@ -2132,7 +2143,27 @@ fn build_block_context_menu(
     i18n: &Rc<crate::shell::i18n::I18nManager>,
 ) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
     let i18n = i18n.clone();
-    move |menu: PopupMenu, _window: &mut Window, _cx: &mut Context<PopupMenu>| {
+    move |menu: PopupMenu, _window: &mut Window, cx: &mut Context<PopupMenu>| {
+        let dismiss_view = view.clone();
+        cx.subscribe_self::<DismissEvent>(move |_menu, _event, cx| {
+            dismiss_view.update(cx, |this, cx| {
+                if let Some(st) = this.treemap_state.as_mut() {
+                    st.suppress_tooltip = false;
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        let release_view = view.clone();
+        cx.on_release(move |_menu, cx| {
+            release_view.update(cx, |this, cx| {
+                if let Some(st) = this.treemap_state.as_mut() {
+                    st.suppress_tooltip = false;
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         let table_view = view.clone();
         let table_parent = parent_path.clone();
         menu.item(PopupMenuItem::new(i18n.get_text("view_in_table")).on_click(
@@ -2155,7 +2186,28 @@ fn build_context_menu(
     i18n: &Rc<crate::shell::i18n::I18nManager>,
 ) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
     let i18n = i18n.clone();
-    move |menu: PopupMenu, _window: &mut Window, _cx: &mut Context<PopupMenu>| {
+    move |menu: PopupMenu, _window: &mut Window, cx: &mut Context<PopupMenu>| {
+        let dismiss_view = view.clone();
+        cx.subscribe_self::<DismissEvent>(move |_menu, _event, cx| {
+            dismiss_view.update(cx, |this, cx| {
+                if let Some(st) = this.treemap_state.as_mut() {
+                    st.suppress_tooltip = false;
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        let release_view = view.clone();
+        cx.on_release(move |_menu, cx| {
+            release_view.update(cx, |this, cx| {
+                if let Some(st) = this.treemap_state.as_mut() {
+                    st.suppress_tooltip = false;
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+
         let file_name = Path::new(&full_path)
             .file_name()
             .and_then(|n| n.to_str())

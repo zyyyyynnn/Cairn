@@ -264,8 +264,7 @@ impl SearchInputState {
         };
 
         let target_ch = self.text[target_idx..].chars().next().unwrap_or(' ');
-        let is_alphanumeric_or_cjk =
-            |c: char| c.is_alphanumeric() || (c as u32) >= 0x4E00 || c == '_';
+        let is_alphanumeric_or_cjk = |c: char| c.is_alphanumeric() || c == '_';
         let is_target_whitespace = target_ch.is_whitespace();
         let is_target_alnum = is_alphanumeric_or_cjk(target_ch);
 
@@ -504,7 +503,7 @@ impl SearchInputState {
             return 0;
         };
 
-        let is_alphanumeric_or_cjk = |c: char| c.is_alphanumeric() || (c as u32) >= 0x4E00;
+        let is_alphanumeric_or_cjk = |c: char| c.is_alphanumeric() || c == '_';
         let is_target_alnum = is_alphanumeric_or_cjk(first_ch);
 
         let mut boundary = 0;
@@ -541,7 +540,7 @@ impl SearchInputState {
             return len;
         };
 
-        let is_alphanumeric_or_cjk = |c: char| c.is_alphanumeric() || (c as u32) >= 0x4E00;
+        let is_alphanumeric_or_cjk = |c: char| c.is_alphanumeric() || c == '_';
         let is_target_alnum = is_alphanumeric_or_cjk(first_ch);
 
         let mut boundary = len;
@@ -863,6 +862,27 @@ mod tests {
         // Undo -> back to "cairn ext:rs"
         assert!(state.undo());
         assert_eq!(state.text, "cairn ext:rs");
+
+        // CJK full-width punctuation and emoji boundaries
+        state.clear();
+        state.handle_replace_text_in_range(None, "测试，文件！");
+        state.delete_word_backward();
+        assert_eq!(state.text, "测试，文件");
+        state.delete_word_backward();
+        assert_eq!(state.text, "测试，");
+        state.delete_word_backward();
+        assert_eq!(state.text, "测试");
+        state.delete_word_backward();
+        assert_eq!(state.text, "");
+
+        state.clear();
+        state.handle_replace_text_in_range(None, "rust🦀code");
+        state.delete_word_backward();
+        assert_eq!(state.text, "rust🦀");
+        state.delete_word_backward();
+        assert_eq!(state.text, "rust");
+        state.delete_word_backward();
+        assert_eq!(state.text, "");
     }
 
     #[test]
@@ -895,5 +915,27 @@ mod tests {
         state.handle_replace_text_in_range(None, "测试搜索 文件.txt");
         state.select_word_at(6); // inside "测试搜索"
         assert_eq!(&state.text[state.selection.clone()], "测试搜索");
+
+        // Full-width punctuation and emoji are punctuation/symbols, not alphanumeric words
+        state.clear();
+        state.handle_replace_text_in_range(None, "测试，文件！");
+        // "测试" is 6 bytes (0..6), "，" is 3 bytes (6..9), "文件" is 6 bytes (9..15), "！" is 3 bytes (15..18)
+        state.select_word_at(0); // clicking on "测试"
+        assert_eq!(&state.text[state.selection.clone()], "测试");
+
+        state.select_word_at(6); // clicking on "，"
+        assert_eq!(&state.text[state.selection.clone()], "，");
+
+        state.select_word_at(9); // clicking on "文件"
+        assert_eq!(&state.text[state.selection.clone()], "文件");
+
+        state.select_word_at(15); // clicking on "！"
+        assert_eq!(&state.text[state.selection.clone()], "！");
+
+        state.clear();
+        state.handle_replace_text_in_range(None, "rust🦀code");
+        // "rust" is 4 bytes (0..4), "🦀" is 4 bytes (4..8), "code" is 4 bytes (8..12)
+        state.select_word_at(4); // clicking on "🦀"
+        assert_eq!(&state.text[state.selection.clone()], "🦀");
     }
 }
