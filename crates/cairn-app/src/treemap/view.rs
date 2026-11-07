@@ -657,6 +657,32 @@ impl CairnApp {
         cx.notify();
     }
 
+    /// Opens the canvas selection the way a double click does: a summary block becomes a
+    /// view-only layer, a directory drills down, a file opens in its associated application.
+    pub fn treemap_open_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(node) = self
+            .treemap_state
+            .as_ref()
+            .and_then(|st| st.selected_node().cloned())
+        else {
+            return;
+        };
+        if node.is_aggregate() {
+            let mut args = FluentArgs::new();
+            args.set("count", node.aggregate_count as i64);
+            args.set("count_text", format_count(node.aggregate_count));
+            let label = self.i18n.get_text_with_args("treemap_aggregate", &args);
+            if let Some(st) = self.treemap_state.as_mut() {
+                st.open_block(&node.path, label);
+            }
+            cx.notify();
+        } else if node.item.is_dir {
+            self.treemap_drill_down(&node.path, window, cx);
+        } else {
+            let _ = open_file(&node.path);
+        }
+    }
+
     /// Switches back to classic "All files" table filtered by `path`.
     pub fn switch_to_table_with_path(
         &mut self,
@@ -736,8 +762,25 @@ impl CairnApp {
                 ))
                 .into_any_element()
         } else {
-            let segments = path_segments(&current_dir);
-            let last = segments.len().saturating_sub(1);
+            // A virtual layer sits under the directory that owns the block, not under the canvas's
+            // own current directory: the crumbs keep every real level and the layer takes the last
+            // position as the current step.
+            let virtual_label = self
+                .treemap_state
+                .as_ref()
+                .and_then(|state| state.virtual_layer.as_ref())
+                .map(|layer| (layer.parent_path.clone(), layer.label.clone()));
+            let crumbs_root = virtual_label
+                .as_ref()
+                .map_or_else(|| current_dir.clone(), |(parent, _)| parent.clone());
+            let segments = path_segments(&crumbs_root);
+            // With a layer open no real segment is the current one: they all stay navigable, and
+            // the layer itself is the level the canvas is showing.
+            let last = if virtual_label.is_some() {
+                usize::MAX
+            } else {
+                segments.len().saturating_sub(1)
+            };
             let menu_for = self.treemap_path_menu_for.clone();
             let menu = self.treemap_path_menu.clone();
             // The product's focus frame belongs to the keyboard. A pointer click
@@ -985,6 +1028,20 @@ impl CairnApp {
                         ))
                     });
                 breadcrumb = breadcrumb.child(segment).child(arrow);
+            }
+            // The layer is a view-only level: it takes the last crumb position but is not a path,
+            // so it renders as the current label with no menu, focus or editing of its own.
+            if let Some((_, label)) = virtual_label {
+                // The segment before it already ends with its own arrow, which is the separator
+                // every crumb uses; a second one would read as another level.
+                breadcrumb = breadcrumb.child(
+                    div()
+                        .max_w(rems(PATH_SEGMENT_MAX_WIDTH))
+                        .truncate()
+                        .flex_shrink_0()
+                        .text_color(tokens.foreground)
+                        .child(label),
+                );
             }
             breadcrumb.into_any_element()
         };
@@ -1399,24 +1456,7 @@ impl CairnApp {
                         this.treemap_drill_back(window, cx);
                     }
                     "enter" => {
-                        let mut table_dir = None;
-                        if let Some(ref st) = this.treemap_state {
-                            if let Some(node) = st.selected_node().cloned() {
-                                if node.is_aggregate() {
-                                    // Folded siblings stay in this directory; the table is where
-                                    // they can be listed, the canvas cannot lay them out.
-                                    table_dir =
-                                        aggregate_parent_path(&node.path).map(str::to_string);
-                                } else if node.item.is_dir {
-                                    this.treemap_drill_down(&node.path, window, cx);
-                                } else {
-                                    let _ = open_file(&node.path);
-                                }
-                            }
-                        }
-                        if let Some(dir) = table_dir {
-                            this.switch_to_table_with_path(&dir, window, cx);
-                        }
+                        this.treemap_open_selected(window, cx);
                     }
                     "+" | "=" => {
                         if let Some(ref mut st) = this.treemap_state {
@@ -1752,13 +1792,13 @@ fn render_nested_node(
     // Filtered categories dim in place; the layout and selection path never
     // move. A selected node stays at full strength so it remains findable.
     let dimmed = !rcx.category_filter[category as usize] && !is_selected;
-    // Every directory uses its category color, including Folder and Other;
-    // an unknown folder falls back to the Folder tint, never a neutral ladder.
-    let header_bg = rcx.palette.directory_header(category, node.depth);
+    // Every directory uses its category color, including Folder and Other; an unknown folder
+    // falls back to the Folder tint.
+    let header_bg = rcx.palette.directory_header(category);
     let texture_fill = if is_dir || node.is_aggregate() {
         header_bg
     } else {
-        rcx.palette.fill(category, node.depth)
+        rcx.palette.fill(category)
     };
     let has_header = is_dir && node.header_rect.is_some();
     let is_label_sized =
@@ -1782,6 +1822,7 @@ fn render_nested_node(
         args.set("count", node.aggregate_count as i64);
         args.set("count_text", format_count(node.aggregate_count));
         let label = rcx.i18n.get_text_with_args("treemap_aggregate", &args);
+        let aggregate_label_text = label.clone();
         let tooltip = SharedString::from(format!(
             "{label}
 {size_str}"
@@ -1797,12 +1838,13 @@ fn render_nested_node(
         );
         let aggregate_view = rcx.view.clone();
         let aggregate_path = full_path.clone();
-        let aggregate_parent = aggregate_parent_path(&full_path).map(str::to_string);
         let block_bg = if dimmed {
             rcx.palette.dimmed_fill(header_bg)
         } else {
             header_bg
         };
+        let menu_label = aggregate_label_text.clone();
+        let menu_parent = aggregate_parent_path(&full_path).map(str::to_string);
         let block = div()
             .id(element_id("treemap-aggregate", &node.path))
             .rounded(px(TREEMAP_RADIUS))
@@ -1814,23 +1856,28 @@ fn render_nested_node(
             })
             .on_mouse_down(MouseButton::Left, move |event, window, cx| {
                 aggregate_view.update(cx, |this, cx| {
-                    let mut table_dir = None;
                     if let Some(ref mut st) = this.treemap_state {
                         st.selected_path = Some(aggregate_path.clone());
                         st.request_focus(window, cx);
+                        // A block is a container: the same double click that enters a directory
+                        // opens its folded items as a canvas layer.
                         if event.click_count == 2 {
-                            table_dir = aggregate_parent.clone();
+                            st.open_block(&aggregate_path, aggregate_label_text.clone());
                         }
-                    }
-                    if let Some(dir) = table_dir {
-                        this.switch_to_table_with_path(&dir, window, cx);
                     }
                     cx.notify();
                     cx.stop_propagation();
                 });
             });
         let block =
-            with_block_fill_interaction(block, block_bg, rcx.palette.is_dark(), is_selected);
+            with_block_fill_interaction(block, block_bg, rcx.palette.is_dark(), is_selected)
+                .context_menu(build_block_context_menu(
+                    rcx.view.clone(),
+                    full_path.clone(),
+                    menu_label,
+                    menu_parent,
+                    rcx.i18n,
+                ));
         elements.push(place_treemap_node(block.child(content), paint));
         if is_selected {
             push_selection_ring(elements, display, rcx.palette.selection(category));
@@ -1980,7 +2027,7 @@ fn render_nested_node(
     let leaf_fill = if is_dir {
         header_bg
     } else {
-        rcx.palette.fill(node.item.category, node.depth)
+        rcx.palette.fill(node.item.category)
     };
     let leaf_icon = if is_dir {
         IconName::Folder
@@ -2076,6 +2123,47 @@ fn category_icon(category: TreemapCategory) -> IconName {
 fn same_directory(left: &str, right: &str) -> bool {
     left.trim_end_matches('\\')
         .eq_ignore_ascii_case(right.trim_end_matches('\\'))
+}
+
+/// The menu a summary block can honour: it opens its folded items as a canvas layer and lists
+/// its owning directory in the table. The block has no filesystem path of its own, so path-based
+/// commands do not apply.
+fn build_block_context_menu(
+    view: Entity<CairnApp>,
+    path: String,
+    label: String,
+    parent_path: Option<String>,
+    i18n: &Rc<crate::shell::i18n::I18nManager>,
+) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
+    let i18n = i18n.clone();
+    move |menu: PopupMenu, _window: &mut Window, _cx: &mut Context<PopupMenu>| {
+        let open_view = view.clone();
+        let open_path = path.clone();
+        let open_label = label.clone();
+        let table_view = view.clone();
+        let table_parent = parent_path.clone();
+        menu.item(
+            PopupMenuItem::new(i18n.get_text("ctx_open")).on_click(move |_, _, cx| {
+                open_view.update(cx, |this, cx| {
+                    if let Some(st) = this.treemap_state.as_mut() {
+                        st.open_block(&open_path, open_label.clone());
+                    }
+                    cx.notify();
+                });
+            }),
+        )
+        .separator()
+        .item(
+            PopupMenuItem::new(i18n.get_text("view_in_table")).on_click(move |_, window, cx| {
+                if let Some(ref dir) = table_parent {
+                    let dir = dir.clone();
+                    table_view.update(cx, |this, cx| {
+                        this.switch_to_table_with_path(&dir, window, cx);
+                    });
+                }
+            }),
+        )
+    }
 }
 
 fn build_context_menu(

@@ -12,11 +12,21 @@ use cairn_core::path_cache::DirectoryPathCache;
 use cairn_core::sort::{PresortedIndices, SortColumn, SortDirection};
 use cairn_core::syntax::{parse_query_with, QueryDefaults, QueryExpr};
 use cairn_core::treemap::DirectorySizeIndex;
+use cairn_ntfs::mft::ExtractedItem;
+use cairn_ntfs::usn::{file_record_flags, UsnChange};
+use cairn_ntfs::volume::enumerate_fixed_drives;
 use cairn_protocol::message::{
-    TreeEntryData, ERROR_CODE_TREE_NOT_DIRECTORY, ERROR_CODE_TREE_NOT_INDEXED,
+    FileRowData, TreeEntryData, ERROR_CODE_TREE_NOT_DIRECTORY, ERROR_CODE_TREE_NOT_INDEXED,
     ERROR_CODE_TREE_TOO_LARGE,
 };
+use cairn_protocol::status::{
+    ContentIndexState, ContentIndexStatus, VolumeState, VolumeStatusSummary,
+};
 use rayon::prelude::*;
+use rayon::slice::ParallelSliceMut;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 
 /// Flattens a finished tree pre-order (parent before children) for the wire.
 fn flatten_tree(
@@ -50,17 +60,10 @@ fn budgeted_tree_depth(
         (count <= budget).then_some((depth, count))
     })
 }
-use cairn_ntfs::mft::ExtractedItem;
-use cairn_ntfs::usn::{file_record_flags, UsnChange};
-use cairn_ntfs::volume::enumerate_fixed_drives;
-use cairn_protocol::message::FileRowData;
-use cairn_protocol::status::{
-    ContentIndexState, ContentIndexStatus, VolumeState, VolumeStatusSummary,
-};
-use rayon::slice::ParallelSliceMut;
-use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+
+/// How far the matched-bytes walk climbs looking for a matched ancestor. NTFS path depth on a real
+/// volume stays well under this, so the cap only exists to end a corrupt parent chain.
+const MAX_ANCESTOR_HOPS: usize = 64;
 
 /// A journal backlog beyond this size is cheaper to recover with a fresh `$MFT` scan than by
 /// replaying hundreds of thousands of USN records. It also bounds how long a cold start can show
@@ -972,13 +975,44 @@ impl VolumeIndex {
     ///
     /// Directories are containers: they contribute zero here, so the total always describes the
     /// visible result set and never counts an excluded descendant through an ancestor's aggregate.
-    pub(crate) fn calculate_matched_file_bytes(&self, matched_indices: &[u32]) -> u64 {
-        matched_indices.iter().fold(0u64, |acc, &idx| {
-            self.records
-                .get(idx as usize)
-                .filter(|record| record.is_file())
-                .map_or(acc, |record| acc.saturating_add(record.size))
-        })
+    /// The space the matched items occupy, counted once at the highest matched point of each branch:
+    /// a directory contributes its aggregated size (its descendants are inside it), and a matched
+    /// item with a matched ancestor contributes nothing, so nesting never counts twice. A result set
+    /// of directories therefore reports a real total, the same figure the Treemap shows for that
+    /// content.
+    pub(crate) fn calculate_matched_bytes(&self, matched_indices: &[u32]) -> u64 {
+        let matched: HashSet<usize> = matched_indices
+            .iter()
+            .map(|&index| index as usize)
+            .collect();
+        matched
+            .iter()
+            .filter(|&&index| !self.has_matched_ancestor(index, &matched))
+            .fold(0u64, |total, &index| {
+                self.records
+                    .get(index)
+                    .map_or(total, |record| total.saturating_add(record.size))
+            })
+    }
+
+    /// `true` when any ancestor of `index` is itself in `matched`. The walk stops at the volume root
+    /// and at the hop cap, so a self-parented or detached record ends the chain instead of looping.
+    fn has_matched_ancestor(&self, index: usize, matched: &HashSet<usize>) -> bool {
+        let mut current = index;
+        for _ in 0..MAX_ANCESTOR_HOPS {
+            let Some(record) = self.records.get(current) else {
+                return false;
+            };
+            let parent = record.parent_idx;
+            if parent == u32::MAX || parent as usize == current {
+                return false;
+            }
+            if matched.contains(&(parent as usize)) {
+                return true;
+            }
+            current = parent as usize;
+        }
+        false
     }
 }
 
@@ -2219,8 +2253,7 @@ impl MultiVolumeEngine {
 
             for (drive, matches) in tantivy_vol_matches {
                 if let Some(vol) = lock.get(&drive) {
-                    total_bytes =
-                        total_bytes.saturating_add(vol.calculate_matched_file_bytes(&matches));
+                    total_bytes = total_bytes.saturating_add(vol.calculate_matched_bytes(&matches));
                 }
             }
         } else {
@@ -2308,7 +2341,7 @@ impl MultiVolumeEngine {
                     });
                 }
 
-                total_bytes = vol.calculate_matched_file_bytes(&vol_matches);
+                total_bytes = vol.calculate_matched_bytes(&vol_matches);
 
                 if single_vol_presorted && !sort_asc {
                     all_results.reverse();
@@ -2359,7 +2392,7 @@ impl MultiVolumeEngine {
                         });
                     }
                     total_bytes =
-                        total_bytes.saturating_add(vol.calculate_matched_file_bytes(&vol_matches));
+                        total_bytes.saturating_add(vol.calculate_matched_bytes(&vol_matches));
                 }
             }
 
@@ -3384,8 +3417,8 @@ mod tests {
         assert_eq!(total, 1);
         assert_eq!(bytes, 100);
 
-        // Directory rows carry no own file bytes. A folder-only result therefore reports zero
-        // rather than borrowing an aggregate that may include excluded descendants.
+        // A directory row carries its aggregate, so a folder-only result reports the space those
+        // folders occupy. `C:` covers `folder`, so the set is counted once, at `C:`.
         let (_, total, _, _, bytes) = engine.execute_search_multi(
             "folder:",
             &QueryDefaults::default(),
@@ -3394,7 +3427,10 @@ mod tests {
             &cancel,
         );
         assert_eq!(total, 2, "matches C: and folder");
-        assert_eq!(bytes, 0, "directory rows do not contribute bytes");
+        assert_eq!(
+            bytes, 600,
+            "the matched set is counted at its highest matched point"
+        );
 
         let (_, total, _, _, bytes) = engine.execute_search_multi(
             "folder",
@@ -3404,7 +3440,10 @@ mod tests {
             &cancel,
         );
         assert_eq!(total, 1, "matches only the folder named 'folder'");
-        assert_eq!(bytes, 0, "directory rows do not contribute bytes");
+        assert_eq!(
+            bytes, 300,
+            "the folder's own aggregate, not its matched descendants"
+        );
     }
 
     #[test]
@@ -4347,7 +4386,7 @@ mod tests {
     }
 
     #[test]
-    fn calculate_matched_file_bytes_counts_only_files() {
+    fn matched_bytes_are_counted_once_at_the_highest_matched_point() {
         let mut vol = VolumeIndex::new('C');
         // Simulate NTFS hierarchy:
         // FRN 5 (root, parent 5), aggregate size 1000
@@ -4438,21 +4477,25 @@ mod tests {
         let note_idx = vol.frn_to_idx[&30][0];
         let out_idx = vol.frn_to_idx[&50][0];
 
-        // 1. Folder-only results carry no file bytes; directories are containers.
+        // 1. The root covers every other match, so the whole set is the root's own aggregate.
         let all_folders = vec![root_idx, win_idx, sys_idx, users_idx];
-        assert_eq!(vol.calculate_matched_file_bytes(&all_folders), 0);
+        assert_eq!(vol.calculate_matched_bytes(&all_folders), 150);
 
-        // 2. A nested folder still contributes no aggregate size of its own.
+        // 2. Without the root, System32 sits inside the matched Windows and is covered by it.
         let subfolders = vec![win_idx, sys_idx, users_idx];
-        assert_eq!(vol.calculate_matched_file_bytes(&subfolders), 0);
+        assert_eq!(vol.calculate_matched_bytes(&subfolders), 50);
 
-        // 3. Pure file query: notepad + outside -> 50 + 100 = 150.
+        // 3. Sibling directories each count their own aggregate.
+        let siblings = vec![win_idx, users_idx];
+        assert_eq!(vol.calculate_matched_bytes(&siblings), 50);
+
+        // 4. Pure file query: nothing is covered by a match, so each file counts.
         let files = vec![note_idx, out_idx];
-        assert_eq!(vol.calculate_matched_file_bytes(&files), 150);
+        assert_eq!(vol.calculate_matched_bytes(&files), 150);
 
-        // 4. Mixed query: the directory contributes zero; only its matched files count.
+        // 5. A matched directory and its own matched file are counted once, at the directory.
         let mixed = vec![win_idx, note_idx, out_idx];
-        assert_eq!(vol.calculate_matched_file_bytes(&mixed), 150);
+        assert_eq!(vol.calculate_matched_bytes(&mixed), 150);
     }
 
     #[test]

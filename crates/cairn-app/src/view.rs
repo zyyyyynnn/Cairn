@@ -677,6 +677,7 @@ impl CairnApp {
         let menu = self.group_menu.clone();
         let mouse_view = view.clone();
         let click_view = view.clone();
+        let hover_view = view.clone();
 
         let trigger = Button::new(element_id("toolbar-menu", group.key()))
             .font_weight(FontWeight::MEDIUM)
@@ -711,6 +712,17 @@ impl CairnApp {
                 }
                 let view = click_view.clone();
                 view.update(cx, |this, cx| this.toggle_group(group, window, cx));
+            })
+            // The trigger sits outside the PopupMenu element, so the popup's own hover-out never
+            // sees the pointer land here. While a group is open, arriving on a trigger is the
+            // menu-bar navigation step: the same trigger drops the popup's item selection (closing
+            // any submenu), a different one switches the open group.
+            .on_hover(move |hovered, window, cx| {
+                if !*hovered {
+                    return;
+                }
+                let view = hover_view.clone();
+                view.update(cx, |this, cx| this.hover_group(group, window, cx));
             });
 
         div()

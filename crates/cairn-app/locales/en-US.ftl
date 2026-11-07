@@ -250,10 +250,7 @@ treemap_unavailable_too_large = This folder has too many direct children to load
 treemap_unavailable_not_directory = That path is a file; open a folder or go up one level
 treemap_unavailable_not_indexed = This path is not in the index; check the path or retry later
 treemap_empty_directory = This folder is empty
-treemap_aggregate = { $count ->
-    [one] { $count_text } item
-   *[other] { $count_text } items
-}
+treemap_aggregate = { $count_text } more
 treemap_status_selected = { $name }, { $path }, { $size } ({ $percent }%), { $date }
 treemap_status_summary = { $count ->
     [one] { $count_text } item { $size }

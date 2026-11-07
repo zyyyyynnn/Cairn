@@ -34,10 +34,9 @@ pub struct NestedTreemapLayoutNode {
     /// A non-zero node is a summary block: it has a synthetic parent path for
     /// stable identity and a tooltip, but no children.
     pub aggregate_count: usize,
-    /// How many items the folded category holds in the owning directory in total, including the
-    /// siblings of the same category that are painted as their own tiles. A summary block lists
-    /// this number when it is opened, so the two counts are shown side by side rather than mixed.
-    pub aggregate_category_total: usize,
+    /// The folded children as indices into the owning directory's children, so a view can open the
+    /// block as a canvas layer.
+    pub aggregate_member_indices: Vec<u32>,
 }
 
 /// Configuration options for hierarchical nested treemap layout.
@@ -110,7 +109,7 @@ impl NestedTreemapLayoutNode {
             children: Vec::new(),
             depth,
             aggregate_count: 0,
-            aggregate_category_total: 0,
+            aggregate_member_indices: Vec::new(),
         }
     }
 }
@@ -124,60 +123,6 @@ const TREEMAP_MAX_ASPECT_RATIO: f32 = 3.0;
 /// as an unlabeled strip.
 const TREEMAP_MIN_TILE_WIDTH: f32 = 46.0;
 const TREEMAP_MIN_TILE_HEIGHT: f32 = 30.0;
-
-/// A split summary must itself have enough pixels to carry a label; small
-/// containers keep one summary instead of a row of unreadable mini blocks.
-const MIN_SUMMARY_AREA: f32 = 64.0 * 48.0;
-/// Below this share a tail is not painted as a separate strip: its bytes stay
-/// in the directory header and the visible tiles fill the area. Without this
-/// floor a 1-2% tail is forced into a thin leftover edge.
-const MIN_VISIBLE_TAIL_SHARE: f32 = 0.05;
-
-/// The tail folded by category: one summary block per category present in the tail, the largest
-/// category first. A block always stands for one category of its directory, so opening it lists
-/// that category instead of an arbitrary size band, and the same block keeps the same identity
-/// when the canvas is resized.
-fn tail_category_groups(nodes: &[TreemapTreeNode], tail: &[usize]) -> Vec<TailGroup> {
-    let mut groups: Vec<TailGroup> = Vec::new();
-    for &index in tail {
-        let category = nodes[index].category;
-        match groups.iter_mut().find(|group| group.category == category) {
-            Some(group) => {
-                group.members.push(index);
-                group.size = group.size.saturating_add(nodes[index].size);
-            }
-            None => groups.push(TailGroup {
-                category,
-                members: vec![index],
-                size: nodes[index].size,
-            }),
-        }
-    }
-    groups.sort_by(|a, b| {
-        b.size
-            .cmp(&a.size)
-            .then_with(|| a.category.machine_key().cmp(b.category.machine_key()))
-    });
-    groups
-}
-
-/// One category's folded tail: its members, in the directory's size order, and their bytes.
-struct TailGroup {
-    category: TreemapCategory,
-    members: Vec<usize>,
-    size: u64,
-}
-
-/// How many children each category holds in this directory, folded and displayed alike. A summary
-/// block reports this when it is opened, because listing the category includes the siblings that
-/// are painted as their own tiles.
-fn category_totals(nodes: &[TreemapTreeNode]) -> [usize; TreemapCategory::COUNT] {
-    let mut totals = [0usize; TreemapCategory::COUNT];
-    for node in nodes {
-        totals[node.category as usize] += 1;
-    }
-    totals
-}
 
 /// Marker between a summary block's owning directory and its category tag.
 const AGGREGATE_MARKER: &str = "::<tail:";
@@ -202,13 +147,13 @@ pub fn aggregate_parent_path(path: &str) -> Option<&str> {
 enum DisplayEntry {
     /// A real child, by index into the directory's children.
     Node(usize),
-    /// A summary block folding the tail members of one category.
+    /// One category's folded tail: the members of that category the canvas did not keep as tiles.
     Aggregate {
         path: String,
         members: Vec<usize>,
         size: u64,
+        /// The category most of the folded bytes belong to; the block takes that tone.
         category: TreemapCategory,
-        category_total: usize,
     },
 }
 
@@ -262,42 +207,65 @@ fn tile_fits(rect: TreemapRect) -> bool {
         && !(shorter > 0.0 && rect.longer_side() / shorter > TREEMAP_MAX_ASPECT_RATIO)
 }
 
-/// Builds the display entries for the kept children plus the summary groups
-/// of the tail. A tail too small to paint is left out entirely: its bytes
-/// stay in the directory header and the visible tiles fill the area.
+/// Builds the display entries for the kept children plus one summary block per category present in
+/// the tail. A block always exists for its category: a small tail may not silently disappear into
+/// the directory's total, and no single block may swallow every child of the directory.
 fn display_entries(
     nodes: &[TreemapTreeNode],
     parent: &str,
     kept: &[usize],
     tail: &[usize],
-    total_size: u64,
-    bounds_area: f32,
+    _total_size: u64,
+    _bounds_area: f32,
 ) -> Vec<DisplayEntry> {
-    let mut entries = Vec::with_capacity(kept.len() + TreemapCategory::COUNT);
+    let mut entries = Vec::with_capacity(kept.len() + 1);
     entries.extend(kept.iter().map(|&index| DisplayEntry::Node(index)));
-
-    let tail_size: u64 = tail.iter().map(|&index| nodes[index].size).sum();
-    let tail_share = if total_size > 0 {
-        tail_size as f32 / total_size as f32
-    } else {
-        0.0
-    };
-    if tail_share < MIN_VISIBLE_TAIL_SHARE || bounds_area * tail_share < MIN_SUMMARY_AREA {
+    if tail.is_empty() {
         return entries;
     }
-
+    // One block per category: a block never stands for a mix, so its tone and its label agree.
     let parent = parent.trim_end_matches('\\');
-    let totals = category_totals(nodes);
     for group in tail_category_groups(nodes, tail) {
         entries.push(DisplayEntry::Aggregate {
             path: aggregate_path(parent, group.category),
             members: group.members,
             size: group.size,
             category: group.category,
-            category_total: totals[group.category as usize],
         });
     }
     entries
+}
+
+/// One category's folded tail, largest bytes first.
+struct TailGroup {
+    category: TreemapCategory,
+    members: Vec<usize>,
+    size: u64,
+}
+
+/// Folds the tail by category, so the canvas can never show one block that mixes several.
+fn tail_category_groups(nodes: &[TreemapTreeNode], tail: &[usize]) -> Vec<TailGroup> {
+    let mut groups: Vec<TailGroup> = Vec::new();
+    for &index in tail {
+        let category = nodes[index].category;
+        match groups.iter_mut().find(|group| group.category == category) {
+            Some(group) => {
+                group.members.push(index);
+                group.size = group.size.saturating_add(nodes[index].size);
+            }
+            None => groups.push(TailGroup {
+                category,
+                members: vec![index],
+                size: nodes[index].size,
+            }),
+        }
+    }
+    groups.sort_by(|a, b| {
+        b.size
+            .cmp(&a.size)
+            .then_with(|| a.category.machine_key().cmp(b.category.machine_key()))
+    });
+    groups
 }
 
 /// Plans a directory with more than one sized child: keeps the largest
@@ -477,7 +445,7 @@ fn layout_child(
         children,
         depth,
         aggregate_count: 0,
-        aggregate_category_total: 0,
+        aggregate_member_indices: Vec::new(),
     }
 }
 
@@ -520,10 +488,9 @@ pub fn layout_nested_treemap(
                 members,
                 size,
                 category,
-                category_total,
             } => NestedTreemapLayoutNode {
                 aggregate_count: members.len(),
-                aggregate_category_total: *category_total,
+                aggregate_member_indices: members.iter().map(|&index| index as u32).collect(),
                 ..NestedTreemapLayoutNode::leaf(
                     TreemapItem {
                         id: 0,
@@ -742,15 +709,14 @@ mod tests {
         assert!(aggregate.aggregate_count >= 2);
         assert!(aggregate.children.is_empty());
         assert!(aggregate.header_rect.is_none());
-        assert!(aggregate.path.ends_with("::<tail:other>"));
+        assert!(aggregate.path.contains("::<tail:"));
         assert_eq!(layout.iter().map(|node| node.item.size).sum::<u64>(), total);
     }
 
-    /// A tail that would swallow most of a directory is folded by category: one block per category
-    /// present in the tail, never several arbitrary byte bands, so a block always names a category
-    /// a person can list.
+    /// A tail of one category paints one block carrying every child the canvas did not keep; a tail
+    /// of several categories paints one block per category instead.
     #[test]
-    fn a_large_tail_folds_into_one_block_per_category() {
+    fn a_single_category_tail_folds_into_one_block() {
         let children = layout_test_children(60, 100, "bin");
         let total: u64 = children.iter().map(|node| node.size).sum();
         let bounds = TreemapRect::new(0.0, 0.0, 800.0, 600.0);
@@ -767,16 +733,69 @@ mod tests {
             "one category in the tail must be one block, not several size bands"
         );
         assert_eq!(
-            aggregates
-                .iter()
-                .map(|node| node.aggregate_count)
-                .sum::<usize>(),
+            aggregates[0].aggregate_count,
             60 - layout
                 .iter()
                 .filter(|node| node.aggregate_count == 0)
                 .count()
         );
-        assert!(aggregates.iter().all(|node| node.path.contains("::<tail:")));
+        assert!(aggregates[0].path.contains("::<tail:"));
+        assert_eq!(layout.iter().map(|node| node.item.size).sum::<u64>(), total);
+    }
+
+    /// A tail holding several categories paints one block per category: no block mixes categories
+    /// and no block swallows the whole tail, so each block names a set a person can open.
+    #[test]
+    fn a_mixed_tail_folds_into_one_block_per_category() {
+        let mut children = Vec::new();
+        for index in 0..40 {
+            children.push(TreemapTreeNode::new_file(
+                index as u64 + 1,
+                format!("clip{index:02}.mp4"),
+                10,
+                0,
+            ));
+        }
+        for index in 0..40 {
+            children.push(TreemapTreeNode::new_file(
+                index as u64 + 41,
+                format!("note{index:02}.txt"),
+                10,
+                0,
+            ));
+        }
+        let total: u64 = children.iter().map(|node| node.size).sum();
+        let bounds = TreemapRect::new(0.0, 0.0, 800.0, 600.0);
+        let mut options = NestedTreemapOptions::from_detail_level(3);
+        options.max_children = 20;
+        options.min_tile_area = 1200.0;
+
+        let layout = layout_nested_treemap(&children, "C:\\", bounds, &options, 1);
+        let aggregates: Vec<_> = layout
+            .iter()
+            .filter(|node| node.aggregate_count > 0)
+            .collect();
+        assert_eq!(
+            aggregates.len(),
+            2,
+            "two categories in the tail, two blocks"
+        );
+        let mut categories: Vec<_> = aggregates.iter().map(|node| node.item.category).collect();
+        categories.sort_by_key(|category| category.machine_key());
+        categories.dedup();
+        assert_eq!(categories.len(), 2, "each block stands for one category");
+        let tiles = layout
+            .iter()
+            .filter(|node| node.aggregate_count == 0)
+            .count();
+        assert_eq!(
+            aggregates
+                .iter()
+                .map(|node| node.aggregate_count)
+                .sum::<usize>(),
+            children.len() - tiles,
+            "the blocks together fold exactly the children that are not tiles"
+        );
         assert_eq!(layout.iter().map(|node| node.item.size).sum::<u64>(), total);
     }
 
@@ -861,10 +880,10 @@ mod tests {
         assert!(layout.iter().all(|node| node.aggregate_count == 0));
     }
 
-    /// A summary block stands for exactly one category, and it reports how many items that category
-    /// holds in the directory in total: that is the set opening the block lists.
+    /// The block folds every child that did not become a tile, and it takes the tone of the bytes
+    /// it holds, so its colour never implies a category the block does not stand for.
     #[test]
-    fn a_summary_block_stands_for_one_category() {
+    fn the_block_folds_every_child_that_is_not_a_tile() {
         let mut children = Vec::new();
         for index in 0..30 {
             children.push(TreemapTreeNode::new_file(
@@ -893,21 +912,17 @@ mod tests {
             .iter()
             .filter(|node| node.aggregate_count > 0)
             .collect();
-        assert_eq!(
-            aggregates.len(),
-            1,
-            "only the code category reaches the tail, so only one block appears"
-        );
-        assert_eq!(aggregates[0].item.category, TreemapCategory::Code);
-        assert_eq!(aggregates[0].aggregate_category_total, 30);
-        let displayed_code = layout
+        assert_eq!(aggregates.len(), 1);
+        let block = aggregates[0];
+        let tiles = layout
             .iter()
-            .filter(|node| node.aggregate_count == 0 && node.item.category == TreemapCategory::Code)
+            .filter(|node| node.aggregate_count == 0)
             .count();
+        assert_eq!(block.aggregate_count, children.len() - tiles);
         assert_eq!(
-            aggregates[0].aggregate_count + displayed_code,
-            aggregates[0].aggregate_category_total,
-            "a block folds exactly the category members the canvas did not show"
+            block.item.category,
+            TreemapCategory::Code,
+            "the folded bytes are code, so the block carries the code tone"
         );
         assert_eq!(layout.iter().map(|node| node.item.size).sum::<u64>(), total);
     }
@@ -1091,33 +1106,33 @@ mod tests {
     #[test]
     fn an_aggregate_parent_is_the_real_directory_that_owns_the_tail() {
         assert_eq!(
-            aggregate_parent_path(&aggregate_path(r"C:\Users\ZYN", TreemapCategory::Document)),
+            aggregate_parent_path(&aggregate_path(r"C:\Users\ZYN", TreemapCategory::Folder)),
             Some(r"C:\Users\ZYN")
         );
         assert_eq!(
-            aggregate_parent_path(&aggregate_path(r"C:\Users\ZYN", TreemapCategory::Code)),
-            Some(r"C:\Users\ZYN")
-        );
-        assert_eq!(
-            aggregate_parent_path(r"C:\Users\ZYN::<tail:archive>"),
+            aggregate_parent_path(r"C:\Users\ZYN::<tail:folder>"),
             Some(r"C:\Users\ZYN")
         );
         assert_eq!(aggregate_parent_path(r"C:\Users\ZYN"), None);
-        assert_eq!(aggregate_parent_path("::<tail:code>"), None);
+        assert_eq!(aggregate_parent_path("::<tail:folder>"), None);
     }
 
-    /// A block's identity is its category, so the same category keeps the same identity whatever
-    /// the canvas size did to the fold.
+    /// A block's identity is its directory and its category, so a relayout cannot re-key it and two
+    /// categories never share one block.
     #[test]
-    fn a_category_block_keeps_one_identity_across_resizes() {
-        let parent = r"C:\Windows\WinSxS";
+    fn a_block_identity_is_its_directory_and_category() {
+        let first = aggregate_path(r"C:\Windows\WinSxS", TreemapCategory::Folder);
         assert_eq!(
-            aggregate_path(parent, TreemapCategory::Folder),
-            aggregate_path(parent, TreemapCategory::Folder)
+            first,
+            aggregate_path(r"C:\Windows\WinSxS", TreemapCategory::Folder)
         );
         assert_ne!(
-            aggregate_path(parent, TreemapCategory::Folder),
-            aggregate_path(parent, TreemapCategory::Code)
+            first,
+            aggregate_path(r"C:\Windows\WinSxS", TreemapCategory::Code)
+        );
+        assert_ne!(
+            first,
+            aggregate_path(r"C:\Windows\System32", TreemapCategory::Folder)
         );
     }
 }

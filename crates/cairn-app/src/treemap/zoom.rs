@@ -429,7 +429,7 @@ mod tests {
             children,
             depth: 0,
             aggregate_count,
-            aggregate_category_total: aggregate_count,
+            aggregate_member_indices: Vec::new(),
         }
     }
 

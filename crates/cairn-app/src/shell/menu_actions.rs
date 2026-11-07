@@ -562,6 +562,22 @@ impl CairnApp {
         }
     }
 
+    /// Pointer arrival on a menu-bar trigger while a group is open. The trigger lives outside the
+    /// PopupMenu element, so the popup's hover-out never clears a submenu item when the pointer
+    /// leaves for the bar: returning to the open trigger rebuilds its popup without a selection,
+    /// and arriving on a different trigger switches the open menu to it. A keyboard-driven
+    /// selection is left intact.
+    pub fn hover_group(&mut self, group: MenuGroup, window: &mut Window, cx: &mut Context<Self>) {
+        if window.last_input_was_keyboard() {
+            return;
+        }
+        match self.open_group {
+            Some(open) if open == group => self.build_group_menu(group, window, cx),
+            Some(_) => self.show_group(group, window, cx),
+            None => {}
+        }
+    }
+
     pub fn set_group_open(
         &mut self,
         group: MenuGroup,
@@ -1178,22 +1194,7 @@ impl CairnApp {
             return;
         }
         if self.drive_view.is_some() {
-            if let Some(ref st) = self.treemap_state {
-                if let Some(node) = st.selected_node().cloned() {
-                    if node.is_aggregate() {
-                        // A summary block folds the tail of one category in this same directory, so
-                        // there is no level to enter. The table lists that category instead.
-                        if let Some(parent) = cairn_core::treemap::aggregate_parent_path(&node.path)
-                        {
-                            self.switch_to_table_with_path(parent, window, cx);
-                        }
-                    } else if node.item.is_dir {
-                        self.treemap_drill_down(&node.path, window, cx);
-                    } else {
-                        let _ = open_file(&node.path);
-                    }
-                }
-            }
+            self.treemap_open_selected(window, cx);
             cx.notify();
             return;
         }

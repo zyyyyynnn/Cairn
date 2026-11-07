@@ -473,9 +473,9 @@ impl CairnApp {
                             // fully opaque so the row remains readable while it is a live
                             // toggle (WCAG 1.4.3).
                             .bg(if visible {
-                                palette.fill(category, 0)
+                                palette.fill(category)
                             } else {
-                                palette.dimmed_fill(palette.fill(category, 0))
+                                palette.dimmed_fill(palette.fill(category))
                             }),
                     )
                     .child(div().whitespace_nowrap().child(label)),

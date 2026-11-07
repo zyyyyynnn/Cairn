@@ -192,7 +192,7 @@ mod tests {
         args.set("size", "1 KB");
         assert_eq!(
             plain(en.get_text_with_args("treemap_aggregate", &args)),
-            "1 item"
+            "1 more"
         );
         assert_eq!(
             plain(en.get_text_with_args("treemap_status_summary", &args)),
@@ -200,17 +200,17 @@ mod tests {
         );
         assert_eq!(
             plain(zh.get_text_with_args("treemap_aggregate", &args)),
-            "1 个项目"
+            "其余 1 项"
         );
         args.set("count", 2i64);
         args.set("count_text", "2");
         assert_eq!(
             plain(en.get_text_with_args("treemap_aggregate", &args)),
-            "2 items"
+            "2 more"
         );
         assert_eq!(
             plain(zh.get_text_with_args("treemap_aggregate", &args)),
-            "2 个项目"
+            "其余 2 项"
         );
     }
 
