@@ -396,9 +396,9 @@ impl CairnApp {
                                 // The entrance starts with the first visible content, not when the
                                 // request left the input handler. An empty answer reveals the state
                                 // band through the same entrance.
-                                this.note_table_content();
+                                this.note_table_content(cx);
                                 if total_matches == 0 {
-                                    this.note_table_empty();
+                                    this.note_table_empty(cx);
                                 }
                                 // The band shows the exact total only after the result set has
                                 // settled; there is no animated or partial number.

@@ -399,14 +399,14 @@ fn merge_bin_selection_keys(
 impl CairnApp {
     /// Rebuilds the visible bin rows from the full listing and the current search text. The
     /// search box filters this location in place instead of launching an index query.
-    pub(crate) fn apply_recycle_bin_filter(&mut self, reset_scroll: bool) {
+    pub(crate) fn apply_recycle_bin_filter(&mut self, reset_scroll: bool, cx: &mut Context<Self>) {
         if self.recycle_bin.error().is_some() {
             return;
         }
         let needle = self.query.search_input.text.trim().to_string();
         let filtered = filter_items(self.recycle_bin.all(), &needle, self.query.case_sensitive);
         self.recycle_bin.set_rows(filtered);
-        self.install_recycle_bin_rows(reset_scroll);
+        self.install_recycle_bin_rows(reset_scroll, cx);
         self.restore_bin_selection();
     }
 
@@ -450,7 +450,7 @@ impl CairnApp {
             return;
         }
         self.sync_bin_selection_keys();
-        self.apply_recycle_bin_filter(true);
+        self.apply_recycle_bin_filter(true, cx);
         cx.notify();
     }
 
@@ -465,14 +465,14 @@ impl CairnApp {
             return;
         }
         self.sync_bin_selection_keys();
-        self.apply_recycle_bin_filter(true);
+        self.apply_recycle_bin_filter(true, cx);
         self.query.search_focus.focus(window, cx);
         cx.notify();
     }
 
     /// Rebuilds the table's fetched window from the first bin page. `reset_scroll` is false when
     /// an operation removed or restored a row and the person should stay where they were reading.
-    pub(crate) fn install_recycle_bin_rows(&mut self, reset_scroll: bool) {
+    pub(crate) fn install_recycle_bin_rows(&mut self, reset_scroll: bool, cx: &mut Context<Self>) {
         let Some(items) = self.recycle_bin.rows() else {
             return;
         };
@@ -486,9 +486,9 @@ impl CairnApp {
             .collect();
         let saved_scroll = self.results.table.scroll_top;
         self.results.table.set_rows(rows, total);
-        self.note_table_content();
+        self.note_table_content(cx);
         if total == 0 {
-            self.note_table_empty();
+            self.note_table_empty(cx);
         }
         if reset_scroll {
             self.results.rows_scroll.set_offset(Point::default());
@@ -553,7 +553,7 @@ impl CairnApp {
         let ascending = self.results.table.sort_asc;
         self.sync_bin_selection_keys();
         self.recycle_bin.sort(column, ascending);
-        self.apply_recycle_bin_filter(true);
+        self.apply_recycle_bin_filter(true, cx);
         cx.notify();
     }
 
@@ -608,7 +608,7 @@ impl CairnApp {
                 if self.recycle_bin.all().is_empty() && !self.query.search_input.text.is_empty() {
                     self.query.search_input.clear();
                 }
-                self.apply_recycle_bin_filter(reset_scroll);
+                self.apply_recycle_bin_filter(reset_scroll, cx);
                 if let Some(anchor) = anchor {
                     if self.recycle_bin.selected_keys().is_empty()
                         && self.results.table.selected_indices.is_empty()
@@ -626,7 +626,7 @@ impl CairnApp {
             Err(reason) => {
                 tracing::warn!("recycle bin load failed: {reason}");
                 self.recycle_bin.fail(reason);
-                self.install_recycle_bin_rows(true);
+                self.install_recycle_bin_rows(true, cx);
             }
         }
         cx.notify();

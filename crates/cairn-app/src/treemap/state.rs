@@ -124,7 +124,9 @@ pub struct TreemapViewState {
     /// Last observed window scale factor for device-pixel snapping.
     pub(super) last_scale_factor: f32,
     /// Generation counter for the scan/load overlay fade-out animation.
-    pub(super) scan_fade_epoch: u64,
+    pub(crate) scan_fade_epoch: u64,
+    /// Highest scan fade epoch for which a cleanup timer has been scheduled.
+    pub(crate) scan_fade_timer_armed: u64,
     /// Loaded in-memory index, if available from index files
     cached_index: Option<Arc<VolumeTreemapIndex>>,
     /// Whether a service tree request is in flight.
@@ -175,6 +177,7 @@ impl TreemapViewState {
             last_window_size: (0.0, 0.0),
             last_scale_factor: 1.0,
             scan_fade_epoch: 0,
+            scan_fade_timer_armed: 0,
             cached_index,
             is_scanning: false,
             request_epoch: 0,
@@ -212,6 +215,7 @@ impl TreemapViewState {
             last_window_size: (0.0, 0.0),
             last_scale_factor: 1.0,
             scan_fade_epoch: 0,
+            scan_fade_timer_armed: 0,
             cached_index: None,
             is_scanning: false,
             request_epoch: 0,

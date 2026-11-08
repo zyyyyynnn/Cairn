@@ -230,14 +230,14 @@ fn display_entries(
     // One block per category: a block never stands for a mix, so its tone and its label agree.
     let parent_buf;
     let parent = if is_drive_root(parent) {
-        if parent.ends_with('\\') {
+        if parent.len() == 3 && parent.ends_with('\\') {
             parent
         } else {
-            parent_buf = format!("{}\\", parent.trim_end_matches('\\'));
+            parent_buf = format!("{}\\", parent.trim_end_matches(['\\', '/']));
             &parent_buf
         }
     } else {
-        parent.trim_end_matches('\\')
+        parent.trim_end_matches(['\\', '/'])
     };
     for group in tail_category_groups(nodes, tail) {
         entries.push(DisplayEntry::Aggregate {
@@ -1177,5 +1177,25 @@ mod tests {
             layout.iter().all(|node| node.aggregate_count == 0),
             "no aggregate blocks should be generated when allow_aggregates is false"
         );
+    }
+
+    #[test]
+    fn forward_slash_and_drive_root_produce_clean_aggregate_paths() {
+        let nodes = vec![
+            TreemapTreeNode::new_file(1, "a.txt".to_string(), 10, 0),
+            TreemapTreeNode::new_file(2, "b.txt".to_string(), 10, 0),
+        ];
+        let entries_forward_drive = display_entries(&nodes, "C:/", &[0], &[1], 20, 1000.0);
+        let DisplayEntry::Aggregate { path, .. } = &entries_forward_drive[1] else {
+            panic!("expected aggregate entry");
+        };
+        assert_eq!(path, "C:\\::<tail:documents>");
+
+        let entries_forward_dir =
+            display_entries(&nodes, "C:/Users/Alice/", &[0], &[1], 20, 1000.0);
+        let DisplayEntry::Aggregate { path, .. } = &entries_forward_dir[1] else {
+            panic!("expected aggregate entry");
+        };
+        assert_eq!(path, "C:/Users/Alice::<tail:documents>");
     }
 }

@@ -272,6 +272,8 @@ impl CairnApp {
         self.treemap_state = Some(state);
         if let Some(path) = scan_target {
             self.start_treemap_scan(path, cx);
+        } else {
+            self.arm_treemap_scan_fade_cleanup(cx);
         }
         cx.notify();
     }
@@ -577,7 +579,38 @@ impl CairnApp {
                     }
                     Err(reason) => state.mark_unavailable(reason),
                 }
+                this.arm_treemap_scan_fade_cleanup(cx);
                 cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Arms the Treemap scan fade cleanup timer if a new scan fade epoch is active.
+    ///
+    /// The timer runs on the background executor and cleans up the fade epoch
+    /// after `MASK_DISSOLVE_CLEANUP`, ensuring `render()` remains pure and never
+    /// spawns redundant tasks across animation frames.
+    pub(crate) fn arm_treemap_scan_fade_cleanup(&mut self, cx: &mut Context<Self>) {
+        let Some(ref mut state) = self.treemap_state else {
+            return;
+        };
+        let epoch = state.scan_fade_epoch;
+        if epoch == 0 || state.scan_fade_timer_armed >= epoch {
+            return;
+        }
+        state.scan_fade_timer_armed = epoch;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(crate::shell::motion::MASK_DISSOLVE_CLEANUP)
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if let Some(ref mut state) = this.treemap_state {
+                    if state.scan_fade_epoch == epoch {
+                        state.scan_fade_epoch = 0;
+                        cx.notify();
+                    }
+                }
             });
         })
         .detach();
@@ -609,6 +642,8 @@ impl CairnApp {
         };
         if let Some(path) = scan_target {
             self.start_treemap_scan(path, cx);
+        } else {
+            self.arm_treemap_scan_fade_cleanup(cx);
         }
         self.focus_treemap_canvas(window, cx);
         cx.notify();
@@ -625,6 +660,8 @@ impl CairnApp {
         };
         if let Some(path) = scan_target {
             self.start_treemap_scan(path, cx);
+        } else {
+            self.arm_treemap_scan_fade_cleanup(cx);
         }
         self.focus_treemap_canvas(window, cx);
         cx.notify();
@@ -640,6 +677,8 @@ impl CairnApp {
         };
         if let Some(path) = scan_target {
             self.start_treemap_scan(path, cx);
+        } else {
+            self.arm_treemap_scan_fade_cleanup(cx);
         }
         self.focus_treemap_canvas(window, cx);
         cx.notify();
@@ -654,6 +693,8 @@ impl CairnApp {
         };
         if let Some(path) = scan_target {
             self.start_treemap_scan(path, cx);
+        } else {
+            self.arm_treemap_scan_fade_cleanup(cx);
         }
         self.focus_treemap_canvas(window, cx);
         cx.notify();
@@ -1465,6 +1506,7 @@ impl CairnApp {
                         if let Some(ref mut st) = this.treemap_state {
                             let lvl = (st.detail_level + 1).min(5);
                             st.set_detail_level(lvl);
+                            this.arm_treemap_scan_fade_cleanup(cx);
                             cx.notify();
                         }
                     }
@@ -1472,6 +1514,7 @@ impl CairnApp {
                         if let Some(ref mut st) = this.treemap_state {
                             let lvl = st.detail_level.saturating_sub(1).max(1);
                             st.set_detail_level(lvl);
+                            this.arm_treemap_scan_fade_cleanup(cx);
                             cx.notify();
                         }
                     }
@@ -1543,23 +1586,6 @@ impl CairnApp {
                 )
             });
 
-        if state.scan_fade_epoch > 0 {
-            let epoch = state.scan_fade_epoch;
-            cx.spawn(async move |this, cx| {
-                cx.background_executor()
-                    .timer(crate::shell::motion::MASK_DISSOLVE_CLEANUP)
-                    .await;
-                let _ = this.update(cx, |this, cx| {
-                    if let Some(ref mut state) = this.treemap_state {
-                        if state.scan_fade_epoch == epoch {
-                            state.scan_fade_epoch = 0;
-                            cx.notify();
-                        }
-                    }
-                });
-            })
-            .detach();
-        }
         canvas_element.into_any_element()
     }
 }

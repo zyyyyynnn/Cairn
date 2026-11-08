@@ -356,24 +356,9 @@ impl CairnApp {
             Some(self.render_service_offline_state(tokens, cx))
         };
 
-        // New content paints hidden for one frame, then a deferred pass starts
-        // the fade. The header is outside this wrapper, so a refresh never
-        // blanks or re-fades the column labels.
-        if self.table_reveal_fade_epoch > 0 {
-            let fade_epoch = self.table_reveal_fade_epoch;
-            cx.spawn(async move |this, cx| {
-                cx.background_executor()
-                    .timer(crate::shell::motion::MASK_DISSOLVE_CLEANUP)
-                    .await;
-                let _ = this.update(cx, |this, cx| {
-                    if this.table_reveal_fade_epoch == fade_epoch {
-                        this.table_reveal_fade_epoch = 0;
-                        cx.notify();
-                    }
-                });
-            })
-            .detach();
-        }
+        // The header is outside this wrapper, so a refresh never blanks or
+        // re-fades the column labels. The fade overlay dissolves over
+        // MASK_DISSOLVE, with a cleanup timer scheduled at the entrance source.
         let has_state = state.is_some();
         let rows = rows.map(|body| body.into_any_element());
         let state = state.map(|body| body.into_any_element());

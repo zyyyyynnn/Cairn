@@ -391,8 +391,10 @@ impl SearchInputState {
     /// Moves cursor one character left (UTF-8 safe).
     pub fn move_cursor_left(&mut self, select: bool) {
         if select {
-            let cursor = self.selection.end;
-            let prev_boundary = self.text[..cursor.min(self.text.len())]
+            let cursor = self
+                .text
+                .floor_char_boundary(self.selection.end.min(self.text.len()));
+            let prev_boundary = self.text[..cursor]
                 .char_indices()
                 .last()
                 .map(|(idx, _)| idx)
@@ -402,8 +404,10 @@ impl SearchInputState {
             let (start, _) = self.normalized_selection();
             self.selection = start..start;
         } else {
-            let cursor = self.selection.start;
-            let prev_boundary = self.text[..cursor.min(self.text.len())]
+            let cursor = self
+                .text
+                .floor_char_boundary(self.selection.start.min(self.text.len()));
+            let prev_boundary = self.text[..cursor]
                 .char_indices()
                 .last()
                 .map(|(idx, _)| idx)
@@ -416,7 +420,9 @@ impl SearchInputState {
     /// Moves cursor one character right (UTF-8 safe).
     pub fn move_cursor_right(&mut self, select: bool) {
         if select {
-            let cursor = self.selection.end;
+            let cursor = self
+                .text
+                .floor_char_boundary(self.selection.end.min(self.text.len()));
             let next_boundary = if cursor < self.text.len() {
                 self.text[cursor..]
                     .chars()
@@ -431,7 +437,9 @@ impl SearchInputState {
             let (_, end) = self.normalized_selection();
             self.selection = end..end;
         } else {
-            let cursor = self.selection.end;
+            let cursor = self
+                .text
+                .floor_char_boundary(self.selection.end.min(self.text.len()));
             let next_boundary = if cursor < self.text.len() {
                 self.text[cursor..]
                     .chars()
@@ -477,7 +485,9 @@ impl SearchInputState {
             self.text = updated;
             self.selection = start..start;
         } else if self.selection.start > 0 {
-            let cursor = self.selection.start.min(self.text.len());
+            let cursor = self
+                .text
+                .floor_char_boundary(self.selection.start.min(self.text.len()));
             if let Some((prev_idx, _)) = self.text[..cursor].char_indices().last() {
                 self.push_undo_snapshot();
                 let mut updated = String::with_capacity(self.text.len());
@@ -500,7 +510,9 @@ impl SearchInputState {
             self.text = updated;
             self.selection = start..start;
         } else if self.selection.start < self.text.len() {
-            let cursor = self.selection.start;
+            let cursor = self
+                .text
+                .floor_char_boundary(self.selection.start.min(self.text.len()));
             if let Some(ch) = self.text[cursor..].chars().next() {
                 self.push_undo_snapshot();
                 let next_idx = cursor + ch.len_utf8();
@@ -516,7 +528,7 @@ impl SearchInputState {
 
     /// Finds the preceding word boundary for Ctrl+Left or Ctrl+Backspace.
     pub fn find_prev_word_boundary(&self, cursor: usize) -> usize {
-        let cursor = cursor.min(self.text.len());
+        let cursor = self.text.floor_char_boundary(cursor.min(self.text.len()));
         if cursor == 0 {
             return 0;
         }
@@ -554,6 +566,7 @@ impl SearchInputState {
     /// Finds the following word boundary for Ctrl+Right or Ctrl+Delete.
     pub fn find_next_word_boundary(&self, cursor: usize) -> usize {
         let len = self.text.len();
+        let cursor = self.text.floor_char_boundary(cursor.min(len));
         if cursor >= len {
             return len;
         }
@@ -721,7 +734,7 @@ mod tests {
 
     #[test]
     fn test_utf16_utf8_mapper() {
-        let s = "content:架构设计 v1";
+        let s = "content:架构设计";
         let mapper = Utf16Utf8Mapper::new(s);
 
         // "架构设计" has 4 Chinese characters, each 3 bytes in UTF-8 and 1 code unit in UTF-16
@@ -1083,5 +1096,19 @@ mod tests {
             5..0,
             "Shift+Home must extend selection to 0 while keeping anchor"
         );
+    }
+
+    #[test]
+    fn word_boundary_guards_against_non_char_boundary_offsets() {
+        let state = SearchInputState {
+            text: "文档检索".to_string(),
+            ..Default::default()
+        };
+        // Byte index 1 and 2 are inside '文' (0..3)
+        // Without UTF-8 char boundary guard, this panics with slice error
+        let prev = state.find_prev_word_boundary(1);
+        assert_eq!(prev, 0);
+        let next = state.find_next_word_boundary(1);
+        assert_eq!(next, 12);
     }
 }

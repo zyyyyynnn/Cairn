@@ -580,10 +580,23 @@ impl CairnApp {
     }
 
     /// Starts the results panel's entrance and closes the pending session.
-    pub(crate) fn bump_table_reveal(&mut self) {
+    pub(crate) fn bump_table_reveal(&mut self, cx: &mut Context<Self>) {
         self.table_reveal_generation = self.table_reveal_generation.wrapping_add(1);
         self.table_reveal_pending = false;
         self.table_reveal_fade_epoch = self.table_reveal_generation;
+        let fade_epoch = self.table_reveal_fade_epoch;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(crate::shell::motion::MASK_DISSOLVE_CLEANUP)
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.table_reveal_fade_epoch == fade_epoch {
+                    this.table_reveal_fade_epoch = 0;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// Leaves the drive visualization. The next visible table content starts a
@@ -599,20 +612,20 @@ impl CairnApp {
 
     /// Starts the table entrance once a panel session actually has rows, so the
     /// fade begins with content rather than while the query is still in flight.
-    pub(crate) fn note_table_content(&mut self) {
+    pub(crate) fn note_table_content(&mut self, cx: &mut Context<Self>) {
         if self.table_reveal_pending
             && self.results.table.total_rows() > 0
             && self.drive_view.is_none()
         {
-            self.bump_table_reveal();
+            self.bump_table_reveal(cx);
         }
     }
 
     /// Starts the same entrance for a new session whose answer is empty; the
     /// state band is content too, not a reason to leave the old frame static.
-    pub(crate) fn note_table_empty(&mut self) {
+    pub(crate) fn note_table_empty(&mut self, cx: &mut Context<Self>) {
         if self.table_reveal_pending && self.drive_view.is_none() {
-            self.bump_table_reveal();
+            self.bump_table_reveal(cx);
         }
     }
 
@@ -826,8 +839,9 @@ impl EntityInputHandler for CairnApp {
 mod tests {
     use core::prelude::rust_2021::test;
 
-    use super::{join_row_path, layout};
+    use super::{join_row_path, layout, CairnApp};
     use crate::shell::theme::BASE_FONT_PX;
+    use gpui_kit::AppContext;
 
     #[test]
     fn row_paths_join_without_doubling_the_separator() {
@@ -997,5 +1011,56 @@ mod tests {
     fn the_column_lanes_are_shared_and_leave_room_for_the_path() {
         assert!(layout::NAME_MIN_COLUMN > layout::PATH_MIN_COLUMN);
         assert!(layout::DATE_COLUMN > layout::SIZE_COLUMN);
+    }
+
+    #[test]
+    fn table_reveal_fade_epoch_advances_and_cleans_up() {
+        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
+            gpui_kit::init(cx);
+            let _ = gpui_kit::open_window(
+                gpui_kit::gpui::WindowOptions::default(),
+                cx,
+                |window, cx| {
+                    let app = cx.new(|cx| CairnApp::new(window, cx));
+                    app.update(cx, |this, cx| {
+                        assert_eq!(this.table_reveal_fade_epoch, 0);
+                        this.table_reveal_pending = true;
+                        this.bump_table_reveal(cx);
+                        assert_eq!(this.table_reveal_fade_epoch, 1);
+                        assert!(!this.table_reveal_pending);
+                    });
+                    cx.quit();
+                    app
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn treemap_scan_fade_epoch_arms_timer_and_is_idempotent() {
+        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
+            gpui_kit::init(cx);
+            let _ = gpui_kit::open_window(
+                gpui_kit::gpui::WindowOptions::default(),
+                cx,
+                |window, cx| {
+                    let app = cx.new(|cx| CairnApp::new(window, cx));
+                    app.update(cx, |this, cx| {
+                        this.open_drive_at('C', r"C:\", window, cx);
+                        assert!(this.treemap_state.is_some());
+                        this.arm_treemap_scan_fade_cleanup(cx);
+                        let armed = this.treemap_state.as_ref().unwrap().scan_fade_timer_armed;
+                        // Repeated arming for the same epoch is idempotent
+                        this.arm_treemap_scan_fade_cleanup(cx);
+                        assert_eq!(
+                            this.treemap_state.as_ref().unwrap().scan_fade_timer_armed,
+                            armed
+                        );
+                    });
+                    cx.quit();
+                    app
+                },
+            );
+        });
     }
 }
