@@ -2308,8 +2308,8 @@ mod tests {
         assert!(path_is_within(r"C:\Windows::<tail:Other>", r"C:\Windows"));
         assert!(!path_is_within(r"C:\Windows", r"C:\Windows\System32"));
         assert!(path_is_within(
-            r"C:\Users\ZYN\AppData",
-            r"C:\Users\ZYN\AppData\"
+            r"C:\Users\Alice\AppData",
+            r"C:\Users\Alice\AppData\"
         ));
         assert!(!path_is_within(r"C:\WindowsApps", r"C:\Windows"));
         assert!(!path_is_within(r"C:\Win", r"C:\Windows"));

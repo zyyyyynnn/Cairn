@@ -1557,8 +1557,8 @@ mod tests {
     #[test]
     fn content_exclusions_skip_system_dependency_and_cache_trees() {
         let (volume, frns) = volume_with_files(&[
-            (&["Users", "ZYN", "Documents", "keep.txt"], 0),
-            (&["Users", "ZYN", "AppData", "Local", "cache.txt"], 0),
+            (&["Users", "Alice", "Documents", "keep.txt"], 0),
+            (&["Users", "Alice", "AppData", "Local", "cache.txt"], 0),
             (&["Program Files", "App", "readme.txt"], 0),
             (
                 &["Workspace", "proj", "node_modules", "pkg", "index.txt"],

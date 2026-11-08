@@ -590,14 +590,14 @@ mod tests {
         ));
 
         let mut users = TreemapTreeNode::new_dir(5, "Users".to_string(), 0);
-        let mut user_zyn = TreemapTreeNode::new_dir(6, "ZYN".to_string(), 0);
-        user_zyn.children.push(TreemapTreeNode::new_file(
+        let mut user_node = TreemapTreeNode::new_dir(6, "Alice".to_string(), 0);
+        user_node.children.push(TreemapTreeNode::new_file(
             7,
             "data.bin".to_string(),
             8_000_000,
             0,
         ));
-        users.children.push(user_zyn);
+        users.children.push(user_node);
 
         root.children.push(win);
         root.children.push(users);
@@ -615,7 +615,7 @@ mod tests {
         assert!(users_layout.header_rect.is_some());
         assert!(users_layout.content_rect.is_some());
         assert!(!users_layout.children.is_empty());
-        assert_eq!(users_layout.children[0].item.name, "ZYN");
+        assert_eq!(users_layout.children[0].item.name, "Alice");
 
         // Windows container should have header and children
         let win_layout = layout.iter().find(|n| n.item.name == "Windows").unwrap();

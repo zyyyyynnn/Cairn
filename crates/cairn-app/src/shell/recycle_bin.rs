@@ -1053,7 +1053,7 @@ mod tests {
 
     #[test]
     fn a_shortcut_extension_survives_the_hidden_display_suffix() {
-        let mut shortcut = item("Grok Bot", r"C:\Users\ZYN\Desktop", 1_700_000_000, 42);
+        let mut shortcut = item("Grok Bot", r"C:\Users\Alice\Desktop", 1_700_000_000, 42);
         shortcut.extension_lower = "lnk".into();
         let shortcut = std::sync::Arc::new(shortcut);
         let map = bin_icon_extensions(std::slice::from_ref(&shortcut));

@@ -131,7 +131,7 @@ mod tests {
             Some(r"C:\Users".to_string())
         );
         assert_eq!(
-            normalize_treemap_path(r"..\Windows", r"C:\Users\ZYN"),
+            normalize_treemap_path(r"..\Windows", r"C:\Users\Alice"),
             Some(r"C:\Users\Windows".to_string())
         );
         assert_eq!(
@@ -167,8 +167,8 @@ mod tests {
             Some(r"C:\Windows".to_string())
         );
         assert_eq!(
-            normalize_treemap_path(r"C:\Users\ZYN.\Folder", r"C:\"),
-            Some(r"C:\Users\ZYN\Folder".to_string())
+            normalize_treemap_path(r"C:\Users\Alice.\Folder", r"C:\"),
+            Some(r"C:\Users\Alice\Folder".to_string())
         );
         assert_eq!(normalize_treemap_path(r"C:\...", r"C:\"), None);
     }

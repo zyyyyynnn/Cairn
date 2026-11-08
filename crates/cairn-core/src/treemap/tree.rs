@@ -295,7 +295,7 @@ mod tests {
     #[test]
     fn a_generic_directory_inherits_its_files_category() {
         let mut folder = dir_with_children(
-            "ZYN",
+            "Alice",
             vec![file_node("main.rs", 300), file_node("lib.rs", 200)],
         );
         assert_eq!(folder.category, TreemapCategory::Other);
@@ -308,7 +308,7 @@ mod tests {
     #[test]
     fn a_mixed_directory_picks_the_largest_category() {
         let mut folder = dir_with_children(
-            "ZYN",
+            "Alice",
             vec![
                 file_node("clip.mp4", 100),
                 file_node("notes.txt", 300),
@@ -324,7 +324,7 @@ mod tests {
     #[test]
     fn a_tie_between_content_categories_keeps_the_earlier_variant() {
         let mut folder = dir_with_children(
-            "ZYN",
+            "Alice",
             vec![file_node("clip.mp4", 500), file_node("backup.zip", 500)],
         );
         assert_eq!(
@@ -337,7 +337,7 @@ mod tests {
     #[test]
     fn a_generic_directory_with_only_unknown_files_stays_other() {
         let mut folder = dir_with_children(
-            "ZYN",
+            "Alice",
             vec![file_node("data.bin", 100), file_node("data.xyz", 200)],
         );
         assert_eq!(
@@ -354,7 +354,7 @@ mod tests {
             "Workspace",
             vec![file_node("main.rs", 100), file_node("photo.jpg", 1_000)],
         );
-        let mut parent = dir_with_children("ZYN", vec![workspace, file_node("notes.txt", 500)]);
+        let mut parent = dir_with_children("Alice", vec![workspace, file_node("notes.txt", 500)]);
 
         assert_eq!(
             parent.propagate_content_categories(),
@@ -367,7 +367,7 @@ mod tests {
     #[test]
     fn propagation_resolves_nested_generic_directories_bottom_up() {
         let inner = dir_with_children("Alpha", vec![file_node("deep.rs", 800)]);
-        let mut outer = dir_with_children("ZYN", vec![inner, file_node("notes.txt", 200)]);
+        let mut outer = dir_with_children("Alice", vec![inner, file_node("notes.txt", 200)]);
 
         assert_eq!(
             outer.propagate_content_categories(),
@@ -397,14 +397,14 @@ mod tests {
         ));
 
         let mut users = TreemapTreeNode::new_dir(5, "Users".to_string(), 0);
-        let mut user_zyn = TreemapTreeNode::new_dir(6, "ZYN".to_string(), 0);
-        user_zyn.children.push(TreemapTreeNode::new_file(
+        let mut user_node = TreemapTreeNode::new_dir(6, "Alice".to_string(), 0);
+        user_node.children.push(TreemapTreeNode::new_file(
             7,
             "data.bin".to_string(),
             8_000_000,
             0,
         ));
-        users.children.push(user_zyn);
+        users.children.push(user_node);
 
         root.children.push(win);
         root.children.push(users);
