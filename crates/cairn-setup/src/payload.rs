@@ -113,7 +113,11 @@ fn sha256_file(file: &mut File) -> Result<String, PayloadError> {
         }
         hasher.update(&buffer[..read]);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
 }
 
 fn extract_payload_from(file: &mut File, destination: &Path) -> Result<(), PayloadError> {
