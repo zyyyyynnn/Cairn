@@ -157,7 +157,11 @@ pub fn lock_verified_installer(
         }
         hasher.update(&buffer[..read]);
     }
-    let actual = format!("{:x}", hasher.finalize());
+    let actual: String = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
     if !actual.eq_ignore_ascii_case(expected_sha256) {
         return Err("the installer changed after verification".to_string());
     }

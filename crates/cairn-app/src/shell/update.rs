@@ -181,7 +181,11 @@ async fn download_and_verify(release: &ReleaseInfo) -> Result<(PathBuf, String),
             .await
             .map_err(|_| UpdateError::Download)?;
 
-        let actual = format!("{:x}", hasher.finalize());
+        let actual: String = hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
         if !actual.eq_ignore_ascii_case(&expected) {
             return Err(UpdateError::Verify);
         }
