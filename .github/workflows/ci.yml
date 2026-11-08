@@ -31,7 +31,7 @@ jobs:
     steps:
       - id: filter
         if: github.event_name == 'pull_request'
-        uses: dorny/paths-filter@v3
+        uses: dorny/paths-filter@v4
         with:
           # `some` ignores negated patterns; `every` keeps a docs-only PR out of `code`.
           predicate-quantifier: every
