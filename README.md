@@ -1,6 +1,11 @@
 <div align="center">
-  <img src="assets/icons/cairn-256.png" width="96" alt="Cairn 品牌标识">
-  <h1 align="center" style="border-bottom: none">Cairn</h1>
+  <h1 align="center" style="border-bottom: none">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/cairn-header.png">
+      <source media="(prefers-color-scheme: light)" srcset="docs/cairn-header-light.png">
+      <img src="docs/cairn-header.png" alt="Cairn" height="44">
+    </picture>
+  </h1>
   <p><strong>面向 Windows 10/11 的高性能本地文件搜索与磁盘空间可视化工作台</strong></p>
   <p>
     <a href="LICENSE"><img alt="Apache-2.0 许可证" height="24" src="https://img.shields.io/github/license/zyyyyynnn/Cairn?style=for-the-badge&amp;label=LICENSE&amp;labelColor=3F444A&amp;color=6B6E75"></a>
@@ -10,6 +15,10 @@
     <img src="https://img.shields.io/badge/Search-Tantivy-5C6E64?style=for-the-badge&amp;labelColor=3F444A" height="24" alt="Tantivy" title="Tantivy">
   </p>
 </div>
+
+<p align="center">
+  <img src="docs/cairn-poster.png" alt="Cairn 界面概览" width="100%">
+</p>
 
 ## 项目概览
 
