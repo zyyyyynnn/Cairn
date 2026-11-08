@@ -23,6 +23,7 @@ use crate::shell::i18n::I18nManager;
 use crate::shell::menu_actions::sort_column_from_key;
 use crate::shell::settings::AppSettings;
 use crate::shell::status_bar::StatusBarModel;
+use crate::shell::window_resize::Observed;
 use crate::table::model::{ColumnBoundary, ColumnWidths, TableState};
 use cairn_protocol::status::ContentIndexStatus;
 use gpui_kit::component::input::{InputEvent, InputState};
@@ -32,6 +33,7 @@ use std::cell::RefCell;
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Instant;
 
 /// Every repeated distance and size in the shell, as a multiple of the window's `rem` — which is
 /// the theme's base font, so zoom moves spacing, type and control frames together. The title-bar
@@ -90,11 +92,15 @@ pub mod layout {
     /// The status line: the compact data row, so it takes the result-row step. The shell pins it
     /// so its arithmetic and the rendered band cannot drift apart.
     pub const STATUS_HEIGHT: f32 = ROW_HEIGHT;
-    /// The Treemap category legend is a compact status item: one 12px swatch plus a text_sm
-    /// label inside a 20px hit row. Its 2px horizontal inset is an optical exception and stays
+    /// The option row step every dropdown in the app shares: the title-bar menus, the row context
+    /// menu and the Treemap path menu. `gpui-kit`'s `PopupMenu` paints its own rows at this fixed
+    /// physical step, so a menu row the application draws itself has to match it rather than take
+    /// the 28px data-row step, which would leave two menu row heights in one product.
+    pub const MENU_ROW_HEIGHT: Pixels = gpui_kit::gpui::px(26.0);
+    /// The Treemap category legend is a compact status item: a text_sm label button inside
+    /// a 20px hit row. Its 2px horizontal inset is an optical exception and stays
     /// off the 4px ladder.
     pub const LEGEND_ROW: f32 = 5.0 * STEP;
-    pub const LEGEND_SWATCH: f32 = 3.0 * STEP;
     pub const LEGEND_INSET: f32 = 0.5 * STEP;
 
     // ---- column lanes, in 4px steps ------------------------------------------------
@@ -134,8 +140,8 @@ pub mod layout {
     pub const DIALOG_SEAT_HEIGHT: f32 = 32.0 * STEP; // 128px
 
     // ---- panes ---------------------------------------------------------------------
-    /// The sidebar keeps its previous rendered width on the 4px ladder: 208px and 152px at 100%.
-    pub const SIDEBAR_MIN_WIDTH: f32 = 38.0 * STEP;
+    /// The sidebar renders at this width or not at all; collapsing clips its
+    /// full surface instead of compressing the rows.
     pub const SIDEBAR_WIDTH: f32 = 52.0 * STEP;
     /// Sidebar leading glyph. It reads the shared control-glyph token (1rem = 14 px at 100%);
     /// the 0.875rem row label sits inside the 1–1.25em icon band. A graphic size, not a layout
@@ -274,6 +280,8 @@ pub struct QueryDomain {
     pub active_session_id: Option<u64>,
     pub is_fetching_more: bool,
     pub is_searching: bool,
+    /// Byte offset where mouse text drag selection started, if a drag is in progress.
+    pub text_selection_anchor: Option<usize>,
 }
 
 /// The result table: focus, scroll owners, viewport state and lane geometry.
@@ -290,7 +298,7 @@ pub struct ResultsDomain {
     /// value both the visible scrollbar and the keyboard path write.
     pub table_scroll: ScrollHandle,
     pub table: TableState,
-    /// Lane widths in rem, the one geometry the heading row, real rows and skeleton rows share.
+    /// Lane widths in rem, shared by the heading row and content rows.
     pub column_widths: ColumnWidths,
     /// Set between a header boundary's mouse down and its release.
     pub(crate) column_drag: Option<ColumnDrag>,
@@ -310,7 +318,7 @@ pub struct ServiceDomain {
     /// repeated; if access is denied the explicit UAC button is the remaining route.
     pub(crate) has_attempted_silent_start: bool,
     /// One status-refresh loop while a volume is building or catching up; it stops at the first
-    /// all-Synced answer so the skeleton and the index capsule can disappear.
+    /// all-Synced answer so the index capsule can disappear.
     pub(crate) is_refreshing_status: bool,
     /// `true` while a connection probe is in flight. It is what makes the retry button answer at once
     /// and refuse a second click while the first is still unanswered, so the state has to belong to
@@ -371,6 +379,16 @@ pub struct CairnApp {
     pub drive_view: Option<char>,
     pub treemap_state: Option<crate::treemap::state::TreemapViewState>,
     pub(crate) treemap_path: TreemapPathField,
+    /// The path switch menu anchored to one breadcrumb segment.
+    pub(crate) treemap_path_menu: Option<Entity<PopupMenu>>,
+    pub(crate) treemap_path_menu_for: Option<String>,
+    /// The segment whose arrow is being pressed. The open menu sees that press
+    /// as an outside click, so its dismissal must not erase the segment the
+    /// same press is about to toggle closed.
+    /// The breadcrumb segment whose arrow opened the menu, so dismissing the menu
+    /// can hand focus back to its trigger.
+    pub(crate) treemap_path_menu_focus: Option<FocusHandle>,
+    pub(crate) treemap_path_menu_dismiss: Option<Subscription>,
     /// The Recycle Bin view. The bin is a location, not a search scope: the view owns its rows,
     /// its selection and its error band together, so any query or drive switch releases the whole
     /// location instead of leaving half of it behind.
@@ -380,9 +398,21 @@ pub struct CairnApp {
     /// The app-owned transient status surface. One at a time; errors persist.
     pub toast: Option<crate::shell::toast::ToastState>,
     pub(crate) toast_serial: u64,
+    /// Generation identifier for the results table panel's entrance animation.
+    pub table_reveal_generation: u64,
+    /// Generation counter for the table reveal overlay fade-out animation.
+    pub table_reveal_fade_epoch: u64,
+    /// A table panel session is waiting for its first visible result set, so
+    /// the entrance starts with content instead of running while the query is
+    /// still in flight.
+    pub table_reveal_pending: bool,
     /// True while the GitHub release check is in flight. The Help menu trigger carries the
     /// loading icon; no separate waiting dialog is opened.
     pub(crate) is_checking_update: bool,
+    /// The live window resize and the cover it owns, judged by this window's own geometry.
+    pub(crate) window_resize: crate::shell::window_resize::WindowResizeTracker,
+    /// Keeps the bounds observer alive for the window's lifetime.
+    window_resize_subscription: Option<Subscription>,
 }
 
 impl CairnApp {
@@ -455,6 +485,7 @@ impl CairnApp {
                 active_session_id: None,
                 is_fetching_more: false,
                 is_searching: false,
+                text_selection_anchor: None,
             },
             results: ResultsDomain {
                 results_focus,
@@ -494,6 +525,7 @@ impl CairnApp {
                 text: String::new(),
                 drive: None,
                 filter: FilterCategory::All,
+                visualization: None,
             }],
             nav_history_index: 0,
             sidebar_scroll: ScrollHandle::default(),
@@ -505,16 +537,96 @@ impl CairnApp {
                 error: false,
                 _subscription: treemap_path_subscription,
             },
+            treemap_path_menu: None,
+            treemap_path_menu_for: None,
+            treemap_path_menu_focus: None,
+            treemap_path_menu_dismiss: None,
             recycle_bin: crate::shell::recycle_bin::RecycleBinView::closed(),
             delete_in_flight: false,
             toast: None,
             toast_serial: 0,
+            table_reveal_generation: 0,
+            table_reveal_fade_epoch: 0,
+            table_reveal_pending: true,
             is_checking_update: false,
+            window_resize: Default::default(),
+            window_resize_subscription: None,
         };
         window.focus(&app.query.search_focus, cx);
+        // The window's own bounds event is the only trustworthy signal that a resize is
+        // happening: a drag runs inside the system's modal loop, GPUI consumes the end of it
+        // internally, and nothing repaints once the geometry goes quiet. Observing it here
+        // keeps the cover out of `render`, which must not mutate state or start tasks.
+        app.window_resize_subscription =
+            Some(cx.observe_window_bounds(window, |this, window, cx| {
+                let size = (
+                    f32::from(window.bounds().size.width),
+                    f32::from(window.bounds().size.height),
+                );
+                if let Observed::Started(epoch) = this.window_resize.observe(size, Instant::now()) {
+                    this.watch_window_resize(epoch, cx);
+                    cx.notify();
+                }
+            }));
         app.consume_update_notice(cx);
         app.check_service_connection(cx);
         app
+    }
+
+    /// Opens a fresh table session. Every entry point that replaces the result set starts
+    /// one, so the entrance waits for real content instead of firing over an empty frame.
+    pub(crate) fn begin_table_session(&mut self) {
+        self.table_reveal_pending = true;
+    }
+
+    /// Starts the results panel's entrance and closes the pending session.
+    pub(crate) fn bump_table_reveal(&mut self, cx: &mut Context<Self>) {
+        self.table_reveal_generation = self.table_reveal_generation.wrapping_add(1);
+        self.table_reveal_pending = false;
+        self.table_reveal_fade_epoch = self.table_reveal_generation;
+        let fade_epoch = self.table_reveal_fade_epoch;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(crate::shell::motion::MASK_DISSOLVE_CLEANUP)
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.table_reveal_fade_epoch == fade_epoch {
+                    this.table_reveal_fade_epoch = 0;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Leaves the drive visualization. The next visible table content starts a
+    /// fresh panel entrance instead of reviving the hidden table in place.
+    pub(crate) fn leave_drive_view(&mut self) {
+        if self.drive_view.take().is_some() {
+            self.sync_visualization_dir();
+            self.clear_treemap_path_menu();
+            self.treemap_state = None;
+            self.begin_table_session();
+        }
+    }
+
+    /// Starts the table entrance once a panel session actually has rows, so the
+    /// fade begins with content rather than while the query is still in flight.
+    pub(crate) fn note_table_content(&mut self, cx: &mut Context<Self>) {
+        if self.table_reveal_pending
+            && self.results.table.total_rows() > 0
+            && self.drive_view.is_none()
+        {
+            self.bump_table_reveal(cx);
+        }
+    }
+
+    /// Starts the same entrance for a new session whose answer is empty; the
+    /// state band is content too, not a reason to leave the old frame static.
+    pub(crate) fn note_table_empty(&mut self, cx: &mut Context<Self>) {
+        if self.table_reveal_pending && self.drive_view.is_none() {
+            self.bump_table_reveal(cx);
+        }
     }
 
     pub fn set_initial_query(&mut self, text: &str, cx: &mut Context<Self>) {
@@ -537,7 +649,7 @@ impl CairnApp {
 
     /// Shapes the query as one line. A `LineLayout` reports byte offsets into this same string,
     /// which is the unit the selection range and [`crate::search::input::Utf16Utf8Mapper`] use.
-    fn query_text_layout(&self, window: &Window) -> Arc<LineLayout> {
+    pub(crate) fn query_text_layout(&self, window: &Window) -> Arc<LineLayout> {
         let text = &self.query.search_input.text;
         let (font_size, style) = self.query_text_style(window);
         window
@@ -627,12 +739,12 @@ impl EntityInputHandler for CairnApp {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<UTF16Selection> {
+        let (start, end) = self.query.search_input.normalized_selection();
         let mapper = crate::search::input::Utf16Utf8Mapper::new(&self.query.search_input.text);
-        let range = mapper.utf8_to_utf16_range(self.query.search_input.selection.clone());
-        Some(UTF16Selection {
-            range,
-            reversed: false,
-        })
+        let range = mapper.utf8_to_utf16_range(start..end);
+        let reversed =
+            self.query.search_input.selection.start > self.query.search_input.selection.end;
+        Some(UTF16Selection { range, reversed })
     }
 
     fn marked_text_range(
@@ -727,8 +839,9 @@ impl EntityInputHandler for CairnApp {
 mod tests {
     use core::prelude::rust_2021::test;
 
-    use super::{join_row_path, layout};
+    use super::{join_row_path, layout, CairnApp};
     use crate::shell::theme::BASE_FONT_PX;
+    use gpui_kit::AppContext;
 
     #[test]
     fn row_paths_join_without_doubling_the_separator() {
@@ -765,14 +878,12 @@ mod tests {
             layout::HEADER_HEIGHT,
             layout::STATUS_HEIGHT,
             layout::LEGEND_ROW,
-            layout::LEGEND_SWATCH,
             layout::NAME_MIN_COLUMN,
             layout::PATH_MIN_COLUMN,
             layout::SIZE_COLUMN,
             layout::DATE_COLUMN,
             layout::TABLE_MIN_WIDTH,
             layout::MESSAGE_MAX_WIDTH,
-            layout::SIDEBAR_MIN_WIDTH,
             layout::SIDEBAR_WIDTH,
             layout::CONTENT_INSET,
             layout::TIGHT_LEAD,
@@ -900,9 +1011,56 @@ mod tests {
     fn the_column_lanes_are_shared_and_leave_room_for_the_path() {
         assert!(layout::NAME_MIN_COLUMN > layout::PATH_MIN_COLUMN);
         assert!(layout::DATE_COLUMN > layout::SIZE_COLUMN);
-        assert!(
-            layout::SIDEBAR_WIDTH >= layout::SIDEBAR_MIN_WIDTH,
-            "the default sidebar cannot be narrower than its minimum"
-        );
+    }
+
+    #[test]
+    fn table_reveal_fade_epoch_advances_and_cleans_up() {
+        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
+            gpui_kit::init(cx);
+            let _ = gpui_kit::open_window(
+                gpui_kit::gpui::WindowOptions::default(),
+                cx,
+                |window, cx| {
+                    let app = cx.new(|cx| CairnApp::new(window, cx));
+                    app.update(cx, |this, cx| {
+                        assert_eq!(this.table_reveal_fade_epoch, 0);
+                        this.table_reveal_pending = true;
+                        this.bump_table_reveal(cx);
+                        assert_eq!(this.table_reveal_fade_epoch, 1);
+                        assert!(!this.table_reveal_pending);
+                    });
+                    cx.quit();
+                    app
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn treemap_scan_fade_epoch_arms_timer_and_is_idempotent() {
+        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
+            gpui_kit::init(cx);
+            let _ = gpui_kit::open_window(
+                gpui_kit::gpui::WindowOptions::default(),
+                cx,
+                |window, cx| {
+                    let app = cx.new(|cx| CairnApp::new(window, cx));
+                    app.update(cx, |this, cx| {
+                        this.open_drive_at('C', r"C:\", window, cx);
+                        assert!(this.treemap_state.is_some());
+                        this.arm_treemap_scan_fade_cleanup(cx);
+                        let armed = this.treemap_state.as_ref().unwrap().scan_fade_timer_armed;
+                        // Repeated arming for the same epoch is idempotent
+                        this.arm_treemap_scan_fade_cleanup(cx);
+                        assert_eq!(
+                            this.treemap_state.as_ref().unwrap().scan_fade_timer_armed,
+                            armed
+                        );
+                    });
+                    cx.quit();
+                    app
+                },
+            );
+        });
     }
 }

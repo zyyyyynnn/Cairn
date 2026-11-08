@@ -12,11 +12,21 @@ use cairn_core::path_cache::DirectoryPathCache;
 use cairn_core::sort::{PresortedIndices, SortColumn, SortDirection};
 use cairn_core::syntax::{parse_query_with, QueryDefaults, QueryExpr};
 use cairn_core::treemap::DirectorySizeIndex;
+use cairn_ntfs::mft::ExtractedItem;
+use cairn_ntfs::usn::{file_record_flags, UsnChange};
+use cairn_ntfs::volume::enumerate_fixed_drives;
 use cairn_protocol::message::{
-    TreeEntryData, ERROR_CODE_TREE_NOT_DIRECTORY, ERROR_CODE_TREE_NOT_INDEXED,
+    FileRowData, TreeEntryData, ERROR_CODE_TREE_NOT_DIRECTORY, ERROR_CODE_TREE_NOT_INDEXED,
     ERROR_CODE_TREE_TOO_LARGE,
 };
+use cairn_protocol::status::{
+    ContentIndexState, ContentIndexStatus, VolumeState, VolumeStatusSummary,
+};
 use rayon::prelude::*;
+use rayon::slice::ParallelSliceMut;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 
 /// Flattens a finished tree pre-order (parent before children) for the wire.
 fn flatten_tree(
@@ -36,21 +46,50 @@ fn flatten_tree(
         flatten_tree(child, depth + 1, out);
     }
 }
-use cairn_ntfs::mft::ExtractedItem;
-use cairn_ntfs::usn::{file_record_flags, UsnChange};
-use cairn_ntfs::volume::enumerate_fixed_drives;
-use cairn_protocol::message::FileRowData;
-use cairn_protocol::status::{
-    ContentIndexState, ContentIndexStatus, VolumeState, VolumeStatusSummary,
-};
-use rayon::slice::ParallelSliceMut;
-use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+
+/// The deepest level at or below `requested` whose entry count fits `budget`, with that count.
+/// Shallower levels are tried in turn, so one oversized subtree degrades its own depth instead of
+/// failing the request; `None` means even the immediate children do not fit.
+fn budgeted_tree_depth(
+    mut count_at_depth: impl FnMut(usize) -> usize,
+    requested: usize,
+    budget: usize,
+) -> Option<(usize, usize)> {
+    (1..=requested).rev().find_map(|depth| {
+        let count = count_at_depth(depth);
+        (count <= budget).then_some((depth, count))
+    })
+}
+
+struct BitSet {
+    words: Vec<u64>,
+}
+
+impl BitSet {
+    fn with_capacity(bits: usize) -> Self {
+        let word_count = bits.div_ceil(64);
+        Self {
+            words: vec![0; word_count],
+        }
+    }
+
+    #[inline(always)]
+    fn insert(&mut self, bit: usize) -> bool {
+        let word_idx = bit / 64;
+        let bit_mask = 1u64 << (bit % 64);
+        if let Some(word) = self.words.get_mut(word_idx) {
+            let was_set = (*word & bit_mask) != 0;
+            *word |= bit_mask;
+            !was_set
+        } else {
+            false
+        }
+    }
+}
 
 /// A journal backlog beyond this size is cheaper to recover with a fresh `$MFT` scan than by
 /// replaying hundreds of thousands of USN records. It also bounds how long a cold start can show
-/// the loading skeleton.
+/// bounds cold start recovery time.
 const MAX_USN_REPLAY_BACKLOG_BYTES: i64 = 64 * 1024 * 1024;
 
 /// A smaller volume is rebuilt quickly enough that compaction on every start would cost more than
@@ -850,8 +889,8 @@ impl VolumeIndex {
     /// dropped. Names are re-packed and every parent reference is remapped; a record whose parent
     /// was dropped becomes a root instead of pointing at a slot that no longer exists.
     // Production goes through [`Self::compact_if_needed`] so the classification that decides
-    // whether to compact is not thrown away; the direct entry point exists for tests.
-    #[cfg_attr(not(test), allow(dead_code))]
+    // whether to compact is not thrown away; this direct entry point is for tests.
+    #[cfg(test)]
     pub(crate) fn compact(&mut self) -> usize {
         let states = self.excluded_subtree_states();
         self.compact_with_states(states)
@@ -958,13 +997,43 @@ impl VolumeIndex {
     ///
     /// Directories are containers: they contribute zero here, so the total always describes the
     /// visible result set and never counts an excluded descendant through an ancestor's aggregate.
-    pub(crate) fn calculate_matched_file_bytes(&self, matched_indices: &[u32]) -> u64 {
-        matched_indices.iter().fold(0u64, |acc, &idx| {
-            self.records
-                .get(idx as usize)
-                .filter(|record| record.is_file())
-                .map_or(acc, |record| acc.saturating_add(record.size))
-        })
+    pub(crate) fn calculate_matched_bytes(&self, matched_indices: &[u32]) -> u64 {
+        if matched_indices.is_empty() || self.records.is_empty() {
+            return 0;
+        }
+
+        if matched_indices.len() <= 64 {
+            let mut total: u64 = 0;
+            for (i, &idx) in matched_indices.iter().enumerate() {
+                let index = idx as usize;
+                if matched_indices[..i].contains(&idx) {
+                    continue;
+                }
+                if let Some(record) = self.records.get(index) {
+                    if record.is_file() && !record.is_tombstone() {
+                        total = total.saturating_add(record.size);
+                    }
+                }
+            }
+            return total;
+        }
+
+        let max_idx = matched_indices.iter().copied().max().unwrap_or(0) as usize;
+        let bit_capacity = (max_idx + 1).min(self.records.len());
+        let mut seen = BitSet::with_capacity(bit_capacity);
+        let mut total: u64 = 0;
+
+        for &idx in matched_indices {
+            let index = idx as usize;
+            if index < self.records.len() && seen.insert(index) {
+                let record = &self.records[index];
+                if record.is_file() && !record.is_tombstone() {
+                    total = total.saturating_add(record.size);
+                }
+            }
+        }
+
+        total
     }
 }
 
@@ -1047,7 +1116,7 @@ impl TreeUnavailable {
         match self {
             Self::NotIndexed => "the path is not covered by the volume index",
             Self::NotDirectory => "the path is not a directory",
-            Self::TooLarge => "the directory tree exceeds the one-response budget",
+            Self::TooLarge => "the directory's immediate children exceed the one-response budget",
         }
     }
 }
@@ -1070,7 +1139,7 @@ impl MultiVolumeEngine {
     }
 
     /// Builds the engine around the SPEC SET-02 data layout, whose access control has already been
-    /// enforced by [`crate::security::prepare_service_data_layout`].
+    /// enforced by [`crate::security::prepare_data_layout`].
     pub fn for_data_layout(
         layout: &crate::security::ServiceDataLayout,
         config: ServiceConfig,
@@ -1549,17 +1618,19 @@ impl MultiVolumeEngine {
             )
         };
 
-        let entry_count = dir_index.subtree_entry_count(dir_idx, max_depth);
-        if entry_count > Self::MAX_TREE_ENTRIES {
-            return Err(TreeUnavailable::TooLarge);
-        }
-        let tree = dir_index.build_tree_node(
-            &volume.records,
-            &volume.arena,
-            dir_idx,
-            &root_name,
+        // The budget picks the depth, not the caller. A depth-capped subtree that
+        // cannot fit one response is still served one level shallower: every node
+        // carries its exact descendant total, so the Treemap renders the children
+        // it gets and its own aggregate blocks absorb the rest. Only a directory
+        // whose immediate children overflow the budget has no answer to give.
+        let (depth, entry_count) = budgeted_tree_depth(
+            |depth| dir_index.subtree_entry_count(dir_idx, depth),
             max_depth,
-        );
+            Self::MAX_TREE_ENTRIES,
+        )
+        .ok_or(TreeUnavailable::TooLarge)?;
+        let tree =
+            dir_index.build_tree_node(&volume.records, &volume.arena, dir_idx, &root_name, depth);
         let mut entries = Vec::with_capacity(entry_count);
         flatten_tree(&tree, 0, &mut entries);
         // A path above either budget cannot be answered in one response.
@@ -2203,8 +2274,7 @@ impl MultiVolumeEngine {
 
             for (drive, matches) in tantivy_vol_matches {
                 if let Some(vol) = lock.get(&drive) {
-                    total_bytes =
-                        total_bytes.saturating_add(vol.calculate_matched_file_bytes(&matches));
+                    total_bytes = total_bytes.saturating_add(vol.calculate_matched_bytes(&matches));
                 }
             }
         } else {
@@ -2292,7 +2362,7 @@ impl MultiVolumeEngine {
                     });
                 }
 
-                total_bytes = vol.calculate_matched_file_bytes(&vol_matches);
+                total_bytes = vol.calculate_matched_bytes(&vol_matches);
 
                 if single_vol_presorted && !sort_asc {
                     all_results.reverse();
@@ -2343,7 +2413,7 @@ impl MultiVolumeEngine {
                         });
                     }
                     total_bytes =
-                        total_bytes.saturating_add(vol.calculate_matched_file_bytes(&vol_matches));
+                        total_bytes.saturating_add(vol.calculate_matched_bytes(&vol_matches));
                 }
             }
 
@@ -2467,26 +2537,6 @@ impl MultiVolumeEngine {
         (all_results, total, highlight_terms, snippets, total_bytes)
     }
 
-    /// Single volume search compatibility method.
-    #[allow(dead_code)]
-    pub fn execute_search(
-        &self,
-        raw_query: &str,
-        sort_by: SortColumn,
-        sort_asc: bool,
-        cancel: &CancellationToken,
-    ) -> (Vec<u32>, usize) {
-        let (items, count, ..) = self.execute_search_multi(
-            raw_query,
-            &QueryDefaults::default(),
-            sort_by,
-            sort_asc,
-            cancel,
-        );
-        let indices = items.into_iter().map(|it| it.record_idx).collect();
-        (indices, count)
-    }
-
     pub fn with_volumes<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&HashMap<char, VolumeIndex>) -> R,
@@ -2495,7 +2545,7 @@ impl MultiVolumeEngine {
         f(&lock)
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn with_primary_volume<F, R>(&self, f: F) -> Option<R>
     where
         F: FnOnce(&VolumeIndex) -> R,
@@ -2505,7 +2555,7 @@ impl MultiVolumeEngine {
         Some(f(vol))
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn with_primary_volume_mut<F, R>(&self, f: F) -> Option<R>
     where
         F: FnOnce(&mut VolumeIndex) -> R,
@@ -2616,6 +2666,86 @@ mod tests {
         assert_eq!(vol.records[record_index(&vol, 1) as usize].size, 0);
         vol.apply_usn_change(UsnChange::Deleted { frn: 4 });
         assert_eq!(vol.records[record_index(&vol, 1) as usize].size, 0);
+    }
+
+    /// One oversized subtree shallows its own depth instead of failing the request, because the
+    /// children it does get still carry exact totals.
+    #[test]
+    fn an_oversized_subtree_shallows_its_depth_before_failing() {
+        // Depth 2 wants 500 entries, depth 1 wants 40, and the budget is 100.
+        assert_eq!(
+            budgeted_tree_depth(|depth| if depth == 2 { 500 } else { 40 }, 2, 100),
+            Some((1, 40))
+        );
+
+        // A subtree that fits is never shallowed.
+        assert_eq!(budgeted_tree_depth(|_| 40, 2, 100), Some((2, 40)));
+
+        // Even the immediate children over the budget leaves no answer to give.
+        assert_eq!(budgeted_tree_depth(|_| 500, 2, 100), None);
+
+        // A caller who asked for one level is never served a deeper tree.
+        assert_eq!(budgeted_tree_depth(|_| 10, 1, 100), Some((1, 10)));
+    }
+
+    /// The budget decides the depth and the built tree must then fit it. A directory whose
+    /// two-level subtree overflows one response is served one level shallower, with the exact
+    /// totals on the capped leaves, instead of failing the request.
+    #[test]
+    fn a_tree_over_the_entry_budget_is_served_one_level_shallower() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let engine = MultiVolumeEngine::with_index_dir_and_drives(temp_dir.path(), vec![]);
+
+        // Two children, one of them holding one entry more than a whole response may carry:
+        // depth 2 counts 1 + 2 + 100_000, depth 1 counts 3.
+        let deep = MultiVolumeEngine::MAX_TREE_ENTRIES;
+        let mut items = vec![
+            index_item(1, 0, "C:", true),
+            index_item(2, 1, "Huge", true),
+            index_item(3, 2, "Big", true),
+            index_item(4, 2, "Small", true),
+        ];
+        for offset in 0..deep {
+            items.push(index_item(
+                5 + offset as u64,
+                3,
+                &format!("f{offset}"),
+                false,
+            ));
+        }
+        let mut vol = VolumeIndex::new('C');
+        vol.ingest_items(items);
+        engine.add_volume(vol);
+
+        let entries = engine
+            .treemap_tree("C:\\Huge", 2)
+            .expect("one level fits the budget");
+        assert_eq!(
+            entries.iter().map(|entry| entry.depth).max(),
+            Some(1),
+            "the response must stop at the depth the budget paid for"
+        );
+        assert_eq!(
+            entries.len(),
+            3,
+            "the root and its two children, and nothing from the level that overflowed"
+        );
+        let big = entries
+            .iter()
+            .find(|entry| entry.name == "Big")
+            .expect("the capped directory is still listed");
+        assert_eq!(
+            big.descendant_items, deep,
+            "a capped node carries the exact total the summary block stands for"
+        );
+
+        assert!(
+            matches!(
+                engine.treemap_tree("C:\\Huge\\Big", 2),
+                Err(TreeUnavailable::TooLarge)
+            ),
+            "a directory whose immediate children overflow has no shallower answer"
+        );
     }
 
     #[test]
@@ -3308,8 +3438,8 @@ mod tests {
         assert_eq!(total, 1);
         assert_eq!(bytes, 100);
 
-        // Directory rows carry no own file bytes. A folder-only result therefore reports zero
-        // rather than borrowing an aggregate that may include excluded descendants.
+        // Directories are containers: folder-only results report 0 bytes because files inside
+        // are not matched.
         let (_, total, _, _, bytes) = engine.execute_search_multi(
             "folder:",
             &QueryDefaults::default(),
@@ -3318,7 +3448,7 @@ mod tests {
             &cancel,
         );
         assert_eq!(total, 2, "matches C: and folder");
-        assert_eq!(bytes, 0, "directory rows do not contribute bytes");
+        assert_eq!(bytes, 0, "directories contribute zero bytes");
 
         let (_, total, _, _, bytes) = engine.execute_search_multi(
             "folder",
@@ -3328,7 +3458,7 @@ mod tests {
             &cancel,
         );
         assert_eq!(total, 1, "matches only the folder named 'folder'");
-        assert_eq!(bytes, 0, "directory rows do not contribute bytes");
+        assert_eq!(bytes, 0, "directory contributes zero bytes");
     }
 
     #[test]
@@ -4271,7 +4401,7 @@ mod tests {
     }
 
     #[test]
-    fn calculate_matched_file_bytes_counts_only_files() {
+    fn matched_bytes_are_counted_once_at_the_highest_matched_point() {
         let mut vol = VolumeIndex::new('C');
         // Simulate NTFS hierarchy:
         // FRN 5 (root, parent 5), aggregate size 1000
@@ -4362,21 +4492,69 @@ mod tests {
         let note_idx = vol.frn_to_idx[&30][0];
         let out_idx = vol.frn_to_idx[&50][0];
 
-        // 1. Folder-only results carry no file bytes; directories are containers.
+        // 1. Folders alone contribute zero bytes.
         let all_folders = vec![root_idx, win_idx, sys_idx, users_idx];
-        assert_eq!(vol.calculate_matched_file_bytes(&all_folders), 0);
+        assert_eq!(vol.calculate_matched_bytes(&all_folders), 0);
 
-        // 2. A nested folder still contributes no aggregate size of its own.
+        // 2. Subfolders alone contribute zero bytes.
         let subfolders = vec![win_idx, sys_idx, users_idx];
-        assert_eq!(vol.calculate_matched_file_bytes(&subfolders), 0);
+        assert_eq!(vol.calculate_matched_bytes(&subfolders), 0);
 
-        // 3. Pure file query: notepad + outside -> 50 + 100 = 150.
+        // 3. Sibling directories contribute zero bytes.
+        let siblings = vec![win_idx, users_idx];
+        assert_eq!(vol.calculate_matched_bytes(&siblings), 0);
+
+        // 4. Pure file query: files contribute their size.
         let files = vec![note_idx, out_idx];
-        assert_eq!(vol.calculate_matched_file_bytes(&files), 150);
+        assert_eq!(vol.calculate_matched_bytes(&files), 150);
 
-        // 4. Mixed query: the directory contributes zero; only its matched files count.
+        // 5. Mixed query: only files contribute size; folders contribute zero.
         let mixed = vec![win_idx, note_idx, out_idx];
-        assert_eq!(vol.calculate_matched_file_bytes(&mixed), 150);
+        assert_eq!(vol.calculate_matched_bytes(&mixed), 150);
+
+        // 6. Duplicate indices are deduplicated in small sets.
+        let duplicates = vec![note_idx, note_idx, out_idx, out_idx];
+        assert_eq!(vol.calculate_matched_bytes(&duplicates), 150);
+
+        // 7. Tombstoned records contribute zero bytes.
+        vol.records[note_idx as usize].flags |= cairn_core::FLAG_TOMBSTONE;
+        assert_eq!(
+            vol.calculate_matched_bytes(&[note_idx, out_idx]),
+            100,
+            "tombstoned file contributes zero bytes"
+        );
+        vol.records[note_idx as usize].flags &= !cairn_core::FLAG_TOMBSTONE;
+
+        // 8. Large query sets (> 64 items) use BitSet deduplication.
+        let mut large_query = Vec::new();
+        for _ in 0..50 {
+            large_query.push(note_idx);
+            large_query.push(out_idx);
+        }
+        assert!(large_query.len() > 64);
+        assert_eq!(vol.calculate_matched_bytes(&large_query), 150);
+    }
+
+    #[test]
+    fn bitset_operations_and_boundaries() {
+        let mut bs = BitSet::with_capacity(128);
+        assert_eq!(bs.words.len(), 2);
+
+        // Insertion of boundary bits
+        assert!(bs.insert(0));
+        assert!(bs.insert(63));
+        assert!(bs.insert(64));
+        assert!(bs.insert(127));
+
+        // Re-insertion of existing bits returns false
+        assert!(!bs.insert(0));
+        assert!(!bs.insert(63));
+        assert!(!bs.insert(64));
+        assert!(!bs.insert(127));
+
+        // Out of bounds insertion returns false
+        assert!(!bs.insert(128));
+        assert!(!bs.insert(1000));
     }
 
     #[test]

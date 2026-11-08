@@ -239,10 +239,6 @@ impl DateFilter {
     }
 }
 
-pub fn parse_date_point(s: &str, now_sec: i64) -> Option<i64> {
-    parse_date_span(s, now_sec).map(|(start, _)| start)
-}
-
 pub fn parse_date_span(s: &str, now_sec: i64) -> Option<(i64, i64)> {
     let s = s.trim().to_ascii_lowercase();
     let cur_days = now_sec.div_euclid(86400);

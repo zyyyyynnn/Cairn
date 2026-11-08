@@ -17,7 +17,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["Cairn Contributors"]
 license = "Apache-2.0"
@@ -63,9 +63,9 @@ lopdf = { version = "0.46", default-features = false }
 
 # GUI & Desktop
 # `component` carries the shell this app is built from (Sidebar, Toolbar, Table, Menu, StatusBar,
-# theme tokens). gpui-kit 0.8 owns the matching gpui-base/gpui-component versions; the application
+# theme tokens). gpui-kit 0.9 owns the matching gpui-base/gpui-component versions; the application
 # does not list them directly.
-gpui-kit = { version = "0.8.0", default-features = false, features = ["assets", "component"] }
+gpui-kit = { version = "0.9.0", default-features = false, features = ["assets", "component"] }
 tray-icon = { version = "0.26", default-features = false }
 fluent-bundle = "0.16"
 unic-langid = "0.9"

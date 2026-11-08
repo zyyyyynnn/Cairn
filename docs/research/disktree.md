@@ -21,7 +21,7 @@ disktree 的 Treemap 配色是一套**先约束视觉噪声、再表达语义**�
 
 README 的首句是：“Find what is filling a disk, mark what should go, and remove it — with the volume's free space in view the whole time.” 它面向 **Omarchy** 桌面，扫描主目录或整块磁盘，用嵌套 Treemap 展示真实磁盘占用，支持标记、复核、移入回收站或永久删除。来源：[`README.md#L5-L16`](https://github.com/tobi/disktree/blob/6c8d4ce6211bf135ff4e42890faebff1040e1846/README.md#L5-L16)。
 
-它不是通用文件管理器，而是“**清理决策工具**”：空间、可回收量、删除风险是产品中心；Treemap 是决策界面，不是装饰图表。
+disktree 定位于磁盘清理决策工具：围绕空间占用、可回收量与删除风险构建，Treemap 承担清理决策的交互界面。
 
 ### 1.2 技术栈与运行平台
 
@@ -33,7 +33,7 @@ README 的首句是：“Find what is filling a disk, mark what should go, and r
 | 版本 | workspace `0.11.0`，MIT | [`Cargo.toml#L5-L10`](https://github.com/tobi/disktree/blob/6c8d4ce6211bf135ff4e42890faebff1040e1846/Cargo.toml#L5-L10) |
 | 规模示例 | README 截图显示 881 GiB、3.9M files、499.4K dirs | [`assets/screenshot.png`](https://github.com/tobi/disktree/blob/6c8d4ce6211bf135ff4e42890faebff1040e1846/assets/screenshot.png) |
 
-关键差异：disktree 与 Cairn 同为 Rust + GPUI，但 disktree 用 **gpui-kit 0.6.6 + gpui-omarchy**，Cairn 用 **gpui-kit 0.8.1 + gpui-component Theme**；两者控件 API、主题模型、渲染路径都不同，不能直接移植代码。
+关键差异：disktree 与 Cairn 同为 Rust + GPUI，但 disktree 用 **gpui-kit 0.6.6 + gpui-omarchy**，Cairn 用 **gpui-kit 0.9.0 + gpui-component Theme**；两者控件 API、主题模型、渲染路径都不同，不能直接移植代码。
 
 ### 1.3 目录结构
 
@@ -61,7 +61,7 @@ README 的首句是：“Find what is filling a disk, mark what should go, and r
 
 `Metric` 只有 `Bytes` 与 `Files` 两种；Age 不改变面积，只改变颜色（[`README.md#L144-L151`](https://github.com/tobi/disktree/blob/6c8d4ce6211bf135ff4e42890faebff1040e1846/README.md#L144-L151)）。这使“面积=大小、颜色=年龄”不会互相打架。
 
-### 1.5 类别从哪来：目录名/形状，而不是扩展名
+### 1.5 类别来源：目录名与形状映射
 
 `Category` 有 9 个值：`Code`、`AgentScratch`、`Toolchain`、`Synced`、`Git`、`Media`、`Documents`、`Cache`、`Other`（[`classify.rs#L21-L70`](https://github.com/tobi/disktree/blob/6c8d4ce6211bf135ff4e42890faebff1040e1846/crates/disktree-core/src/classify.rs#L21-L70)）。分类依据是：
 
@@ -102,7 +102,7 @@ README 的首句是：“Find what is filling a disk, mark what should go, and r
 
 ### 2.2 标签：裁剪到自己的区域，按屏幕空间取舍
 
-标签不是独立悬浮层，而是画在 tile 自己的 header band 或左上角，并用 `ContentMask` 裁到该区域，防止文字渗到邻居（[`treemap_view.rs#L389-L539`](https://github.com/tobi/disktree/blob/6c8d4ce6211bf135ff4e42890faebff1040e1846/crates/disktree-app/src/treemap_view.rs#L389-L539)）。
+标签绘制于 tile 自身的表头区域或左上角，通过 `ContentMask` 裁切在当前区域内，避免文字溢出（[`treemap_view.rs#L389-L539`](https://github.com/tobi/disktree/blob/6c8d4ce6211bf135ff4e42890faebff1040e1846/crates/disktree-app/src/treemap_view.rs#L389-L539)）。
 
 具体规则：
 
@@ -171,10 +171,10 @@ screen = (base - origin) * scale
 4. **表头预留与标签裁剪**：父目录名称独占表头带，宁可放弃细分也不将文字叠在子块上。
 5. **多重编码**：结合颜色、图标、名称与图例，不将颜色作为唯一信息通道。
 
-### 3.2 不照搬的部分
-1. **许可证与资产**：仅借鉴设计约束，不复制源码、截图或图标资产。
-2. **框架与绘制架构**：disktree 使用单 canvas 绘制 quad，Cairn 使用 GPUI 元素树以保留焦点、无障碍（AccessKit）、右键菜单与 hover 能力。
-3. **清理标记语义**：不引入 disktree 的 `Marked` 待删标记或可回收斜线 hatch。
+### 3.2 实现差异与架构边界
+1. **资产与实现边界**：借鉴其设计理念，全量独立实现，不复制外部源码或视觉资产。
+2. **框架与绘制架构**：Cairn 基于 GPUI 元素树构建，保留焦点、AccessKit 无障碍支持、原生上下文菜单与悬停状态。
+3. **交互与操作模型**：聚焦于即时搜索直驱与类别高亮，文件写操作由原生 Shell 回收站安全模型承载。
 
 ---
 

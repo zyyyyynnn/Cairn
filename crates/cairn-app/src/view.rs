@@ -22,7 +22,9 @@ use crate::shell::accessibility::{self, ControlElement, KeyControl};
 use crate::shell::command_groups::{menu_groups, GroupCommand, MenuGroup};
 use crate::shell::commands::{self, WINDOW_CONTEXT, WINDOW_CONTROL_CONTEXT};
 use crate::shell::theme::{self, ShellTokens};
+use crate::shell::window_resize::{WindowResizeTracker, SETTLE_POLL};
 use gpui_kit::assets::IconName as AssetIconName;
+use gpui_kit::base::motion::{transition_with_status, MotionStatus, Transition};
 use gpui_kit::base::Disableable;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
@@ -34,6 +36,7 @@ use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::*;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 /// The focus frame's box around the caption glyph. It stays clear of the native window frame and
 /// the rounded window corner, and leaves the full-cell hover surface untouched. The size is chosen
@@ -126,7 +129,6 @@ fn render_window_control(
         )
 }
 
-static FIRST_SKELETON_FRAME: AtomicBool = AtomicBool::new(false);
 static FIRST_ROWS_FRAME: AtomicBool = AtomicBool::new(false);
 
 /// One row of a command-group menu, already resolved to what this frame shows.
@@ -257,7 +259,10 @@ pub(crate) fn treemap_path_clear_button(
 
 /// The one rounded content panel used by the result table and the Treemap:
 /// the 4px frame gap, the panel surface and the corner crescent overlay.
-fn content_panel(tokens: &ShellTokens, child: impl IntoElement) -> Div {
+///
+/// `cover` is painted over the panel's content but under the crescents, so a
+/// covering surface cannot square off the panel's rounded corners.
+fn content_panel(tokens: &ShellTokens, child: impl IntoElement, cover: Option<AnyElement>) -> Div {
     v_flex()
         .flex_1()
         .min_w_0()
@@ -265,10 +270,11 @@ fn content_panel(tokens: &ShellTokens, child: impl IntoElement) -> Div {
         .relative()
         .mx(rems(layout::SPACE_4))
         .mb(rems(layout::SPACE_4))
-        .bg(tokens.background)
+        .bg(tokens.muted)
         .rounded(tokens.radius)
         .overflow_hidden()
         .child(child)
+        .when_some(cover, |this, cover| this.child(cover))
         .child(rounded_panel_corners(tokens.radius, tokens.chrome))
 }
 
@@ -357,6 +363,16 @@ struct TableBand {
     results_hold_focus: bool,
 }
 
+/// The sidebar's sampled width for this frame. The content column uses it as
+/// the canvas origin, so both regions share one motion value.
+struct SidebarBand {
+    width: f32,
+    /// The width the sidebar holds once its motion stops. The Treemap sizes labels by this rather
+    /// than by the animated width, so a collapse reveals titles without reshuffling the layout.
+    settled_width: f32,
+    animating: bool,
+}
+
 impl Render for CairnApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _perf = crate::shell::perf::scope("render");
@@ -411,17 +427,11 @@ impl Render for CairnApp {
         }
         self.results.table.scroll_top = clamped;
         let visible = self.visible_rows(row_height);
-        if crate::shell::perf::enabled() {
-            if self.results.table.total_rows() == 0
-                && !FIRST_SKELETON_FRAME.swap(true, Ordering::Relaxed)
-            {
-                crate::shell::perf::mark("skeleton first frame");
-            }
-            if self.results.table.total_rows() > 0
-                && !FIRST_ROWS_FRAME.swap(true, Ordering::Relaxed)
-            {
-                crate::shell::perf::mark("rows first frame");
-            }
+        if crate::shell::perf::enabled()
+            && self.results.table.total_rows() > 0
+            && !FIRST_ROWS_FRAME.swap(true, Ordering::Relaxed)
+        {
+            crate::shell::perf::mark("rows first frame");
         }
         // Wheel, pointer and keyboard page directly; a scrollbar drag only moves the scroll handle.
         // Detect the unloaded band here, after the handle's offset became this frame's scroll_top,
@@ -433,8 +443,29 @@ impl Render for CairnApp {
             });
         }
 
+        // One transition value drives the sidebar and the content column, so
+        // the treemap canvas width is always the width the layout actually left
+        // for it. The first frame adopts the target; a toggle reverses from the
+        // currently sampled width.
+        let target_sidebar_width = if self.sidebar_collapsed {
+            0.0
+        } else {
+            f32::from(theme::rem(window) * layout::SIDEBAR_WIDTH)
+        };
+        let sidebar_motion = transition_with_status(
+            "cairn-sidebar-width",
+            target_sidebar_width,
+            Transition::new(crate::shell::motion::SIDEBAR).ease(ease_out_quint()),
+            window,
+            cx,
+        );
+        let sidebar_animating = matches!(
+            sidebar_motion.status,
+            MotionStatus::Running | MotionStatus::Delayed
+        );
+
         let title_bar = self.render_title_bar(view.clone(), window, &tokens, cx);
-        let sidebar = self.render_sidebar(&tokens, window, cx);
+        let sidebar = self.render_sidebar(&tokens, sidebar_motion.value, window, cx);
         let content = self.render_content_column(
             &tokens,
             QueryBand {
@@ -446,6 +477,11 @@ impl Render for CairnApp {
                 visible,
                 row_height,
                 results_hold_focus,
+            },
+            SidebarBand {
+                width: sidebar_motion.value,
+                settled_width: target_sidebar_width,
+                animating: sidebar_animating,
             },
             window,
             cx,
@@ -466,7 +502,7 @@ impl Render for CairnApp {
             .on_action(cx.listener(Self::undo_query_text))
             .on_action(cx.listener(Self::redo_query_text))
             .on_action(cx.listener(Self::cut_query_text))
-            .on_action(cx.listener(Self::select_all_query_text))
+            .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::escape_query))
             .on_action(cx.listener(Self::focus_search_box))
             .on_action(cx.listener(Self::toggle_case_sensitive))
@@ -475,6 +511,7 @@ impl Render for CairnApp {
             .on_action(cx.listener(Self::toggle_regex))
             .on_action(cx.listener(Self::cycle_filter))
             .on_action(cx.listener(Self::show_properties))
+            .on_action(cx.listener(Self::restore_all_action))
             .on_action(cx.listener(Self::open_file_menu))
             .on_action(cx.listener(Self::open_edit_menu))
             .on_action(cx.listener(Self::open_view_menu))
@@ -546,7 +583,7 @@ impl Render for CairnApp {
             .child(status_line)
             .when_some(toast, |this, toast| this.child(toast))
             .when(self.results.column_drag.is_some(), |this| {
-                let view = drag_paint_view;
+                let view = drag_paint_view.clone();
                 this.child(
                     canvas(
                         |_, _, _| {},
@@ -600,6 +637,54 @@ impl Render for CairnApp {
                     .inset_0(),
                 )
             })
+            .when(self.query.text_selection_anchor.is_some(), |this| {
+                let view = drag_paint_view;
+                this.child(
+                    canvas(
+                        |_, _, _| {},
+                        move |_bounds, _, window, _cx| {
+                            let move_view = view.clone();
+                            window.on_mouse_event(
+                                move |event: &MouseMoveEvent, phase, window, cx| {
+                                    if phase == DispatchPhase::Capture {
+                                        return;
+                                    }
+                                    move_view.update(cx, |this, cx| {
+                                        let Some(anchor) = this.query.text_selection_anchor else {
+                                            return;
+                                        };
+                                        let current_idx =
+                                            this.query_byte_index_for_point(event.position, window);
+                                        let sel = anchor..current_idx;
+                                        if this.query.search_input.selection != sel {
+                                            this.query.search_input.selection = sel;
+                                            cx.notify();
+                                        }
+                                    });
+                                },
+                            );
+
+                            let up_view = view.clone();
+                            window.on_mouse_event(
+                                move |event: &MouseUpEvent, phase, _window, cx| {
+                                    if phase == DispatchPhase::Capture {
+                                        return;
+                                    }
+                                    if event.button == MouseButton::Left {
+                                        up_view.update(cx, |this, cx| {
+                                            if this.query.text_selection_anchor.take().is_some() {
+                                                cx.notify();
+                                            }
+                                        });
+                                    }
+                                },
+                            );
+                        },
+                    )
+                    .absolute()
+                    .inset_0(),
+                )
+            })
     }
 }
 
@@ -640,6 +725,7 @@ impl CairnApp {
         let menu = self.group_menu.clone();
         let mouse_view = view.clone();
         let click_view = view.clone();
+        let hover_view = view.clone();
 
         let trigger = Button::new(element_id("toolbar-menu", group.key()))
             .font_weight(FontWeight::MEDIUM)
@@ -674,6 +760,17 @@ impl CairnApp {
                 }
                 let view = click_view.clone();
                 view.update(cx, |this, cx| this.toggle_group(group, window, cx));
+            })
+            // The trigger sits outside the PopupMenu element, so the popup's own hover-out never
+            // sees the pointer land here. While a group is open, arriving on a trigger is the
+            // menu-bar navigation step: the same trigger drops the popup's item selection (closing
+            // any submenu), a different one switches the open group.
+            .on_hover(move |hovered, window, cx| {
+                if !*hovered {
+                    return;
+                }
+                let view = hover_view.clone();
+                view.update(cx, |this, cx| this.hover_group(group, window, cx));
             });
 
         div()
@@ -943,6 +1040,95 @@ impl CairnApp {
             )
     }
 
+    // ---- window resize cover -------------------------------------------------------
+
+    /// Drops a resize cover once the window's size has stopped changing.
+    ///
+    /// GPUI consumes `WM_EXITSIZEMOVE` inside its own modal-loop handling and never
+    /// redispatches it, so no event marks the end of a drag and nothing repaints after
+    /// the last size change: a timer has to make the settle call. It only ever settles
+    /// the generation it was armed for, and the poll ceiling bounds a window whose
+    /// geometry never goes quiet.
+    pub(crate) fn watch_window_resize(&mut self, epoch: u64, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            for _ in 0..WindowResizeTracker::max_polls() {
+                cx.background_executor().timer(SETTLE_POLL).await;
+                let quiet = this.update(cx, |this, _| {
+                    this.window_resize.active_epoch() == Some(epoch)
+                        && this.window_resize.is_quiet(Instant::now())
+                });
+                if matches!(quiet, Ok(true)) {
+                    break;
+                }
+            }
+            let settled = this.update(cx, |this, cx| {
+                if this.window_resize.settle(epoch) {
+                    cx.notify();
+                    true
+                } else {
+                    false
+                }
+            });
+            if !matches!(settled, Ok(true)) {
+                return;
+            }
+            cx.background_executor()
+                .timer(crate::shell::motion::MASK_DISSOLVE_CLEANUP)
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.window_resize.clear_fade(epoch) {
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// The plate a live resize puts over the content panel, so the reflowing table or
+    /// Treemap stays one stable surface while the window is being dragged. It dissolves
+    /// over `motion::MASK_DISSOLVE` once the geometry has settled and the layout reflowed.
+    fn render_window_resize_cover(
+        &self,
+        tokens: &ShellTokens,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if self.window_resize.is_covered() {
+            return Some(
+                div()
+                    .id("panel-resize-overlay")
+                    .absolute()
+                    .inset_0()
+                    .bg(tokens.muted)
+                    .into_any_element(),
+            );
+        }
+        let epoch = self.window_resize.fading_epoch();
+        if epoch == 0 {
+            return None;
+        }
+        let reduce_motion = cx.reduce_motion();
+        Some(
+            div()
+                .id("panel-resize-fade-overlay")
+                .absolute()
+                .inset_0()
+                .bg(tokens.muted)
+                .with_animation(
+                    format!("window-resize-fade-{epoch}"),
+                    Animation::new(crate::shell::motion::MASK_DISSOLVE)
+                        .with_easing(ease_out_quint()),
+                    move |element, delta| {
+                        if reduce_motion {
+                            element.opacity(0.0)
+                        } else {
+                            element.opacity(1.0 - delta)
+                        }
+                    },
+                )
+                .into_any_element(),
+        )
+    }
+
     // ---- content column ----------------------------------------------------------
 
     fn render_content_column(
@@ -950,48 +1136,71 @@ impl CairnApp {
         tokens: &ShellTokens,
         band: QueryBand,
         table_band: TableBand,
+        sidebar: SidebarBand,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Div {
-        if self.drive_view.is_some() {
+    ) -> impl IntoElement {
+        // Taken before the views borrow the app mutably: the cover only reads the
+        // resize tracker, and it belongs to the panel rather than to the window.
+        let resize_cover = self.render_window_resize_cover(tokens, cx);
+        let column = if self.drive_view.is_some() {
             let path_band = self.render_treemap_path_band(tokens, band.view.clone(), window, cx);
-            let body = self.render_treemap_body(tokens, window, cx);
+            let body = self.render_treemap_body(
+                tokens,
+                sidebar.width,
+                sidebar.settled_width,
+                sidebar.animating,
+                window,
+                cx,
+            );
             // The path band's bottom inset is this panel's top gap, the same
             // relationship the search band has with the result panel.
-            let body_surface = content_panel(tokens, body);
-            return v_flex()
+            let body_surface = content_panel(tokens, body, resize_cover);
+            v_flex()
                 .flex_1()
                 .min_w_0()
                 .min_h_0()
                 .bg(tokens.chrome)
                 .child(path_band)
-                .child(body_surface);
-        }
+                .child(body_surface)
+        } else {
+            let QueryBand {
+                is_query_focused,
+                search_focus,
+                view,
+            } = band;
+            let query = self.render_search_band(
+                tokens,
+                is_query_focused,
+                search_focus,
+                view.clone(),
+                window,
+                cx,
+            );
+            let results = self.render_results(
+                tokens,
+                table_band.visible,
+                table_band.row_height,
+                table_band.results_hold_focus,
+                window,
+                cx,
+            );
 
-        let QueryBand {
-            is_query_focused,
-            search_focus,
-            view,
-        } = band;
-        let query =
-            self.render_search_band(tokens, is_query_focused, search_focus, view.clone(), cx);
-        let results = self.render_results(
-            tokens,
-            table_band.visible,
-            table_band.row_height,
-            table_band.results_hold_focus,
-            cx,
-        );
+            // The search band's own bottom inset is this panel's top gap. Repeating it as a margin
+            // would space the same boundary twice and push the heading off the row band.
+            let results_surface = content_panel(tokens, results, resize_cover);
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .bg(tokens.chrome)
+                .child(query)
+                .child(results_surface)
+        };
 
-        // The search band's own bottom inset is this panel's top gap. Repeating it as a margin
-        // would space the same boundary twice and push the heading off the row band.
-        let results_surface = content_panel(tokens, results);
-        v_flex()
-            .flex_1()
-            .min_w_0()
-            .min_h_0()
-            .bg(tokens.chrome)
-            .child(query)
-            .child(results_surface)
+        // Return the column directly without wrapping it in an animation during sidebar motion.
+        // Wrapping this column alters its GlobalElementId path, which forces nested elements
+        // (such as table rows) to re-initialize and flicker, and causes distracting opacity changes.
+        column.into_any_element()
     }
 }

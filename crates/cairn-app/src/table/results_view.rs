@@ -2,20 +2,21 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Results table view: headers, rows, placeholders, skeletons, and empty / offline states.
+//! Results table view: headers, rows, placeholders, and empty / offline states.
 
 use crate::app::{element_id, join_row_path, layout, split_name_highlights, CairnApp};
-use crate::service::service_issue::ServiceIssue;
+use crate::service::service_issue::{self, ServiceBandAction, ServiceIssue};
 use crate::shell::accessibility::{self, ControlElement};
 use crate::shell::command_groups::GroupCommand;
 use crate::shell::commands::RESULTS_CONTEXT;
+use crate::shell::file_icon::file_kind_icon;
 use crate::shell::menu_rules::IndexMenuState;
 use crate::shell::state_view::{icon_action, render_state_band};
 use crate::shell::theme::{self, ShellTokens};
 use crate::table::model::{format_timestamp, ColumnBoundary, SortColumn};
 use crate::view::announce_shortcut;
 use cairn_core::format_size_bytes;
-use cairn_core::treemap::TreemapCategory;
+use cairn_core::treemap::FileKind;
 use cairn_protocol::message::FileRowData;
 use cairn_protocol::status::ContentIndexState;
 use gpui_kit::assets::IconName as AssetIconName;
@@ -28,23 +29,12 @@ use gpui_kit::component::{
 };
 use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::*;
-use gpui_kit::gpui::{ease_out_quint, Animation, AnimationExt};
 use std::ops::Range;
 use std::rc::Rc;
-use std::time::Duration;
 
-/// Measured on the live 1.2M index: filtered GUI queries answer in 20-80 ms (one 157 ms outlier),
-/// while the all-files first page takes ~2.7 s. 180 ms clears every observed fast search and page
-/// fetch, so neither the first page nor a scroll-driven placeholder flashes, and still appears
-/// promptly when the wait is real.
-const SKELETON_DELAY: Duration = Duration::from_millis(180);
-/// One full traversal of the row-to-row pulse.
-const SKELETON_PULSE: Duration = Duration::from_millis(1400);
-/// How long the first page takes to fade in where the skeleton used to be.
-const ROW_REVEAL: Duration = Duration::from_millis(140);
-/// Placeholder-bar geometry is local to the skeleton: no real control shares this height or width.
-const SKELETON_BAR_HEIGHT: f32 = 0.75;
-const SKELETON_DATE_WIDTH: f32 = 7.0;
+/// Placeholder geometry for unfetched scroll windows.
+const PLACEHOLDER_BAR_HEIGHT: f32 = 0.75;
+const PLACEHOLDER_DATE_WIDTH: f32 = 7.0;
 /// The resize affordance is a physical hit strip; the painted line is a hairline inside it.
 const RESIZE_HIT_WIDTH: Pixels = px(8.0);
 const RESIZE_LINE_OFFSET: Pixels = px(3.0);
@@ -83,15 +73,6 @@ fn content_query_notice(state: &IndexMenuState<'_>) -> Option<ContentQueryNotice
         ContentIndexState::Backfilling { .. } => Some(ContentQueryNotice::Backfilling),
         ContentIndexState::Error(_) => Some(ContentQueryNotice::Error),
     }
-}
-
-/// Opacity of one skeleton row at a point in the shared pulse. Neighbouring rows are offset so the
-/// brightness travels down the table instead of the whole block blinking at once.
-fn pulse_opacity(row: usize, delta: f32) -> f32 {
-    let phase = (delta + row as f32 * 0.06).rem_euclid(1.0);
-    let triangle = 1.0 - (2.0 * phase - 1.0).abs();
-    let smooth = triangle * triangle * (3.0 - 2.0 * triangle);
-    0.45 + 0.55 * smooth
 }
 
 /// Viewport-local top of the first rendered row.
@@ -167,27 +148,37 @@ fn rows_to_paint(
     }
 }
 
-/// Broad file kind behind a result row's icon, from the taxonomy the Treemap already uses.
+/// The file kind behind a result row's icon.
 ///
 /// A recovered suffix matters when the display name hides or differs from it. In that case the
 /// suffix is carried through the taxonomy's name entry point with a synthetic name instead of a
 /// second extension table. When the name already ends in the same suffix — or no suffix was
-/// recovered — the taxonomy's own name rules stay in charge, so `CMakeLists.txt` stays code and a
-/// bare dotfile stays configuration.
-fn broad_file_category(name: &str, resolved_extension: &str) -> TreemapCategory {
+/// recovered — the taxonomy's own name rules stay in charge, so `CMakeLists.txt` stays source code
+/// and a bare dotfile stays configuration.
+fn row_file_kind(name: &str, resolved_extension: &str) -> FileKind {
     let name_extension = name.rsplit_once('.').map(|(_, extension)| extension);
     let name_names_the_suffix =
         name_extension.is_some_and(|extension| extension.eq_ignore_ascii_case(resolved_extension));
     if resolved_extension.is_empty() || name_names_the_suffix {
-        return TreemapCategory::classify(name, false);
+        return FileKind::classify_file(name);
     }
-    let category = TreemapCategory::classify(&format!("file.{resolved_extension}"), false);
-    if category == TreemapCategory::Other {
+    let kind = FileKind::classify_file(&format!("file.{resolved_extension}"));
+    if kind == FileKind::Other {
         // An unknown recovered suffix cannot improve on what the name itself says.
-        TreemapCategory::classify(name, false)
+        FileKind::classify_file(name)
     } else {
-        category
+        kind
     }
+}
+
+/// The icon a result row shows: a directory is always a folder; a file is
+/// classified by its name and the recovered Shell suffix, then mapped through
+/// the shared file-kind icon table.
+fn result_row_icon(name: &str, resolved_extension: &str, is_dir: bool) -> AssetIconName {
+    if is_dir {
+        return AssetIconName::Folder;
+    }
+    file_kind_icon(row_file_kind(name, resolved_extension))
 }
 
 /// One proportional text lane. `flex_basis` at zero makes the grow factors divide the surplus
@@ -221,17 +212,20 @@ const RESULT_COMMANDS: &[GroupCommand] = &[
     GroupCommand::RevealLocation,
     GroupCommand::CopyPaths,
     GroupCommand::CopyNames,
+    GroupCommand::SelectAll,
     GroupCommand::DeleteSelected,
     GroupCommand::ShowProperties,
 ];
 
 /// A bin row has no live path to reveal and no useful payload properties sheet. It offers the
-/// bin's own restore command instead, then the copy commands, then the permanent delete.
+/// row's own restore command instead, then the copy commands, then the permanent delete.
+/// Restoring every item is a location action and stays in the File menu.
 const BIN_COMMANDS: &[GroupCommand] = &[
     GroupCommand::OpenSelected,
     GroupCommand::RestoreSelected,
     GroupCommand::CopyPaths,
     GroupCommand::CopyNames,
+    GroupCommand::SelectAll,
     GroupCommand::DeleteSelected,
 ];
 
@@ -272,6 +266,29 @@ enum HeaderLane {
     Date,
 }
 
+/// What the result region shows while it holds no rows.
+///
+/// The loading cover answers a request that is actually in flight and nothing
+/// else: a service problem or an empty answer is content with its own recovery
+/// actions, and covering it would hide the only way out (SPEC SVC-04).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResultSurface {
+    Rows,
+    Loading,
+    StateBand,
+}
+
+/// Decides the result surface from the two facts the panel can observe.
+fn result_surface(has_content: bool, is_loading: bool) -> ResultSurface {
+    if has_content {
+        ResultSurface::Rows
+    } else if is_loading {
+        ResultSurface::Loading
+    } else {
+        ResultSurface::StateBand
+    }
+}
+
 impl CairnApp {
     /// The heading row plus whatever the band under it holds: the rows, the empty state, or the
     /// reason there are no rows to show.
@@ -295,6 +312,7 @@ impl CairnApp {
         visible: Range<usize>,
         row_height: Pixels,
         results_hold_focus: bool,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let header = self.render_table_header(tokens, cx);
@@ -302,12 +320,9 @@ impl CairnApp {
         // not: a recovery sentence laid out at the columns' full extent runs past the frame and only
         // becomes readable by scrolling sideways, which is the opposite of what the band exists to
         // say. A band fills the width the window actually shows instead.
-        // While the first page (or a rebuilt index) is loading, show the progressive skeleton.
         // Once any rows exist the table wins even if the index is still catching up: the cached
         // results are usable, and the single "synchronizing" capsule describes their freshness.
-        // The skeleton is the first page only. A background refresh of an index that already
-        // shows rows must leave those rows in place: replacing them with the skeleton makes a
-        // slow refresh look like a search that never finishes.
+        // A background refresh of an index that already shows rows must leave those rows in place.
         let bin_loading = self.recycle_bin.is_open() && self.recycle_bin.is_loading();
         let first_page_loading = (!self.recycle_bin.is_open()
             && self.results.table.total_rows() == 0
@@ -318,6 +333,7 @@ impl CairnApp {
             && !self.has_query()
             && self.service.status.is_any_loading()
             && self.results.table.total_rows() == 0;
+        let is_loading = first_page_loading || index_loading;
         // The bin is shell data, not index data: a stopped service must not replace it
         // with the offline band, and an empty bin is its own state, not an offline one.
         let local_location = self.recycle_bin.is_open() || self.service.is_service_connected;
@@ -325,46 +341,31 @@ impl CairnApp {
             // An unreadable bin is authoritative over any rows still in the table. The state band
             // below owns the retry path; stale rows must never become actionable again.
             None
-        } else if first_page_loading || index_loading {
-            // A known-long state (rebuild, local scan) shows the skeleton at once; an ordinary
-            // first page waits out the measured fast path before adding the skeleton.
-            let delay = if index_loading || bin_loading {
-                Duration::ZERO
-            } else {
-                SKELETON_DELAY
-            };
-            // A long wait renders a still skeleton: a pulse that repaints the window for minutes
-            // costs a core without telling the reader anything the skeleton does not already say.
-            // The ordinary first page keeps the pulse for its brief wait.
-            let still = cx.reduce_motion() || delay.is_zero();
-            Some(
-                self.render_skeleton_band(tokens, row_height, delay, still)
-                    .into_any_element(),
-            )
         } else if local_location && self.results.table.total_rows() > 0 {
-            Some(
-                self.render_rows_band(tokens, visible, row_height, cx)
-                    .into_any_element(),
-            )
+            Some(self.render_rows_band(tokens, visible, row_height, cx))
         } else {
             None
         };
         let has_content = rows.is_some();
-        let state = if has_content {
+        let surface = result_surface(has_content, is_loading);
+        let state = if surface != ResultSurface::StateBand {
             None
         } else if local_location {
-            Some(self.render_empty_state(tokens, cx).into_any_element())
+            Some(self.render_empty_state(tokens, cx))
         } else {
-            Some(
-                self.render_service_offline_state(tokens, cx)
-                    .into_any_element(),
-            )
+            Some(self.render_service_offline_state(tokens, cx))
         };
 
-        // Whether the columns need the sideways route at all, read from the handle that measured it
-        // last frame. The component skips an axis whose content fits
-        // (`gpui-base-0.7.3/src/scrollbar.rs`: "Hide scrollbar, if the scroll area is smaller than
-        // the container"), so this only decides whether to spend the row on it.
+        // The header is outside this wrapper, so a refresh never blanks or
+        // re-fades the column labels. The fade overlay dissolves over
+        // MASK_DISSOLVE, with a cleanup timer scheduled at the entrance source.
+        let has_state = state.is_some();
+        let rows = rows.map(|body| body.into_any_element());
+        let state = state.map(|body| body.into_any_element());
+
+        // Whether the columns need the sideways route at all, read from the handle that measured
+        // it last frame: the row is spent on a scrollbar only when the content is genuinely wider
+        // than the viewport.
         let overflows_sideways = self.results.table_scroll.max_offset().x > px(0.0);
 
         let viewport = div()
@@ -373,7 +374,7 @@ impl CairnApp {
             // does, because the scrollbar that belongs to this box must not travel with its content.
             .id("result-table-viewport")
             // The viewport always fills the width it is given. Without this, a state band (empty,
-            // offline, skeleton-free) left the box sized by the header's intrinsic width, so the
+            // offline) left the box sized by the header's intrinsic width, so the
             // columns jumped left and right as a query resolved to zero rows. Height still comes
             // from the row: with rows this box shares the leftover body; without them it ends at
             // the heading and the band below takes the space.
@@ -393,7 +394,7 @@ impl CairnApp {
                 v_flex()
                     .w_full()
                     .min_w(rems(layout::TABLE_MIN_WIDTH))
-                    .when(has_content, |this| this.flex_1())
+                    .flex_1()
                     .min_h_0()
                     // The heading row owns the separator under it; the scrolling band must not draw
                     // the same edge a second time.
@@ -435,14 +436,15 @@ impl CairnApp {
                     .relative()
                     .child(viewport)
                     // The gutter is permanent, not conditional on the first page.
-                    // Reserving its width while the skeleton is up keeps the
+                    // Reserving its width keeps the
                     // header and every column from jumping when rows land.
                     .child(
                         v_flex()
                             .flex_shrink_0()
                             .h_full()
                             .w(Scrollbar::width())
-                            .bg(tokens.background)
+                            .when(has_content, |this| this.bg(tokens.background))
+                            .when(!has_content, |this| this.bg(tokens.muted))
                             // The heading owns the top of the region, so its gutter keeps the
                             // header surface and the scrollbar track starts underneath it.
                             .child(
@@ -481,6 +483,45 @@ impl CairnApp {
             // so it is painted over the region's edge instead of becoming a border on the region. It
             // carries no id and no listener, so drawing it last costs the content nothing it needs to
             // be hit by.
+            .when(surface == ResultSurface::Loading, |this| {
+                this.child(
+                    div()
+                        .id("table-loading-overlay")
+                        .absolute()
+                        .inset_0()
+                        // The horizontal scrollbar is a row of this region, so the cover stops
+                        // above it: a control that can still be hit must not be hidden.
+                        .when(overflows_sideways, |this| this.bottom(Scrollbar::width()))
+                        .bg(tokens.muted),
+                )
+            })
+            .when(
+                self.table_reveal_fade_epoch > 0 && (has_content || has_state),
+                |this| {
+                    let fade_key = format!("table-reveal-fade-{}", self.table_reveal_fade_epoch);
+                    let reduce_motion = cx.reduce_motion();
+                    this.child(
+                        div()
+                            .id("table-reveal-fade-overlay")
+                            .absolute()
+                            .inset_0()
+                            .when(overflows_sideways, |this| this.bottom(Scrollbar::width()))
+                            .bg(tokens.muted)
+                            .with_animation(
+                                fade_key,
+                                Animation::new(crate::shell::motion::MASK_DISSOLVE)
+                                    .with_easing(ease_out_quint()),
+                                move |el, delta| {
+                                    if reduce_motion {
+                                        el.opacity(0.0)
+                                    } else {
+                                        el.opacity(1.0 - delta)
+                                    }
+                                },
+                            ),
+                    )
+                },
+            )
             .when(results_hold_focus, |this| {
                 this.child(
                     div()
@@ -491,158 +532,6 @@ impl CairnApp {
                         .border_color(tokens.ring),
                 )
             })
-    }
-
-    fn render_skeleton_band(
-        &self,
-        tokens: &ShellTokens,
-        row_height: Pixels,
-        delay: Duration,
-        still: bool,
-    ) -> impl IntoElement {
-        let vh = self.results.table.viewport_height;
-        let count = if f32::from(row_height) > 0.0 && vh > 0.0 {
-            ((vh / f32::from(row_height)).ceil() as usize + 2).max(8)
-        } else {
-            14
-        };
-        let decay_step = 0.65 / (count as f32).max(1.0);
-        let skeleton_rows = (0..count).map(move |ix| {
-            self.render_skeleton_row(ix, tokens, row_height, decay_step, delay, still)
-        });
-
-        v_flex()
-            .flex_1()
-            .min_h_0()
-            .bg(tokens.background)
-            .children(skeleton_rows)
-    }
-
-    fn render_skeleton_row(
-        &self,
-        ix: usize,
-        tokens: &ShellTokens,
-        row_height: Pixels,
-        decay_step: f32,
-        delay: Duration,
-        still: bool,
-    ) -> AnyElement {
-        const SKELETON_NAME_WIDTHS: [f32; 8] = [8.0, 11.0, 6.5, 9.5, 12.0, 7.5, 10.0, 8.5];
-        const SKELETON_PATH_WIDTHS: [f32; 8] = [14.0, 18.0, 12.0, 16.5, 20.0, 13.5, 17.0, 15.0];
-        const SKELETON_SIZE_WIDTHS: [f32; 4] = [3.2, 2.5, 4.0, 2.8];
-
-        let name_w = rems(SKELETON_NAME_WIDTHS[ix % SKELETON_NAME_WIDTHS.len()]);
-        let path_w = rems(SKELETON_PATH_WIDTHS[ix % SKELETON_PATH_WIDTHS.len()]);
-        let size_w = rems(SKELETON_SIZE_WIDTHS[ix % SKELETON_SIZE_WIDTHS.len()]);
-        let opacity = (1.0 - (ix as f32 * decay_step)).max(0.35);
-        let skel_bg = tokens.skeleton.opacity(opacity);
-
-        let row = h_flex()
-            .h(row_height)
-            .items_center()
-            .w_full()
-            .child(
-                div()
-                    .lane_grow(self.results.column_widths.name)
-                    .min_w(rems(layout::NAME_MIN_COLUMN))
-                    .pl(rems(layout::CONTENT_INSET - layout::SPACE_4))
-                    .pr(rems(layout::INNER_SPACING))
-                    .flex()
-                    .items_center()
-                    .gap(rems(layout::INNER_SPACING))
-                    .child(
-                        div()
-                            .size_4()
-                            .flex_shrink_0()
-                            .rounded(tokens.radius)
-                            .bg(skel_bg),
-                    )
-                    .child(
-                        div()
-                            .h(rems(SKELETON_BAR_HEIGHT))
-                            .w(name_w)
-                            .max_w_full()
-                            .rounded(tokens.radius)
-                            .bg(skel_bg),
-                    ),
-            )
-            .child(
-                div()
-                    .lane_grow(self.results.column_widths.path)
-                    .min_w(rems(layout::PATH_MIN_COLUMN))
-                    .px(rems(layout::INNER_SPACING))
-                    .flex()
-                    .items_center()
-                    .child(
-                        div()
-                            .h(rems(SKELETON_BAR_HEIGHT))
-                            .w(path_w)
-                            .max_w_full()
-                            .rounded(tokens.radius)
-                            .bg(skel_bg),
-                    ),
-            )
-            .child(
-                div()
-                    .lane_grow(self.results.column_widths.size)
-                    .min_w(rems(layout::SIZE_COLUMN))
-                    .px(rems(layout::INNER_SPACING))
-                    .flex()
-                    .items_center()
-                    .child(
-                        div()
-                            .h(rems(SKELETON_BAR_HEIGHT))
-                            .w(size_w)
-                            .rounded(tokens.radius)
-                            .bg(skel_bg),
-                    ),
-            )
-            .child(
-                div()
-                    .lane_grow(self.results.column_widths.date)
-                    .min_w(rems(layout::DATE_COLUMN))
-                    .px(rems(layout::INNER_SPACING))
-                    .flex()
-                    .items_center()
-                    .child(
-                        div()
-                            .h(rems(SKELETON_BAR_HEIGHT))
-                            .w(rems(SKELETON_DATE_WIDTH))
-                            .rounded(tokens.radius)
-                            .bg(skel_bg),
-                    ),
-            );
-
-        // A still skeleton renders as a single static image. Building the animation and then
-        // painting a constant opacity would keep requesting frames for a value that can never
-        // change, which costs the same as the moving skeleton without showing anything.
-        if still {
-            return row.opacity(1.0).into_any_element();
-        }
-
-        // The pulse rides the window's frame clock. A timer cap ran on the platform timer, whose
-        // 15.6ms Windows resolution stepped every row at ~47ms; the rows share the frame the
-        // platform already delivers, and a known-long wait still renders the still skeleton.
-        let pulse = Animation::new(SKELETON_PULSE).repeat_synced();
-        // The list length must not change between frames: GPUI persists the active animation index
-        // in the element state, and a shorter list makes that index out of bounds. The ordinary
-        // first page has a non-zero wait phase; a known-long state never reaches this path.
-        let animations = vec![Animation::new(delay), pulse];
-
-        row.with_animations(
-            element_id("skeleton-row", &ix.to_string()),
-            animations,
-            move |row, phase, delta| {
-                if phase == 0 {
-                    // The delay phase: the skeleton exists in the layout but has not become
-                    // visible. A fast answer unmounts it before this timer ever elapses.
-                    row.opacity(0.0)
-                } else {
-                    row.opacity(pulse_opacity(ix, delta))
-                }
-            },
-        )
-        .into_any_element()
     }
 
     /// The empty and no-match states. With an empty box the "所有文件" query is still a query, so a
@@ -807,7 +696,7 @@ impl CairnApp {
         &self,
         tokens: &ShellTokens,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> ControlElement {
         let issue = self
             .service
             .service_issue
@@ -836,22 +725,27 @@ impl CairnApp {
             retry_label.clone()
         };
         // Starting the service is a UAC action, so it is offered only when SCM says the service
-        // exists. A missing service gets install guidance instead of an elevation prompt.
-        let can_start = self.service.service_installed && issue == ServiceIssue::NotRunning;
-        let action = if can_start {
-            icon_action(start, AssetIconName::Play, start_face)
-                .loading(self.service.is_probing_service)
-                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                    this.start_service(cx);
-                }))
-                .into_any_element()
-        } else {
-            icon_action(retry, AssetIconName::RotateCcw, retry_face)
-                .loading(self.service.is_probing_service)
-                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                    this.retry_service_connection(cx);
-                }))
-                .into_any_element()
+        // exists. A missing service gets install guidance instead of an elevation prompt, and an
+        // issue the app cannot clear gets its sentence alone: a control that cannot change the
+        // outcome is worse than no control.
+        let action = match service_issue::band_action(issue, self.service.service_installed) {
+            ServiceBandAction::Start => Some(
+                icon_action(start, AssetIconName::Play, start_face)
+                    .loading(self.service.is_probing_service)
+                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                        this.start_service(cx);
+                    }))
+                    .into_any_element(),
+            ),
+            ServiceBandAction::Retry => Some(
+                icon_action(retry, AssetIconName::RotateCcw, retry_face)
+                    .loading(self.service.is_probing_service)
+                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                        this.retry_service_connection(cx);
+                    }))
+                    .into_any_element(),
+            ),
+            ServiceBandAction::None => None,
         };
         render_state_band(
             tokens,
@@ -861,7 +755,7 @@ impl CairnApp {
                 .size_8()
                 .text_color(tokens.danger)
                 .into_any_element(),
-            Some(action),
+            action,
         )
     }
 
@@ -871,7 +765,7 @@ impl CairnApp {
         visible: Range<usize>,
         row_height: Pixels,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> ControlElement {
         let extent = px(self.results.table.scroll_extent(f32::from(row_height)));
         // The fetched window can start millions of rows into the result set. Laying those rows
         // out inside the scrolled content would place them tens of millions of pixels from the
@@ -896,7 +790,6 @@ impl CairnApp {
         let band_top = painted.top;
         let pinned = painted.pinned;
         let first = visible.start;
-        let reduce_motion = cx.reduce_motion();
 
         let control = accessibility::control("result-band");
         let band = accessibility::element(control)
@@ -971,19 +864,7 @@ impl CairnApp {
                     ),
             );
 
-        // The first page fades in where the skeleton stood. The id is stable while the band stays
-        // mounted, so paging and background refreshes do not replay the entrance.
-        band.with_animation(
-            "result-rows-reveal",
-            Animation::new(ROW_REVEAL).with_easing(ease_out_quint()),
-            move |band, delta| {
-                if reduce_motion {
-                    band
-                } else {
-                    band.opacity(delta)
-                }
-            },
-        )
+        band
     }
 
     fn collect_visible_rows(
@@ -1129,64 +1010,6 @@ impl CairnApp {
             .into_any_element()
     }
 
-    /// File semantics are resolved from the name's final extension. The broad
-    /// document/image/archive groups reuse [`TreemapCategory`] — including an extension recovered
-    /// from a display name that hides it — while types that need a distinct silhouette in a result
-    /// row (shortcuts, spreadsheets, binaries, scripts, fonts) get a dedicated glyph before that
-    /// fallback.
-    fn result_file_icon(name: &str, extension: &str, is_dir: bool) -> AssetIconName {
-        if is_dir {
-            return AssetIconName::Folder;
-        }
-        // The argument is the suffix recovered from the Shell payload; the local copy also falls
-        // back to the name's own last segment for the specific glyph groups below.
-        let resolved_extension = extension;
-        let extension = if extension.is_empty() {
-            name.rsplit_once('.')
-                .map(|(_, extension)| extension)
-                .unwrap_or("")
-        } else {
-            extension
-        };
-        let matches = |known: &[&str]| {
-            known
-                .iter()
-                .any(|candidate| candidate.eq_ignore_ascii_case(extension))
-        };
-        if matches(&["lnk", "url", "appref-ms", "website", "webloc"]) {
-            return AssetIconName::FileSymlink;
-        }
-        if matches(&["xls", "xlsx", "csv", "tsv"]) {
-            return AssetIconName::FileSpreadsheet;
-        }
-        if matches(&["ttf", "otf", "woff", "woff2", "fon"]) {
-            return AssetIconName::FileType;
-        }
-        if matches(&["exe", "msi", "msix", "com"]) {
-            return AssetIconName::AppWindow;
-        }
-        if matches(&["bat", "cmd", "ps1", "sh"]) {
-            return AssetIconName::FileTerminal;
-        }
-        if matches(&["json", "toml", "yaml", "yml", "xml"]) {
-            return AssetIconName::FileBraces;
-        }
-        if matches(&["dll", "sys", "drv", "efi"]) {
-            return AssetIconName::FileCog;
-        }
-        match broad_file_category(name, resolved_extension) {
-            TreemapCategory::Document => AssetIconName::FileText,
-            TreemapCategory::Archive => AssetIconName::FileArchive,
-            TreemapCategory::Image => AssetIconName::FileImage,
-            TreemapCategory::Code => AssetIconName::FileCode,
-            TreemapCategory::Audio => AssetIconName::FileMusic,
-            TreemapCategory::Video => AssetIconName::FileVideoCamera,
-            TreemapCategory::System => AssetIconName::FileCog,
-            TreemapCategory::Applications => AssetIconName::AppWindow,
-            TreemapCategory::Folder | TreemapCategory::Other => AssetIconName::File,
-        }
-    }
-
     /// A name cell is one truncated text run, not a row of independent spans: only a single run can
     /// put the ellipsis where the lane actually ends. The full name is available on hover, so a
     /// clipped value is never the only copy. The element id is the row's full path, which stays the
@@ -1228,7 +1051,7 @@ impl CairnApp {
             .items_center()
             .gap(rems(layout::INNER_SPACING))
             .child(
-                Icon::new(Self::result_file_icon(&row.name, extension, row.is_dir))
+                Icon::new(result_row_icon(&row.name, extension, row.is_dir))
                     .small()
                     // The glyph already distinguishes the file kind. Selection is the only thing
                     // that should raise the icon, together with the row's text.
@@ -1326,9 +1149,7 @@ impl CairnApp {
     /// the fetched window never reads as an empty result. The words say which of the two states this
     /// is; the bar beside them is the shape of the row that will land there.
     ///
-    /// The bars stay invisible for the same measured fast path the first page uses. A scrollbar
-    /// drag can cross several unfetched windows in a few frames, and painting a skeleton for a page
-    /// that lands before the next frame turns scrolling into a flicker of gray bars.
+    /// Fast scrolling across unfetched windows renders this quiet placeholder without flickering.
     fn render_placeholder_row(
         &self,
         ix: usize,
@@ -1336,7 +1157,6 @@ impl CairnApp {
         tokens: &ShellTokens,
         row_height: Pixels,
     ) -> AnyElement {
-        // The registry lists the two states in order: fetching first, then not loaded yet.
         let control = accessibility::control("result-placeholder");
         let message = if is_fetching {
             accessibility::name_at(control, 0, &self.i18n)
@@ -1344,14 +1164,14 @@ impl CairnApp {
             accessibility::name_at(control, 1, &self.i18n)
         };
 
-        const SKELETON_NAME_WIDTHS: [f32; 8] = [8.0, 11.0, 6.5, 9.5, 12.0, 7.5, 10.0, 8.5];
-        const SKELETON_PATH_WIDTHS: [f32; 8] = [14.0, 18.0, 12.0, 16.5, 20.0, 13.5, 17.0, 15.0];
-        const SKELETON_SIZE_WIDTHS: [f32; 4] = [3.2, 2.5, 4.0, 2.8];
+        const PLACEHOLDER_NAME_WIDTHS: [f32; 8] = [8.0, 11.0, 6.5, 9.5, 12.0, 7.5, 10.0, 8.5];
+        const PLACEHOLDER_PATH_WIDTHS: [f32; 8] = [14.0, 18.0, 12.0, 16.5, 20.0, 13.5, 17.0, 15.0];
+        const PLACEHOLDER_SIZE_WIDTHS: [f32; 4] = [3.2, 2.5, 4.0, 2.8];
 
-        let name_w = rems(SKELETON_NAME_WIDTHS[ix % SKELETON_NAME_WIDTHS.len()]);
-        let path_w = rems(SKELETON_PATH_WIDTHS[ix % SKELETON_PATH_WIDTHS.len()]);
-        let size_w = rems(SKELETON_SIZE_WIDTHS[ix % SKELETON_SIZE_WIDTHS.len()]);
-        let skel_bg = tokens.skeleton;
+        let name_w = rems(PLACEHOLDER_NAME_WIDTHS[ix % PLACEHOLDER_NAME_WIDTHS.len()]);
+        let path_w = rems(PLACEHOLDER_PATH_WIDTHS[ix % PLACEHOLDER_PATH_WIDTHS.len()]);
+        let size_w = rems(PLACEHOLDER_SIZE_WIDTHS[ix % PLACEHOLDER_SIZE_WIDTHS.len()]);
+        let bar_bg = tokens.muted;
 
         accessibility::element_at(control, ix)
             .aria_label(message)
@@ -1373,15 +1193,15 @@ impl CairnApp {
                             .size_4()
                             .flex_shrink_0()
                             .rounded(tokens.radius)
-                            .bg(skel_bg),
+                            .bg(bar_bg),
                     )
                     .child(
                         div()
-                            .h(rems(SKELETON_BAR_HEIGHT))
+                            .h(rems(PLACEHOLDER_BAR_HEIGHT))
                             .w(name_w)
                             .max_w_full()
                             .rounded(tokens.radius)
-                            .bg(skel_bg),
+                            .bg(bar_bg),
                     ),
             )
             .child(
@@ -1393,11 +1213,11 @@ impl CairnApp {
                     .items_center()
                     .child(
                         div()
-                            .h(rems(SKELETON_BAR_HEIGHT))
+                            .h(rems(PLACEHOLDER_BAR_HEIGHT))
                             .w(path_w)
                             .max_w_full()
                             .rounded(tokens.radius)
-                            .bg(skel_bg),
+                            .bg(bar_bg),
                     ),
             )
             .child(
@@ -1409,10 +1229,10 @@ impl CairnApp {
                     .items_center()
                     .child(
                         div()
-                            .h(rems(SKELETON_BAR_HEIGHT))
+                            .h(rems(PLACEHOLDER_BAR_HEIGHT))
                             .w(size_w)
                             .rounded(tokens.radius)
-                            .bg(skel_bg),
+                            .bg(bar_bg),
                     ),
             )
             .child(
@@ -1424,22 +1244,11 @@ impl CairnApp {
                     .items_center()
                     .child(
                         div()
-                            .h(rems(SKELETON_BAR_HEIGHT))
-                            .w(rems(SKELETON_DATE_WIDTH))
+                            .h(rems(PLACEHOLDER_BAR_HEIGHT))
+                            .w(rems(PLACEHOLDER_DATE_WIDTH))
                             .rounded(tokens.radius)
-                            .bg(skel_bg),
+                            .bg(bar_bg),
                     ),
-            )
-            .with_animation(
-                element_id("result-placeholder", &ix.to_string()),
-                Animation::new(SKELETON_DELAY),
-                |row, delta| {
-                    if delta < 1.0 {
-                        row.opacity(0.0)
-                    } else {
-                        row
-                    }
-                },
             )
             .into_any_element()
     }
@@ -1661,67 +1470,74 @@ mod tests {
     use core::prelude::rust_2021::test;
 
     use super::{
-        column_label_key, content_query_notice, pulse_opacity, result_command_label_key,
-        rows_band_local_top, rows_to_paint, ContentQueryNotice,
+        column_label_key, content_query_notice, result_command_label_key, result_row_icon,
+        result_surface, rows_band_local_top, rows_to_paint, ContentQueryNotice, ResultSurface,
     };
-    use crate::app::CairnApp;
     use crate::shell::command_groups::GroupCommand;
     use crate::table::model::SortColumn;
     use cairn_protocol::status::ContentIndexState;
+
+    #[test]
+    fn rows_beat_the_cover_and_a_stopped_service_beats_neither() {
+        // The cover answers an in-flight request only. With nothing in flight and no rows the band
+        // owns the region, because its recovery actions are the only way out of a stopped service
+        // (SPEC SVC-04).
+        assert_eq!(result_surface(false, false), ResultSurface::StateBand);
+        assert_eq!(result_surface(false, true), ResultSurface::Loading);
+        assert_eq!(result_surface(true, true), ResultSurface::Rows);
+        assert_eq!(result_surface(true, false), ResultSurface::Rows);
+    }
     use gpui_kit::assets::IconName as AssetIconName;
 
     #[test]
     fn result_rows_use_the_file_semantics_they_can_show() {
         assert_eq!(
-            CairnApp::result_file_icon("Deploy.lnk", "", false),
+            result_row_icon("Deploy.lnk", "", false),
             AssetIconName::FileSymlink
         );
         assert_eq!(
-            CairnApp::result_file_icon("BOOKMARKS.URL", "", false),
+            result_row_icon("BOOKMARKS.URL", "", false),
             AssetIconName::FileSymlink
         );
         assert_eq!(
-            CairnApp::result_file_icon("budget.xlsx", "", false),
+            result_row_icon("budget.xlsx", "", false),
             AssetIconName::FileSpreadsheet
         );
         assert_eq!(
-            CairnApp::result_file_icon("photo.PNG", "", false),
+            result_row_icon("photo.PNG", "", false),
             AssetIconName::FileImage
         );
         assert_eq!(
-            CairnApp::result_file_icon("Cairn.exe", "", false),
+            result_row_icon("Cairn.exe", "", false),
             AssetIconName::AppWindow
         );
         assert_eq!(
-            CairnApp::result_file_icon("build.ps1", "", false),
+            result_row_icon("build.ps1", "", false),
             AssetIconName::FileTerminal
         );
         assert_eq!(
-            CairnApp::result_file_icon("notes.unknown", "", false),
+            result_row_icon("notes.unknown", "", false),
             AssetIconName::File
         );
-        assert_eq!(
-            CairnApp::result_file_icon("Reports", "", true),
-            AssetIconName::Folder
-        );
+        assert_eq!(result_row_icon("Reports", "", true), AssetIconName::Folder);
 
         assert_eq!(
-            CairnApp::result_file_icon("Grok Bot", "lnk", false),
+            result_row_icon("Grok Bot", "lnk", false),
             AssetIconName::FileSymlink,
             "a Shell row hides the .lnk suffix from its display name"
         );
         assert_eq!(
-            CairnApp::result_file_icon("Screenshot", "png", false),
+            result_row_icon("Screenshot", "png", false),
             AssetIconName::FileImage,
             "a display name that hides its suffix still resolves through the recovered extension"
         );
         assert_eq!(
-            CairnApp::result_file_icon(".gitignore", "gitignore", false),
-            AssetIconName::FileCode,
+            result_row_icon(".gitignore", "gitignore", false),
+            AssetIconName::FileBraces,
             "a bare dotfile keeps the taxonomy's configuration meaning"
         );
         assert_eq!(
-            CairnApp::result_file_icon("CMakeLists.txt", "txt", false),
+            result_row_icon("CMakeLists.txt", "txt", false),
             AssetIconName::FileCode,
             "a name the taxonomy already knows outranks its ordinary suffix"
         );
@@ -1831,32 +1647,6 @@ mod tests {
             content_query_notice(&state),
             None,
             "a ready index makes zero rows a genuine no-match"
-        );
-    }
-
-    #[test]
-    fn the_skeleton_pulse_never_dims_a_row_out_of_sight() {
-        for row in 0..16 {
-            for step in 0..40 {
-                let opacity = pulse_opacity(row, step as f32 / 40.0);
-                assert!(
-                    (0.45..=1.0).contains(&opacity),
-                    "row {row} at step {step} rendered {opacity}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn adjacent_skeleton_rows_peak_at_different_times() {
-        assert_ne!(
-            pulse_opacity(0, 0.0),
-            pulse_opacity(5, 0.0),
-            "a single block-wide blink is not a travelling pulse"
-        );
-        assert!(
-            (pulse_opacity(0, 1.0) - pulse_opacity(0, 0.0)).abs() < f32::EPSILON,
-            "the pulse must repeat seamlessly"
         );
     }
 

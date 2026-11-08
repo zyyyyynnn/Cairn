@@ -55,11 +55,32 @@ pub fn should_try_silent_start(issue: ServiceIssue, already_attempted: bool) -> 
     issue == ServiceIssue::NotRunning && !already_attempted
 }
 
+/// What the result band may offer for an issue. An action has to be able to change the outcome:
+/// re-probing only helps while the service might answer next time, and starting it only helps when
+/// the service exists but is stopped. The remaining issues are cleared outside the app, so the band
+/// names that recovery in its sentence and offers no control (SVC-04).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ServiceBandAction {
+    Start,
+    Retry,
+    None,
+}
+
+pub const fn band_action(issue: ServiceIssue, service_installed: bool) -> ServiceBandAction {
+    match issue {
+        ServiceIssue::NotRunning if service_installed => ServiceBandAction::Start,
+        ServiceIssue::NotRunning => ServiceBandAction::Retry,
+        ServiceIssue::NotInstalled
+        | ServiceIssue::ProtocolIncompatible
+        | ServiceIssue::Unauthorized => ServiceBandAction::None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use core::prelude::rust_2021::test;
 
-    use super::{should_try_silent_start, ServiceIssue};
+    use super::{band_action, should_try_silent_start, ServiceBandAction, ServiceIssue};
 
     #[test]
     fn a_stopped_installed_service_gets_one_silent_start_attempt() {
@@ -78,6 +99,32 @@ mod tests {
             ServiceIssue::Unauthorized,
         ] {
             assert!(!should_try_silent_start(issue, false), "{issue:?}");
+        }
+    }
+
+    /// An action the issue cannot clear is a dead control: the band offers none.
+    #[test]
+    fn only_a_recoverable_issue_offers_an_action() {
+        assert_eq!(
+            band_action(ServiceIssue::NotRunning, true),
+            ServiceBandAction::Start
+        );
+        assert_eq!(
+            band_action(ServiceIssue::NotRunning, false),
+            ServiceBandAction::Retry
+        );
+        for issue in [
+            ServiceIssue::NotInstalled,
+            ServiceIssue::ProtocolIncompatible,
+            ServiceIssue::Unauthorized,
+        ] {
+            for installed in [true, false] {
+                assert_eq!(
+                    band_action(issue, installed),
+                    ServiceBandAction::None,
+                    "{issue:?} with installed={installed}"
+                );
+            }
         }
     }
 

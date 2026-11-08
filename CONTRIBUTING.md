@@ -55,6 +55,7 @@ Cairn 采用 Rust 与 GPUI 构建 Windows NTFS 文件检索与磁盘分析工具
      ```powershell
      cargo test --workspace
      ```
+   - 测试分层、价值判定、需要提权的人工验证与 CI 门禁见 `docs/engineering/testing.md`。
 3. **提交 PR**：
    - 仓库已内置 PR 模板。请按照要求填写：
      - **Summary**：简述变更逻辑与调用树/组件树示意。

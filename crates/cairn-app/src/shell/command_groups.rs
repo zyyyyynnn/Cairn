@@ -17,7 +17,7 @@
 
 use crate::shell::commands::{
     CopyFileNames, CopyFullPaths, CutQueryText, DeleteSelected, EscapeQuery, OpenSelected,
-    PasteQueryText, RedoQueryText, RestoreSelected, RevealSelectedLocation, SelectAllQueryText,
+    PasteQueryText, RedoQueryText, RestoreAll, RestoreSelected, RevealSelectedLocation, SelectAll,
     ShowProperties, ToggleCaseSensitive, ToggleMatchPath, ToggleRegex, ToggleWholeWord,
     UndoQueryText,
 };
@@ -135,6 +135,7 @@ pub enum GroupCommand {
     // ---- the selected result (文件) -------------------------------------------------
     OpenSelected,
     RestoreSelected,
+    RestoreAll,
     RevealLocation,
     ShowProperties,
     DeleteSelected,
@@ -146,7 +147,7 @@ pub enum GroupCommand {
     CopyPaths,
     CopyNames,
     PasteQueryText,
-    SelectAllQueryText,
+    SelectAll,
     ClearQuery,
     // ---- match flags (搜索) ---------------------------------------------------------
     ToggleCase,
@@ -210,6 +211,7 @@ impl GroupCommand {
         match self {
             GroupCommand::OpenSelected => "ctx_open",
             GroupCommand::RestoreSelected => "ctx_restore",
+            GroupCommand::RestoreAll => "ctx_restore_all",
             GroupCommand::RevealLocation => "ctx_open_path",
             GroupCommand::ShowProperties => "ctx_properties",
             GroupCommand::DeleteSelected => "ctx_delete",
@@ -220,7 +222,7 @@ impl GroupCommand {
             GroupCommand::CopyPaths => "ctx_copy_path",
             GroupCommand::CopyNames => "ctx_copy_name",
             GroupCommand::PasteQueryText => "query_paste",
-            GroupCommand::SelectAllQueryText => "query_select_all_text",
+            GroupCommand::SelectAll => "edit_select_all",
             GroupCommand::ClearQuery => "query_clear",
             GroupCommand::ToggleCase => "toggle_case_label",
             GroupCommand::ToggleWholeWord => "toggle_whole_word_label",
@@ -258,6 +260,7 @@ impl GroupCommand {
         match self {
             GroupCommand::OpenSelected => Some(Box::new(OpenSelected)),
             GroupCommand::RestoreSelected => Some(Box::new(RestoreSelected)),
+            GroupCommand::RestoreAll => Some(Box::new(RestoreAll)),
             GroupCommand::RevealLocation => Some(Box::new(RevealSelectedLocation)),
             GroupCommand::UndoQueryText => Some(Box::new(UndoQueryText)),
             GroupCommand::RedoQueryText => Some(Box::new(RedoQueryText)),
@@ -267,7 +270,7 @@ impl GroupCommand {
             GroupCommand::PasteQueryText => Some(Box::new(PasteQueryText)),
             GroupCommand::ShowProperties => Some(Box::new(ShowProperties)),
             GroupCommand::DeleteSelected => Some(Box::new(DeleteSelected)),
-            GroupCommand::SelectAllQueryText => Some(Box::new(SelectAllQueryText)),
+            GroupCommand::SelectAll => Some(Box::new(SelectAll)),
             GroupCommand::ToggleCase => Some(Box::new(ToggleCaseSensitive)),
             GroupCommand::ToggleWholeWord => Some(Box::new(ToggleWholeWord)),
             GroupCommand::ToggleMatchPath => Some(Box::new(ToggleMatchPath)),
@@ -307,7 +310,7 @@ impl GroupCommand {
             GroupCommand::PasteQueryText => Some("ctrl-v"),
             GroupCommand::ShowProperties => Some("alt-enter"),
             GroupCommand::DeleteSelected => Some("delete"),
-            GroupCommand::SelectAllQueryText => Some("ctrl-a"),
+            GroupCommand::SelectAll => Some("ctrl-a"),
             GroupCommand::ClearQuery => Some("escape"),
             GroupCommand::ToggleCase => Some("ctrl-i"),
             GroupCommand::ToggleWholeWord => Some("ctrl-b"),
@@ -367,6 +370,7 @@ pub static DEFAULT_GROUPS: &[MenuGroupSpec] = &[
             &[
                 GroupCommand::OpenSelected,
                 GroupCommand::RestoreSelected,
+                GroupCommand::RestoreAll,
                 GroupCommand::RevealLocation,
                 GroupCommand::ShowProperties,
             ],
@@ -379,10 +383,10 @@ pub static DEFAULT_GROUPS: &[MenuGroupSpec] = &[
             &[GroupCommand::UndoQueryText, GroupCommand::RedoQueryText],
             &[
                 GroupCommand::CutQueryText,
+                GroupCommand::PasteQueryText,
                 GroupCommand::CopyPaths,
                 GroupCommand::CopyNames,
-                GroupCommand::PasteQueryText,
-                GroupCommand::SelectAllQueryText,
+                GroupCommand::SelectAll,
             ],
             &[GroupCommand::ClearQuery],
         ],

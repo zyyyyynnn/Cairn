@@ -240,6 +240,76 @@ impl SearchInputState {
         self.selection = 0..self.text.len();
     }
 
+    /// Returns the normalized selection range `(start, end)` where `start <= end <= text.len()`.
+    pub fn normalized_selection(&self) -> (usize, usize) {
+        let len = self.text.len();
+        let start = self.selection.start.min(self.selection.end).min(len);
+        let end = self.selection.start.max(self.selection.end).min(len);
+        (start, end)
+    }
+
+    /// Returns `true` if there is a non-empty selection.
+    pub fn has_selection(&self) -> bool {
+        let (start, end) = self.normalized_selection();
+        start < end
+    }
+
+    /// Selects the word, whitespace run, or punctuation sequence enclosing `byte_idx` (Double-click).
+    pub fn select_word_at(&mut self, byte_idx: usize) {
+        if self.text.is_empty() {
+            self.selection = 0..0;
+            return;
+        }
+        let len = self.text.len();
+        let idx = byte_idx.min(len);
+
+        let target_idx = if idx < len {
+            self.text.floor_char_boundary(idx)
+        } else {
+            self.text.floor_char_boundary(len.saturating_sub(1))
+        };
+
+        let target_ch = self.text[target_idx..].chars().next().unwrap_or(' ');
+        let is_alphanumeric_or_cjk = |c: char| c.is_alphanumeric() || c == '_';
+        let is_target_whitespace = target_ch.is_whitespace();
+        let is_target_alnum = is_alphanumeric_or_cjk(target_ch);
+
+        let mut start = target_idx;
+        for (i, c) in self.text[..target_idx].char_indices().rev() {
+            let matches = if is_target_whitespace {
+                c.is_whitespace()
+            } else if is_target_alnum {
+                is_alphanumeric_or_cjk(c)
+            } else {
+                !c.is_whitespace() && !is_alphanumeric_or_cjk(c)
+            };
+            if matches {
+                start = i;
+            } else {
+                break;
+            }
+        }
+
+        let mut end = target_idx + target_ch.len_utf8();
+        for (_, c) in self.text[end..].char_indices() {
+            let matches = if is_target_whitespace {
+                c.is_whitespace()
+            } else if is_target_alnum {
+                is_alphanumeric_or_cjk(c)
+            } else {
+                !c.is_whitespace() && !is_alphanumeric_or_cjk(c)
+            };
+            if matches {
+                end += c.len_utf8();
+            } else {
+                break;
+            }
+        }
+
+        self.selection = start..end;
+        self.marked_range = None;
+    }
+
     pub fn clear(&mut self) {
         if !self.text.is_empty() {
             self.push_undo_snapshot();
@@ -270,24 +340,25 @@ impl SearchInputState {
             }
         }
 
-        let is_paste_or_multi = new_text.chars().count() > 1
-            || replacement_range.is_some()
-            || self.selection.start != self.selection.end;
+        let is_paste_or_multi =
+            new_text.chars().count() > 1 || replacement_range.is_some() || self.has_selection();
         self.push_typing_undo_snapshot(is_paste_or_multi);
 
         let had_marked_range = self.marked_range.is_some();
 
         let mapper = Utf16Utf8Mapper::new(&self.text);
-        let target_range = if let Some(r) = replacement_range {
-            mapper.utf16_to_utf8_range(r)
+        let (start, end) = if let Some(r) = replacement_range {
+            let u8_r = mapper.utf16_to_utf8_range(r);
+            let s = u8_r.start.min(u8_r.end).min(self.text.len());
+            let e = u8_r.start.max(u8_r.end).min(self.text.len());
+            (s, e)
         } else if let Some(ref marked) = self.marked_range {
-            marked.clone()
+            let s = marked.start.min(marked.end).min(self.text.len());
+            let e = marked.start.max(marked.end).min(self.text.len());
+            (s, e)
         } else {
-            self.selection.clone()
+            self.normalized_selection()
         };
-
-        let start = target_range.start.min(self.text.len());
-        let end = target_range.end.min(self.text.len());
 
         let mut updated = String::with_capacity(self.text.len() + new_text.len());
         updated.push_str(&self.text[..start]);
@@ -311,19 +382,28 @@ impl SearchInputState {
 
     /// Moves cursor one character left (UTF-8 safe).
     pub fn move_cursor_left(&mut self, select: bool) {
-        let cursor = if select {
-            self.selection.end
-        } else {
-            self.selection.start
-        };
-        let prev_boundary = self.text[..cursor.min(self.text.len())]
-            .char_indices()
-            .last()
-            .map(|(idx, _)| idx)
-            .unwrap_or(0);
         if select {
+            let cursor = self
+                .text
+                .floor_char_boundary(self.selection.end.min(self.text.len()));
+            let prev_boundary = self.text[..cursor]
+                .char_indices()
+                .last()
+                .map(|(idx, _)| idx)
+                .unwrap_or(0);
             self.selection = self.selection.start..prev_boundary;
+        } else if self.has_selection() {
+            let (start, _) = self.normalized_selection();
+            self.selection = start..start;
         } else {
+            let cursor = self
+                .text
+                .floor_char_boundary(self.selection.start.min(self.text.len()));
+            let prev_boundary = self.text[..cursor]
+                .char_indices()
+                .last()
+                .map(|(idx, _)| idx)
+                .unwrap_or(0);
             self.selection = prev_boundary..prev_boundary;
         }
         self.marked_range = None;
@@ -331,19 +411,36 @@ impl SearchInputState {
 
     /// Moves cursor one character right (UTF-8 safe).
     pub fn move_cursor_right(&mut self, select: bool) {
-        let cursor = self.selection.end;
-        let next_boundary = if cursor < self.text.len() {
-            self.text[cursor..]
-                .chars()
-                .next()
-                .map(|ch| cursor + ch.len_utf8())
-                .unwrap_or(self.text.len())
-        } else {
-            self.text.len()
-        };
         if select {
+            let cursor = self
+                .text
+                .floor_char_boundary(self.selection.end.min(self.text.len()));
+            let next_boundary = if cursor < self.text.len() {
+                self.text[cursor..]
+                    .chars()
+                    .next()
+                    .map(|ch| cursor + ch.len_utf8())
+                    .unwrap_or(self.text.len())
+            } else {
+                self.text.len()
+            };
             self.selection = self.selection.start..next_boundary;
+        } else if self.has_selection() {
+            let (_, end) = self.normalized_selection();
+            self.selection = end..end;
         } else {
+            let cursor = self
+                .text
+                .floor_char_boundary(self.selection.end.min(self.text.len()));
+            let next_boundary = if cursor < self.text.len() {
+                self.text[cursor..]
+                    .chars()
+                    .next()
+                    .map(|ch| cursor + ch.len_utf8())
+                    .unwrap_or(self.text.len())
+            } else {
+                self.text.len()
+            };
             self.selection = next_boundary..next_boundary;
         }
         self.marked_range = None;
@@ -352,7 +449,7 @@ impl SearchInputState {
     /// Moves cursor to start of text.
     pub fn move_cursor_home(&mut self, select: bool) {
         if select {
-            self.selection = 0..self.selection.end;
+            self.selection = self.selection.start..0;
         } else {
             self.selection = 0..0;
         }
@@ -372,15 +469,17 @@ impl SearchInputState {
 
     /// Deletes text backward (Backspace).
     pub fn delete_backward(&mut self) {
-        if self.selection.start < self.selection.end && self.selection.end <= self.text.len() {
+        let (start, end) = self.normalized_selection();
+        if start < end {
             self.push_undo_snapshot();
             let mut updated = self.text.clone();
-            updated.drain(self.selection.clone());
+            updated.drain(start..end);
             self.text = updated;
-            let cursor = self.selection.start;
-            self.selection = cursor..cursor;
+            self.selection = start..start;
         } else if self.selection.start > 0 {
-            let cursor = self.selection.start.min(self.text.len());
+            let cursor = self
+                .text
+                .floor_char_boundary(self.selection.start.min(self.text.len()));
             if let Some((prev_idx, _)) = self.text[..cursor].char_indices().last() {
                 self.push_undo_snapshot();
                 let mut updated = String::with_capacity(self.text.len());
@@ -395,15 +494,17 @@ impl SearchInputState {
 
     /// Deletes text forward (Delete).
     pub fn delete_forward(&mut self) {
-        if self.selection.start < self.selection.end && self.selection.end <= self.text.len() {
+        let (start, end) = self.normalized_selection();
+        if start < end {
             self.push_undo_snapshot();
             let mut updated = self.text.clone();
-            updated.drain(self.selection.clone());
+            updated.drain(start..end);
             self.text = updated;
-            let cursor = self.selection.start;
-            self.selection = cursor..cursor;
+            self.selection = start..start;
         } else if self.selection.start < self.text.len() {
-            let cursor = self.selection.start;
+            let cursor = self
+                .text
+                .floor_char_boundary(self.selection.start.min(self.text.len()));
             if let Some(ch) = self.text[cursor..].chars().next() {
                 self.push_undo_snapshot();
                 let next_idx = cursor + ch.len_utf8();
@@ -419,7 +520,7 @@ impl SearchInputState {
 
     /// Finds the preceding word boundary for Ctrl+Left or Ctrl+Backspace.
     pub fn find_prev_word_boundary(&self, cursor: usize) -> usize {
-        let cursor = cursor.min(self.text.len());
+        let cursor = self.text.floor_char_boundary(cursor.min(self.text.len()));
         if cursor == 0 {
             return 0;
         }
@@ -439,7 +540,7 @@ impl SearchInputState {
             return 0;
         };
 
-        let is_alphanumeric_or_cjk = |c: char| c.is_alphanumeric() || (c as u32) >= 0x4E00;
+        let is_alphanumeric_or_cjk = |c: char| c.is_alphanumeric() || c == '_';
         let is_target_alnum = is_alphanumeric_or_cjk(first_ch);
 
         let mut boundary = 0;
@@ -457,6 +558,7 @@ impl SearchInputState {
     /// Finds the following word boundary for Ctrl+Right or Ctrl+Delete.
     pub fn find_next_word_boundary(&self, cursor: usize) -> usize {
         let len = self.text.len();
+        let cursor = self.text.floor_char_boundary(cursor.min(len));
         if cursor >= len {
             return len;
         }
@@ -476,7 +578,7 @@ impl SearchInputState {
             return len;
         };
 
-        let is_alphanumeric_or_cjk = |c: char| c.is_alphanumeric() || (c as u32) >= 0x4E00;
+        let is_alphanumeric_or_cjk = |c: char| c.is_alphanumeric() || c == '_';
         let is_target_alnum = is_alphanumeric_or_cjk(first_ch);
 
         let mut boundary = len;
@@ -493,10 +595,12 @@ impl SearchInputState {
 
     /// Deletes the preceding word (Ctrl+Backspace).
     pub fn delete_word_backward(&mut self) {
-        if self.selection.start < self.selection.end && self.selection.end <= self.text.len() {
+        if self.has_selection() {
             self.delete_backward();
         } else if self.selection.start > 0 {
-            let cursor = self.selection.start.min(self.text.len());
+            let cursor = self
+                .text
+                .floor_char_boundary(self.selection.start.min(self.text.len()));
             let prev_boundary = self.find_prev_word_boundary(cursor);
             if prev_boundary < cursor {
                 self.push_undo_snapshot();
@@ -506,16 +610,21 @@ impl SearchInputState {
                 self.text = updated;
                 self.selection = prev_boundary..prev_boundary;
                 self.marked_range = None;
+            } else if cursor != self.selection.start {
+                self.selection = cursor..cursor;
+                self.marked_range = None;
             }
         }
     }
 
     /// Deletes the following word (Ctrl+Delete).
     pub fn delete_word_forward(&mut self) {
-        if self.selection.start < self.selection.end && self.selection.end <= self.text.len() {
+        if self.has_selection() {
             self.delete_forward();
         } else if self.selection.start < self.text.len() {
-            let cursor = self.selection.start;
+            let cursor = self
+                .text
+                .floor_char_boundary(self.selection.start.min(self.text.len()));
             let next_boundary = self.find_next_word_boundary(cursor);
             if next_boundary > cursor {
                 self.push_undo_snapshot();
@@ -531,15 +640,16 @@ impl SearchInputState {
 
     /// Moves cursor one word left (Ctrl+Left).
     pub fn move_cursor_word_left(&mut self, select: bool) {
-        let cursor = if select {
-            self.selection.end
-        } else {
-            self.selection.start
-        };
-        let prev_boundary = self.find_prev_word_boundary(cursor);
         if select {
+            let cursor = self.selection.end;
+            let prev_boundary = self.find_prev_word_boundary(cursor);
             self.selection = self.selection.start..prev_boundary;
+        } else if self.has_selection() {
+            let (start, _) = self.normalized_selection();
+            self.selection = start..start;
         } else {
+            let cursor = self.selection.start;
+            let prev_boundary = self.find_prev_word_boundary(cursor);
             self.selection = prev_boundary..prev_boundary;
         }
         self.marked_range = None;
@@ -547,11 +657,16 @@ impl SearchInputState {
 
     /// Moves cursor one word right (Ctrl+Right).
     pub fn move_cursor_word_right(&mut self, select: bool) {
-        let cursor = self.selection.end;
-        let next_boundary = self.find_next_word_boundary(cursor);
         if select {
+            let cursor = self.selection.end;
+            let next_boundary = self.find_next_word_boundary(cursor);
             self.selection = self.selection.start..next_boundary;
+        } else if self.has_selection() {
+            let (_, end) = self.normalized_selection();
+            self.selection = end..end;
         } else {
+            let cursor = self.selection.end;
+            let next_boundary = self.find_next_word_boundary(cursor);
             self.selection = next_boundary..next_boundary;
         }
         self.marked_range = None;
@@ -566,15 +681,20 @@ impl SearchInputState {
     ) {
         let (target_start, target_end, marked_start_u16) = {
             let mapper = Utf16Utf8Mapper::new(&self.text);
-            let target_range = if let Some(r) = range_utf16 {
-                mapper.utf16_to_utf8_range(r)
+            let (start, end) = if let Some(r) = range_utf16 {
+                let u8_r = mapper.utf16_to_utf8_range(r);
+                (
+                    u8_r.start.min(u8_r.end).min(self.text.len()),
+                    u8_r.start.max(u8_r.end).min(self.text.len()),
+                )
             } else if let Some(ref marked) = self.marked_range {
-                marked.clone()
+                (
+                    marked.start.min(marked.end).min(self.text.len()),
+                    marked.start.max(marked.end).min(self.text.len()),
+                )
             } else {
-                self.selection.clone()
+                self.normalized_selection()
             };
-            let start = target_range.start.min(self.text.len());
-            let end = target_range.end.min(self.text.len());
             let start_u16 = mapper.utf8_to_utf16_offset(start);
             (start, end, start_u16)
         };
@@ -613,7 +733,7 @@ mod tests {
 
     #[test]
     fn test_utf16_utf8_mapper() {
-        let s = "content:架构设计 v1";
+        let s = "content:架构设计";
         let mapper = Utf16Utf8Mapper::new(s);
 
         // "架构设计" has 4 Chinese characters, each 3 bytes in UTF-8 and 1 code unit in UTF-16
@@ -798,5 +918,216 @@ mod tests {
         // Undo -> back to "cairn ext:rs"
         assert!(state.undo());
         assert_eq!(state.text, "cairn ext:rs");
+
+        // CJK full-width punctuation and emoji boundaries
+        state.clear();
+        state.handle_replace_text_in_range(None, "测试，文件！");
+        state.delete_word_backward();
+        assert_eq!(state.text, "测试，文件");
+        state.delete_word_backward();
+        assert_eq!(state.text, "测试，");
+        state.delete_word_backward();
+        assert_eq!(state.text, "测试");
+        state.delete_word_backward();
+        assert_eq!(state.text, "");
+
+        state.clear();
+        state.handle_replace_text_in_range(None, "rust🦀code");
+        state.delete_word_backward();
+        assert_eq!(state.text, "rust🦀");
+        state.delete_word_backward();
+        assert_eq!(state.text, "rust");
+        state.delete_word_backward();
+        assert_eq!(state.text, "");
+    }
+
+    #[test]
+    fn test_select_word_at() {
+        let mut state = SearchInputState::default();
+        state.handle_replace_text_in_range(None, r#"cargo run --release "c:\test path\file.rs""#);
+
+        // Double click on 'c' in "cargo"
+        state.select_word_at(0);
+        assert_eq!(&state.text[state.selection.clone()], "cargo");
+
+        // Double click on 'g' in "cargo"
+        state.select_word_at(3);
+        assert_eq!(&state.text[state.selection.clone()], "cargo");
+
+        // Double click on space after "cargo"
+        state.select_word_at(5);
+        assert_eq!(&state.text[state.selection.clone()], " ");
+
+        // Double click on "--"
+        state.select_word_at(10);
+        assert_eq!(&state.text[state.selection.clone()], "--");
+
+        // Double click on "release"
+        state.select_word_at(13);
+        assert_eq!(&state.text[state.selection.clone()], "release");
+
+        // Test with Chinese text
+        state.clear();
+        state.handle_replace_text_in_range(None, "测试搜索 文件.txt");
+        state.select_word_at(6); // inside "测试搜索"
+        assert_eq!(&state.text[state.selection.clone()], "测试搜索");
+
+        // Full-width punctuation and emoji are punctuation/symbols, not alphanumeric words
+        state.clear();
+        state.handle_replace_text_in_range(None, "测试，文件！");
+        // "测试" is 6 bytes (0..6), "，" is 3 bytes (6..9), "文件" is 6 bytes (9..15), "！" is 3 bytes (15..18)
+        state.select_word_at(0); // clicking on "测试"
+        assert_eq!(&state.text[state.selection.clone()], "测试");
+
+        state.select_word_at(6); // clicking on "，"
+        assert_eq!(&state.text[state.selection.clone()], "，");
+
+        state.select_word_at(9); // clicking on "文件"
+        assert_eq!(&state.text[state.selection.clone()], "文件");
+
+        state.select_word_at(15); // clicking on "！"
+        assert_eq!(&state.text[state.selection.clone()], "！");
+
+        state.clear();
+        state.handle_replace_text_in_range(None, "rust🦀code");
+        // "rust" is 4 bytes (0..4), "🦀" is 4 bytes (4..8), "code" is 4 bytes (8..12)
+        state.select_word_at(4); // clicking on "🦀"
+        assert_eq!(&state.text[state.selection.clone()], "🦀");
+    }
+
+    #[test]
+    #[allow(clippy::reversed_empty_ranges)]
+    fn test_backward_selection_delete_and_replace() {
+        let mut state = SearchInputState::default();
+        state.handle_replace_text_in_range(None, "abcdef");
+
+        // Backward selection from index 4 to 1 ("bcd")
+        state.selection = 4..1;
+        let (start, end) = state.normalized_selection();
+        assert_eq!(start, 1);
+        assert_eq!(end, 4);
+        assert!(state.has_selection());
+        assert_eq!(&state.text[start..end], "bcd");
+
+        // Replacement on backward selection: "abcdef" with "bcd" replaced by "XYZ" -> "aXYZef"
+        state.handle_replace_text_in_range(None, "XYZ");
+        assert_eq!(state.text, "aXYZef");
+        assert_eq!(state.selection, 4..4);
+
+        // Backward selection delete_backward
+        state.selection = 4..1; // selects "XYZ"
+        state.delete_backward();
+        assert_eq!(state.text, "aef");
+        assert_eq!(state.selection, 1..1);
+
+        // Backward selection delete_forward
+        state.text = "abcdef".to_string();
+        state.selection = 4..1; // selects "bcd"
+        state.delete_forward();
+        assert_eq!(state.text, "aef");
+        assert_eq!(state.selection, 1..1);
+
+        // Word backward deletion on backward selection
+        state.text = "hello world test".to_string();
+        state.selection = 11..6; // selects "world"
+        state.delete_word_backward();
+        assert_eq!(state.text, "hello  test");
+        assert_eq!(state.selection, 6..6);
+
+        // Arrow navigation collapsing forward selection
+        state.text = "abcdef".to_string();
+        state.selection = 1..4; // selects "bcd"
+        state.move_cursor_left(false);
+        assert_eq!(
+            state.selection,
+            1..1,
+            "Left arrow must collapse forward selection to left boundary"
+        );
+
+        state.selection = 1..4;
+        state.move_cursor_right(false);
+        assert_eq!(
+            state.selection,
+            4..4,
+            "Right arrow must collapse forward selection to right boundary"
+        );
+
+        // Arrow navigation collapsing backward selection
+        state.selection = 4..1; // selects "bcd" backward
+        state.move_cursor_left(false);
+        assert_eq!(
+            state.selection,
+            1..1,
+            "Left arrow must collapse backward selection to left boundary"
+        );
+
+        state.selection = 4..1;
+        state.move_cursor_right(false);
+        assert_eq!(
+            state.selection,
+            4..4,
+            "Right arrow must collapse backward selection to right boundary"
+        );
+
+        // Word arrow navigation collapsing backward selection
+        state.text = "hello world test".to_string();
+        state.selection = 11..6;
+        state.move_cursor_word_left(false);
+        assert_eq!(
+            state.selection,
+            6..6,
+            "Word left must collapse backward selection to left boundary"
+        );
+
+        state.selection = 11..6;
+        state.move_cursor_word_right(false);
+        assert_eq!(
+            state.selection,
+            11..11,
+            "Word right must collapse backward selection to right boundary"
+        );
+
+        // Shift+Home from cursor position preserves anchor
+        state.selection = 5..5;
+        state.move_cursor_home(true);
+        assert_eq!(
+            state.selection,
+            5..0,
+            "Shift+Home must extend selection to 0 while keeping anchor"
+        );
+    }
+
+    #[test]
+    fn word_boundary_guards_against_non_char_boundary_offsets() {
+        let state = SearchInputState {
+            text: "文档检索".to_string(),
+            ..Default::default()
+        };
+        // Byte index 1 and 2 are inside '文' (0..3)
+        // Without UTF-8 char boundary guard, this panics with slice error
+        let prev = state.find_prev_word_boundary(1);
+        assert_eq!(prev, 0);
+        let next = state.find_next_word_boundary(1);
+        assert_eq!(next, 12);
+    }
+    #[test]
+    fn delete_word_guards_against_non_char_boundary_offsets() {
+        let mut state = SearchInputState {
+            text: "文档检索".to_string(),
+            ..Default::default()
+        };
+        state.selection = 1..1;
+        state.delete_word_backward();
+        assert_eq!(state.selection, 0..0);
+        assert_eq!(state.text, "文档检索");
+
+        let mut state = SearchInputState {
+            text: "文档检索".to_string(),
+            ..Default::default()
+        };
+        state.selection = 1..1;
+        state.delete_word_forward();
+        assert_eq!(state.selection, 0..0);
+        assert_eq!(state.text, "");
     }
 }

@@ -19,7 +19,7 @@ pub use message::{
     ClientRequest, Envelope, FileRowData, QueryDefaults, ResponsePayload,
     ERROR_CODE_ADMIN_ONLY_QUERY, ERROR_CODE_HANDSHAKE_REQUIRED,
     ERROR_CODE_PROTOCOL_VERSION_MISMATCH, ERROR_CODE_SESSION_EXPIRED, ERROR_CODE_UNAUTHORIZED,
-    PIPE_NAME, PROTOCOL_VERSION,
+    MAX_TREE_DEPTH, PIPE_NAME, PRODUCT_VERSION, WIRE_GUARD,
 };
 pub use status::{
     ContentIndexState, ContentIndexStatus, ContentIndexTask, VolumeState, VolumeStatusSummary,

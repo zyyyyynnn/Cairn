@@ -248,12 +248,38 @@ impl DirectorySizeIndex {
         name: &str,
         max_depth: usize,
     ) -> TreemapTreeNode {
+        // A node at the depth limit is a leaf. It keeps its exact descendant total but its
+        // children are not walked: walking them would put one more level in the tree than
+        // `subtree_entry_count` budgeted for, and a caller that checked the count before building
+        // would then produce a payload larger than the one it measured.
+        if max_depth == 0 {
+            let (size, modified_ts) = match dir_idx {
+                Some(idx) => (self.sizes[idx as usize], records[idx as usize].modified_ts),
+                None => (
+                    self.children_of(None)
+                        .iter()
+                        .map(|&child| self.sizes[child as usize])
+                        .sum(),
+                    0,
+                ),
+            };
+            return TreemapTreeNode {
+                id: dir_idx.map(u64::from).unwrap_or(0),
+                name: name.to_string(),
+                size,
+                is_dir: true,
+                modified_ts,
+                category: TreemapCategory::classify(name, true),
+                children: Vec::new(),
+                descendant_items: self.descendant_count(dir_idx),
+            };
+        }
         let child_indices = self.children_of(dir_idx);
         let mut children = Vec::with_capacity(child_indices.len());
         for &child in child_indices {
             let record = &records[child as usize];
             let child_name = arena.get_name(record.name_offset, record.name_len);
-            if record.is_dir() && max_depth > 0 {
+            if record.is_dir() {
                 let mut child_node =
                     self.build_subtree(records, arena, Some(child), child_name, max_depth - 1);
                 // The index knows every descendant even where the tree is
@@ -417,11 +443,11 @@ mod tests {
         assert_eq!(system32_node.descendant_count(), 1);
         assert_eq!(system32_node.size, 3000);
         assert!(system32_node.is_dir);
-        assert_eq!(system32_node.category, TreemapCategory::System);
+        assert_eq!(system32_node.category, TreemapCategory::Programs);
         let notepad_node = child(windows_node, "notepad.exe");
         assert_eq!(notepad_node.size, 1000);
         assert!(!notepad_node.is_dir);
-        assert_eq!(notepad_node.category, TreemapCategory::Code);
+        assert_eq!(notepad_node.category, TreemapCategory::Programs);
     }
 
     #[test]
@@ -536,12 +562,73 @@ mod tests {
         push(&mut records, &mut pool, "deep.bin", mid, 0, 4_096);
 
         let index = DirectorySizeIndex::build(&records, &pool);
-        let tree = index.build_tree_node(&records, &pool, Some(top), "Top", 0);
+        let tree = index.build_tree_node(&records, &pool, Some(top), "Top", 1);
 
         assert_eq!(tree.size, 4_096);
         let mid_node = child(&tree, "Mid");
         assert!(mid_node.is_dir);
-        assert!(mid_node.children.is_empty());
+        assert!(
+            mid_node.children.is_empty(),
+            "a directory at the depth limit is a leaf"
+        );
         assert_eq!(mid_node.size, 4_096);
+        assert_eq!(mid_node.descendant_items, 1);
+    }
+
+    /// The response budget is decided from `subtree_entry_count` and then spent by
+    /// `build_tree_node`, so both must describe the same tree at every depth. They drifted apart
+    /// once: the builder walked one level further than the count, so a tree measured as fitting
+    /// was rejected after it had been built.
+    #[test]
+    fn a_depth_capped_tree_has_exactly_the_entries_the_count_promised() {
+        fn nodes(node: &TreemapTreeNode) -> usize {
+            1 + node.children.iter().map(nodes).sum::<usize>()
+        }
+        fn deepest(node: &TreemapTreeNode) -> usize {
+            node.children
+                .iter()
+                .map(|child| 1 + deepest(child))
+                .max()
+                .unwrap_or(0)
+        }
+
+        let mut pool = NamePool::default();
+        let mut records = Vec::new();
+        let root = push(
+            &mut records,
+            &mut pool,
+            "C:\\",
+            FileRecord::ROOT_PARENT,
+            FLAG_DIRECTORY,
+            0,
+        );
+        let windows = push(&mut records, &mut pool, "Windows", root, FLAG_DIRECTORY, 0);
+        let system32 = push(
+            &mut records,
+            &mut pool,
+            "System32",
+            windows,
+            FLAG_DIRECTORY,
+            0,
+        );
+        push(&mut records, &mut pool, "kernel32.dll", system32, 0, 3000);
+        push(&mut records, &mut pool, "notepad.exe", windows, 0, 1000);
+        push(&mut records, &mut pool, "pagefile.sys", root, 0, 10_000);
+
+        let index = DirectorySizeIndex::build(&records, &pool);
+
+        for depth in 0..=4 {
+            let tree = index.build_tree_node(&records, &pool, None, "C:\\", depth);
+            assert_eq!(
+                nodes(&tree),
+                index.subtree_entry_count(None, depth),
+                "depth {depth} builds a different number of nodes than the budget counted"
+            );
+            assert_eq!(
+                deepest(&tree),
+                depth.min(3),
+                "depth {depth} must not add a level below the limit"
+            );
+        }
     }
 }

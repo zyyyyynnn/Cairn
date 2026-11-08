@@ -535,6 +535,7 @@ fn generate_wix_template(wxs_path: &Path) -> Result<(), Box<dyn Error>> {
            Compressed="yes"
            UpgradeCode="{upgrade_code}">
     <MajorUpgrade Schedule="afterInstallInitialize"
+                  AllowSameVersionUpgrades="yes"
                   DowngradeErrorMessage="A newer version of Cairn is already installed." />
     <MediaTemplate EmbedCab="yes" />
     <Binary Id="CairnInstallGuard" SourceFile="{guard}" />
@@ -865,6 +866,18 @@ mod tests {
         let wxs = fs::read_to_string(&path).expect("read WXS");
         assert!(wxs.contains(r#"--install-dir &quot;[INSTALLFOLDER]/&quot;"#));
         assert!(wxs.contains(r#"--program-files &quot;[ProgramFiles64Folder]/&quot;"#));
+    }
+
+    /// An install of the current version must replace what is already on disk. Without this the
+    /// MSI reports success and leaves the old binaries in place, which also silently disables the
+    /// in-app update whenever a release keeps the same version number.
+    #[test]
+    fn the_msi_replaces_an_equal_version() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("cairn.wxs");
+        generate_wix_template(&path).expect("generate WXS");
+        let wxs = fs::read_to_string(&path).expect("read WXS");
+        assert!(wxs.contains(r#"AllowSameVersionUpgrades="yes""#));
     }
 
     fn write_fake_binaries(bin_dir: &Path) {

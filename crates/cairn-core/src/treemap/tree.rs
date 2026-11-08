@@ -21,7 +21,8 @@ pub struct TreemapItem {
     pub is_dir: bool,
     /// Last modification timestamp.
     pub modified_ts: i64,
-    /// Data category resolved from the name when the item was built.
+    /// Data category resolved when the item was built: a file's from its name,
+    /// a directory's from its content.
     pub category: TreemapCategory,
 }
 
@@ -46,9 +47,9 @@ impl From<&TreemapTreeNode> for TreemapItem {
 /// nodes the layout actually paints, and lookups walk name segments.
 ///
 /// Producers hand out finished trees: directory sizes are aggregated, children
-/// are sorted by size descending and generic directories carry the category
-/// of their dominant content. A directory without children may still carry a
-/// size — a depth-capped leaf whose recursive size was already measured.
+/// are sorted by size descending and directories carry the category of their
+/// dominant content. A directory without children may still carry a size — a
+/// depth-capped leaf whose recursive size was already measured.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct TreemapTreeNode {
     pub id: u64,
@@ -149,16 +150,16 @@ impl TreemapTreeNode {
         total
     }
 
-    /// Resolves the category of every unnamed directory from its content,
-    /// bottom-up, after sizes are final. Returns this node's final category.
+    /// Resolves the category of every directory from its content, bottom-up,
+    /// after sizes are final. Returns this node's final category.
     ///
     /// A file keeps its classified category. A directory accumulates the whole
-    /// final size of each child under that child's final category — a known
-    /// directory contributes its own category, not a per-file breakdown. Only a
-    /// still-structural [`TreemapCategory::Folder`] adopts the largest
-    /// non-structural category; an explicit [`TreemapCategory::Other`] and every
-    /// known category stay untouched. A directory whose content carries no
-    /// category signal remains a Folder.
+    /// final size of each child under that child's final category — a nested
+    /// directory contributes its own resolved category, not a per-file
+    /// breakdown. A directory whose category is still [`TreemapCategory::Other`]
+    /// adopts the category holding the most descendant bytes when that category
+    /// is not `Other`; a directory whose bytes are mostly unclassified stays
+    /// `Other`.
     pub fn propagate_content_categories(&mut self) -> TreemapCategory {
         if !self.is_dir {
             return self.category;
@@ -170,9 +171,11 @@ impl TreemapTreeNode {
             totals.add(category, child.size);
         }
 
-        if self.category == TreemapCategory::Folder {
+        if self.category == TreemapCategory::Other {
             if let Some(dominant) = totals.dominant() {
-                self.category = dominant;
+                if dominant != TreemapCategory::Other {
+                    self.category = dominant;
+                }
             }
         }
         self.category
@@ -246,12 +249,12 @@ mod tests {
     }
 
     #[test]
-    fn propagate_content_never_overwrites_a_known_category() {
+    fn content_propagation_assigns_a_directory_category() {
         let mut windows = dir_with_children(
             "Windows",
             vec![
-                file_node("wallpaper.jpg", 900),
-                file_node("kernel32.dll", 100),
+                file_node("pagefile.sys", 900),
+                file_node("wallpaper.jpg", 100),
             ],
         );
         assert_eq!(
@@ -266,37 +269,46 @@ mod tests {
         );
         assert_eq!(
             program_files.propagate_content_categories(),
-            TreemapCategory::Applications
+            TreemapCategory::Documents
         );
 
         let mut users = dir_with_children("Users", vec![file_node("main.rs", 400)]);
         assert_eq!(
             users.propagate_content_categories(),
-            TreemapCategory::Document
-        );
-
-        // Other is an explicit decision, not an empty slot to fill in.
-        let mut program_data = dir_with_children("ProgramData", vec![file_node("cache.rs", 400)]);
-        assert_eq!(
-            program_data.propagate_content_categories(),
-            TreemapCategory::Other
+            TreemapCategory::Documents
         );
     }
 
     #[test]
-    fn a_generic_directory_inherits_code_from_its_files() {
+    fn unknown_bytes_can_outweigh_a_content_category() {
         let mut folder = dir_with_children(
-            "ZYN",
+            "Temp",
+            vec![file_node("data.bin", 900), file_node("notes.txt", 100)],
+        );
+        assert_eq!(
+            folder.propagate_content_categories(),
+            TreemapCategory::Other,
+            "a directory whose bytes are mostly unclassified stays Other"
+        );
+    }
+
+    #[test]
+    fn a_generic_directory_inherits_its_files_category() {
+        let mut folder = dir_with_children(
+            "Alice",
             vec![file_node("main.rs", 300), file_node("lib.rs", 200)],
         );
-        assert_eq!(folder.category, TreemapCategory::Folder);
-        assert_eq!(folder.propagate_content_categories(), TreemapCategory::Code);
+        assert_eq!(folder.category, TreemapCategory::Other);
+        assert_eq!(
+            folder.propagate_content_categories(),
+            TreemapCategory::Documents
+        );
     }
 
     #[test]
     fn a_mixed_directory_picks_the_largest_category() {
         let mut folder = dir_with_children(
-            "ZYN",
+            "Alice",
             vec![
                 file_node("clip.mp4", 100),
                 file_node("notes.txt", 300),
@@ -310,40 +322,58 @@ mod tests {
     }
 
     #[test]
-    fn a_generic_directory_with_only_unknown_files_stays_folder() {
+    fn a_tie_between_content_categories_keeps_the_earlier_variant() {
         let mut folder = dir_with_children(
-            "ZYN",
-            vec![file_node("data.bin", 100), file_node("data.xyz", 200)],
+            "Alice",
+            vec![file_node("clip.mp4", 500), file_node("backup.zip", 500)],
         );
         assert_eq!(
             folder.propagate_content_categories(),
-            TreemapCategory::Folder
+            TreemapCategory::Video,
+            "Video precedes Archive in the category order"
         );
     }
 
     #[test]
-    fn a_known_child_contributes_its_whole_size_under_its_own_category() {
-        // Workspace is Code by name even though most of its bytes are images.
+    fn a_generic_directory_with_only_unknown_files_stays_other() {
+        let mut folder = dir_with_children(
+            "Alice",
+            vec![file_node("data.bin", 100), file_node("data.xyz", 200)],
+        );
+        assert_eq!(
+            folder.propagate_content_categories(),
+            TreemapCategory::Other
+        );
+    }
+
+    #[test]
+    fn a_nested_directory_contributes_its_whole_size_under_its_resolved_category() {
+        // Workspace holds more image bytes than source bytes, so its whole
+        // subtree counts as Image in the parent.
         let workspace = dir_with_children(
             "Workspace",
             vec![file_node("main.rs", 100), file_node("photo.jpg", 1_000)],
         );
-        let mut parent = dir_with_children("ZYN", vec![workspace, file_node("notes.txt", 500)]);
+        let mut parent = dir_with_children("Alice", vec![workspace, file_node("notes.txt", 500)]);
 
         assert_eq!(
             parent.propagate_content_categories(),
-            TreemapCategory::Code,
-            "the whole Workspace subtree counts as Code, not its image files"
+            TreemapCategory::Image,
+            "the whole Workspace subtree counts as Image, not its source files"
         );
+        assert_eq!(parent.children[0].category, TreemapCategory::Image);
     }
 
     #[test]
     fn propagation_resolves_nested_generic_directories_bottom_up() {
         let inner = dir_with_children("Alpha", vec![file_node("deep.rs", 800)]);
-        let mut outer = dir_with_children("ZYN", vec![inner, file_node("notes.txt", 200)]);
+        let mut outer = dir_with_children("Alice", vec![inner, file_node("notes.txt", 200)]);
 
-        assert_eq!(outer.propagate_content_categories(), TreemapCategory::Code);
-        assert_eq!(outer.children[0].category, TreemapCategory::Code);
+        assert_eq!(
+            outer.propagate_content_categories(),
+            TreemapCategory::Documents
+        );
+        assert_eq!(outer.children[0].category, TreemapCategory::Documents);
     }
 
     #[test]
@@ -367,14 +397,14 @@ mod tests {
         ));
 
         let mut users = TreemapTreeNode::new_dir(5, "Users".to_string(), 0);
-        let mut user_zyn = TreemapTreeNode::new_dir(6, "ZYN".to_string(), 0);
-        user_zyn.children.push(TreemapTreeNode::new_file(
+        let mut user_node = TreemapTreeNode::new_dir(6, "Alice".to_string(), 0);
+        user_node.children.push(TreemapTreeNode::new_file(
             7,
             "data.bin".to_string(),
             8_000_000,
             0,
         ));
-        users.children.push(user_zyn);
+        users.children.push(user_node);
 
         root.children.push(win);
         root.children.push(users);

@@ -57,10 +57,6 @@ impl CallerIdentity {
     pub fn authorization(&self) -> CallerAuthorization {
         self.authorization
     }
-
-    pub fn is_admin(&self) -> bool {
-        self.authorization.is_privileged()
-    }
 }
 
 /// Why a connection could not be attributed to a local caller.

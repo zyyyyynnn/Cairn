@@ -6,7 +6,6 @@
 
 use crate::app::layout;
 use crate::shell::accessibility;
-use cairn_ui::brand;
 use cairn_ui::brand::HAIRLINE;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::dialog::{
@@ -206,26 +205,15 @@ fn inset_action(button: Button, inset: bool, surface: Hsla, cx: &App) -> AnyElem
         .into_any_element()
 }
 
-/// One title recipe: heading role, serif face and script split. The runs are shaped as one
-/// line, so Latin, CJK and digits share a baseline.
+/// One title recipe: the window's UI face at heading weight, shaped as one line.
 pub(crate) fn title(title: String, window: &Window) -> AnyElement {
     let color = window.text_style().color;
-    let runs: Vec<TextRun> = brand::heading_runs(&title, FontWeight::SEMIBOLD)
-        .into_iter()
-        .map(|(len, font)| TextRun {
-            len,
-            font,
-            color,
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        })
-        .collect();
     accessibility::heading(div().id("dialog-title"), title.clone())
         .text_base()
-        .line_height(relative(brand::SERIF_LINE_HEIGHT))
+        .font_weight(FontWeight::SEMIBOLD)
+        .line_height(relative(1.25))
         .text_color(color)
-        .child(StyledText::new(title).with_runs(runs))
+        .child(title)
         .into_any_element()
 }
 

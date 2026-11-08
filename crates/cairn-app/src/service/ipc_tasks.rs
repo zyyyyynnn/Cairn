@@ -161,7 +161,7 @@ impl CairnApp {
     /// Opening the window only asks this question; starting the service is an explicit action.
     /// Polls the service while any volume is building or catching up. The probe's first answer can
     /// be `CatchingUp(0)`, and without this loop the GUI would keep that stale snapshot forever:
-    /// the skeleton would never clear and the capsule would freeze at "synchronizing".
+    /// the capsule would freeze at "synchronizing".
     pub(crate) fn start_status_refresh(&mut self, cx: &mut Context<Self>) {
         if self.service.is_refreshing_status || !self.service.status.is_any_loading() {
             return;
@@ -346,7 +346,8 @@ impl CairnApp {
             let (tx, rx) = tokio::sync::oneshot::channel();
             runtime.spawn(async move {
                 if elevate {
-                    // UAC and sc.exe are blocking; keep them off the IPC runtime's worker threads.
+                    // UAC and the elevated process are blocking; keep them off the IPC runtime's
+                    // worker threads.
                     let launched = tokio::task::spawn_blocking(
                         crate::service::service_control::start_service_elevated,
                     )

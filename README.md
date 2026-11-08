@@ -5,7 +5,7 @@
   <p>
     <a href="LICENSE"><img alt="Apache-2.0 许可证" height="24" src="https://img.shields.io/github/license/zyyyyynnn/Cairn?style=for-the-badge&amp;label=LICENSE&amp;labelColor=3F444A&amp;color=6B6E75"></a>
     <img src="https://img.shields.io/badge/-Rust-786B65?style=for-the-badge&amp;logo=rust&amp;logoColor=white&amp;labelColor=3F444A" height="24" alt="Rust" title="Rust">
-    <img src="https://img.shields.io/badge/UI-GPUI%20Kit%200.8-5A6F73?style=for-the-badge&amp;labelColor=3F444A" height="24" alt="GPUI Kit 0.8" title="GPUI Kit 0.8">
+    <img src="https://img.shields.io/badge/UI-GPUI%20Kit-5A6F73?style=for-the-badge&amp;labelColor=3F444A" height="24" alt="GPUI Kit" title="GPUI Kit">
     <img src="https://img.shields.io/badge/Kernel-NTFS%20%2F%20USN-566778?style=for-the-badge&amp;labelColor=3F444A" height="24" alt="NTFS / USN" title="NTFS / USN">
     <img src="https://img.shields.io/badge/Search-Tantivy-5C6E64?style=for-the-badge&amp;labelColor=3F444A" height="24" alt="Tantivy" title="Tantivy">
   </p>
@@ -15,14 +15,14 @@
 
 Cairn 将本地文件检索与磁盘空间占用分析收敛于同一桌面工作台。底层直接解析 NTFS `$MFT` 主文件表并订阅 USN 变更日志，在低内存占用下完成冷启动加载、目录体量聚合与实时增量同步。
 
-桌面端基于 GPUI Kit 构建硬件加速界面，通过异步 Windows Named Pipe 与后台索引服务 `CairnService` 解耦；服务不可达时 GUI 先尝试一次免 UAC 的 SCM 静默启动，仍不可用则显示离线态并给出启动或重试入口。可选全文检索由独立子进程 `CairnWorker.exe` 承担文档提取与 Tantivy 索引写入。
+桌面端基于 GPUI Kit 构建硬件加速界面，通过异步 Windows 命名管道与后台索引服务 `CairnService` 通信解耦；可选全文检索由独立子进程 `CairnWorker.exe` 承担文档提取与 Tantivy 索引写入。
 
 ## 核心能力
 
 - **NTFS 实时索引**：直接读取 `$MFT` 记录与非常驻 Runlist，结合 USN Journal 增量回放、缓存校验与离线卷重连恢复。
 - **结构化查询引擎**：支持布尔逻辑、通配符、正则表达式、大小/时间范围、类型过滤与多卷并行施瓦茨变换排序。
 - **进程隔离全文检索**：内置 CJK 双字与拉丁混合分词器，支持纯文本、代码、PDF 与 DOCX 内容提取及高亮摘要。
-- **Treemap 磁盘空间分析**：基于 Squarified 算法构建交互式矩形树图，支持连续缩放平移、下钻导航与类型色彩映射。
+- **Treemap 磁盘空间分析**：基于 Squarified 算法构建交互式矩形树图，支持连续缩放平移、下钻导航与类别筛选。
 - **原生 Shell 与回收站集成**：提供虚拟滚动结果表、中英双语切换、Windows 回收站枚举还原与系统原生属性对话框联动。
 - **安全与权限边界**：命名管道拒绝远程客户端，按调用方访问令牌实施鉴权，配置文件与索引存储强制绑定系统级安全描述符。
 
@@ -30,7 +30,7 @@ Cairn 将本地文件检索与磁盘空间占用分析收敛于同一桌面工�
 
 | 层级 | 技术 | 职责 |
 | --- | --- | --- |
-| 桌面界面 | Rust、GPUI Kit 0.8、Fluent | GPU 渲染界面、固定行高虚拟滚动、Treemap 画布与中英双语本地化 |
+| 桌面界面 | Rust、GPUI Kit、Fluent | GPU 渲染界面、固定行高虚拟滚动、Treemap 画布与中英双语本地化 |
 | 进程通信 | Tokio Named Pipe、Postcard、CRC32 | 定长帧编解码、超时与背压控制、会话分页缓存与增量状态同步 |
 | 文件系统 | Win32 Storage / IO API、`cairn-ntfs` | `$MFT` 扇区流式解析、USN 变更日志轮询与目录大小聚合 |
 | 全文索引 | Tantivy 0.27、lopdf、quick-xml、zip | CJK 双字分词、多格式文本提取、倒排索引构建与匹配摘要生成 |
@@ -43,12 +43,12 @@ Cairn 将本地文件检索与磁盘空间占用分析收敛于同一桌面工�
 
 - Windows 10 / 11（x64）与 PowerShell 7+
 - Rust stable（见 `rust-toolchain.toml`；`x86_64-pc-windows-msvc`）
-- WiX Toolset v5（仅构建 MSI 与 `CairnSetup.exe` 安装包时需要）
+- WiX Toolset v5（构建安装包）
 
 ### 本地开发与运行
 
 ```powershell
-# 以控制台模式启动后台索引服务（开发调试；索引来源只有该服务）
+# 控制台模式启动后台索引服务
 cargo run -p cairn-service -- --console
 
 # 启动桌面客户端
