@@ -2155,12 +2155,12 @@ fn path_is_within(candidate: &str, ancestor: &str) -> bool {
         return false;
     }
     let rest = &candidate[ancestor.len()..];
-    rest.starts_with('\\') || rest.starts_with("::")
+    rest.starts_with('\\') || rest.starts_with('/') || rest.starts_with("::")
 }
 
 fn same_directory(left: &str, right: &str) -> bool {
-    left.trim_end_matches('\\')
-        .eq_ignore_ascii_case(right.trim_end_matches('\\'))
+    left.trim_end_matches(['\\', '/'])
+        .eq_ignore_ascii_case(right.trim_end_matches(['\\', '/']))
 }
 
 /// The menu a summary block can honour: it lists its owning directory in the table.
@@ -2485,5 +2485,20 @@ mod tests {
             state.scan_fade_epoch, state.reveal_generation,
             "the dissolve belongs to the generation it reveals"
         );
+    }
+    #[test]
+    fn path_is_within_handles_both_separators_and_aggregates() {
+        assert!(path_is_within("C:\\Users\\Alice", "C:\\Users"));
+        assert!(path_is_within("C:/Users/Alice", "C:/Users"));
+        assert!(path_is_within(
+            "C:/Users/Alice::<tail:documents>",
+            "C:/Users/Alice"
+        ));
+        assert!(path_is_within(
+            "C:\\Users\\Alice::<tail:documents>",
+            "C:\\Users\\Alice"
+        ));
+        assert!(!path_is_within("C:\\UsersExtended", "C:\\Users"));
+        assert!(!path_is_within("C:/UsersExtended", "C:/Users"));
     }
 }

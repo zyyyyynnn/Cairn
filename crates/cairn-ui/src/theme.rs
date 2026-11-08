@@ -313,8 +313,7 @@ pub const LIGHT_PALETTE: ModePalette = ModePalette {
 /// Dark mode takes its own steps from the dark end of the ramp instead of mirroring light mode: the
 /// page, inset and frame steps are compressed, and the interaction step is the one the component
 /// halves over a dark ground — `#3A3A3A` composites to `#2A2A2A`, which moves the `#1F1F1F` frame by
-/// 6.5 L\*, where the `#262626` this palette used to carry moved it by 3.4 and read as no change.
-/// Ink stops at the `#E4E4E4` anchor, short of white.
+/// 6.5 L\*. Ink stops at the `#E4E4E4` anchor, short of white.
 pub const DARK_PALETTE: ModePalette = ModePalette {
     content: gray::GRAY_94,
     inset: gray::GRAY_91,

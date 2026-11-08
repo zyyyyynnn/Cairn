@@ -997,9 +997,6 @@ impl VolumeIndex {
     ///
     /// Directories are containers: they contribute zero here, so the total always describes the
     /// visible result set and never counts an excluded descendant through an ancestor's aggregate.
-    /// Matched bytes total: each matched file's size is summed once.
-    /// Directories are containers whose recursive aggregates would inflate non-matching
-    /// files, so only matched files contribute their logical size.
     pub(crate) fn calculate_matched_bytes(&self, matched_indices: &[u32]) -> u64 {
         if matched_indices.is_empty() || self.records.is_empty() {
             return 0;

@@ -203,7 +203,7 @@ mod tests {
         TreemapCategory::Other,
     ];
 
-    /// Colour no longer names a category: every tile carries the mode's one tone.
+    /// Every category shares the mode tone.
     #[test]
     fn every_category_shares_the_mode_tone() {
         for is_dark in [false, true] {

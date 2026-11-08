@@ -457,8 +457,7 @@ impl CairnApp {
                             cx.notify();
                         }
                     }))
-                    // Colour no longer encodes a category, so the legend row carries the name and its
-                    // toggle state only: a hidden category dims its label instead of a swatch.
+                    // The legend row displays category names and toggle states; inactive categories dim their labels.
                     .child(
                         div()
                             .whitespace_nowrap()

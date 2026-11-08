@@ -264,17 +264,9 @@ impl SearchInputState {
         let idx = byte_idx.min(len);
 
         let target_idx = if idx < len {
-            let mut i = idx;
-            while i > 0 && !self.text.is_char_boundary(i) {
-                i -= 1;
-            }
-            i
+            self.text.floor_char_boundary(idx)
         } else {
-            let mut i = len.saturating_sub(1);
-            while i > 0 && !self.text.is_char_boundary(i) {
-                i -= 1;
-            }
-            i
+            self.text.floor_char_boundary(len.saturating_sub(1))
         };
 
         let target_ch = self.text[target_idx..].chars().next().unwrap_or(' ');
@@ -606,7 +598,9 @@ impl SearchInputState {
         if self.has_selection() {
             self.delete_backward();
         } else if self.selection.start > 0 {
-            let cursor = self.selection.start.min(self.text.len());
+            let cursor = self
+                .text
+                .floor_char_boundary(self.selection.start.min(self.text.len()));
             let prev_boundary = self.find_prev_word_boundary(cursor);
             if prev_boundary < cursor {
                 self.push_undo_snapshot();
@@ -615,6 +609,9 @@ impl SearchInputState {
                 updated.push_str(&self.text[cursor..]);
                 self.text = updated;
                 self.selection = prev_boundary..prev_boundary;
+                self.marked_range = None;
+            } else if cursor != self.selection.start {
+                self.selection = cursor..cursor;
                 self.marked_range = None;
             }
         }
@@ -625,7 +622,9 @@ impl SearchInputState {
         if self.has_selection() {
             self.delete_forward();
         } else if self.selection.start < self.text.len() {
-            let cursor = self.selection.start;
+            let cursor = self
+                .text
+                .floor_char_boundary(self.selection.start.min(self.text.len()));
             let next_boundary = self.find_next_word_boundary(cursor);
             if next_boundary > cursor {
                 self.push_undo_snapshot();
@@ -1110,5 +1109,25 @@ mod tests {
         assert_eq!(prev, 0);
         let next = state.find_next_word_boundary(1);
         assert_eq!(next, 12);
+    }
+    #[test]
+    fn delete_word_guards_against_non_char_boundary_offsets() {
+        let mut state = SearchInputState {
+            text: "文档检索".to_string(),
+            ..Default::default()
+        };
+        state.selection = 1..1;
+        state.delete_word_backward();
+        assert_eq!(state.selection, 0..0);
+        assert_eq!(state.text, "文档检索");
+
+        let mut state = SearchInputState {
+            text: "文档检索".to_string(),
+            ..Default::default()
+        };
+        state.selection = 1..1;
+        state.delete_word_forward();
+        assert_eq!(state.selection, 0..0);
+        assert_eq!(state.text, "");
     }
 }
