@@ -167,7 +167,7 @@ jobs:
           if (-not $binary) { throw "The installer test binary was not produced." }
           Copy-Item -LiteralPath $binary.FullName -Destination package-test.exe
       - name: Upload installer test binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: package-test-binary
           path: package-test.exe
@@ -213,7 +213,7 @@ jobs:
       - name: Build runtime binaries
         run: cargo build --release -p cairn-app -p cairn-service -p cairn-cli -p cairn-worker
       - name: Upload runtime binaries
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-runtime-binaries
           path: |
@@ -246,7 +246,7 @@ jobs:
       - name: Build installer binaries
         run: cargo build --release -p cairn-setup-bin
       - name: Upload installer binaries
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-installer-binaries
           path: |
