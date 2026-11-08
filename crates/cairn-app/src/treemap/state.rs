@@ -581,13 +581,37 @@ impl TreemapViewState {
             return &[];
         };
         let root = self.navigation.current_dir();
-        let relative = parent_path
-            .strip_prefix(root)
-            .unwrap_or_default()
-            .trim_start_matches(['\\', '/']);
+
+        let base_parts: Vec<&str> = root.split(['\\', '/']).filter(|s| !s.is_empty()).collect();
+        let target_parts: Vec<&str> = parent_path
+            .split(['\\', '/'])
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        if target_parts.len() < base_parts.len() {
+            return &[];
+        }
+
+        for (i, (b, t)) in base_parts.iter().zip(target_parts.iter()).enumerate() {
+            if i == 0 {
+                let b_norm = b.trim_end_matches(':');
+                let t_norm = t.trim_end_matches(':');
+                if !b_norm.eq_ignore_ascii_case(t_norm) {
+                    return &[];
+                }
+            } else if !b.eq_ignore_ascii_case(t) {
+                return &[];
+            }
+        }
+
+        let remaining = &target_parts[base_parts.len()..];
         let mut node = tree;
-        for segment in relative.split('\\').filter(|part| !part.is_empty()) {
-            match node.children.iter().find(|child| child.name == segment) {
+        for &segment in remaining {
+            match node
+                .children
+                .iter()
+                .find(|child| child.name.eq_ignore_ascii_case(segment))
+            {
                 Some(child) => node = child,
                 None => return &[],
             }
@@ -692,6 +716,25 @@ impl TreemapViewState {
         let Some(count) = removed_count else {
             return;
         };
+
+        if let Some(ref layer) = self.virtual_layer {
+            let parent = layer.parent_path.trim_end_matches(['\\', '/']);
+            let target = target_path.trim_end_matches(['\\', '/']);
+            if target.eq_ignore_ascii_case(parent)
+                || resolve_relative_segments(&layer.parent_path, target_path).is_some()
+            {
+                self.discard_virtual_layer();
+            }
+        }
+        if let Some(ref layer) = self.forward_layer {
+            let parent = layer.parent_path.trim_end_matches(['\\', '/']);
+            let target = target_path.trim_end_matches(['\\', '/']);
+            if target.eq_ignore_ascii_case(parent)
+                || resolve_relative_segments(&layer.parent_path, target_path).is_some()
+            {
+                self.forward_layer = None;
+            }
+        }
 
         // Invalidate in-memory pre-built volume index snapshot so navigation
         // cannot reconstruct and resurrect deleted files from the stale snapshot.
@@ -1492,5 +1535,73 @@ mod tests {
         state.suppress_tooltip = true;
         state.drill_down(r"C:\Windows");
         assert!(!state.suppress_tooltip);
+    }
+
+    #[test]
+    fn children_at_resolves_root_and_descendants_strictly() {
+        let mut state = TreemapViewState::new_for_test('C');
+        let mut root = TreemapTreeNode::new_dir(1, "C:".into(), 0);
+        let mut win = TreemapTreeNode::new_dir(2, "Windows".into(), 0);
+        win.children
+            .push(TreemapTreeNode::new_file(3, "notepad.exe".into(), 100, 0));
+        root.children.push(win);
+        state.set_tree(root);
+
+        // Drive root matching with or without trailing separator
+        assert_eq!(state.children_at(r"C:\").len(), 1);
+        assert_eq!(state.children_at(r"C:").len(), 1);
+        assert_eq!(state.children_at(r"c:\").len(), 1);
+
+        // Subdirectory matching
+        assert_eq!(state.children_at(r"C:\Windows").len(), 1);
+        assert_eq!(state.children_at(r"C:\Windows\").len(), 1);
+
+        // Non-existent or unrelated directories must return empty instead of falling back to root
+        assert_eq!(state.children_at(r"D:\").len(), 0);
+        assert_eq!(state.children_at(r"D:\Windows").len(), 0);
+        assert_eq!(state.children_at(r"C:\Nonexistent").len(), 0);
+        assert_eq!(state.children_at(r"C:\Windows_Old").len(), 0);
+    }
+
+    #[test]
+    fn item_removal_discards_active_virtual_layer() {
+        let mut state = TreemapViewState::new_for_test('C');
+        let mut root = TreemapTreeNode::new_dir(1, "C:".into(), 0);
+        let mut win = TreemapTreeNode::new_dir(2, "Windows".into(), 0);
+        for i in 0..10 {
+            win.children.push(TreemapTreeNode::new_file(
+                i as u64 + 10,
+                format!("win_{i}.txt"),
+                100,
+                0,
+            ));
+        }
+        root.children.push(win);
+        root.children
+            .push(TreemapTreeNode::new_file(3, "root_file.txt".into(), 50, 0));
+        state.set_tree(root);
+
+        let layer = VirtualLayer {
+            parent_path: r"C:\Windows".to_string(),
+            members: (0..10).collect(),
+            label: "10 items".to_string(),
+        };
+        state.enter_virtual_layer(layer);
+        assert!(state.virtual_layer.is_some());
+
+        // 1. Removing an item outside the virtual layer hierarchy preserves it
+        state.remove_item(r"C:\root_file.txt");
+        assert!(
+            state.virtual_layer.is_some(),
+            "remove_item outside virtual layer directory must preserve the active virtual layer"
+        );
+
+        // 2. Removing an item inside the virtual layer hierarchy cleanly discards it
+        state.remove_item(r"C:\Windows\win_0.txt");
+        assert!(
+            state.virtual_layer.is_none(),
+            "remove_item inside virtual layer hierarchy must discard active virtual layer"
+        );
+        assert!(state.forward_layer.is_none());
     }
 }

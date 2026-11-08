@@ -726,12 +726,12 @@ impl EntityInputHandler for CairnApp {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<UTF16Selection> {
+        let (start, end) = self.query.search_input.normalized_selection();
         let mapper = crate::search::input::Utf16Utf8Mapper::new(&self.query.search_input.text);
-        let range = mapper.utf8_to_utf16_range(self.query.search_input.selection.clone());
-        Some(UTF16Selection {
-            range,
-            reversed: false,
-        })
+        let range = mapper.utf8_to_utf16_range(start..end);
+        let reversed =
+            self.query.search_input.selection.start > self.query.search_input.selection.end;
+        Some(UTF16Selection { range, reversed })
     }
 
     fn marked_text_range(

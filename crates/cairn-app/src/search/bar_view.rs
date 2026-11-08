@@ -133,47 +133,12 @@ impl CairnApp {
                             this.dismiss_result_selection_on_chrome_press(cx);
                             this.query.search_focus.focus(window, cx);
                             let byte_idx = this.query_byte_index_for_point(event.position, window);
-                            if event.click_count == 1 {
-                                if event.modifiers.shift {
-                                    let anchor = this
-                                        .query
-                                        .text_selection_anchor
-                                        .unwrap_or(this.query.search_input.selection.start);
-                                    this.query.text_selection_anchor = Some(anchor);
-                                    this.query.search_input.selection =
-                                        anchor.min(byte_idx)..anchor.max(byte_idx);
-                                } else {
-                                    this.query.text_selection_anchor = Some(byte_idx);
-                                    this.query.search_input.selection = byte_idx..byte_idx;
-                                }
-                            } else if event.click_count == 2 {
-                                this.query.search_input.select_word_at(byte_idx);
-                                this.query.text_selection_anchor =
-                                    Some(this.query.search_input.selection.start);
-                            } else if event.click_count >= 3 {
-                                this.query.search_input.select_all();
-                                this.query.text_selection_anchor = Some(0);
-                            }
+                            this.handle_search_bar_mouse_down(
+                                byte_idx,
+                                event.click_count,
+                                event.modifiers.shift,
+                            );
                             cx.notify();
-                        }),
-                    )
-                    .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
-                        if let Some(anchor) = this.query.text_selection_anchor {
-                            let current_idx =
-                                this.query_byte_index_for_point(event.position, window);
-                            let sel = anchor.min(current_idx)..anchor.max(current_idx);
-                            if this.query.search_input.selection != sel {
-                                this.query.search_input.selection = sel;
-                                cx.notify();
-                            }
-                        }
-                    }))
-                    .on_mouse_up(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _, cx| {
-                            if this.query.text_selection_anchor.take().is_some() {
-                                cx.notify();
-                            }
                         }),
                     )
                     .child(
@@ -242,9 +207,7 @@ impl CairnApp {
                 .child(placeholder);
         }
         let text = &self.query.search_input.text;
-        let sel = &self.query.search_input.selection;
-        let sel_start = sel.start.min(sel.end).min(text.len());
-        let sel_end = sel.start.max(sel.end).min(text.len());
+        let (sel_start, sel_end) = self.query.search_input.normalized_selection();
         let has_selection = sel_start < sel_end;
 
         if !is_focused && !has_selection && self.query.search_input.marked_range.is_none() {
@@ -330,6 +293,33 @@ impl CairnApp {
             "recycle_bin_filter_placeholder"
         } else {
             "search_placeholder"
+        }
+    }
+
+    pub(crate) fn handle_search_bar_mouse_down(
+        &mut self,
+        byte_idx: usize,
+        click_count: usize,
+        shift: bool,
+    ) {
+        if click_count == 1 {
+            if shift {
+                let anchor = self
+                    .query
+                    .text_selection_anchor
+                    .unwrap_or(self.query.search_input.selection.start);
+                self.query.text_selection_anchor = Some(anchor);
+                self.query.search_input.selection = anchor..byte_idx;
+            } else {
+                self.query.text_selection_anchor = Some(byte_idx);
+                self.query.search_input.selection = byte_idx..byte_idx;
+            }
+        } else if click_count == 2 {
+            self.query.search_input.select_word_at(byte_idx);
+            self.query.text_selection_anchor = None;
+        } else if click_count >= 3 {
+            self.query.search_input.select_all();
+            self.query.text_selection_anchor = None;
         }
     }
 }

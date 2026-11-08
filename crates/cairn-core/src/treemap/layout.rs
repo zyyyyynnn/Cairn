@@ -12,6 +12,7 @@
 
 use super::category::TreemapCategory;
 use super::geometry::TreemapRect;
+use super::path::is_drive_root;
 use super::squarify::{squarify, SquarifiedCell};
 use super::tree::{TreemapItem, TreemapTreeNode};
 
@@ -227,7 +228,17 @@ fn display_entries(
         return entries;
     }
     // One block per category: a block never stands for a mix, so its tone and its label agree.
-    let parent = parent.trim_end_matches('\\');
+    let parent_buf;
+    let parent = if is_drive_root(parent) {
+        if parent.ends_with('\\') {
+            parent
+        } else {
+            parent_buf = format!("{}\\", parent.trim_end_matches('\\'));
+            &parent_buf
+        }
+    } else {
+        parent.trim_end_matches('\\')
+    };
     for group in tail_category_groups(nodes, tail) {
         entries.push(DisplayEntry::Aggregate {
             path: aggregate_path(parent, group.category),
@@ -1110,14 +1121,18 @@ mod tests {
     #[test]
     fn an_aggregate_parent_is_the_real_directory_that_owns_the_tail() {
         assert_eq!(
-            aggregate_parent_path(&aggregate_path(r"C:\Users\ZYN", TreemapCategory::Other)),
-            Some(r"C:\Users\ZYN")
+            aggregate_parent_path(&aggregate_path(r"C:\Users\Alice", TreemapCategory::Other)),
+            Some(r"C:\Users\Alice")
         );
         assert_eq!(
-            aggregate_parent_path(r"C:\Users\ZYN::<tail:folder>"),
-            Some(r"C:\Users\ZYN")
+            aggregate_parent_path(&aggregate_path(r"C:\", TreemapCategory::Other)),
+            Some(r"C:\")
         );
-        assert_eq!(aggregate_parent_path(r"C:\Users\ZYN"), None);
+        assert_eq!(
+            aggregate_parent_path(r"C:\Users\Alice::<tail:folder>"),
+            Some(r"C:\Users\Alice")
+        );
+        assert_eq!(aggregate_parent_path(r"C:\Users\Alice"), None);
         assert_eq!(aggregate_parent_path("::<tail:folder>"), None);
     }
 

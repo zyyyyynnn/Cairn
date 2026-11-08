@@ -163,6 +163,8 @@ impl CairnApp {
             // The drill path is spent, so Back leaves the visualization for the step before it
             // rather than reporting a dead end at the view's own root.
             if self.nav_history_index > 0 {
+                self.sync_visualization_dir();
+                self.update_current_nav_state_text();
                 self.nav_history_index -= 1;
                 self.restore_nav_state(self.nav_history_index, window, cx);
             }
@@ -195,6 +197,8 @@ impl CairnApp {
                 return;
             }
             if self.nav_history_index + 1 < self.nav_history.len() {
+                self.sync_visualization_dir();
+                self.update_current_nav_state_text();
                 self.nav_history_index += 1;
                 self.restore_nav_state(self.nav_history_index, window, cx);
             }
@@ -315,6 +319,83 @@ mod tests {
                         assert_eq!(this.nav_history_index, 2);
                         assert!(this.can_go_back());
                         assert!(!this.can_go_forward());
+                    });
+
+                    cx.quit();
+                    app
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn nav_history_preserves_browsing_dir_when_leaving_drive_view() {
+        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
+            gpui_kit::init(cx);
+            let _ = gpui_kit::open_window(
+                gpui_kit::gpui::WindowOptions::default(),
+                cx,
+                |window, cx| {
+                    let app = cx.new(|cx| CairnApp::new(window, cx));
+
+                    app.update(cx, |this, cx| {
+                        // 1. Initial state at table index 0
+                        assert_eq!(this.nav_history_index, 0);
+                        assert!(this.drive_view.is_none());
+
+                        // 2. Open drive visualization for 'C'
+                        this.open_drive_visualization('C', window, cx);
+                        assert_eq!(this.nav_history_index, 1);
+                        assert_eq!(this.drive_view, Some('C'));
+
+                        // 3. Navigate directly to a browsing path C:\Windows without drill-back history
+                        this.open_drive_at('C', r"C:\Windows", window, cx);
+
+                        // 4. Leave drive view by going back to table
+                        this.go_back(window, cx);
+                        assert_eq!(this.nav_history_index, 0);
+                        assert!(this.drive_view.is_none());
+
+                        // Verify that the drive history entry at index 1 recorded C:\Windows
+                        let recorded_dir = this.nav_history[1]
+                            .visualization
+                            .as_ref()
+                            .map(|(_, dir)| dir.as_str());
+                        assert_eq!(
+                            recorded_dir,
+                            Some(r"C:\Windows"),
+                            "drive history entry must preserve browsing path when leaving drive view"
+                        );
+
+                        // 5. Go forward back into drive view
+                        this.go_forward(window, cx);
+                        assert_eq!(this.nav_history_index, 1);
+                        assert_eq!(this.drive_view, Some('C'));
+                        assert_eq!(
+                            this.treemap_state.as_ref().map(|s| s.current_dir()),
+                            Some(r"C:\Windows")
+                        );
+
+                        // 6. Switch directly to drive D and navigate to D:\Games
+                        this.open_drive_visualization('D', window, cx);
+                        assert_eq!(this.drive_view, Some('D'));
+                        this.open_drive_at('D', r"D:\Games", window, cx);
+
+                        // 7. Go back: must restore Drive C at C:\Windows
+                        this.go_back(window, cx);
+                        assert_eq!(this.drive_view, Some('C'));
+                        assert_eq!(
+                            this.treemap_state.as_ref().map(|s| s.current_dir()),
+                            Some(r"C:\Windows")
+                        );
+
+                        // 8. Go forward: must restore Drive D at D:\Games
+                        this.go_forward(window, cx);
+                        assert_eq!(this.drive_view, Some('D'));
+                        assert_eq!(
+                            this.treemap_state.as_ref().map(|s| s.current_dir()),
+                            Some(r"D:\Games")
+                        );
                     });
 
                     cx.quit();

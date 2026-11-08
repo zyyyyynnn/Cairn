@@ -238,7 +238,8 @@ impl CairnApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // The query being left behind stays in the entry it belongs to.
+        // The query and directory being left behind stay in the entry they belong to.
+        self.sync_visualization_dir();
         self.update_current_nav_state_text();
         self.open_drive_at(
             drive,

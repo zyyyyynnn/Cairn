@@ -34,7 +34,6 @@ use gpui_kit::component::menu::PopupMenu;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::gpui::*;
-use std::ops::Range;
 
 /// Which search flag a toggle command flips, so the five toggle Actions share one code path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1859,8 +1858,8 @@ impl CairnApp {
     }
 
     pub fn selected_query_text(&self) -> Option<String> {
-        let Range { start, end } = self.query.search_input.selection.clone();
-        if start >= end || end > self.query.search_input.text.len() {
+        let (start, end) = self.query.search_input.normalized_selection();
+        if start >= end {
             return None;
         }
         Some(self.query.search_input.text[start..end].to_string())
@@ -2115,9 +2114,11 @@ fn content_failed(status_error: Option<&str>, action_error: Option<&str>) -> boo
 #[cfg(test)]
 mod confirmation_tests {
     use super::{content_failed, reconcile_bin_items, reconcile_empty_bin};
+    use crate::app::CairnApp;
     use crate::shell::i18n::I18nManager;
     use crate::shell::os::{BinOperationError, RecycleBinItem};
     use fluent_bundle::FluentArgs;
+    use gpui_kit::gpui::AppContext as _;
 
     fn item(name: &str) -> RecycleBinItem {
         RecycleBinItem {
@@ -2280,5 +2281,78 @@ mod confirmation_tests {
                 assert_ne!(resolved, key, "{key} fell back to raw key in {locale}");
             }
         }
+    }
+
+    #[test]
+    #[allow(clippy::reversed_empty_ranges)]
+    fn selected_query_text_supports_both_forward_and_backward_selection() {
+        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
+            gpui_kit::init(cx);
+            let _ = gpui_kit::open_window(
+                gpui_kit::gpui::WindowOptions::default(),
+                cx,
+                |window, cx| {
+                    let app = cx.new(|cx| CairnApp::new(window, cx));
+
+                    app.update(cx, |this, _| {
+                        this.query.search_input.text = "hello world".to_string();
+
+                        // Forward selection "world" (6..11)
+                        this.query.search_input.selection = 6..11;
+                        assert_eq!(this.selected_query_text().as_deref(), Some("world"));
+
+                        // Backward selection "world" (11..6)
+                        this.query.search_input.selection = 11..6;
+                        assert_eq!(
+                            this.selected_query_text().as_deref(),
+                            Some("world"),
+                            "backward selection must return normalized selected text"
+                        );
+
+                        // Empty selection (6..6)
+                        this.query.search_input.selection = 6..6;
+                        assert_eq!(this.selected_query_text(), None);
+
+                        // Mouse click anchor & selection behavior
+                        // 1. Single click at index 6 sets anchor and cursor
+                        this.handle_search_bar_mouse_down(6, 1, false);
+                        assert_eq!(this.query.text_selection_anchor, Some(6));
+                        assert_eq!(this.query.search_input.selection, 6..6);
+
+                        // 2. Shift+Click to index 11 expands selection, keeps anchor
+                        this.handle_search_bar_mouse_down(11, 1, true);
+                        assert_eq!(this.query.text_selection_anchor, Some(6));
+                        assert_eq!(this.query.search_input.selection, 6..11);
+
+                        // 3. Shift+Click backwards to index 0 creates backward selection
+                        this.handle_search_bar_mouse_down(0, 1, true);
+                        assert_eq!(this.query.text_selection_anchor, Some(6));
+                        assert_eq!(this.query.search_input.selection, 6..0);
+
+                        // 4. Double-click selects word and CLEARS anchor so jitter cannot wipe it
+                        this.handle_search_bar_mouse_down(7, 2, false);
+                        assert_eq!(
+                            this.query.text_selection_anchor, None,
+                            "double click must clear text_selection_anchor"
+                        );
+                        assert_eq!(this.query.search_input.selection, 6..11);
+
+                        // 5. Triple-click selects all and CLEARS anchor
+                        this.handle_search_bar_mouse_down(2, 3, false);
+                        assert_eq!(
+                            this.query.text_selection_anchor, None,
+                            "triple click must clear text_selection_anchor"
+                        );
+                        assert_eq!(
+                            this.query.search_input.selection,
+                            0..this.query.search_input.text.len()
+                        );
+                    });
+
+                    cx.quit();
+                    app
+                },
+            );
+        });
     }
 }

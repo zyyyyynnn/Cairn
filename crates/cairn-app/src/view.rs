@@ -655,7 +655,7 @@ impl Render for CairnApp {
                                         };
                                         let current_idx =
                                             this.query_byte_index_for_point(event.position, window);
-                                        let sel = anchor.min(current_idx)..anchor.max(current_idx);
+                                        let sel = anchor..current_idx;
                                         if this.query.search_input.selection != sel {
                                             this.query.search_input.selection = sel;
                                             cx.notify();
