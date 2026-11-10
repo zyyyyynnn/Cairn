@@ -268,7 +268,7 @@ impl GroupCommand {
             match self {
                 GroupCommand::DeleteSelected => "ctx_delete_permanently",
                 GroupCommand::CopyPaths => "ctx_copy_original_location",
-                GroupCommand::SortBy(column) => column.recycle_bin_label_key(),
+                GroupCommand::SortBy(column) => column.label_key_in(true),
                 _ => self.label_key(),
             }
         } else {

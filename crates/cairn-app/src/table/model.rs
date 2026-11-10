@@ -122,6 +122,16 @@ impl SortColumn {
         }
     }
 
+    /// The Fluent message naming this column in the active location. Inside the Recycle Bin, the
+    /// path and modification-time lanes hold the original location and the deletion time.
+    pub const fn label_key_in(self, in_recycle_bin: bool) -> &'static str {
+        if in_recycle_bin {
+            self.recycle_bin_label_key()
+        } else {
+            self.label_key()
+        }
+    }
+
     /// The same column inside the Recycle Bin holds the original location and the deletion time,
     /// so its header and its 排序 item have to carry those names instead.
     pub const fn recycle_bin_label_key(self) -> &'static str {

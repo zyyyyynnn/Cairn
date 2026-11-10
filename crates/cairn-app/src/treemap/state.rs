@@ -193,6 +193,16 @@ impl TreemapViewState {
         (state, scan_target)
     }
 
+    pub(super) fn canvas_origin(&self, fallback: (f32, f32)) -> (f32, f32) {
+        self.painted_canvas_bounds
+            .get()
+            .filter(|bounds| {
+                f32::from(bounds.size.width) > 0.0 && f32::from(bounds.size.height) > 0.0
+            })
+            .map(|bounds| (f32::from(bounds.origin.x), f32::from(bounds.origin.y)))
+            .unwrap_or(fallback)
+    }
+
     #[cfg(test)]
     pub(super) fn new_for_test(drive: char) -> Self {
         let drive_upper = drive.to_ascii_uppercase();

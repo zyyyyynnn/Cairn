@@ -313,13 +313,6 @@ fn version_mismatch(server_guard: u16, client_guard: u16) -> ResponsePayload {
     }
 }
 
-/// Maps a `Rescan` volume id back to the drive letter it was derived from (`FileRecord::volume_id`,
-/// a zero-based offset from `A:`). Only the 26 possible letters are in range; anything else yields
-/// `None` so the caller refuses the request instead of rescanning a fabricated drive.
-fn drive_from_volume_id(volume_id: u16) -> Option<char> {
-    cairn_core::FileRecord::drive_from_volume_id(volume_id)
-}
-
 fn process_request(
     req: ClientRequest,
     engine: &MultiVolumeEngine,
@@ -436,7 +429,7 @@ fn process_request(
         ClientRequest::GetStatus => ResponsePayload::StatusAck,
         ClientRequest::Rescan { volume_id } => {
             let outcome = match volume_id {
-                Some(id) => match drive_from_volume_id(id) {
+                Some(id) => match cairn_core::FileRecord::drive_from_volume_id(id) {
                     Some(drive) => engine.rescan_volume(drive).map(|_| ()),
                     None => Err(format!(
                         "volume id {id} is outside the drive-letter range 0..=25, nothing was rescanned"
@@ -810,15 +803,6 @@ mod tests {
             }
             other => panic!("unexpected response: {other:?}"),
         }
-    }
-
-    #[test]
-    fn volume_id_maps_back_to_the_drive_letter_it_came_from() {
-        assert_eq!(drive_from_volume_id(0), Some('A'));
-        assert_eq!(drive_from_volume_id(2), Some('C'));
-        assert_eq!(drive_from_volume_id(25), Some('Z'));
-        assert_eq!(drive_from_volume_id(26), None);
-        assert_eq!(drive_from_volume_id(60000), None);
     }
 
     /// A peer whose guard differs from this build's is refused at the message gate, and the reason

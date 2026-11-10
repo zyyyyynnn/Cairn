@@ -109,13 +109,6 @@ impl CairnApp {
             f32::from(layout::TITLE_BAR_HEIGHT) + band_height,
         );
         let canvas_bounds = state.painted_canvas_bounds.clone();
-        let canvas_origin = canvas_bounds
-            .get()
-            .filter(|bounds| {
-                f32::from(bounds.size.width) > 0.0 && f32::from(bounds.size.height) > 0.0
-            })
-            .map(|bounds| (f32::from(bounds.origin.x), f32::from(bounds.origin.y)))
-            .unwrap_or(fallback_origin);
         let canvas_size = (avail_w, avail_h);
         let window_size = (
             f32::from(window_bounds.size.width),
@@ -295,11 +288,12 @@ impl CairnApp {
             .on_mouse_down(
                 MouseButton::Middle,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    let cursor = (
-                        f32::from(event.position.x) - canvas_origin.0,
-                        f32::from(event.position.y) - canvas_origin.1,
-                    );
                     if let Some(ref mut st) = this.treemap_state {
+                        let origin = st.canvas_origin(fallback_origin);
+                        let cursor = (
+                            f32::from(event.position.x) - origin.0,
+                            f32::from(event.position.y) - origin.1,
+                        );
                         if st.zoom.begin_pan(cursor) {
                             st.request_focus(window, cx);
                             cx.notify();
@@ -314,9 +308,10 @@ impl CairnApp {
                     if lines == 0.0 {
                         None
                     } else {
+                        let origin = st.canvas_origin(fallback_origin);
                         let cursor = (
-                            f32::from(event.position.x) - canvas_origin.0,
-                            f32::from(event.position.y) - canvas_origin.1,
+                            f32::from(event.position.x) - origin.0,
+                            f32::from(event.position.y) - origin.1,
                         );
                         let outcome = st.zoom.wheel(
                             &st.layout_nodes,
@@ -448,7 +443,9 @@ impl CairnApp {
                     div().absolute().size_full().child(
                         canvas(
                             |_, _, _| {},
-                            move |_bounds, _, window, _cx| {
+                            move |bounds, _, window, _cx| {
+                                let pan_origin =
+                                    (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
                                 let move_view = entity.clone();
                                 window.on_mouse_event(
                                     move |event: &MouseMoveEvent, phase, _window, cx| {
@@ -456,8 +453,8 @@ impl CairnApp {
                                             return;
                                         }
                                         let cursor = (
-                                            f32::from(event.position.x) - canvas_origin.0,
-                                            f32::from(event.position.y) - canvas_origin.1,
+                                            f32::from(event.position.x) - pan_origin.0,
+                                            f32::from(event.position.y) - pan_origin.1,
                                         );
                                         if event.pressed_button != Some(MouseButton::Middle) {
                                             move_view.update(cx, |this, cx| {
