@@ -2180,101 +2180,193 @@ impl MultiVolumeEngine {
         if !content_queries.is_empty() {
             // Decoupled Tantivy inverted index search: run without holding self.volumes lock
             // to avoid blocking real-time USN writer threads.
-            let content_q = content_queries.join(" ");
-            let content_hits = if self.content_index_status().state.is_ready() {
-                if let Some(ci) = self.get_or_create_content_searcher() {
-                    ci.search(&content_q, 50_000).unwrap_or_default()
-                } else {
-                    Vec::new()
-                }
-            } else {
-                Vec::new()
-            };
-
-            if cancel.is_cancelled() || content_hits.is_empty() {
-                return (all_results, 0, highlight_terms, snippets, 0);
-            }
-
-            // Precompile MFT filter outside the lock to keep lock duration minimal
-            let compiled_mft = if !mft_query_expr.is_empty() {
-                Some(cairn_core::engine::CompiledQuery::compile(&mft_query_expr))
+            let searcher = if self.content_index_status().state.is_ready() {
+                self.get_or_create_content_searcher()
             } else {
                 None
             };
+            let Some(searcher) = searcher else {
+                return (all_results, 0, highlight_terms, snippets, 0);
+            };
 
-            // Acquire read lock with minimal critical section to convert and merge results
-            lock = self.volumes.read().unwrap();
-            let mut tantivy_vol_matches: HashMap<char, Vec<u32>> = HashMap::new();
+            // A conjunction of positive `content:` terms is one joined Tantivy query; every
+            // other shape (Not, Or, mixed metadata branches) needs record-by-record boolean
+            // evaluation instead of flattening the expression.
+            if is_positive_content_conjunction(&query_expr) {
+                let content_q = content_queries.join(" ");
+                let content_hits = searcher.search(&content_q, 50_000).unwrap_or_default();
 
-            for hit in &content_hits {
-                if cancel.is_cancelled() {
-                    break;
+                if cancel.is_cancelled() || content_hits.is_empty() {
+                    return (all_results, 0, highlight_terms, snippets, 0);
                 }
-                if hit.volume_id >= 26 {
-                    continue;
-                }
-                let drive_letter = (b'A' + hit.volume_id as u8) as char;
-                if excluded_drives
-                    .iter()
-                    .any(|&ex| ex.eq_ignore_ascii_case(&drive_letter))
-                {
-                    continue;
-                }
-                let Some(vol) = lock.get(&drive_letter) else {
-                    continue;
-                };
-                if !vol.status.is_synced() && vol.records.is_empty() {
-                    continue;
-                }
-                let Some(indices) = vol.frn_to_idx.get(&hit.frn) else {
-                    continue;
+
+                // Precompile MFT filter outside the lock to keep lock duration minimal
+                let compiled_mft = if !mft_query_expr.is_empty() {
+                    Some(cairn_core::engine::CompiledQuery::compile(&mft_query_expr))
+                } else {
+                    None
                 };
 
-                for &idx in indices {
-                    let rec = &vol.records[idx as usize];
-                    if rec.is_tombstone() {
+                // Acquire read lock with minimal critical section to convert and merge results
+                lock = self.volumes.read().unwrap();
+                let mut tantivy_vol_matches: HashMap<char, Vec<u32>> = HashMap::new();
+
+                for hit in &content_hits {
+                    if cancel.is_cancelled() {
+                        break;
+                    }
+                    if hit.volume_id >= 26 {
                         continue;
                     }
-                    if let Some(ref compiled) = compiled_mft {
-                        if !compiled.evaluate_record(
-                            rec,
-                            idx,
-                            &vol.records,
-                            &vol.arena,
-                            &vol.path_cache,
-                            vol.drive_letter,
-                            &mft_query_expr,
-                        ) {
-                            continue;
-                        }
+                    let drive_letter = (b'A' + hit.volume_id as u8) as char;
+                    if excluded_drives
+                        .iter()
+                        .any(|&ex| ex.eq_ignore_ascii_case(&drive_letter))
+                    {
+                        continue;
                     }
-                    if !excluded_paths.is_empty() {
-                        let full_path = vol.path_cache.get_full_path(
-                            &vol.records,
-                            &vol.arena,
-                            vol.drive_letter,
-                            idx,
-                        );
-                        if crate::exclusion::is_path_excluded(&full_path, &excluded_paths) {
-                            continue;
-                        }
+                    let Some(vol) = lock.get(&drive_letter) else {
+                        continue;
+                    };
+                    if !vol.status.is_synced() && vol.records.is_empty() {
+                        continue;
                     }
-                    all_results.push(SearchResultItem {
-                        drive_letter: vol.drive_letter,
-                        record_idx: idx,
-                        generation: vol.generation,
-                    });
-                    tantivy_vol_matches
-                        .entry(vol.drive_letter)
-                        .or_default()
-                        .push(idx);
-                    snippets.insert((vol.drive_letter, rec.frn), hit.snippet.clone());
-                }
-            }
+                    let Some(indices) = vol.frn_to_idx.get(&hit.frn) else {
+                        continue;
+                    };
 
-            for (drive, matches) in tantivy_vol_matches {
-                if let Some(vol) = lock.get(&drive) {
-                    total_bytes = total_bytes.saturating_add(vol.calculate_matched_bytes(&matches));
+                    for &idx in indices {
+                        let rec = &vol.records[idx as usize];
+                        if rec.is_tombstone() {
+                            continue;
+                        }
+                        if let Some(ref compiled) = compiled_mft {
+                            if !compiled.evaluate_record(
+                                rec,
+                                idx,
+                                &vol.records,
+                                &vol.arena,
+                                &vol.path_cache,
+                                vol.drive_letter,
+                                &mft_query_expr,
+                            ) {
+                                continue;
+                            }
+                        }
+                        if !excluded_paths.is_empty() {
+                            let full_path = vol.path_cache.get_full_path(
+                                &vol.records,
+                                &vol.arena,
+                                vol.drive_letter,
+                                idx,
+                            );
+                            if crate::exclusion::is_path_excluded(&full_path, &excluded_paths) {
+                                continue;
+                            }
+                        }
+                        all_results.push(SearchResultItem {
+                            drive_letter: vol.drive_letter,
+                            record_idx: idx,
+                            generation: vol.generation,
+                        });
+                        tantivy_vol_matches
+                            .entry(vol.drive_letter)
+                            .or_default()
+                            .push(idx);
+                        snippets.insert((vol.drive_letter, rec.frn), hit.snippet.clone());
+                    }
+                }
+
+                for (drive, matches) in tantivy_vol_matches {
+                    if let Some(vol) = lock.get(&drive) {
+                        total_bytes =
+                            total_bytes.saturating_add(vol.calculate_matched_bytes(&matches));
+                    }
+                }
+            } else {
+                // One Tantivy search per content term, then the core evaluator applies
+                // Not/Or/And uniformly over content and metadata terms. Records without any
+                // hit stay in the game: negation and disjunction are decided per record.
+                let mut hits_by_drive: HashMap<char, HashMap<String, HashSet<u64>>> =
+                    HashMap::new();
+                let mut snippets_by_key: HashMap<(char, u64), String> = HashMap::new();
+                for term in &content_queries {
+                    for hit in searcher.search(term, 50_000).unwrap_or_default() {
+                        if hit.volume_id >= 26 {
+                            continue;
+                        }
+                        let drive_letter = (b'A' + hit.volume_id as u8) as char;
+                        hits_by_drive
+                            .entry(drive_letter)
+                            .or_default()
+                            .entry(term.clone())
+                            .or_default()
+                            .insert(hit.frn);
+                        snippets_by_key
+                            .entry((drive_letter, hit.frn))
+                            .or_insert_with(|| hit.snippet.clone());
+                    }
+                }
+
+                lock = self.volumes.read().unwrap();
+                for vol in lock.values() {
+                    if cancel.is_cancelled() {
+                        return (all_results, 0, highlight_terms, snippets, 0);
+                    }
+                    if excluded_drives
+                        .iter()
+                        .any(|&ex| ex.eq_ignore_ascii_case(&vol.drive_letter))
+                    {
+                        continue;
+                    }
+                    if !vol.status.is_synced() && vol.records.is_empty() {
+                        continue;
+                    }
+                    let matcher = |term: &str, frn: u64| {
+                        hits_by_drive
+                            .get(&vol.drive_letter)
+                            .and_then(|terms| terms.get(term))
+                            .is_some_and(|frns| frns.contains(&frn))
+                    };
+                    let matches = cairn_core::engine::execute_query_with_content(
+                        &vol.records,
+                        &vol.arena,
+                        &vol.path_cache,
+                        vol.drive_letter,
+                        &query_expr,
+                        &matcher,
+                        cancel,
+                    );
+                    all_results.reserve(matches.len());
+                    let mut vol_matches = Vec::with_capacity(matches.len());
+                    for (i, idx) in matches.into_iter().enumerate() {
+                        if (i & 0xFFF) == 0 && cancel.is_cancelled() {
+                            return (all_results, 0, highlight_terms, snippets, 0);
+                        }
+                        if !excluded_paths.is_empty() {
+                            let full_path = vol.path_cache.get_full_path(
+                                &vol.records,
+                                &vol.arena,
+                                vol.drive_letter,
+                                idx,
+                            );
+                            if crate::exclusion::is_path_excluded(&full_path, &excluded_paths) {
+                                continue;
+                            }
+                        }
+                        let frn = vol.records[idx as usize].frn;
+                        if let Some(snippet) = snippets_by_key.get(&(vol.drive_letter, frn)) {
+                            snippets.insert((vol.drive_letter, frn), snippet.clone());
+                        }
+                        vol_matches.push(idx);
+                        all_results.push(SearchResultItem {
+                            drive_letter: vol.drive_letter,
+                            record_idx: idx,
+                            generation: vol.generation,
+                        });
+                    }
+                    total_bytes =
+                        total_bytes.saturating_add(vol.calculate_matched_bytes(&vol_matches));
                 }
             }
         } else {
@@ -2572,6 +2664,18 @@ impl MultiVolumeEngine {
 
 /// Presorted index to use as the order for `sort_by`, or `None` when it cannot be trusted: a
 /// dirty index no longer matches the records, and DateCreated/Extension have no presorted array.
+/// A query whose whole shape is a conjunction of positive `content:` terms is answered by one
+/// joined Tantivy search; any Not, Or, or metadata leaf requires the record-by-record evaluator.
+fn is_positive_content_conjunction(expr: &QueryExpr) -> bool {
+    match expr {
+        QueryExpr::Term(term) => term.content_query.is_some(),
+        QueryExpr::And(subs) => {
+            !subs.is_empty() && subs.iter().all(is_positive_content_conjunction)
+        }
+        _ => false,
+    }
+}
+
 fn presorted_order(vol: &VolumeIndex, sort_by: SortColumn) -> Option<&[u32]> {
     if vol.presorted_dirty {
         return None;
@@ -4600,5 +4704,97 @@ mod tests {
 
         engine.restore_volume_status('C', previous);
         assert_eq!(engine.get_volume_summaries()[0].status, VolumeState::Synced);
+    }
+
+    /// An engine with a real on-disk content index (four documents) and matching volume rows.
+    /// The tests below cross the public `execute_search_multi` seam, so the content combination
+    /// is exercised exactly as a client sees it.
+    fn engine_with_indexed_content() -> (MultiVolumeEngine, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("index dir");
+        let config = ServiceConfig {
+            content_index_enabled: true,
+            ..Default::default()
+        };
+        let engine =
+            MultiVolumeEngine::with_index_dir_drives_and_config(dir.path(), vec![], config);
+        let writer = cairn_content::ContentIndex::open_or_create(&engine.content_dir)
+            .expect("content index");
+        for (frn, path, body) in [
+            (101, r"C:\docs\report.txt", "resumable needle"),
+            (102, r"C:\docs\report-draft.txt", "quarterly summary"),
+            (103, r"C:\docs\other.txt", "resumable needle"),
+            (104, r"C:\docs\other-notes.txt", "plain filler"),
+        ] {
+            writer
+                .index_document(2, frn, 16, 1, path, body)
+                .expect("index document");
+        }
+        writer.finish().expect("finish content index");
+        assert!(engine.get_or_create_content_searcher().is_some());
+        engine.mark_content_index_ready_for_test();
+
+        let mut volume = VolumeIndex::new('C');
+        volume.ingest_items(vec![
+            index_item(1, 0, "C:", true),
+            index_item(9, 1, "docs", true),
+            index_item(101, 9, "report.txt", false),
+            index_item(102, 9, "report-draft.txt", false),
+            index_item(103, 9, "other.txt", false),
+            index_item(104, 9, "other-notes.txt", false),
+        ]);
+        engine.add_volume(volume);
+        (engine, dir)
+    }
+
+    fn matched_content_frns(engine: &MultiVolumeEngine, query: &str) -> Vec<u64> {
+        let cancel = CancellationToken::new();
+        let (results, ..) = engine.execute_search_multi(
+            query,
+            &QueryDefaults::default(),
+            SortColumn::Name,
+            true,
+            &cancel,
+        );
+        let volumes = engine.volumes.read().unwrap();
+        let mut frns: Vec<u64> = results
+            .iter()
+            .map(|item| volumes[&item.drive_letter].records[item.record_idx as usize].frn)
+            .collect();
+        frns.sort_unstable();
+        frns
+    }
+
+    #[test]
+    fn a_negated_content_term_excludes_its_hits_from_the_result_set() {
+        let (engine, _dir) = engine_with_indexed_content();
+        assert_eq!(
+            matched_content_frns(&engine, "!content:needle"),
+            vec![1, 9, 102, 104],
+            "every record without the needle hit, directories included, must survive the negation"
+        );
+    }
+
+    #[test]
+    fn a_metadata_or_content_branch_returns_the_union() {
+        let (engine, _dir) = engine_with_indexed_content();
+        assert_eq!(
+            matched_content_frns(&engine, "report|content:needle"),
+            vec![101, 102, 103],
+            "the metadata branch and the content branch must union under Or"
+        );
+    }
+
+    #[test]
+    fn a_metadata_and_content_conjunction_keeps_requiring_both() {
+        let (engine, _dir) = engine_with_indexed_content();
+        assert_eq!(
+            matched_content_frns(&engine, "report content:needle"),
+            vec![101]
+        );
+        assert_eq!(
+            matched_content_frns(&engine, "content:needle"),
+            vec![101, 103],
+            "the pure positive content query keeps its hit-driven fast path"
+        );
     }
 }

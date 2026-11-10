@@ -42,6 +42,11 @@ impl CancellationToken {
     }
 }
 
+/// Resolves whether a `content:` term's full-text hits include one record. The in-memory engine
+/// has no content index of its own, so the caller that owns it supplies the membership test; the
+/// term string is the query text after `content:`.
+pub type ContentHitResolver<'a> = &'a (dyn Fn(&str, u64) -> bool + Sync);
+
 /// Evaluates a `QueryExpr` against indexed file records in parallel, preserving the specified record order if given.
 pub fn execute_query_ordered(
     records: &[FileRecord],
@@ -50,6 +55,52 @@ pub fn execute_query_ordered(
     drive_letter: char,
     query: &QueryExpr,
     order: Option<&[u32]>,
+    cancel: &CancellationToken,
+) -> Vec<u32> {
+    execute_query_inner(
+        records,
+        arena,
+        path_cache,
+        drive_letter,
+        query,
+        order,
+        None,
+        cancel,
+    )
+}
+
+/// Evaluates `query` with `content:` terms resolved through `content_hit`. The boolean structure
+/// (And/Or/Not) applies uniformly to metadata and content terms.
+pub fn execute_query_with_content(
+    records: &[FileRecord],
+    arena: &NamePool,
+    path_cache: &DirectoryPathCache,
+    drive_letter: char,
+    query: &QueryExpr,
+    content_hit: ContentHitResolver<'_>,
+    cancel: &CancellationToken,
+) -> Vec<u32> {
+    execute_query_inner(
+        records,
+        arena,
+        path_cache,
+        drive_letter,
+        query,
+        None,
+        Some(content_hit),
+        cancel,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_query_inner(
+    records: &[FileRecord],
+    arena: &NamePool,
+    path_cache: &DirectoryPathCache,
+    drive_letter: char,
+    query: &QueryExpr,
+    order: Option<&[u32]>,
+    content_hit: Option<ContentHitResolver<'_>>,
     cancel: &CancellationToken,
 ) -> Vec<u32> {
     if query.is_empty() {
@@ -106,6 +157,7 @@ pub fn execute_query_ordered(
                 drive_letter,
                 query,
                 &regexes,
+                content_hit,
             ) {
                 matched.push(idx);
             }
@@ -134,6 +186,7 @@ pub fn execute_query_ordered(
                 drive_letter,
                 query,
                 &regexes,
+                content_hit,
             ) {
                 matched.push(idx);
             }
@@ -232,6 +285,7 @@ impl CompiledQuery {
             drive_letter,
             query,
             &self.programs,
+            None,
         )
     }
 }
@@ -389,6 +443,7 @@ fn evaluate_expr(
     drive_letter: char,
     expr: &QueryExpr,
     regexes: &RegexPrograms,
+    content_hit: Option<ContentHitResolver<'_>>,
 ) -> bool {
     match expr {
         QueryExpr::Term(term) => evaluate_term(
@@ -400,6 +455,7 @@ fn evaluate_expr(
             drive_letter,
             term,
             regexes,
+            content_hit,
         ),
         QueryExpr::And(terms) => terms.iter().all(|sub| {
             evaluate_expr(
@@ -411,6 +467,7 @@ fn evaluate_expr(
                 drive_letter,
                 sub,
                 regexes,
+                content_hit,
             )
         }),
         QueryExpr::Or(terms) => terms.iter().any(|sub| {
@@ -423,6 +480,7 @@ fn evaluate_expr(
                 drive_letter,
                 sub,
                 regexes,
+                content_hit,
             )
         }),
         QueryExpr::Not(inner) => !evaluate_expr(
@@ -434,6 +492,7 @@ fn evaluate_expr(
             drive_letter,
             inner,
             regexes,
+            content_hit,
         ),
     }
 }
@@ -448,6 +507,7 @@ fn evaluate_term(
     drive_letter: char,
     term: &SearchTerm,
     regexes: &RegexPrograms,
+    content_hit: Option<ContentHitResolver<'_>>,
 ) -> bool {
     // 0. Unparsable search item (e.g. a lone `size:`): constrain to nothing rather than
     //    silently matching every record.
@@ -527,10 +587,11 @@ fn evaluate_term(
     }
 
     // 7. Content search filter (CNT-06)
-    // The MFT in-memory engine only matches file metadata and paths.
-    // When a term requires content matching, it must never falsely match all files.
-    if term.content_query.is_some() {
-        return false;
+    // The MFT in-memory engine only matches file metadata and paths. When a term requires
+    // content matching, only the caller's hit resolver can answer it; without one the term must
+    // never falsely match all files.
+    if let Some(ref content_query) = term.content_query {
+        return content_hit.is_some_and(|hit| hit(content_query, rec.frn));
     }
 
     // 8. Text match
@@ -1084,6 +1145,64 @@ mod tests {
         let q_name = parse_query("readme");
         let matches_name = execute_query(&records, &pool, &path_cache, 'C', &q_name, &cancel);
         assert_eq!(matches_name.len(), 1);
+    }
+
+    #[test]
+    fn content_terms_follow_boolean_negation_through_a_hit_resolver() {
+        use crate::syntax::parse_query;
+
+        let mut pool = NamePool::default();
+        let (note_off, note_len, note_ext) = pool.insert("note.txt");
+        let (report_off, report_len, report_ext) = pool.insert("report.txt");
+
+        let records = vec![
+            FileRecord {
+                frn: 101,
+                parent_idx: FileRecord::ROOT_PARENT,
+                name_offset: note_off,
+                name_len: note_len,
+                ext_offset: note_ext,
+                volume_id: 2,
+                flags: 0,
+                size: 1,
+                modified_ts: 1,
+                created_ts: 1,
+            },
+            FileRecord {
+                frn: 102,
+                parent_idx: FileRecord::ROOT_PARENT,
+                name_offset: report_off,
+                name_len: report_len,
+                ext_offset: report_ext,
+                volume_id: 2,
+                flags: 0,
+                size: 1,
+                modified_ts: 1,
+                created_ts: 1,
+            },
+        ];
+        let path_cache = DirectoryPathCache::new();
+        let cancel = CancellationToken::new();
+
+        // Only frn 101 carries the content hit for `needle`; the resolver stands in for the
+        // service's Tantivy hit sets.
+        let content_hits = |term: &str, frn: u64| term == "needle" && frn == 101;
+
+        let query = parse_query("!content:needle");
+        let matched = execute_query_with_content(
+            &records,
+            &pool,
+            &path_cache,
+            'C',
+            &query,
+            &content_hits,
+            &cancel,
+        );
+        assert_eq!(
+            matched,
+            vec![1],
+            "a negated content term must exclude exactly its hits"
+        );
     }
 
     #[test]
