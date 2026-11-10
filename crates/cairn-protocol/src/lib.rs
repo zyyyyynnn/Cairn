@@ -10,6 +10,7 @@
 pub mod codec;
 pub mod message;
 pub mod status;
+pub mod worker_exit;
 
 pub use codec::{
     encode_frame, encode_frame_with_version, peek_frame_header, try_decode_frame, CodecError,

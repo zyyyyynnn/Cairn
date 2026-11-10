@@ -136,13 +136,47 @@ fn apply_batches(
     Ok((processed, failed))
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> std::process::ExitCode {
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::from_default_env())
         .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .init();
 
-    let args = WorkerCli::parse();
+    match run(WorkerCli::parse()) {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            error!("{error}");
+            std::process::ExitCode::from(worker_exit_code(error.as_ref()))
+        }
+    }
+}
+
+/// The dominant failure kind the service uses to decide whether a retry can help. Errors from
+/// Tantivy or the extractor wrap the OS error, so the whole source chain is searched.
+fn worker_exit_code(error: &(dyn std::error::Error + 'static)) -> u8 {
+    use cairn_protocol::worker_exit;
+    match raw_os_error(error) {
+        Some(5) => worker_exit::ACCESS_DENIED,
+        Some(32) => worker_exit::SHARING_VIOLATION,
+        _ => worker_exit::FAILED,
+    }
+}
+
+fn raw_os_error(error: &(dyn std::error::Error + 'static)) -> Option<i32> {
+    let mut current = Some(error);
+    while let Some(err) = current {
+        if let Some(code) = err
+            .downcast_ref::<std::io::Error>()
+            .and_then(std::io::Error::raw_os_error)
+        {
+            return Some(code);
+        }
+        current = err.source();
+    }
+    None
+}
+
+fn run(args: WorkerCli) -> Result<(), Box<dyn std::error::Error>> {
     let extractor = CompositeExtractor::new();
     let index = ContentIndex::open_or_create(&args.index_dir)?;
 
@@ -250,5 +284,47 @@ mod tests {
 
         assert_eq!(processed, 1);
         assert_eq!(failed, 2); // 1 malformed delete + 1 malformed task
+    }
+
+    #[derive(Debug)]
+    struct WrappedError(std::io::Error);
+
+    impl std::fmt::Display for WrappedError {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(formatter, "wrapped: {}", self.0)
+        }
+    }
+
+    impl std::error::Error for WrappedError {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+
+    #[test]
+    fn exit_codes_name_the_os_failure_even_when_wrapped() {
+        use cairn_protocol::worker_exit;
+
+        assert_eq!(
+            worker_exit_code(&std::io::Error::from_raw_os_error(5)),
+            worker_exit::ACCESS_DENIED
+        );
+        assert_eq!(
+            worker_exit_code(&std::io::Error::from_raw_os_error(32)),
+            worker_exit::SHARING_VIOLATION
+        );
+        assert_eq!(
+            worker_exit_code(&std::io::Error::from_raw_os_error(2)),
+            worker_exit::FAILED
+        );
+        assert_eq!(
+            worker_exit_code(&WrappedError(std::io::Error::from_raw_os_error(32))),
+            worker_exit::SHARING_VIOLATION,
+            "a Tantivy/extractor wrapper must not hide the retryable OS error"
+        );
+        assert_eq!(
+            worker_exit_code(&WrappedError(std::io::Error::from_raw_os_error(5))),
+            worker_exit::ACCESS_DENIED
+        );
     }
 }
