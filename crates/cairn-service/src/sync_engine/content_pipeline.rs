@@ -73,7 +73,30 @@ pub enum ContentCommand {
 enum BatchOutcome {
     Completed,
     Cancelled,
-    Failed(String),
+    Failed(WorkerFailure),
+}
+
+/// A failed worker batch. `transient` records whether the worker's exit code names a handle
+/// conflict that a retry can clear; the message keeps the process output for the log.
+struct WorkerFailure {
+    message: String,
+    transient: bool,
+}
+
+impl BatchOutcome {
+    fn failed(message: impl Into<String>) -> Self {
+        Self::Failed(WorkerFailure {
+            message: message.into(),
+            transient: false,
+        })
+    }
+
+    fn worker_failed(message: impl Into<String>, exit_code: Option<i32>) -> Self {
+        Self::Failed(WorkerFailure {
+            message: message.into(),
+            transient: worker_exit_is_transient(exit_code),
+        })
+    }
 }
 
 /// Marker written after a full backfill reaches Ready. It records the configuration the index was
@@ -843,8 +866,8 @@ impl MultiVolumeEngine {
                         self.set_content_state(ContentIndexState::Disabled);
                         return;
                     }
-                    BatchOutcome::Failed(err) => {
-                        self.set_content_error(err);
+                    BatchOutcome::Failed(failure) => {
+                        self.set_content_error(failure.message);
                         return;
                     }
                 }
@@ -860,8 +883,8 @@ impl MultiVolumeEngine {
                     self.set_content_state(ContentIndexState::Disabled);
                     return;
                 }
-                BatchOutcome::Failed(err) => {
-                    self.set_content_error(err);
+                BatchOutcome::Failed(failure) => {
+                    self.set_content_error(failure.message);
                     return;
                 }
             }
@@ -920,8 +943,8 @@ impl MultiVolumeEngine {
                     self.set_content_state(ContentIndexState::Disabled);
                     return;
                 }
-                BatchOutcome::Failed(err) => {
-                    self.keep_last_content_snapshot(err);
+                BatchOutcome::Failed(failure) => {
+                    self.keep_last_content_snapshot(failure.message);
                     return;
                 }
             }
@@ -947,8 +970,8 @@ impl MultiVolumeEngine {
                         self.set_content_state(ContentIndexState::Disabled);
                         return;
                     }
-                    BatchOutcome::Failed(err) => {
-                        self.keep_last_content_snapshot(err);
+                    BatchOutcome::Failed(failure) => {
+                        self.keep_last_content_snapshot(failure.message);
                         return;
                     }
                 }
@@ -986,7 +1009,7 @@ impl MultiVolumeEngine {
                 status.last_updated_ts = 0;
             }
             BatchOutcome::Cancelled => self.set_content_state(ContentIndexState::Disabled),
-            BatchOutcome::Failed(err) => self.set_content_error(err),
+            BatchOutcome::Failed(failure) => self.set_content_error(failure.message),
         }
     }
 
@@ -1059,7 +1082,7 @@ impl MultiVolumeEngine {
     ) -> BatchOutcome {
         let first = self.run_worker_process(tasks, deletions, clear);
         let err = match &first {
-            BatchOutcome::Failed(err) if worker_error_is_transient(err) => err.clone(),
+            BatchOutcome::Failed(failure) if failure.transient => failure.message.clone(),
             _ => return first,
         };
         tracing::warn!(
@@ -1081,10 +1104,10 @@ impl MultiVolumeEngine {
     ) -> BatchOutcome {
         let worker = match Self::worker_path() {
             Ok(path) => path,
-            Err(err) => return BatchOutcome::Failed(err),
+            Err(err) => return BatchOutcome::failed(err),
         };
         if let Err(err) = std::fs::create_dir_all(&self.content_dir) {
-            return BatchOutcome::Failed(format!(
+            return BatchOutcome::failed(format!(
                 "could not create content directory {}: {err}",
                 self.content_dir.display()
             ));
@@ -1103,12 +1126,12 @@ impl MultiVolumeEngine {
 
         if let Err(err) = write_json_lines(&batch_path, tasks) {
             remove_worker_files(&cleanup_paths);
-            return BatchOutcome::Failed(err);
+            return BatchOutcome::failed(err);
         }
         if let Some(path) = &delete_path {
             if let Err(err) = write_json_lines(path, deletions) {
                 remove_worker_files(&cleanup_paths);
-                return BatchOutcome::Failed(err);
+                return BatchOutcome::failed(err);
             }
         }
 
@@ -1139,7 +1162,7 @@ impl MultiVolumeEngine {
             Ok(child) => child,
             Err(err) => {
                 remove_worker_files(&cleanup_paths);
-                return BatchOutcome::Failed(format!("could not start CairnWorker: {err}"));
+                return BatchOutcome::failed(format!("could not start CairnWorker: {err}"));
             }
         };
         #[cfg(windows)]
@@ -1187,9 +1210,10 @@ impl MultiVolumeEngine {
                         .unwrap_or_default();
                     remove_worker_files(&cleanup_paths);
                     if !status.success() {
-                        return BatchOutcome::Failed(format!(
-                            "CairnWorker exited with {status}: {output} {errors}"
-                        ));
+                        return BatchOutcome::worker_failed(
+                            format!("CairnWorker exited with {status}: {output} {errors}"),
+                            status.code(),
+                        );
                     }
                     let summary: serde_json::Value =
                         serde_json::from_str(output.trim()).unwrap_or_default();
@@ -1215,14 +1239,14 @@ impl MultiVolumeEngine {
                     let _ = child.kill();
                     let _ = child.wait();
                     remove_worker_files(&cleanup_paths);
-                    return BatchOutcome::Failed(format!("could not wait for CairnWorker: {err}"));
+                    return BatchOutcome::failed(format!("could not wait for CairnWorker: {err}"));
                 }
             }
             if Instant::now() >= deadline {
                 let _ = child.kill();
                 let _ = child.wait();
                 remove_worker_files(&cleanup_paths);
-                return BatchOutcome::Failed("CairnWorker timed out".to_string());
+                return BatchOutcome::failed("CairnWorker timed out");
             }
             std::thread::sleep(Duration::from_millis(100));
         }
@@ -1239,19 +1263,15 @@ impl MultiVolumeEngine {
     }
 }
 
-/// Whether a worker failure looks like a file-handle conflict that can clear on its own: Tantivy
-/// or Windows reporting access denied / a sharing violation. Anything else (bad arguments, a
-/// crashed worker, a timeout) is not retried at this level.
-fn worker_error_is_transient(error: &str) -> bool {
-    let error = error.to_ascii_lowercase();
-    [
-        "permissiondenied",
-        "os error 5",
-        "拒绝访问",
-        "sharing violation",
-    ]
-    .iter()
-    .any(|needle| error.contains(needle))
+/// Whether the worker's exit code names a handle conflict a retry can clear. Anything else (bad
+/// arguments, a crashed worker, a timeout) is not retried at this level.
+fn worker_exit_is_transient(exit_code: Option<i32>) -> bool {
+    matches!(
+        exit_code,
+        Some(code)
+            if code == i32::from(cairn_protocol::worker_exit::ACCESS_DENIED)
+                || code == i32::from(cairn_protocol::worker_exit::SHARING_VIOLATION)
+    )
 }
 
 fn write_json_lines<T: serde::Serialize>(path: &Path, items: &[T]) -> Result<(), String> {
@@ -2309,27 +2329,16 @@ mod tests {
 
     #[test]
     fn only_file_handle_conflicts_count_as_transient_worker_failures() {
-        for error in [
-            "CairnWorker exited with exit code: 1: PermissionDenied (os error 5)",
-            "Access is denied. (os error 5)",
-            "拒绝访问。 (os error 5)",
-            "The process cannot access the file because it is being used by another process. \
-             (os error 32): sharing violation",
-        ] {
+        for exit_code in [5, 32] {
             assert!(
-                worker_error_is_transient(error),
-                "{error:?} must be retried once"
+                worker_exit_is_transient(Some(exit_code)),
+                "worker exit {exit_code} is a sharing conflict that must be retried once"
             );
         }
-        for error in [
-            "CairnWorker timed out",
-            "invalid content batch payload",
-            "os error 2: the system cannot find the file specified",
-            "CairnWorker exited with 0xc0000409",
-        ] {
+        for exit_code in [None, Some(0), Some(1), Some(2), Some(0xc0000409_u32 as i32)] {
             assert!(
-                !worker_error_is_transient(error),
-                "{error:?} is not a sharing conflict"
+                !worker_exit_is_transient(exit_code),
+                "{exit_code:?} is not a sharing conflict"
             );
         }
     }
@@ -2359,7 +2368,7 @@ mod tests {
         engine.run_incremental_with(tasks, Vec::new(), |_, _, _| {
             // A crashed worker (WER 0xc0000409) is a permanent failure for this batch, but still
             // not a reason to disable content search for every other file.
-            BatchOutcome::Failed("CairnWorker exited with 0xc0000409".to_string())
+            BatchOutcome::failed("CairnWorker exited with 0xc0000409")
         });
 
         let after = engine.content_index_status();

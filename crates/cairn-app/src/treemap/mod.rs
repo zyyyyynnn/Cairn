@@ -4,7 +4,7 @@
 
 //! Drive disk space Treemap: view rendering and interaction, view state and
 //! incremental scan ingestion, directory history, paint geometry, category
-//! palette, viewport zoom, and the pre-built volume index loader.
+//! palette and viewport zoom.
 
 pub(crate) mod navigation;
 pub(crate) mod paint;
@@ -12,5 +12,4 @@ pub(crate) mod palette;
 pub(crate) mod path_input;
 pub(crate) mod state;
 pub(crate) mod view;
-pub(crate) mod volume_index;
 pub(crate) mod zoom;

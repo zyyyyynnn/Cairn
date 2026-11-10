@@ -97,7 +97,7 @@ flowchart TD
 
 | 内容项目 | 物理存储路径 | 权限控制标准 |
 |:---|:---|:---|
-| 文件名索引缓存 | `%ProgramData%\Cairn\index\vol_<guid>.idx` | 仅 SYSTEM 与 Administrators 可读写 |
+| 文件名索引缓存 | `%ProgramData%\Cairn\index\vol_<drive>.idx` | 仅 SYSTEM 与 Administrators 可读写 |
 | 全文内容索引 | `%ProgramData%\Cairn\content\` | 仅 SYSTEM 与 Administrators 可读写 |
 | 服务端配置文件 | `%ProgramData%\Cairn\service.toml` | 仅 SYSTEM 与 Administrators 可写 |
 | 服务端运行日志 | `%ProgramData%\Cairn\logs\` | 仅 SYSTEM 与 Administrators 可读写 |

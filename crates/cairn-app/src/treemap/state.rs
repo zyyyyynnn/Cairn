@@ -6,7 +6,6 @@
 
 use crate::treemap::navigation::TreemapNavigation;
 use crate::treemap::paint::painted_gutter_device;
-use crate::treemap::volume_index::{try_load_index_for_drive, VolumeTreemapIndex};
 use crate::treemap::zoom::TreemapZoom;
 use cairn_core::treemap::{
     aggregate_parent_path, is_drive_root, layout_nested_treemap, NestedTreemapLayoutNode,
@@ -18,7 +17,7 @@ use cairn_protocol::message::{
 };
 use gpui_kit::gpui::*;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -127,8 +126,6 @@ pub struct TreemapViewState {
     pub(crate) scan_fade_epoch: u64,
     /// Highest scan fade epoch for which a cleanup timer has been scheduled.
     pub(crate) scan_fade_timer_armed: u64,
-    /// Loaded in-memory index, if available from index files
-    cached_index: Option<Arc<VolumeTreemapIndex>>,
     /// Whether a service tree request is in flight.
     pub(super) is_scanning: bool,
     /// Epoch of the directory request the view is waiting for. A late answer
@@ -140,8 +137,8 @@ pub struct TreemapViewState {
     /// Reset on each new directory request until the tree is ready.
     pub(super) content_revealed: bool,
     /// Exact item totals from scans completed in this view, keyed by directory.
-    /// A later cache or stored-tree load of the same directory reuses the scan
-    /// total instead of the depth-capped tree count.
+    /// A later stored-tree load of the same directory reuses the scan total
+    /// instead of the depth-capped tree count.
     scanned_item_totals: HashMap<String, usize>,
     /// Wheel zoom transform. The layout above stays in base pixel space.
     pub(super) zoom: TreemapZoom,
@@ -154,7 +151,6 @@ fn normalize_dir_key(path: &str) -> String {
 impl TreemapViewState {
     pub(super) fn new(drive: char, entry_dir: &str, focus: FocusHandle) -> (Self, Option<PathBuf>) {
         let drive_upper = drive.to_ascii_uppercase();
-        let cached_index = try_load_index_for_drive(drive_upper).map(Arc::new);
 
         let mut state = Self {
             drive: drive_upper,
@@ -178,7 +174,6 @@ impl TreemapViewState {
             last_scale_factor: 1.0,
             scan_fade_epoch: 0,
             scan_fade_timer_armed: 0,
-            cached_index,
             is_scanning: false,
             request_epoch: 0,
             unavailable: None,
@@ -216,7 +211,6 @@ impl TreemapViewState {
             last_scale_factor: 1.0,
             scan_fade_epoch: 0,
             scan_fade_timer_armed: 0,
-            cached_index: None,
             is_scanning: false,
             request_epoch: 0,
             unavailable: None,
@@ -258,7 +252,7 @@ impl TreemapViewState {
         self.selected_path.take().is_some()
     }
 
-    /// Loads the current directory from the volume index or the stored drive tree.
+    /// Loads the current directory from the stored trees.
     /// Returns `Some(path)` when the service has to answer, or `None` when the
     /// in-memory trees already hold the directory.
     fn load_current_dir(&mut self) -> Option<PathBuf> {
@@ -273,40 +267,7 @@ impl TreemapViewState {
 
         let current_dir = self.navigation.current_dir().to_string();
 
-        // 1. Check in-memory pre-built volume index
-        if let Some(ref idx) = self.cached_index {
-            let root_name = if is_drive_root(&current_dir) {
-                format!("{}:\\", self.drive)
-            } else {
-                Path::new(&current_dir)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| current_dir.clone())
-            };
-
-            // A directory the snapshot does not contain must fall through to the
-            // stored tree or the service. Treating a failed lookup as `None` here
-            // would build the volume root and show it under the requested path.
-            let resolved = if is_drive_root(&current_dir) {
-                Some(None)
-            } else {
-                idx.dir_index
-                    .resolve_path_to_idx(&idx.records, &idx.arena, &current_dir)
-            };
-            if let Some(dir_idx) = resolved {
-                let tree =
-                    idx.dir_index
-                        .build_tree_node(&idx.records, &idx.arena, dir_idx, &root_name, 6);
-                // A resolved directory with no children is an empty folder, not
-                // a missing one: it belongs on the canvas without a service call.
-                self.current_dir_total_items = idx.dir_index.descendant_count(dir_idx);
-                self.set_tree(tree);
-                self.reveal_content();
-                return None;
-            }
-        }
-
-        // 2. Drive root: instant from stored_drive_tree if already scanned.
+        // 1. Drive root: instant from stored_drive_tree if already scanned.
         if is_drive_root(&current_dir) {
             if let Some(drive_tree) = self.stored_drive_tree.clone() {
                 self.current_dir_total_items = self
@@ -319,7 +280,7 @@ impl TreemapViewState {
                 return None;
             }
         } else {
-            // 3. Subdirectory: check if we previously fetched and cached the full tree for this directory.
+            // 2. Subdirectory: check if we previously fetched and cached the full tree for this directory.
             let dir_key = normalize_dir_key(&current_dir);
             if let Some(cached_tree) = self.cached_dir_trees.get(&dir_key).cloned() {
                 self.current_dir_total_items = self
@@ -345,6 +306,9 @@ impl TreemapViewState {
         Some(PathBuf::from(current_dir))
     }
 
+    /// Aggregates, sorts and adopts a freshly built tree. Test entry points build trees through
+    /// this; runtime paths receive already prepared trees from the service.
+    #[cfg(test)]
     fn set_tree(&mut self, mut tree: TreemapTreeNode) {
         tree.compute_aggregated_sizes();
         tree.sort_recursive();
@@ -739,9 +703,6 @@ impl TreemapViewState {
             }
         }
 
-        // Invalidate in-memory pre-built volume index snapshot so navigation
-        // cannot reconstruct and resurrect deleted files from the stale snapshot.
-        self.cached_index = None;
         self.cached_dir_trees.clear();
 
         // Keep cached scan totals updated for ancestors, drop deleted subtrees,
@@ -1174,7 +1135,6 @@ mod tests {
         assert_eq!(state.current_dir_total_size, 1000);
         assert_eq!(state.current_dir_total_items, 2);
         assert_eq!(state.scanned_item_totals.get(r"C:\"), Some(&2));
-        assert!(state.cached_index.is_none());
         assert!(state.stored_drive_tree.is_some());
     }
 

@@ -49,13 +49,13 @@ pub fn run_vhd_tests() -> Result<(), Box<dyn std::error::Error>> {
 
     // 2. Verify Rename and Cross-Directory Move
     println!("Test 2: Rename and cross-directory move...");
-    vol.apply_usn_change(UsnChange::Renamed {
+    vol.apply_usn_changes([UsnChange::Renamed {
         frn: 1001,
         parent_frn: 10,
         name: "renamed_target.txt".to_string(),
         is_dir: false,
         is_new_name: true,
-    });
+    }]);
     let rec0 = &vol.records()[0];
     let name0 = vol.record_name(rec0);
     assert_eq!(name0, "renamed_target.txt");
@@ -83,14 +83,14 @@ pub fn run_vhd_tests() -> Result<(), Box<dyn std::error::Error>> {
                 let name = format!("file_{}_{}.dat", i, if is_dir { "dir" } else { "file" });
 
                 ground_truth.insert(frn, (parent_frn, name.clone(), is_dir));
-                inc_vol.apply_usn_change(UsnChange::Created {
+                inc_vol.apply_usn_changes([UsnChange::Created {
                     frn,
                     parent_frn,
                     name,
                     is_dir,
                     attributes: if is_dir { FILE_ATTRIBUTE_DIRECTORY } else { 0 },
                     ts: 1600000000 + i as i64,
-                });
+                }]);
             }
             2 => {
                 // Rename existing file
@@ -100,20 +100,20 @@ pub fn run_vhd_tests() -> Result<(), Box<dyn std::error::Error>> {
                     entry.0 = new_parent;
                     entry.1 = new_name.clone();
 
-                    inc_vol.apply_usn_change(UsnChange::Renamed {
+                    inc_vol.apply_usn_changes([UsnChange::Renamed {
                         frn,
                         parent_frn: new_parent,
                         name: new_name,
                         is_dir: entry.2,
                         is_new_name: true,
-                    });
+                    }]);
                 }
             }
             _ => {
                 // Delete existing file
                 if let Some(&frn) = ground_truth.keys().next() {
                     ground_truth.remove(&frn);
-                    inc_vol.apply_usn_change(UsnChange::Deleted { frn });
+                    inc_vol.apply_usn_changes([UsnChange::Deleted { frn }]);
                 }
             }
         }

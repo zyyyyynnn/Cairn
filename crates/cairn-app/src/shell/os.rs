@@ -226,14 +226,72 @@ impl RecycleBinItem {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BinOperationError {
     Cancelled,
-    Failed { reason: String, items: Vec<String> },
+    Failed {
+        reason: String,
+        items: Vec<String>,
+        kind: BinErrorKind,
+    },
+}
+
+/// The meaning of a shell failure, classified once where the diagnostic is produced. The UI
+/// localizes by kind, so no user-facing path parses HRESULT text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BinErrorKind {
+    AccessDenied,
+    ReadOnly,
+    Conflict,
+    PathTooDeep,
+    PathTooLong,
+    MissingItem,
+    OriginalLocation,
+    NoItems,
+    Generic,
+}
+
+impl BinErrorKind {
+    /// The shell file-operation HRESULTs and raw Win32 diagnostics that name a distinct remedy.
+    /// The raw text stays in the log; this classifier only decides which sentence the toast shows.
+    pub fn from_reason(reason: &str) -> Self {
+        let reason = reason.to_ascii_lowercase();
+        if reason.contains("0x80270021") || reason.contains("0x80270022") {
+            Self::AccessDenied
+        } else if reason.contains("0x8027003f") {
+            Self::ReadOnly
+        } else if reason.contains("0x80270029")
+            || reason.contains("0x8027002a")
+            || reason.contains("0x8027002b")
+            || reason.contains("0x8027002c")
+        {
+            Self::Conflict
+        } else if reason.contains("0x8027001e") {
+            Self::PathTooDeep
+        } else if reason.contains("0x80270038") || reason.contains("path too long") {
+            Self::PathTooLong
+        } else if reason.contains("access is denied")
+            || reason.contains("access denied")
+            || reason.contains("os error 5")
+        {
+            Self::AccessDenied
+        } else if reason.contains("no longer in the recycle bin") {
+            Self::MissingItem
+        } else if reason.contains("original location") {
+            Self::OriginalLocation
+        } else if reason.contains("no item could") {
+            Self::NoItems
+        } else {
+            Self::Generic
+        }
+    }
 }
 
 impl BinOperationError {
     pub fn failed(reason: impl Into<String>, items: Vec<String>) -> Self {
+        let reason = reason.into();
+        let kind = BinErrorKind::from_reason(&reason);
         Self::Failed {
-            reason: reason.into(),
+            reason,
             items,
+            kind,
         }
     }
 
@@ -254,13 +312,21 @@ impl BinOperationError {
             Self::Failed { items, .. } => items,
         }
     }
+
+    /// `None` only for cancellation, which carries no failure to classify.
+    pub fn kind(&self) -> Option<BinErrorKind> {
+        match self {
+            Self::Cancelled => None,
+            Self::Failed { kind, .. } => Some(*kind),
+        }
+    }
 }
 
 impl std::fmt::Display for BinOperationError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Cancelled => formatter.write_str("the operation was cancelled"),
-            Self::Failed { reason, items } => {
+            Self::Failed { reason, items, .. } => {
                 write!(formatter, "{reason}")?;
                 if !items.is_empty() {
                     write!(formatter, " ({})", items.join(", "))?;
@@ -1116,6 +1182,38 @@ mod tests {
     use core::prelude::rust_2021::test;
 
     use super::*;
+
+    #[test]
+    fn every_failure_classifier_keeps_its_remedy() {
+        for (reason, kind) in [
+            ("PerformOperations: 0x80270021", BinErrorKind::AccessDenied),
+            ("PerformOperations: 0x80270022", BinErrorKind::AccessDenied),
+            ("PerformOperations: 0x8027003f", BinErrorKind::ReadOnly),
+            ("PerformOperations: 0x80270029", BinErrorKind::Conflict),
+            ("PerformOperations: 0x8027002c", BinErrorKind::Conflict),
+            ("PerformOperations: 0x8027001e", BinErrorKind::PathTooDeep),
+            ("PerformOperations: 0x80270038", BinErrorKind::PathTooLong),
+            ("perform: path too long", BinErrorKind::PathTooLong),
+            ("Access is denied. (os error 5)", BinErrorKind::AccessDenied),
+            (
+                "x.txt is no longer in the Recycle Bin",
+                BinErrorKind::MissingItem,
+            ),
+            (
+                "the original location is not absolute: X:\\",
+                BinErrorKind::OriginalLocation,
+            ),
+            ("no item could be deleted", BinErrorKind::NoItems),
+            ("some items could not be deleted", BinErrorKind::Generic),
+        ] {
+            assert_eq!(BinErrorKind::from_reason(reason), kind, "{reason}");
+        }
+        assert_eq!(
+            BinOperationError::failed("no item could be restored", Vec::new()).kind(),
+            Some(BinErrorKind::NoItems),
+            "the constructor must carry the classified kind"
+        );
+    }
 
     #[test]
     fn a_cancelled_bin_operation_is_not_a_failure() {

@@ -65,8 +65,12 @@ impl ServiceRuntime {
     }
 
     /// Serves the pipe until `shutdown` resolves, keeping the index current in the background, and
-    /// persists the indexes on the way out (IDX-04, NFR-09).
-    pub async fn run(self, shutdown: impl std::future::Future<Output = ()>) {
+    /// persists the indexes on the way out (IDX-04, NFR-09). A control-channel failure is returned
+    /// after the index is saved, so the host exits with a failure status instead of looking stopped.
+    pub async fn run(
+        self,
+        shutdown: impl std::future::Future<Output = ()>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let Self {
             engine,
             pipe,
@@ -109,16 +113,18 @@ impl ServiceRuntime {
             }
         });
 
-        tokio::select! {
+        let served = tokio::select! {
             res = pipe.run() => {
-                if let Err(e) = res {
+                if let Err(e) = &res {
                     error!("Pipe server terminated with error: {}", e);
                 }
+                res
             },
             _ = shutdown => {
                 info!("Shutdown signal received, stopping pipe server");
+                Ok(())
             }
-        }
+        };
 
         usn_task.abort();
         persist_task.abort();
@@ -130,6 +136,7 @@ impl ServiceRuntime {
             Ok(()) => info!("All volume indexes saved successfully."),
             Err(e) => error!("Failed to save indexes on shutdown: {}", e),
         }
+        served
     }
 }
 
