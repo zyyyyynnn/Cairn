@@ -326,11 +326,6 @@ impl Drop for ComApartment {
     }
 }
 
-#[cfg(windows)]
-fn initialize_com_apartment() -> ComApartment {
-    ComApartment::enter()
-}
-
 /// The bin's children, each kept as the shell item the Recycle Bin namespace
 /// produced. Restore consumes these items directly instead of re-parsing `$R`
 /// filesystem paths, so the move stays inside the shell's own Restore semantics.
@@ -355,7 +350,7 @@ unsafe fn shell_string(value: PWSTR) -> String {
 
 #[cfg(windows)]
 fn enumerate_recycle_bin() -> Result<Vec<BinEntry>, String> {
-    let _com = initialize_com_apartment();
+    let _com = ComApartment::enter();
 
     // SAFETY: the known-folder GUID is a constant; the returned PIDL is
     // consumed by SHCreateItemFromIDList and freed with CoTaskMemFree.
@@ -560,7 +555,7 @@ pub fn restore_from_recycle_bin(
         if items.is_empty() {
             return Ok(());
         }
-        let _com = initialize_com_apartment();
+        let _com = ComApartment::enter();
         let requested: Vec<String> = items.iter().map(|item| item.name.clone()).collect();
         let entries = enumerate_recycle_bin()
             .map_err(|reason| BinOperationError::failed(reason, dedup_names(requested.clone())))?;
@@ -721,7 +716,7 @@ pub fn delete_permanently_from_recycle_bin(
         if items.is_empty() {
             return Ok(());
         }
-        let _com = initialize_com_apartment();
+        let _com = ComApartment::enter();
         let requested: Vec<String> = items.iter().map(|item| item.name.clone()).collect();
         let entries = enumerate_recycle_bin()
             .map_err(|reason| BinOperationError::failed(reason, dedup_names(requested.clone())))?;
@@ -827,7 +822,7 @@ pub fn delete_permanently_from_recycle_bin(
 pub fn empty_recycle_bin(owner: isize) -> Result<(), BinOperationError> {
     #[cfg(windows)]
     {
-        let _com = initialize_com_apartment();
+        let _com = ComApartment::enter();
         const SHERB_NOCONFIRMATION: u32 = 0x00000001;
         // SAFETY: the app's live window owns the shell call; no root-path restriction, so
         // this empties all recycle bins across drives.
@@ -864,7 +859,7 @@ pub fn delete_to_recycle_bin(paths: &[String], owner: isize) -> Result<(), BinOp
         if paths.is_empty() {
             return Ok(());
         }
-        let _com = initialize_com_apartment();
+        let _com = ComApartment::enter();
         let requested: Vec<String> = paths
             .iter()
             .map(|path| {

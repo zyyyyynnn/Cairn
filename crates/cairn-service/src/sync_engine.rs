@@ -663,18 +663,6 @@ impl VolumeIndex {
                 if !is_dir {
                     self.pending_data_changes.insert(frn);
                 }
-                if !self.presorted.by_name.is_empty() {
-                    self.presorted.by_name.push(new_idx);
-                }
-                if !self.presorted.by_size.is_empty() {
-                    self.presorted.by_size.push(new_idx);
-                }
-                if !self.presorted.by_date_modified.is_empty() {
-                    self.presorted.by_date_modified.push(new_idx);
-                }
-                if !self.presorted.by_path.is_empty() {
-                    self.presorted.by_path.push(new_idx);
-                }
             }
             UsnChange::Renamed {
                 frn,

@@ -138,10 +138,7 @@ fn parse_size_val(s: &str) -> Option<u64> {
 #[derive(Clone, Debug, PartialEq)]
 pub enum DateOp {
     Lt(i64),
-    Lte(i64),
     Gt(i64),
-    Gte(i64),
-    Eq(i64),
     Range(i64, i64),
     Neq(i64, i64),
 }
@@ -156,10 +153,7 @@ impl DateFilter {
         let ts = crate::time::timestamp_to_unix_seconds(ts);
         match self.op {
             DateOp::Lt(v) => ts < v,
-            DateOp::Lte(v) => ts < v,
             DateOp::Gt(v) => ts >= v,
-            DateOp::Gte(v) => ts >= v,
-            DateOp::Eq(v) => ts == v,
             DateOp::Range(min, max) => ts >= min && ts < max,
             DateOp::Neq(min, max) => ts < min || ts >= max,
         }
@@ -205,7 +199,7 @@ impl DateFilter {
         } else if let Some(rest) = trimmed.strip_prefix(">=") {
             let (val, _) = parse_date_span(rest, now_sec)?;
             Some(Self {
-                op: DateOp::Gte(val),
+                op: DateOp::Gt(val),
             })
         } else if let Some(rest) = trimmed.strip_prefix('>') {
             let (_, val) = parse_date_span(rest, now_sec)?;
@@ -215,7 +209,7 @@ impl DateFilter {
         } else if let Some(rest) = trimmed.strip_prefix("<=") {
             let (_, val) = parse_date_span(rest, now_sec)?;
             Some(Self {
-                op: DateOp::Lte(val),
+                op: DateOp::Lt(val),
             })
         } else if let Some(rest) = trimmed.strip_prefix('<') {
             let (val, _) = parse_date_span(rest, now_sec)?;

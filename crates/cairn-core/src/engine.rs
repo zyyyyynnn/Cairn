@@ -913,40 +913,6 @@ fn match_glob_recursive(tokens: &[GlobToken], t_chars: &[char], case_sensitive: 
     }
 }
 
-/// Finds matching highlight byte ranges within `text` for a pattern.
-pub fn find_highlights(text: &str, pattern: &str, case_sensitive: bool) -> Vec<Range<usize>> {
-    if text.is_empty() || pattern.is_empty() {
-        return Vec::new();
-    }
-
-    let mut ranges = Vec::new();
-    let p_len = pattern.len();
-
-    if case_sensitive {
-        let finder = Finder::new(pattern.as_bytes());
-        let mut curr = 0;
-        while let Some(pos) = finder.find(&text.as_bytes()[curr..]) {
-            let start = curr + pos;
-            let end = start + p_len;
-            ranges.push(start..end);
-            curr = end;
-        }
-    } else {
-        let text_lower = text.to_ascii_lowercase();
-        let pat_lower = pattern.to_ascii_lowercase();
-        let finder = Finder::new(pat_lower.as_bytes());
-        let mut curr = 0;
-        while let Some(pos) = finder.find(&text_lower.as_bytes()[curr..]) {
-            let start = curr + pos;
-            let end = start + p_len;
-            ranges.push(start..end);
-            curr = end;
-        }
-    }
-
-    ranges
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -967,14 +933,6 @@ mod tests {
         assert!(!glob_match("*.rs", r"C:\dir\main.rs", false));
         assert!(glob_match(r"**\*.rs", r"C:\dir\main.rs", false));
         assert!(glob_match(r"C:\*\main.rs", r"C:\dir\main.rs", false));
-    }
-
-    #[test]
-    fn test_highlight_ranges() {
-        let ranges = find_highlights("Hello World, hello!", "hello", false);
-        assert_eq!(ranges.len(), 2);
-        assert_eq!(ranges[0], 0..5);
-        assert_eq!(ranges[1], 13..18);
     }
 
     #[test]

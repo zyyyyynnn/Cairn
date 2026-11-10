@@ -6,9 +6,6 @@
 
 use crate::mft::{parse_mft_record, ExtractedItem};
 use rayon::prelude::*;
-use std::fs::File;
-use std::io::Read;
-use std::path::Path;
 use thiserror::Error;
 
 #[cfg(windows)]
@@ -383,56 +380,6 @@ pub fn scan_live_volume_mft(
     _chunk_records: usize,
 ) -> Result<Vec<ExtractedItem>, VolumeError> {
     Ok(Vec::new())
-}
-
-/// Loads MFT records from an offline MFT image file (IDX-10).
-pub fn read_offline_mft_file<P: AsRef<Path>>(
-    path: P,
-    chunk_records: usize,
-) -> Result<Vec<ExtractedItem>, VolumeError> {
-    let mut file = File::open(path)?;
-    let file_len = file.metadata()?.len();
-    const RECORD_SIZE: usize = 1024;
-    const SECTOR_SIZE: usize = 512;
-
-    let total_records = file_len as usize / RECORD_SIZE;
-    let mut all_items = Vec::new();
-    let chunk_size = chunk_records * RECORD_SIZE;
-    let mut buffer = vec![0u8; chunk_size];
-
-    let mut current_record_num = 0u64;
-
-    while current_record_num < total_records as u64 {
-        let read_bytes = file.read(&mut buffer)?;
-        if read_bytes == 0 {
-            break;
-        }
-
-        let records_in_buf = read_bytes / RECORD_SIZE;
-        let mut chunks: Vec<(u64, Vec<u8>)> = Vec::with_capacity(records_in_buf);
-
-        for i in 0..records_in_buf {
-            let rec_num = current_record_num + i as u64;
-            // Skip first 24 system metadata records by default (IDX-09)
-            if rec_num < 24 {
-                continue;
-            }
-            let slice = &buffer[i * RECORD_SIZE..(i + 1) * RECORD_SIZE];
-            chunks.push((rec_num, slice.to_vec()));
-        }
-
-        let parsed_items: Vec<ExtractedItem> = chunks
-            .into_par_iter()
-            .flat_map(|(rec_num, mut rec_bytes)| {
-                parse_mft_record(&mut rec_bytes, SECTOR_SIZE, rec_num).unwrap_or_default()
-            })
-            .collect();
-
-        all_items.extend(parsed_items);
-        current_record_num += records_in_buf as u64;
-    }
-
-    Ok(all_items)
 }
 
 #[cfg(test)]

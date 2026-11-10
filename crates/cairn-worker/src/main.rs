@@ -22,7 +22,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 #[command(name = "CairnWorker", about = "Cairn Service Worker")]
 struct WorkerCli {
     /// Directory where Tantivy content index is stored
-    #[arg(short, long, default_value = r"C:\ProgramData\Cairn\content")]
+    #[arg(short, long)]
     index_dir: PathBuf,
 
     /// JSON Lines batch produced by the service: one ContentIndexTask per line
@@ -33,12 +33,8 @@ struct WorkerCli {
     #[arg(long)]
     delete_batch: Option<PathBuf>,
 
-    /// Single file path to extract and index (manual use)
-    #[arg(short, long)]
-    file: Option<PathBuf>,
-
     /// Maximum document bytes to extract per file
-    #[arg(long, default_value_t = 10 * 1024 * 1024)]
+    #[arg(long)]
     max_bytes: usize,
 
     /// Remove every document before applying this batch
@@ -172,37 +168,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if args.clear {
         index.clear()?;
-    }
-
-    if let Some(file_path) = args.file {
-        let metadata = std::fs::symlink_metadata(&file_path)?;
-        #[cfg(windows)]
-        let is_reparse = {
-            use std::os::windows::fs::MetadataExt;
-            (metadata.file_attributes() & 0x400) != 0
-        };
-        #[cfg(not(windows))]
-        let is_reparse = false;
-        if metadata.file_type().is_symlink() || is_reparse {
-            return Err("Refusing to index symlink or reparse point".into());
-        }
-        let task = ContentIndexTask {
-            volume_id: 0,
-            frn: 0,
-            size: metadata.len(),
-            modified_ts: metadata
-                .modified()
-                .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64,
-            path: file_path.to_string_lossy().into_owned(),
-        };
-        extract_and_index(&extractor, &index, &task, args.max_bytes)?;
-        index.commit()?;
-        info!("Indexed {}", task.path);
-    } else if !args.clear {
-        info!("Nothing to do: pass --batch, --delete-batch or --file");
+    } else {
+        info!("Nothing to do: pass --batch, --delete-batch or --clear");
     }
 
     index.finish()?;
@@ -212,20 +179,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_worker_cli_defaults() {
-        let args = WorkerCli::try_parse_from(["CairnWorker"]).expect("parse defaults");
-        assert_eq!(
-            args.index_dir,
-            PathBuf::from(r"C:\ProgramData\Cairn\content")
-        );
-        assert!(args.batch.is_none());
-        assert!(args.delete_batch.is_none());
-        assert!(args.file.is_none());
-        assert_eq!(args.max_bytes, 10 * 1024 * 1024);
-        assert!(!args.clear);
-    }
 
     #[test]
     fn test_worker_cli_custom_flags() {

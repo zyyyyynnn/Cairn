@@ -21,8 +21,6 @@ pub use fixup::{apply_fixup, RECORD_FLAG_IN_USE, RECORD_FLAG_IS_DIR};
 pub use mft::{parse_mft_record, ExtractedItem, MftError};
 pub use runlist::{parse_runlist, DataRun};
 pub use usn::{parse_usn_records, ReadUsnJournalDataV0, UsnChange, UsnJournalData};
-pub use volume::{
-    enumerate_fixed_drives, read_offline_mft_file, scan_live_volume_mft, VolumeError,
-};
+pub use volume::{enumerate_fixed_drives, scan_live_volume_mft, VolumeError};
 #[cfg(windows)]
 pub use volume::{locate_mft_clusters, RawVolumeHandle};
