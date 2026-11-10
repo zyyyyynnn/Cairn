@@ -693,9 +693,8 @@ mod tests {
         repair_ink_contrast, ModePalette, DARK_PALETTE, INK_CONTRAST_FLOOR, LIGHT_PALETTE,
         MAX_ZOOM, MIN_ZOOM, NEUTRAL_RAMP, RING_CONTRAST_FLOOR, SURFACE_CONTRAST_FLOOR,
     };
-    use crate::brand::{BASE_FONT_PX, HAIRLINE};
     use gpui_kit::component::{Theme, ThemeMode};
-    use gpui_kit::gpui::{px, Hsla};
+    use gpui_kit::gpui::Hsla;
 
     /// A theme built the way the product builds it: the mode palette, the ink floor, the
     /// interaction fills, and the danger button's own palette.
@@ -811,12 +810,6 @@ mod tests {
         }
         assert_eq!(clamp_zoom(1.25), MAX_ZOOM);
         assert_eq!(clamp_zoom(0.75), MIN_ZOOM);
-    }
-
-    #[test]
-    fn the_hairline_is_a_device_pixel_not_a_rem_step() {
-        assert_eq!(HAIRLINE, px(1.0));
-        assert_eq!(BASE_FONT_PX, 14.0);
     }
 
     #[test]

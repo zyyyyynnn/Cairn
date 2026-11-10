@@ -290,16 +290,6 @@ mod tests {
     #[test]
     fn test_read_usn_journal_data_v0_layout() {
         assert_eq!(std::mem::size_of::<ReadUsnJournalDataV0>(), 40);
-        let data = ReadUsnJournalDataV0 {
-            start_usn: 12345,
-            reason_mask: 0xFFFFFFFF,
-            return_only_on_close: 1,
-            timeout: 0,
-            bytes_to_wait_for: 0,
-            usn_journal_id: 99999,
-        };
-        assert_eq!(data.start_usn, 12345);
-        assert_eq!(data.usn_journal_id, 99999);
     }
 
     #[test]

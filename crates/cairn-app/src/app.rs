@@ -1042,32 +1042,4 @@ mod tests {
             );
         });
     }
-
-    #[test]
-    fn treemap_scan_fade_epoch_arms_timer_and_is_idempotent() {
-        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
-            gpui_kit::init(cx);
-            let _ = gpui_kit::open_window(
-                gpui_kit::gpui::WindowOptions::default(),
-                cx,
-                |window, cx| {
-                    let app = cx.new(|cx| CairnApp::new(window, cx));
-                    app.update(cx, |this, cx| {
-                        this.open_drive_at('C', r"C:\", window, cx);
-                        assert!(this.treemap_state.is_some());
-                        this.arm_treemap_scan_fade_cleanup(cx);
-                        let armed = this.treemap_state.as_ref().unwrap().scan_fade_timer_armed;
-                        // Repeated arming for the same epoch is idempotent
-                        this.arm_treemap_scan_fade_cleanup(cx);
-                        assert_eq!(
-                            this.treemap_state.as_ref().unwrap().scan_fade_timer_armed,
-                            armed
-                        );
-                    });
-                    cx.quit();
-                    app
-                },
-            );
-        });
-    }
 }

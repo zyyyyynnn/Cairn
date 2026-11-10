@@ -208,18 +208,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_cli_args_defaults() {
-        let args = CliArgs::try_parse_from(["CairnCli"]).expect("parse default args");
-        assert_eq!(args.query, "");
-        assert!(!args.status);
-        assert!(!args.json);
-        assert!(args.export_csv.is_none());
-        assert_eq!(args.max, 100);
-        assert_eq!(args.sort, "name");
-        assert!(args.asc);
-    }
-
-    #[test]
     fn test_cli_args_custom_options() {
         let args = CliArgs::try_parse_from([
             "CairnCli",

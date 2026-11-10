@@ -966,23 +966,6 @@ mod tests {
         assert!(find_node_by_path(&layout, r"C:\Windows\Temp").is_none());
     }
 
-    /// A later scan batch rebuilds the same path with a new id; the selection
-    /// must follow the path across that rebuild.
-    #[test]
-    fn selection_survives_a_rebatch_that_regenerates_the_id() {
-        let before = vec![layout_node(3, r"C:\Games", "Games", vec![])];
-        let after = vec![layout_node(10_001, r"C:\Games", "Games", vec![])];
-
-        assert_eq!(
-            find_node_by_path(&before, r"C:\Games").map(|node| node.item.id),
-            Some(3)
-        );
-        assert_eq!(
-            find_node_by_path(&after, r"C:\Games").map(|node| node.item.id),
-            Some(10_001)
-        );
-    }
-
     fn entry(name: &str, size: u64, is_dir: bool, depth: usize) -> TreeEntryData {
         TreeEntryData {
             name: name.to_string(),

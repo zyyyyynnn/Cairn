@@ -2423,14 +2423,9 @@ mod tests {
                 cairn_core::treemap::TreemapCategory::Other,
             ] {
                 let base_header = palette.directory_header(category);
-                let header_bg_dimmed = palette.dimmed_fill(base_header);
                 let dir_leaf_bg_dimmed = palette.dimmed_fill(base_header);
                 let file_leaf_bg_dimmed = palette.dimmed_fill(palette.fill(category));
 
-                assert_eq!(
-                    dir_leaf_bg_dimmed, header_bg_dimmed,
-                    "compact directory leaf and header must match when dimmed (category {category:?}, is_dark={is_dark})"
-                );
                 assert_eq!(
                     dir_leaf_bg_dimmed, file_leaf_bg_dimmed,
                     "compact directory leaf and file leaf must match when dimmed (category {category:?}, is_dark={is_dark})"

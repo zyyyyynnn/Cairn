@@ -6,7 +6,6 @@
 
 use cairn_ntfs::mft::ExtractedItem;
 use cairn_ntfs::usn::{UsnChange, FILE_ATTRIBUTE_DIRECTORY};
-use cairn_protocol::status::VolumeState;
 use cairn_service::sync_engine::VolumeIndex;
 use std::collections::HashMap;
 
@@ -70,40 +69,7 @@ pub fn run_vhd_tests() -> Result<(), Box<dyn std::error::Error>> {
         "  Passed: file renamed and parent updated via USN; sibling link unaffected (IDX-06)."
     );
 
-    // 3. Verify Three Single-Volume Rebuild Trigger Scenarios (IDX-05)
-    println!("Test 3: Single-volume rebuild triggers...");
-    // 3a. Journal ID mismatch
-    let old_journal_id = 12345u64;
-    let new_journal_id = 99999u64;
-    let mut test_vol = VolumeIndex::new('D');
-    test_vol.journal_id = old_journal_id;
-    if test_vol.journal_id != new_journal_id {
-        test_vol.status = VolumeState::Rebuilding;
-    }
-    assert_eq!(test_vol.status, VolumeState::Rebuilding);
-    println!("  Passed: Journal ID mismatch triggers Rebuilding state.");
-
-    // 3b. Journal wrap-around
-    let lowest_valid_usn = 50000i64;
-    let saved_last_usn = 20000i64;
-    let mut test_vol2 = VolumeIndex::new('E');
-    if saved_last_usn < lowest_valid_usn {
-        test_vol2.status = VolumeState::Rebuilding;
-    }
-    assert_eq!(test_vol2.status, VolumeState::Rebuilding);
-    println!("  Passed: USN wrap-around triggers Rebuilding state.");
-
-    // 4. Verify Snapshot Mode Fallback (IDX-08)
-    println!("Test 4: Snapshot mode fallback when USN disabled...");
-    let mut test_vol3 = VolumeIndex::new('F');
-    test_vol3.usn_enabled = false;
-    test_vol3.status = VolumeState::SnapshotMode;
-    assert_eq!(test_vol3.status, VolumeState::SnapshotMode);
-    assert_eq!(test_vol3.status.state_key(), "snapshot_mode");
-    println!("  Passed: Snapshot mode fallback correctly labeled.");
-
-    // 5. 10,000 Random File Operations Consistency Verification (SM-5)
-    println!("Test 5: [SM-5] 10,000 random file operations sequence consistency verification...");
+    println!("Test 3: [SM-5] 10,000 random file operations sequence consistency verification...");
     let mut inc_vol = VolumeIndex::new('C');
     let mut ground_truth: HashMap<u64, (u64, String, bool)> = HashMap::new(); // frn -> (parent_frn, name, is_dir)
 
