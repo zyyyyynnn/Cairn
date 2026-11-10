@@ -42,9 +42,9 @@ impl CancellationToken {
     }
 }
 
-/// Resolves whether a `content:` term's full-text hits include one record. The in-memory engine
-/// has no content index of its own, so the caller that owns it supplies the membership test; the
-/// term string is the query text after `content:`.
+/// Resolves whether a content term's full-text hits include one record. The in-memory engine has
+/// no content index of its own, so the caller that owns it supplies the membership test; the term
+/// string is the content query text.
 pub type ContentHitResolver<'a> = &'a (dyn Fn(&str, u64) -> bool + Sync);
 
 /// Evaluates a `QueryExpr` against indexed file records in parallel, preserving the specified record order if given.

@@ -9,11 +9,15 @@ use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread::available_parallelism;
-use tantivy::collector::TopDocs;
+use tantivy::collector::{Collector, SegmentCollector, TopDocs};
+use tantivy::fastfield::Column;
 use tantivy::query::{BooleanQuery, Occur, QueryParser, TermQuery};
 use tantivy::schema::IndexRecordOption;
 use tantivy::schema::*;
-use tantivy::{doc, Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument};
+use tantivy::{
+    doc, DocId, Index, IndexReader, IndexWriter, ReloadPolicy, Score, SegmentOrdinal,
+    SegmentReader, TantivyDocument,
+};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -146,32 +150,20 @@ impl ContentSearcher {
 
     /// Returns every `(volume_id, frn)` the query matches, without snippets or scores. Negation
     /// and disjunction need the complete hit set; the scored top-k search is only for result rows.
+    /// The FAST fields carry both identifiers, so a full set costs no scoring and no body read.
     pub fn search_all_frns(&self, query_str: &str) -> Result<Vec<(u64, u64)>, ContentIndexError> {
         self.reader.reload()?;
         let searcher = self.reader.searcher();
-        let mut query_parser = QueryParser::for_index(&self.index, vec![self.f_body, self.f_path]);
-        query_parser.set_conjunction_by_default();
-        let query = query_parser.parse_query(query_str)?;
-
-        let limit = searcher.num_docs() as usize;
-        if limit == 0 {
+        if searcher.num_docs() == 0 {
             return Ok(Vec::new());
         }
-        let top_docs = searcher.search(&query, &TopDocs::with_limit(limit).order_by_score())?;
-        let mut pairs = Vec::with_capacity(top_docs.len());
-        for (_score, doc_address) in top_docs {
-            let retrieved_doc: TantivyDocument = searcher.doc(doc_address)?;
-            let volume_id = retrieved_doc
-                .get_first(self.f_volume_id)
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            let frn = retrieved_doc
-                .get_first(self.f_frn)
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            pairs.push((volume_id, frn));
-        }
-        Ok(pairs)
+        let query = self.parsed_query(query_str)?;
+        let schema = self.index.schema();
+        let collector = FrnSetCollector {
+            volume_field: schema.get_field_name(self.f_volume_id).to_string(),
+            frn_field: schema.get_field_name(self.f_frn).to_string(),
+        };
+        Ok(searcher.search(query.as_ref(), &collector)?)
     }
 
     /// Queries the full-text content index.
@@ -182,11 +174,44 @@ impl ContentSearcher {
     ) -> Result<Vec<ContentHit>, ContentIndexError> {
         self.reader.reload()?;
         let searcher = self.reader.searcher();
+        let query = self.parsed_query(query_str)?;
+        self.collect_hits(&searcher, query.as_ref(), query_str, limit)
+    }
+
+    /// Queries with one parsed term per clause, conjoined. Parsing each term on its own keeps a
+    /// term's boolean syntax from regrouping its siblings, which a joined string would allow.
+    pub fn search_terms(
+        &self,
+        terms: &[String],
+        limit: usize,
+    ) -> Result<Vec<ContentHit>, ContentIndexError> {
+        self.reader.reload()?;
+        let searcher = self.reader.searcher();
+        let mut clauses = Vec::with_capacity(terms.len());
+        for term in terms {
+            clauses.push((Occur::Must, self.parsed_query(term)?));
+        }
+        let query = BooleanQuery::new(clauses);
+        self.collect_hits(&searcher, &query, &terms.join(" "), limit)
+    }
+
+    fn parsed_query(
+        &self,
+        query_str: &str,
+    ) -> Result<Box<dyn tantivy::query::Query>, ContentIndexError> {
         let mut query_parser = QueryParser::for_index(&self.index, vec![self.f_body, self.f_path]);
         query_parser.set_conjunction_by_default();
-        let query = query_parser.parse_query(query_str)?;
+        Ok(query_parser.parse_query(query_str)?)
+    }
 
-        let top_docs = searcher.search(&query, &TopDocs::with_limit(limit).order_by_score())?;
+    fn collect_hits(
+        &self,
+        searcher: &tantivy::Searcher,
+        query: &dyn tantivy::query::Query,
+        query_str: &str,
+        limit: usize,
+    ) -> Result<Vec<ContentHit>, ContentIndexError> {
+        let top_docs = searcher.search(query, &TopDocs::with_limit(limit).order_by_score())?;
         let mut hits = Vec::with_capacity(top_docs.len());
 
         for (_score, doc_address) in top_docs {
@@ -227,6 +252,64 @@ impl ContentSearcher {
     #[cfg(test)]
     pub(crate) fn segment_count(&self) -> Result<usize, ContentIndexError> {
         Ok(self.index.searchable_segment_ids()?.len())
+    }
+}
+
+/// Collects every matching document and reads `(volume_id, frn)` from the FAST fields, so a full
+/// hit set needs neither scoring nor a stored-document read.
+struct FrnSetCollector {
+    volume_field: String,
+    frn_field: String,
+}
+
+impl Collector for FrnSetCollector {
+    type Fruit = Vec<(u64, u64)>;
+    type Child = FrnSetChild;
+
+    fn for_segment(
+        &self,
+        _segment_ord: SegmentOrdinal,
+        segment: &SegmentReader,
+    ) -> tantivy::Result<Self::Child> {
+        Ok(FrnSetChild {
+            volume: segment.fast_fields().u64(&self.volume_field)?,
+            frn: segment.fast_fields().u64(&self.frn_field)?,
+            docs: Vec::new(),
+        })
+    }
+
+    fn requires_scoring(&self) -> bool {
+        false
+    }
+
+    fn merge_fruits(&self, segment_fruits: Vec<Self::Fruit>) -> tantivy::Result<Self::Fruit> {
+        Ok(segment_fruits.into_iter().flatten().collect())
+    }
+}
+
+struct FrnSetChild {
+    volume: Column<u64>,
+    frn: Column<u64>,
+    docs: Vec<DocId>,
+}
+
+impl SegmentCollector for FrnSetChild {
+    type Fruit = Vec<(u64, u64)>;
+
+    fn collect(&mut self, doc: DocId, _score: Score) {
+        self.docs.push(doc);
+    }
+
+    fn harvest(self) -> Self::Fruit {
+        self.docs
+            .into_iter()
+            .map(|doc| {
+                (
+                    self.volume.first(doc).unwrap_or(0),
+                    self.frn.first(doc).unwrap_or(0),
+                )
+            })
+            .collect()
     }
 }
 
@@ -513,6 +596,32 @@ mod tests {
     fn content_writer_budget_keeps_each_thread_above_the_tantivy_floor() {
         assert_eq!(content_writer_memory_budget(1), 50_000_000);
         assert!(content_writer_memory_budget(8) >= 8 * 16 * 1024 * 1024);
+    }
+
+    #[test]
+    fn search_all_frns_returns_every_match_not_just_the_top_k() {
+        let temp = tempdir().unwrap();
+        let index = ContentIndex::open_or_create(temp.path()).expect("open failed");
+        for frn in [1u64, 2, 3] {
+            index
+                .index_document(
+                    0,
+                    frn,
+                    16,
+                    1,
+                    &format!("C:\\docs\\{frn}.txt"),
+                    "shared needle body",
+                )
+                .expect("index doc failed");
+        }
+
+        let top = index.search("needle", 1).expect("search failed");
+        assert_eq!(top.len(), 1, "the scored search honours its top-k bound");
+        let all = index
+            .searcher
+            .search_all_frns("needle")
+            .expect("full hit set");
+        assert_eq!(all.len(), 3, "the full hit set ignores the top-k bound");
     }
 
     #[test]

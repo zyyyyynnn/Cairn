@@ -144,7 +144,7 @@
 - **Cairn 闭环现状**：
   - `CairnService.exe` 服务具备 Win32 DACL 严格安全描述符与 `PIPE_REJECT_REMOTE_CLIENTS`，仅允许本地交互用户连接（达标）。
   - 管道显式校验版本护栏，防止反序列化漏洞（达标）。
-  - 索引配置由本地已认证用户经管道提交，服务校验后以 SYSTEM/Administrators 描述符原子持久化并即时应用：`SetConfig` / `GetConfig` / `ClearContentIndex` 界面可达（达标）；`Rescan` / `ReloadConfig` 的服务端 handler 与鉴权已实现并有测试，界面与 CLI 均不发出（待接线，见 §3.10-9）；`admin_only_query` 只能由管理员修改（达标）。
+  - 索引配置由本地已认证用户经管道提交，服务校验后以 SYSTEM/Administrators 描述符原子持久化并即时应用：`SetConfig` / `GetConfig` / `ClearContentIndex` 界面可达（达标）；`Rescan` / `ReloadConfig` 的服务端 handler 与鉴权已实现并有测试，界面与 CLI 均不发出（待接线，见 §3.10-8）；`admin_only_query` 只能由管理员修改（达标）。
 
 ### 3.9 本地化与偏好设置（Localization & Settings）
 - **同类基线**：完整的多语言国际化架构（非硬编码），偏好设置持久化。
@@ -222,7 +222,7 @@
 | **CNT-03** | P0 | 基于 Tantivy 的全文检索封装；分词器采用自定义 `CjkBigramLatinTokenizer`（CJK 字符相邻 Bigram + 拉丁单词切分） | 中文词汇、英文标识符、中英混排查询均可精准召回 |
 | **CNT-04** | P0 | 文件抽取与索引构建全部运行于独立低优先级子进程 `CairnWorker.exe`（`BELOW_NORMAL_PRIORITY_CLASS` + 后台 I/O 优先级），并发线程数设为 `max(1, cpu_cores / 4)` | 遇到畸形损坏文件或 Zip Bomb 时，Worker 异常崩溃不影响主服务稳定运行 |
 | **CNT-05** | P0 | 首次启用内容索引时后台建立所有已索引卷的合格文件；此后 USN 数据变更事件经去抖队列（1~2 秒）对比 `(file_size, modified_ts)`，仅当内容实际发生改变时触发重新索引 | 旧文件在建立完成后可检索；修改已索引文件后，新内容 ≤ 10 秒内可被检索召回；建立期间不阻塞文件名查询；关闭开关停止建立，下次开启重新建立 |
-| **CNT-06** | P0 | 检索入口：`content:` 语法前缀。工具菜单的索引区仅设一个“内容检索”总开关负责建立索引；普通关键词仍匹配名称/路径。服务端将 Tantivy 命中集按 `(volume_serial, frn)` 与 MFT 路径过滤结果求交 | 支持多条件复合查询，如 `ext:rs content:Token`；总开关关闭或建立中时 `content:` 查询给出明确不可用/未就绪反馈 |
+| **CNT-06** | P0 | 检索入口：`content:` 语法前缀。工具菜单的索引区仅设一个“内容检索”总开关负责建立索引；普通关键词仍匹配名称/路径。服务端按查询的布尔结构求值：正向合取用 Tantivy 命中集（按 `(volume_serial, frn)`）与 MFT 路径过滤求交，`!` / `|` 组合逐记录布尔求值 | 支持多条件复合查询，如 `ext:rs content:Token`；总开关关闭或建立中时 `content:` 查询给出明确不可用/未就绪反馈 |
 | **CNT-07** | P0 | 内容索引物理存储独立于文件名索引（位于 `%ProgramData%\Cairn\content\`），支持一键清空且不影响文件名索引 | 清空后文件名搜索无任何回归与抖动 |
 | **CNT-08** | P1 | 富文档格式抽取：定义 `TextExtractor` trait，接入 `docx`、`xlsx`、`pptx`（基于流式 XML 展开）与 `pdf` 文本抽取 | 各类主流 Office 与 PDF 文档测试夹具精准解析通过 |
 | **CNT-09** | P1 | 检索结果附带内容命中上下文切片预览（Snippet），并附带匹配词高亮区间 | 上下文片段长度适度，边界对齐标点与词尾 |

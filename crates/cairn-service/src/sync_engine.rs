@@ -2166,8 +2166,8 @@ impl MultiVolumeEngine {
         let lock;
 
         if !content_queries.is_empty() {
-            // Decoupled Tantivy inverted index search: run without holding self.volumes lock
-            // to avoid blocking real-time USN writer threads.
+            // Tantivy searches run before the volume lock is taken; evaluating content terms
+            // against records then holds the read lock, as the metadata query paths do.
             let searcher = if self.content_index_status().state.is_ready() {
                 self.get_or_create_content_searcher()
             } else {
@@ -2177,18 +2177,18 @@ impl MultiVolumeEngine {
                 return (all_results, 0, highlight_terms, snippets, 0);
             };
 
-            // A conjunction of positive terms — content and metadata alike — is one joined
-            // Tantivy query plus the compiled metadata filter; any Not or Or needs
-            // record-by-record boolean evaluation instead of flattening the expression.
+            // A conjunction of positive terms — content and metadata alike — is one Tantivy
+            // query with one clause per content term plus the compiled metadata filter; any Not
+            // or Or needs record-by-record boolean evaluation instead of flattening the
+            // expression.
             if is_positive_conjunction(&query_expr) {
-                let content_q = content_queries.join(" ");
-                // The joined search keeps the historical top-k bound: a content conjunction is a
-                // result query, so truncation only shortens the reply and never flips a hit into
-                // a miss for a negation.
-                let content_hits = match searcher.search(&content_q, 50_000) {
+                // The scored top-k bound is historical: truncation shortens the reply before the
+                // metadata filter runs, so a conjunction over a very common word can show fewer
+                // rows than its true match set.
+                let content_hits = match searcher.search_terms(&content_queries, 50_000) {
                     Ok(hits) => hits,
                     Err(err) => {
-                        tracing::warn!("content search for {content_q:?} failed: {err}");
+                        tracing::warn!("content search for {content_queries:?} failed: {err}");
                         return (Vec::new(), 0, highlight_terms, snippets, 0);
                     }
                 };
@@ -2210,7 +2210,7 @@ impl MultiVolumeEngine {
 
                 for hit in &content_hits {
                     if cancel.is_cancelled() {
-                        break;
+                        return (Vec::new(), 0, highlight_terms, snippets, 0);
                     }
                     if hit.volume_id >= 26 {
                         continue;
@@ -2281,36 +2281,67 @@ impl MultiVolumeEngine {
                     }
                 }
             } else {
-                // One full hit set per content term, then the core evaluator applies Not/Or/And
-                // uniformly over content and metadata terms. Records without any hit stay in the
-                // game: negation and disjunction are decided per record, so no top-k bound may
-                // hide a hit. These shapes carry no content snippet: snippets come from the
-                // scored result search, which only a positive conjunction performs.
-                let mut hits_by_drive: HashMap<char, HashMap<String, HashSet<u64>>> =
-                    HashMap::new();
-                for term in &content_queries {
-                    let pairs = match searcher.search_all_frns(term) {
-                        Ok(pairs) => pairs,
+                // One complete hit set per content term, then the core evaluator applies
+                // Not/Or/And uniformly over content and metadata terms. Records without any hit
+                // stay in the game: negation and disjunction are decided per record, so no top-k
+                // bound may hide a hit. Snippets are display-only: a term whose scored search is
+                // complete contributes them; a very common term keeps just its hit set, so a
+                // query cannot retain a snippet for every matching document.
+                let term_index: HashMap<&str, usize> = content_queries
+                    .iter()
+                    .enumerate()
+                    .map(|(index, term)| (term.as_str(), index))
+                    .collect();
+                let mut hits_by_drive: HashMap<char, Vec<HashSet<u64>>> = HashMap::new();
+                let mut snippets_by_key: HashMap<(char, u64), String> = HashMap::new();
+                for (term_slot, term) in content_queries.iter().enumerate() {
+                    if cancel.is_cancelled() {
+                        return (Vec::new(), 0, highlight_terms, snippets, 0);
+                    }
+                    let capped = match searcher.search(term, 50_000) {
+                        Ok(hits) => hits,
                         Err(err) => {
                             tracing::warn!("content search for {term:?} failed: {err}");
                             return (Vec::new(), 0, highlight_terms, snippets, 0);
                         }
                     };
-                    for (volume_id, frn) in pairs {
-                        if volume_id >= 26 {
-                            continue;
+                    if capped.len() < 50_000 {
+                        for hit in &capped {
+                            if hit.volume_id >= 26 {
+                                continue;
+                            }
+                            let drive_letter = (b'A' + hit.volume_id as u8) as char;
+                            hits_by_drive
+                                .entry(drive_letter)
+                                .or_insert_with(|| vec![HashSet::new(); content_queries.len()])
+                                [term_slot]
+                                .insert(hit.frn);
+                            snippets_by_key.insert((drive_letter, hit.frn), hit.snippet.clone());
                         }
-                        let drive_letter = (b'A' + volume_id as u8) as char;
-                        hits_by_drive
-                            .entry(drive_letter)
-                            .or_default()
-                            .entry(term.clone())
-                            .or_default()
-                            .insert(frn);
+                    } else {
+                        let pairs = match searcher.search_all_frns(term) {
+                            Ok(pairs) => pairs,
+                            Err(err) => {
+                                tracing::warn!("content search for {term:?} failed: {err}");
+                                return (Vec::new(), 0, highlight_terms, snippets, 0);
+                            }
+                        };
+                        for (volume_id, frn) in pairs {
+                            if volume_id >= 26 {
+                                continue;
+                            }
+                            let drive_letter = (b'A' + volume_id as u8) as char;
+                            hits_by_drive
+                                .entry(drive_letter)
+                                .or_insert_with(|| vec![HashSet::new(); content_queries.len()])
+                                [term_slot]
+                                .insert(frn);
+                        }
                     }
                 }
 
                 lock = self.volumes.read().unwrap();
+                let exclusion_masks = path_exclusion_masks(&lock, &excluded_paths);
                 for vol in lock.values() {
                     if cancel.is_cancelled() {
                         return (Vec::new(), 0, highlight_terms, snippets, 0);
@@ -2325,10 +2356,11 @@ impl MultiVolumeEngine {
                         continue;
                     }
                     let matcher = |term: &str, frn: u64| {
-                        hits_by_drive
-                            .get(&vol.drive_letter)
-                            .and_then(|terms| terms.get(term))
-                            .is_some_and(|frns| frns.contains(&frn))
+                        term_index.get(term).is_some_and(|&index| {
+                            hits_by_drive
+                                .get(&vol.drive_letter)
+                                .is_some_and(|sets| sets[index].contains(&frn))
+                        })
                     };
                     let matches = cairn_core::engine::execute_query_with_content(
                         &vol.records,
@@ -2345,7 +2377,14 @@ impl MultiVolumeEngine {
                         if (i & 0xFFF) == 0 && cancel.is_cancelled() {
                             return (Vec::new(), 0, highlight_terms, snippets, 0);
                         }
-                        if !excluded_paths.is_empty() {
+                        if exclusion_masks.as_ref().is_some_and(|masks| {
+                            masks.get(&vol.drive_letter).is_some_and(|mask| {
+                                mask.get(idx as usize).copied().unwrap_or(false)
+                            })
+                        }) {
+                            continue;
+                        }
+                        if exclusion_masks.is_none() && !excluded_paths.is_empty() {
                             let full_path = vol.path_cache.get_full_path(
                                 &vol.records,
                                 &vol.arena,
@@ -2355,6 +2394,10 @@ impl MultiVolumeEngine {
                             if crate::exclusion::is_path_excluded(&full_path, &excluded_paths) {
                                 continue;
                             }
+                        }
+                        let frn = vol.records[idx as usize].frn;
+                        if let Some(snippet) = snippets_by_key.get(&(vol.drive_letter, frn)) {
+                            snippets.insert((vol.drive_letter, frn), snippet.clone());
                         }
                         vol_matches.push(idx);
                         all_results.push(SearchResultItem {
@@ -2374,24 +2417,7 @@ impl MultiVolumeEngine {
             // segment rules (a broad query could match most of the table). Compute the same
             // verdict once per volume and use it as an O(1) lookup; unsupported rule forms keep
             // the reference behavior.
-            let exclusion_masks: Option<HashMap<char, Vec<bool>>> = if !excluded_paths.is_empty() {
-                let mut masks = HashMap::new();
-                let mut complete = true;
-                for (drive, volume) in lock.iter() {
-                    match volume.excluded_record_mask(&excluded_paths) {
-                        Some(mask) => {
-                            masks.insert(*drive, mask);
-                        }
-                        None => {
-                            complete = false;
-                            break;
-                        }
-                    }
-                }
-                complete.then_some(masks)
-            } else {
-                None
-            };
+            let exclusion_masks = path_exclusion_masks(&lock, &excluded_paths);
             let active_vols: Vec<_> = lock
                 .values()
                 .filter(|v| {
@@ -2623,6 +2649,10 @@ impl MultiVolumeEngine {
             all_results = decorated.into_iter().map(|(_, item)| item).collect();
         }
 
+        if cancel.is_cancelled() {
+            return (Vec::new(), 0, highlight_terms, snippets, 0);
+        }
+
         let total = all_results.len();
         (all_results, total, highlight_terms, snippets, total_bytes)
     }
@@ -2658,6 +2688,22 @@ impl MultiVolumeEngine {
         };
         Some(f(vol))
     }
+}
+
+/// One exclusion verdict per record, shared by every query path. `None` means the rules use a
+/// form the mask cannot express, so callers must check each path.
+fn path_exclusion_masks(
+    volumes: &HashMap<char, VolumeIndex>,
+    excluded_paths: &[String],
+) -> Option<HashMap<char, Vec<bool>>> {
+    if excluded_paths.is_empty() {
+        return None;
+    }
+    let mut masks = HashMap::new();
+    for (drive, volume) in volumes {
+        masks.insert(*drive, volume.excluded_record_mask(excluded_paths)?);
+    }
+    Some(masks)
 }
 
 /// A query whose whole shape is a conjunction of positive terms can be answered by one joined
@@ -4788,10 +4834,14 @@ mod tests {
             matched_content_frns(&engine, "report content:needle"),
             vec![101]
         );
+    }
+
+    #[test]
+    fn a_pure_positive_content_query_returns_its_hits() {
+        let (engine, _dir) = engine_with_indexed_content();
         assert_eq!(
             matched_content_frns(&engine, "content:needle"),
-            vec![101, 103],
-            "the pure positive content query keeps its hit-driven fast path"
+            vec![101, 103]
         );
     }
 
@@ -4820,5 +4870,55 @@ mod tests {
             matched_content_frns(&engine, "!content:absent"),
             vec![1, 9, 101, 102, 103, 104]
         );
+    }
+
+    #[test]
+    fn an_empty_content_term_matches_nothing() {
+        let (engine, _dir) = engine_with_indexed_content();
+        assert!(matched_content_frns(&engine, "content:").is_empty());
+        assert!(matched_content_frns(&engine, "content:needle content:").is_empty());
+    }
+
+    #[test]
+    fn an_or_content_query_keeps_snippets_on_content_hit_rows() {
+        let (engine, _dir) = engine_with_indexed_content();
+        let cancel = CancellationToken::new();
+        let (results, .., snippets, _) = engine.execute_search_multi(
+            "content:needle|content:quarterly",
+            &QueryDefaults::default(),
+            SortColumn::Name,
+            true,
+            &cancel,
+        );
+        assert_eq!(results.len(), 3);
+        let volumes = engine.volumes.read().unwrap();
+        for item in &results {
+            let frn = volumes[&item.drive_letter].records[item.record_idx as usize].frn;
+            assert!(
+                snippets.contains_key(&(item.drive_letter, frn)),
+                "row frn {frn} matched its content term and must carry a snippet"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cancelled_query_returns_no_rows_in_either_content_shape() {
+        let (engine, _dir) = engine_with_indexed_content();
+        for query in ["!content:needle", "content:needle|content:quarterly"] {
+            let cancel = CancellationToken::new();
+            cancel.cancel();
+            let (results, total, ..) = engine.execute_search_multi(
+                query,
+                &QueryDefaults::default(),
+                SortColumn::Name,
+                true,
+                &cancel,
+            );
+            assert!(
+                results.is_empty(),
+                "{query} must not return partial rows after a cancel"
+            );
+            assert_eq!(total, 0, "{query} must not report a partial total");
+        }
     }
 }
