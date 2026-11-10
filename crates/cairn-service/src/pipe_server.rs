@@ -113,18 +113,28 @@ impl PipeServer {
         #[cfg(windows)]
         {
             let admin_only_query = self.engine.admin_only_query();
-            if let Ok(mut sd) = SafeSecurityDescriptor::create(admin_only_query) {
-                // SAFETY: pointer to SECURITY_ATTRIBUTES passed into windows named pipe creation
-                unsafe {
-                    return options.create_with_security_attributes_raw(
-                        &self.pipe_name,
-                        &mut sd.sa as *mut _ as *mut _,
-                    );
-                }
+            let mut sd = SafeSecurityDescriptor::create(admin_only_query).map_err(|err| {
+                error!(
+                    "refusing to create {} without its access-controlled DACL: {err}",
+                    self.pipe_name
+                );
+                std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!("control pipe DACL: {err}"),
+                )
+            })?;
+            // SAFETY: pointer to SECURITY_ATTRIBUTES passed into windows named pipe creation
+            unsafe {
+                options.create_with_security_attributes_raw(
+                    &self.pipe_name,
+                    &mut sd.sa as *mut _ as *mut _,
+                )
             }
         }
-
-        options.create(&self.pipe_name)
+        #[cfg(not(windows))]
+        {
+            options.create(&self.pipe_name)
+        }
     }
 }
 

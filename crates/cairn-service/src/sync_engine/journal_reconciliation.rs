@@ -120,7 +120,13 @@ pub fn open_journal_at_scan_start(
 
 #[cfg(windows)]
 pub fn save_scanned_index(vol: &VolumeIndex, index_dir: &Path) {
-    let _ = vol.save_to_dir(index_dir);
+    if let Err(err) = vol.save_to_dir(index_dir) {
+        tracing::warn!(
+            "volume {}: scanned index could not be persisted to {} ({err}): the previous checkpoint stays on disk",
+            vol.drive_letter,
+            index_dir.display()
+        );
+    }
 }
 
 /// Reconciles a volume whose records were just ingested from a full scan with the journal window
