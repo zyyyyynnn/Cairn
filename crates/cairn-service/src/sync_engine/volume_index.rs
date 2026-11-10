@@ -167,7 +167,8 @@ impl VolumeIndex {
     }
 
     pub(crate) fn content_volume_id(&self) -> u64 {
-        (self.drive_letter as u16 - b'A' as u16) as u64
+        FileRecord::volume_id_from_drive(self.drive_letter)
+            .expect("volume drive letter is an ASCII letter") as u64
     }
 
     /// Atomically persists volume records and name pool to the specified directory.
@@ -337,7 +338,8 @@ impl VolumeIndex {
                 name_offset,
                 name_len,
                 ext_offset,
-                volume_id: (self.drive_letter as u16) - (b'A' as u16),
+                volume_id: FileRecord::volume_id_from_drive(self.drive_letter)
+                    .expect("volume drive letter is an ASCII letter"),
                 flags: item.flags,
                 size: item.size,
                 modified_ts: item.modified_ts,
@@ -593,7 +595,8 @@ impl VolumeIndex {
                     name_offset,
                     name_len,
                     ext_offset,
-                    volume_id: (self.drive_letter as u16) - (b'A' as u16),
+                    volume_id: FileRecord::volume_id_from_drive(self.drive_letter)
+                        .expect("volume drive letter is an ASCII letter"),
                     flags,
                     size: 0,
                     modified_ts: ts,

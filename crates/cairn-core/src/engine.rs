@@ -253,14 +253,17 @@ pub(crate) struct CompiledTerm {
     pub(crate) glob_tokens_cs: Option<Vec<GlobToken>>,
 }
 
-/// Precompiled query execution state containing regex programs and precomputed query term representations.
+/// Precompiled query execution state containing the expression, regex programs and precomputed
+/// query term representations.
 pub struct CompiledQuery {
+    query: QueryExpr,
     programs: RegexPrograms,
 }
 
 impl CompiledQuery {
     pub fn compile(query: &QueryExpr) -> Self {
         Self {
+            query: query.clone(),
             programs: RegexPrograms::compile(query),
         }
     }
@@ -274,7 +277,6 @@ impl CompiledQuery {
         arena: &NamePool,
         path_cache: &DirectoryPathCache,
         drive_letter: char,
-        query: &QueryExpr,
     ) -> bool {
         evaluate_expr(
             rec,
@@ -283,7 +285,7 @@ impl CompiledQuery {
             arena,
             path_cache,
             drive_letter,
-            query,
+            &self.query,
             &self.programs,
             None,
         )

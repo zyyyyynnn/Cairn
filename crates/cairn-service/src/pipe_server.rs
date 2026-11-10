@@ -317,10 +317,7 @@ fn version_mismatch(server_guard: u16, client_guard: u16) -> ResponsePayload {
 /// a zero-based offset from `A:`). Only the 26 possible letters are in range; anything else yields
 /// `None` so the caller refuses the request instead of rescanning a fabricated drive.
 fn drive_from_volume_id(volume_id: u16) -> Option<char> {
-    if volume_id >= 26 {
-        return None;
-    }
-    Some(char::from(b'A' + volume_id as u8))
+    cairn_core::FileRecord::drive_from_volume_id(volume_id)
 }
 
 fn process_request(

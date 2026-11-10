@@ -26,5 +26,8 @@ pub use index::DirectorySizeIndex;
 pub use layout::{
     aggregate_parent_path, layout_nested_treemap, NestedTreemapLayoutNode, NestedTreemapOptions,
 };
-pub use path::{is_drive_root, parent_directory};
+pub use path::{
+    is_drive_root, parent_directory, path_is_within, path_segments, relative_segments,
+    same_directory,
+};
 pub use tree::{TreemapItem, TreemapTreeNode};

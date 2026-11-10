@@ -10,6 +10,7 @@ use cairn_content::CONTENT_RESULT_TOP_K;
 use cairn_core::engine::CancellationToken;
 use cairn_core::sort::{SortColumn, SortDirection};
 use cairn_core::syntax::{parse_query_with, QueryDefaults, QueryExpr};
+use cairn_core::FileRecord;
 use rayon::prelude::*;
 use rayon::slice::ParallelSliceMut;
 use std::collections::{HashMap, HashSet};
@@ -126,10 +127,12 @@ impl MultiVolumeEngine {
                     if cancel.is_cancelled() {
                         return (Vec::new(), 0, highlight_terms, snippets, 0);
                     }
-                    if hit.volume_id >= 26 {
+                    let Some(drive_letter) = u16::try_from(hit.volume_id)
+                        .ok()
+                        .and_then(FileRecord::drive_from_volume_id)
+                    else {
                         continue;
-                    }
-                    let drive_letter = (b'A' + hit.volume_id as u8) as char;
+                    };
                     if excluded_drives
                         .iter()
                         .any(|&ex| ex.eq_ignore_ascii_case(&drive_letter))
@@ -159,28 +162,12 @@ impl MultiVolumeEngine {
                                 &vol.arena,
                                 &vol.path_cache,
                                 vol.drive_letter,
-                                &mft_query_expr,
                             ) {
                                 continue;
                             }
                         }
-                        if exclusion_masks.as_ref().is_some_and(|masks| {
-                            masks.get(&vol.drive_letter).is_some_and(|mask| {
-                                mask.get(idx as usize).copied().unwrap_or(false)
-                            })
-                        }) {
+                        if is_record_excluded(vol, idx, &exclusion_masks, &excluded_paths) {
                             continue;
-                        }
-                        if exclusion_masks.is_none() && !excluded_paths.is_empty() {
-                            let full_path = vol.path_cache.get_full_path(
-                                &vol.records,
-                                &vol.arena,
-                                vol.drive_letter,
-                                idx,
-                            );
-                            if crate::exclusion::is_path_excluded(&full_path, &excluded_paths) {
-                                continue;
-                            }
                         }
                         all_results.push(SearchResultItem {
                             drive_letter: vol.drive_letter,
@@ -248,10 +235,12 @@ impl MultiVolumeEngine {
                             }
                         };
                         for hit in &hits {
-                            if hit.volume_id >= 26 {
+                            let Some(drive_letter) = u16::try_from(hit.volume_id)
+                                .ok()
+                                .and_then(FileRecord::drive_from_volume_id)
+                            else {
                                 continue;
-                            }
-                            let drive_letter = (b'A' + hit.volume_id as u8) as char;
+                            };
                             hits_by_drive
                                 .entry(drive_letter)
                                 .or_insert_with(|| vec![HashSet::new(); content_queries.len()])
@@ -268,10 +257,12 @@ impl MultiVolumeEngine {
                             }
                         };
                         for (volume_id, frn) in pairs {
-                            if volume_id >= 26 {
+                            let Some(drive_letter) = u16::try_from(volume_id)
+                                .ok()
+                                .and_then(FileRecord::drive_from_volume_id)
+                            else {
                                 continue;
-                            }
-                            let drive_letter = (b'A' + volume_id as u8) as char;
+                            };
                             hits_by_drive
                                 .entry(drive_letter)
                                 .or_insert_with(|| vec![HashSet::new(); content_queries.len()])
@@ -312,40 +303,21 @@ impl MultiVolumeEngine {
                         &matcher,
                         cancel,
                     );
-                    all_results.reserve(matches.len());
-                    let mut vol_matches = Vec::with_capacity(matches.len());
-                    for (i, idx) in matches.into_iter().enumerate() {
-                        if (i & 0xFFF) == 0 && cancel.is_cancelled() {
-                            return (Vec::new(), 0, highlight_terms, snippets, 0);
-                        }
-                        if exclusion_masks.as_ref().is_some_and(|masks| {
-                            masks.get(&vol.drive_letter).is_some_and(|mask| {
-                                mask.get(idx as usize).copied().unwrap_or(false)
-                            })
-                        }) {
-                            continue;
-                        }
-                        if exclusion_masks.is_none() && !excluded_paths.is_empty() {
-                            let full_path = vol.path_cache.get_full_path(
-                                &vol.records,
-                                &vol.arena,
-                                vol.drive_letter,
-                                idx,
-                            );
-                            if crate::exclusion::is_path_excluded(&full_path, &excluded_paths) {
-                                continue;
-                            }
-                        }
+                    let Some(vol_matches) = collect_volume_matches(
+                        vol,
+                        matches,
+                        &exclusion_masks,
+                        &excluded_paths,
+                        cancel,
+                        &mut all_results,
+                    ) else {
+                        return (Vec::new(), 0, highlight_terms, snippets, 0);
+                    };
+                    for &idx in &vol_matches {
                         let frn = vol.records[idx as usize].frn;
                         if let Some(snippet) = snippets_by_key.get(&(vol.drive_letter, frn)) {
                             snippets.insert((vol.drive_letter, frn), snippet.clone());
                         }
-                        vol_matches.push(idx);
-                        all_results.push(SearchResultItem {
-                            drive_letter: vol.drive_letter,
-                            record_idx: idx,
-                            generation: vol.generation,
-                        });
                     }
                     total_bytes =
                         total_bytes.saturating_add(vol.calculate_matched_bytes(&vol_matches));
@@ -372,11 +344,15 @@ impl MultiVolumeEngine {
                 })
                 .collect();
 
-            if active_vols.len() == 1 {
-                let vol = active_vols[0];
+            let is_single_vol = active_vols.len() == 1;
+            for vol in active_vols {
+                if cancel.is_cancelled() {
+                    return (Vec::new(), 0, highlight_terms, snippets, 0);
+                }
                 let presorted_col = presorted_order(vol, sort_by);
-                single_vol_presorted = presorted_col.is_some();
-
+                if is_single_vol {
+                    single_vol_presorted = presorted_col.is_some();
+                }
                 let matches = cairn_core::engine::execute_query_ordered(
                     &vol.records,
                     &vol.arena,
@@ -386,95 +362,23 @@ impl MultiVolumeEngine {
                     presorted_col,
                     cancel,
                 );
-
-                all_results.reserve(matches.len());
-                let mut vol_matches = Vec::with_capacity(matches.len());
-                for (i, idx) in matches.into_iter().enumerate() {
-                    if (i & 0xFFF) == 0 && cancel.is_cancelled() {
-                        return (Vec::new(), 0, highlight_terms, snippets, 0);
-                    }
-                    if exclusion_masks.as_ref().is_some_and(|masks| {
-                        masks
-                            .get(&vol.drive_letter)
-                            .is_some_and(|mask| mask.get(idx as usize).copied().unwrap_or(false))
-                    }) {
-                        continue;
-                    }
-                    if exclusion_masks.is_none() && !excluded_paths.is_empty() {
-                        let full_path = vol.path_cache.get_full_path(
-                            &vol.records,
-                            &vol.arena,
-                            vol.drive_letter,
-                            idx,
-                        );
-                        if crate::exclusion::is_path_excluded(&full_path, &excluded_paths) {
-                            continue;
-                        }
-                    }
-                    vol_matches.push(idx);
-                    all_results.push(SearchResultItem {
-                        drive_letter: vol.drive_letter,
-                        record_idx: idx,
-                        generation: vol.generation,
-                    });
-                }
-
-                total_bytes = vol.calculate_matched_bytes(&vol_matches);
-
-                if single_vol_presorted && !sort_asc {
-                    all_results.reverse();
-                }
-            } else {
-                for vol in active_vols {
-                    if cancel.is_cancelled() {
-                        return (Vec::new(), 0, highlight_terms, snippets, 0);
-                    }
-                    let presorted_col = presorted_order(vol, sort_by);
-                    let matches = cairn_core::engine::execute_query_ordered(
-                        &vol.records,
-                        &vol.arena,
-                        &vol.path_cache,
-                        vol.drive_letter,
-                        &query_expr,
-                        presorted_col,
-                        cancel,
-                    );
-                    let mut vol_matches = Vec::with_capacity(matches.len());
-                    for (i, idx) in matches.into_iter().enumerate() {
-                        if (i & 0xFFF) == 0 && cancel.is_cancelled() {
-                            return (Vec::new(), 0, highlight_terms, snippets, 0);
-                        }
-                        if exclusion_masks.as_ref().is_some_and(|masks| {
-                            masks.get(&vol.drive_letter).is_some_and(|mask| {
-                                mask.get(idx as usize).copied().unwrap_or(false)
-                            })
-                        }) {
-                            continue;
-                        }
-                        if exclusion_masks.is_none() && !excluded_paths.is_empty() {
-                            let full_path = vol.path_cache.get_full_path(
-                                &vol.records,
-                                &vol.arena,
-                                vol.drive_letter,
-                                idx,
-                            );
-                            if crate::exclusion::is_path_excluded(&full_path, &excluded_paths) {
-                                continue;
-                            }
-                        }
-                        vol_matches.push(idx);
-                        all_results.push(SearchResultItem {
-                            drive_letter: vol.drive_letter,
-                            record_idx: idx,
-                            generation: vol.generation,
-                        });
-                    }
-                    total_bytes =
-                        total_bytes.saturating_add(vol.calculate_matched_bytes(&vol_matches));
-                }
+                let Some(vol_matches) = collect_volume_matches(
+                    vol,
+                    matches,
+                    &exclusion_masks,
+                    &excluded_paths,
+                    cancel,
+                    &mut all_results,
+                ) else {
+                    return (Vec::new(), 0, highlight_terms, snippets, 0);
+                };
+                total_bytes = total_bytes.saturating_add(vol.calculate_matched_bytes(&vol_matches));
             }
 
             if single_vol_presorted {
+                if !sort_asc {
+                    all_results.reverse();
+                }
                 if cancel.is_cancelled() {
                     return (Vec::new(), 0, highlight_terms, snippets, 0);
                 }
@@ -493,20 +397,14 @@ impl MultiVolumeEngine {
         if all_results.len() > 1 && !cancel.is_cancelled() {
             let mut vol_by_letter: [Option<&VolumeIndex>; 26] = [None; 26];
             for (ch, vol) in lock.iter() {
-                let upper = ch.to_ascii_uppercase();
-                if upper.is_ascii_uppercase() {
-                    let idx = (upper as u8 - b'A') as usize;
-                    if idx < 26 {
-                        vol_by_letter[idx] = Some(vol);
-                    }
+                if let Some(idx) = FileRecord::volume_id_from_drive(*ch) {
+                    vol_by_letter[idx as usize] = Some(vol);
                 }
             }
 
             let get_vol = |letter: char| -> &VolumeIndex {
-                let upper = letter.to_ascii_uppercase();
-                if upper.is_ascii_uppercase() {
-                    let idx = (upper as u8 - b'A') as usize;
-                    if let Some(vol) = vol_by_letter.get(idx).copied().flatten() {
+                if let Some(idx) = FileRecord::volume_id_from_drive(letter) {
+                    if let Some(vol) = vol_by_letter[idx as usize] {
                         return vol;
                     }
                 }
@@ -600,6 +498,59 @@ impl MultiVolumeEngine {
         let total = all_results.len();
         (all_results, total, highlight_terms, snippets, total_bytes)
     }
+}
+
+/// Filters `matches` against `exclusion_masks` / `excluded_paths` and appends non-excluded
+/// [`SearchResultItem`]s into `all_results`. Returns `None` if `cancel` triggers mid-loop.
+fn collect_volume_matches(
+    vol: &VolumeIndex,
+    matches: Vec<u32>,
+    exclusion_masks: &Option<HashMap<char, Vec<bool>>>,
+    excluded_paths: &[String],
+    cancel: &CancellationToken,
+    all_results: &mut Vec<SearchResultItem>,
+) -> Option<Vec<u32>> {
+    all_results.reserve(matches.len());
+    let mut vol_matches = Vec::with_capacity(matches.len());
+    for (i, idx) in matches.into_iter().enumerate() {
+        if (i & 0xFFF) == 0 && cancel.is_cancelled() {
+            return None;
+        }
+        if is_record_excluded(vol, idx, exclusion_masks, excluded_paths) {
+            continue;
+        }
+        vol_matches.push(idx);
+        all_results.push(SearchResultItem {
+            drive_letter: vol.drive_letter,
+            record_idx: idx,
+            generation: vol.generation,
+        });
+    }
+    Some(vol_matches)
+}
+
+fn is_record_excluded(
+    vol: &VolumeIndex,
+    idx: u32,
+    exclusion_masks: &Option<HashMap<char, Vec<bool>>>,
+    excluded_paths: &[String],
+) -> bool {
+    if exclusion_masks.as_ref().is_some_and(|masks| {
+        masks
+            .get(&vol.drive_letter)
+            .is_some_and(|mask| mask.get(idx as usize).copied().unwrap_or(false))
+    }) {
+        return true;
+    }
+    if exclusion_masks.is_none() && !excluded_paths.is_empty() {
+        let full_path =
+            vol.path_cache
+                .get_full_path(&vol.records, &vol.arena, vol.drive_letter, idx);
+        if crate::exclusion::is_path_excluded(&full_path, excluded_paths) {
+            return true;
+        }
+    }
+    false
 }
 
 /// One exclusion verdict per record, shared by every query path. `None` means the rules use a
