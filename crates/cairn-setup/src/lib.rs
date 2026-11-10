@@ -29,7 +29,9 @@ pub(crate) mod view;
 /// The product upgrade code the MSI and the uninstaller agree on.
 pub const MSI_UPGRADE_CODE: &str = "4C65A8E1-7F89-4D12-9A4B-3D8F42D8E6C0";
 
-/// The six installed product executables; the packaging step and the uninstaller share the list.
+/// The six product executables: the MSI installs five, while `CairnSetup.exe` is the outer
+/// installer that packaging stages and the forced cleanup removes if an old install left it.
+/// The packaging step and the uninstaller share this list.
 pub use platform::PRODUCT_FILES;
 
 /// The product version this setup binary installs.
