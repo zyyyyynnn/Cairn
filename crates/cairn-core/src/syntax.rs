@@ -14,6 +14,11 @@
 use crate::filter::{DateFilter, SizeFilter};
 use serde::{Deserialize, Serialize};
 
+/// Content text longer than this is a paste, not a query. The tokenizer materializes every
+/// token of a content term, so an unbounded term is a memory hazard; an oversized term matches
+/// nothing like any other unusable item instead of failing the whole query.
+const MAX_CONTENT_TERM_BYTES: usize = 4096;
+
 /// Query-wide defaults: what a search item means when the item itself does not say.
 ///
 /// The UI match toggles (case, whole word, path, regex, content) and the hidden/system
@@ -720,7 +725,7 @@ pub fn parse_search_term(raw_token: &str, defaults: &QueryDefaults) -> SearchTer
             return term;
         } else if let Some(rest) = remaining.strip_prefix("content:") {
             let content = unquote(rest).trim();
-            if content.is_empty() {
+            if content.is_empty() || content.len() > MAX_CONTENT_TERM_BYTES {
                 term.match_nothing = true;
             } else {
                 term.content_query = Some(content.to_string());
@@ -814,7 +819,12 @@ pub fn parse_search_term(raw_token: &str, defaults: &QueryDefaults) -> SearchTer
     }
     if defaults.content && !term.text.is_empty() {
         let text = std::mem::take(&mut term.text);
-        term.content_query = Some(text.trim().to_string());
+        let text = text.trim();
+        if text.len() > MAX_CONTENT_TERM_BYTES {
+            term.match_nothing = true;
+        } else {
+            term.content_query = Some(text.to_string());
+        }
     }
 
     term
@@ -1195,6 +1205,16 @@ mod tests {
         let empty = parse_search_term("content:", &QueryDefaults::default());
         assert!(empty.match_nothing);
         assert!(empty.content_query.is_none());
+
+        // A term-sized paste is not a query: the tokenizer would materialize every token, so
+        // the item nullifies itself instead of risking the service's memory.
+        let oversized_text = "a".repeat(MAX_CONTENT_TERM_BYTES + 1);
+        let oversized = parse_search_term(
+            &format!("content:{oversized_text}"),
+            &QueryDefaults::default(),
+        );
+        assert!(oversized.match_nothing);
+        assert!(oversized.content_query.is_none());
 
         // `case:` turning the default off is not possible: a default only ever states the
         // absence of a modifier, so an item that wrote `case:` keeps it.
