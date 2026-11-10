@@ -84,9 +84,7 @@ pub fn replay_usn_backlog(
 
     for _ in 0..USN_CATCH_UP_MAX_ROUNDS {
         let (next_usn, changes) = handle.read_usn_journal(journal_id, resume, buf)?;
-        for change in changes {
-            vol.apply_usn_change(change);
-        }
+        vol.apply_usn_changes(changes);
         vol.last_usn = next_usn;
         if next_usn >= tail_usn || next_usn <= resume {
             break;

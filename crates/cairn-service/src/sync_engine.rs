@@ -553,7 +553,9 @@ impl VolumeIndex {
         })
     }
 
-    /// Applies real-time USN changes.
+    /// Applies one USN change, rebuilding folder sizes immediately. Test entry points use this;
+    /// production paths apply batches so `k` kind changes cost one rebuild, not `k`.
+    #[cfg(test)]
     pub fn apply_usn_change(&mut self, change: UsnChange) {
         self.apply_usn_change_inner(change);
         self.ensure_directory_sizes();
