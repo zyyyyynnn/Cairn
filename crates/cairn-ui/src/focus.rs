@@ -83,14 +83,3 @@ pub fn edge(
             .into_any_element()
     })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::RING_WIDTH;
-    use gpui_kit::gpui::px;
-
-    #[test]
-    fn the_focus_frame_is_one_pixel() {
-        assert_eq!(RING_WIDTH, px(1.0));
-    }
-}

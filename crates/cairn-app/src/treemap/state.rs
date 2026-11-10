@@ -578,7 +578,6 @@ impl TreemapViewState {
         self.forward_layer = None;
     }
 
-    /// Returns to the real directory a layer was opened from. `true` when one was open.
     /// The children of `parent_path` in the tree the canvas is showing.
     pub(super) fn children_at(&self, parent_path: &str) -> &[TreemapTreeNode] {
         let Some(tree) = self.root_tree.as_deref() else {
@@ -965,23 +964,6 @@ mod tests {
         let selected = find_node_by_path(&layout, r"C:\Users").expect("a sibling path resolves");
         assert_eq!(selected.item.name, "Users");
         assert!(find_node_by_path(&layout, r"C:\Windows\Temp").is_none());
-    }
-
-    /// A later scan batch rebuilds the same path with a new id; the selection
-    /// must follow the path across that rebuild.
-    #[test]
-    fn selection_survives_a_rebatch_that_regenerates_the_id() {
-        let before = vec![layout_node(3, r"C:\Games", "Games", vec![])];
-        let after = vec![layout_node(10_001, r"C:\Games", "Games", vec![])];
-
-        assert_eq!(
-            find_node_by_path(&before, r"C:\Games").map(|node| node.item.id),
-            Some(3)
-        );
-        assert_eq!(
-            find_node_by_path(&after, r"C:\Games").map(|node| node.item.id),
-            Some(10_001)
-        );
     }
 
     fn entry(name: &str, size: u64, is_dir: bool, depth: usize) -> TreeEntryData {

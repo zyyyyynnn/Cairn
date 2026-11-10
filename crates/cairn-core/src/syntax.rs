@@ -14,6 +14,11 @@
 use crate::filter::{DateFilter, SizeFilter};
 use serde::{Deserialize, Serialize};
 
+/// Content text longer than this is a paste, not a query. The tokenizer materializes every
+/// token of a content term, so an unbounded term is a memory hazard; an oversized term matches
+/// nothing like any other unusable item instead of failing the whole query.
+const MAX_CONTENT_TERM_BYTES: usize = 4096;
+
 /// Query-wide defaults: what a search item means when the item itself does not say.
 ///
 /// The UI match toggles (case, whole word, path, regex, content) and the hidden/system
@@ -171,6 +176,38 @@ impl QueryExpr {
             QueryExpr::Not(inner) => {
                 inner.extract_content_queries_inner(out);
             }
+        }
+    }
+
+    /// The content terms written under a positive polarity. A term below an odd number of Not
+    /// nodes can never be the reason a row matched, so it must not contribute a snippet or a
+    /// content badge either.
+    pub fn extract_positive_content_queries(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        self.collect_positive_content_queries(true, &mut out);
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    fn collect_positive_content_queries(&self, positive: bool, out: &mut Vec<String>) {
+        match self {
+            QueryExpr::Term(term) => {
+                if positive {
+                    if let Some(ref content) = term.content_query {
+                        let trimmed = content.trim();
+                        if !trimmed.is_empty() {
+                            out.push(trimmed.to_string());
+                        }
+                    }
+                }
+            }
+            QueryExpr::And(subs) | QueryExpr::Or(subs) => {
+                for sub in subs {
+                    sub.collect_positive_content_queries(positive, out);
+                }
+            }
+            QueryExpr::Not(inner) => inner.collect_positive_content_queries(!positive, out),
         }
     }
 
@@ -687,7 +724,7 @@ pub fn parse_search_term(raw_token: &str, defaults: &QueryDefaults) -> SearchTer
             term.parent_filter = Some(unquote(rest).trim_end_matches('\\').to_string());
             return term;
         } else if let Some(rest) = remaining.strip_prefix("content:") {
-            term.content_query = Some(unquote(rest).to_string());
+            apply_content_query(&mut term, unquote(rest));
             return term;
         } else if let Some(rest) = remaining.strip_prefix("audio:") {
             term.ext_filter = "mp3;wav;flac;aac;ogg;wma;m4a;opus;ape"
@@ -776,10 +813,23 @@ pub fn parse_search_term(raw_token: &str, defaults: &QueryDefaults) -> SearchTer
         term.is_regex = true;
     }
     if defaults.content && !term.text.is_empty() {
-        term.content_query = Some(std::mem::take(&mut term.text));
+        let text = std::mem::take(&mut term.text);
+        apply_content_query(&mut term, &text);
     }
 
     term
+}
+
+/// Applies the content-term policy shared by the `content:` prefix and the content default: a
+/// term with no text — or a paste-sized one, which the tokenizer would expand into millions of
+/// tokens — constrains nothing and must match nothing.
+fn apply_content_query(term: &mut SearchTerm, raw: &str) {
+    let content = raw.trim();
+    if content.is_empty() || content.len() > MAX_CONTENT_TERM_BYTES {
+        term.match_nothing = true;
+    } else {
+        term.content_query = Some(content.to_string());
+    }
 }
 
 fn unquote(s: &str) -> &str {
@@ -1147,6 +1197,35 @@ mod tests {
             }
             other => panic!("Expected And chain, got {other:?}"),
         }
+
+        // Padding inside the quotes must not leak into the term: the hit resolver keys on the
+        // trimmed text.
+        let expr = parse_query("content:< needled >");
+        assert_eq!(term_of(&expr).content_query.as_deref(), Some("needled"));
+
+        // A bare `content:` carries no constraint to match on, like any dangling modifier.
+        let empty = parse_search_term("content:", &QueryDefaults::default());
+        assert!(empty.match_nothing);
+        assert!(empty.content_query.is_none());
+
+        // A term-sized paste is not a query: the tokenizer would materialize every token, so
+        // the item nullifies itself instead of risking the service's memory.
+        let oversized_text = "a".repeat(MAX_CONTENT_TERM_BYTES + 1);
+        let oversized = parse_search_term(
+            &format!("content:{oversized_text}"),
+            &QueryDefaults::default(),
+        );
+        assert!(oversized.match_nothing);
+        assert!(oversized.content_query.is_none());
+
+        // The content default applies the same policy as the written prefix.
+        let content_defaults = QueryDefaults {
+            content: true,
+            ..Default::default()
+        };
+        let oversized = parse_search_term(&oversized_text, &content_defaults);
+        assert!(oversized.match_nothing);
+        assert!(oversized.content_query.is_none());
 
         // `case:` turning the default off is not possible: a default only ever states the
         // absence of a modifier, so an item that wrote `case:` keeps it.

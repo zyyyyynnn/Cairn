@@ -21,9 +21,7 @@ pub mod time;
 pub mod treemap;
 
 pub use arena::NamePool;
-pub use engine::{
-    execute_query, execute_query_ordered, find_highlights, glob_match, CancellationToken,
-};
+pub use engine::{execute_query, execute_query_ordered, glob_match, CancellationToken};
 pub use filter::{DateFilter, DateOp, SizeFilter, SizeOp};
 pub use format::format_size_bytes;
 pub use model::{

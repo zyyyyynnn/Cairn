@@ -172,18 +172,21 @@ impl CairnClient {
     }
 
     fn handshake_error(code: u32, message: &str) -> ClientError {
+        Self::service_error(code, message.to_string())
+    }
+
+    /// The one code-to-error mapping both the handshake and the reply envelope use.
+    fn service_error(code: u32, message: String) -> ClientError {
         match code {
             ERROR_CODE_PROTOCOL_VERSION_MISMATCH | ERROR_CODE_HANDSHAKE_REQUIRED => {
-                ClientError::HandshakeRejected {
-                    message: message.to_string(),
-                }
+                ClientError::HandshakeRejected { message }
             }
-            ERROR_CODE_UNAUTHORIZED | ERROR_CODE_ADMIN_ONLY_QUERY => ClientError::Unauthorized {
-                message: message.to_string(),
-            },
-            _ => ClientError::ServerProtocolError {
-                code,
-                message: message.to_string(),
+            ERROR_CODE_UNAUTHORIZED | ERROR_CODE_ADMIN_ONLY_QUERY => {
+                ClientError::Unauthorized { message }
+            }
+            other => ClientError::ServerProtocolError {
+                code: other,
+                message,
             },
         }
     }
@@ -191,18 +194,7 @@ impl CairnClient {
     /// Turns a service denial payload into a typed error, leaving successful payloads alone.
     fn unwrap_service_error(payload: ResponsePayload) -> Result<ResponsePayload, ClientError> {
         match payload {
-            ResponsePayload::Error { code, message } => Err(match code {
-                ERROR_CODE_UNAUTHORIZED | ERROR_CODE_ADMIN_ONLY_QUERY => {
-                    ClientError::Unauthorized { message }
-                }
-                ERROR_CODE_PROTOCOL_VERSION_MISMATCH | ERROR_CODE_HANDSHAKE_REQUIRED => {
-                    ClientError::HandshakeRejected { message }
-                }
-                other => ClientError::ServerProtocolError {
-                    code: other,
-                    message,
-                },
-            }),
+            ResponsePayload::Error { code, message } => Err(Self::service_error(code, message)),
             other => Ok(other),
         }
     }
@@ -246,24 +238,6 @@ impl CairnClient {
         .await
     }
 
-    /// Cancels an in-flight query.
-    pub async fn cancel(&mut self, query_id: u64) -> Result<(), ClientError> {
-        let frame = encode_frame(&ClientRequest::Cancel { query_id })?;
-        self.pipe.write_all(&frame).await?;
-        self.pipe.flush().await?;
-        let _ = self.read_response().await?;
-        Ok(())
-    }
-
-    /// Requests rescanning of volumes.
-    pub async fn rescan(
-        &mut self,
-        volume_id: Option<u16>,
-    ) -> Result<Envelope<ResponsePayload>, ClientError> {
-        self.send_request(&ClientRequest::Rescan { volume_id })
-            .await
-    }
-
     /// Reads the current state of every volume the service indexes. The state rides in the
     /// envelope's volume list; the payload only acknowledges the read.
     pub async fn get_status(&mut self) -> Result<Envelope<ResponsePayload>, ClientError> {
@@ -287,22 +261,12 @@ impl CairnClient {
         .await
     }
 
-    /// Requests reloading configuration from %ProgramData%\Cairn\service.toml (SVC-05).
-    pub async fn reload_config(&mut self) -> Result<Envelope<ResponsePayload>, ClientError> {
-        self.send_request(&ClientRequest::ReloadConfig).await
-    }
-
     /// Reads the content-index lifecycle, including backfill progress and the last error.
     pub async fn get_content_index_status(
         &mut self,
     ) -> Result<Envelope<ResponsePayload>, ClientError> {
         self.send_request(&ClientRequest::GetContentIndexStatus)
             .await
-    }
-
-    /// Stops a running backfill and turns the content-index master switch off.
-    pub async fn cancel_content_index(&mut self) -> Result<Envelope<ResponsePayload>, ClientError> {
-        self.send_request(&ClientRequest::CancelContentIndex).await
     }
 
     /// Clears the entire full-text content index (CNT-07).
@@ -640,37 +604,6 @@ mod tests {
             !client.caller_is_admin(),
             "the client must not invent a privilege the service did not confirm"
         );
-    }
-
-    #[tokio::test]
-    #[cfg(windows)]
-    async fn cancel_reads_response_and_keeps_pipe_in_sync() {
-        let (mut server, mut client) =
-            stub_pipe_pair(r"\\.\pipe\cairn.client.stub.cancel_sync").await;
-        let task = tokio::spawn(async move {
-            client.cancel(42).await.expect("cancel must succeed");
-            client
-        });
-
-        server.connect().await.expect("stub connect");
-        let mut buf = [0u8; 4096];
-        let read = server.read(&mut buf).await.expect("stub read");
-        let (_, request) = try_decode_frame::<ClientRequest>(&buf[..read])
-            .expect("stub decode")
-            .expect("complete frame");
-        assert!(matches!(request, ClientRequest::Cancel { query_id: 42 }));
-
-        let frame = encode_frame(&Envelope {
-            volumes: Vec::new(),
-            payload: ResponsePayload::CancelAck,
-        })
-        .expect("encode stub answer");
-        server.write_all(&frame).await.expect("stub write");
-        server.flush().await.expect("stub flush");
-
-        let client = task.await.expect("task must succeed");
-        // Verify pipe buffer on client is clean and ready for subsequent request
-        assert!(client.read_buf.is_empty());
     }
 
     #[tokio::test(start_paused = true)]

@@ -112,34 +112,6 @@ pub fn peek_frame_header(buf: &[u8]) -> Result<Option<FrameHeader>, CodecError> 
     }))
 }
 
-/// Decodes a frame from an exact byte slice.
-pub fn decode_frame<T: DeserializeOwned>(buf: &[u8]) -> Result<(u16, T), CodecError> {
-    if buf.len() < HEADER_SIZE {
-        return Err(CodecError::Incomplete {
-            expected: HEADER_SIZE,
-            actual: buf.len(),
-        });
-    }
-
-    let header = peek_frame_header(buf)?.expect("header is complete");
-    let total_len = header.total_len();
-    if buf.len() < total_len {
-        return Err(CodecError::Incomplete {
-            expected: total_len,
-            actual: buf.len(),
-        });
-    }
-
-    if header.version != WIRE_GUARD {
-        return Err(CodecError::IncompatibleVersion {
-            received: header.version,
-        });
-    }
-
-    let payload = postcard::from_bytes(&buf[HEADER_SIZE..total_len])?;
-    Ok((header.version, payload))
-}
-
 /// Decodes a frame from bytes if a complete frame is present.
 /// Returns `Ok(Some((consumed_bytes, payload)))` or `Ok(None)` if more data is needed.
 pub fn try_decode_frame<T: DeserializeOwned>(buf: &[u8]) -> Result<Option<(usize, T)>, CodecError> {
@@ -303,10 +275,6 @@ mod tests {
             ),
             "a frame of another version must never be deserialized"
         );
-        assert!(matches!(
-            decode_frame::<ClientRequest>(&legacy),
-            Err(CodecError::IncompatibleVersion { received: v }) if v == WIRE_GUARD - 1
-        ));
     }
 
     #[test]

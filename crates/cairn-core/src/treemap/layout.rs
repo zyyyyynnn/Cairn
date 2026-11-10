@@ -219,8 +219,6 @@ fn display_entries(
     parent: &str,
     kept: &[usize],
     tail: &[usize],
-    _total_size: u64,
-    _bounds_area: f32,
 ) -> Vec<DisplayEntry> {
     let mut entries = Vec::with_capacity(kept.len() + 1);
     entries.extend(kept.iter().map(|&index| DisplayEntry::Node(index)));
@@ -326,11 +324,8 @@ fn plan_with_tail(
         kept.append(&mut tail);
     }
 
-    let mut plan = DisplayPlan::squarified(
-        nodes,
-        display_entries(nodes, parent, &kept, &tail, total_size, area),
-        bounds,
-    );
+    let mut plan =
+        DisplayPlan::squarified(nodes, display_entries(nodes, parent, &kept, &tail), bounds);
     loop {
         let (slivers, dropped) = plan.offenders();
         if slivers.is_empty() && dropped.is_empty() {
@@ -354,17 +349,7 @@ fn plan_with_tail(
             plan = DisplayPlan::default();
             break;
         }
-        let display_total = kept
-            .iter()
-            .chain(tail.iter())
-            .map(|&index| nodes[index].size)
-            .sum::<u64>()
-            .max(1);
-        plan = DisplayPlan::squarified(
-            nodes,
-            display_entries(nodes, parent, &kept, &tail, display_total, area),
-            bounds,
-        );
+        plan = DisplayPlan::squarified(nodes, display_entries(nodes, parent, &kept, &tail), bounds);
     }
 
     // A container must never end up with an empty body. If repeated drops
@@ -1185,14 +1170,13 @@ mod tests {
             TreemapTreeNode::new_file(1, "a.txt".to_string(), 10, 0),
             TreemapTreeNode::new_file(2, "b.txt".to_string(), 10, 0),
         ];
-        let entries_forward_drive = display_entries(&nodes, "C:/", &[0], &[1], 20, 1000.0);
+        let entries_forward_drive = display_entries(&nodes, "C:/", &[0], &[1]);
         let DisplayEntry::Aggregate { path, .. } = &entries_forward_drive[1] else {
             panic!("expected aggregate entry");
         };
         assert_eq!(path, "C:\\::<tail:documents>");
 
-        let entries_forward_dir =
-            display_entries(&nodes, "C:/Users/Alice/", &[0], &[1], 20, 1000.0);
+        let entries_forward_dir = display_entries(&nodes, "C:/Users/Alice/", &[0], &[1]);
         let DisplayEntry::Aggregate { path, .. } = &entries_forward_dir[1] else {
             panic!("expected aggregate entry");
         };

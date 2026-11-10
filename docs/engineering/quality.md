@@ -10,7 +10,7 @@
 |:---|:---|:---|
 | **单元测试** | `cargo test` | 覆盖语法解析 AST、运算符优先级、通配符、过滤条件、日期与大小计算 |
 | **属性测试** | `proptest` | 查询解析不 panic、`NamePool` 插入与取回的性质测试 |
-| **NTFS / 索引集成测试** | `xtask test-ntfs-vhd` | 内存 `VolumeIndex` 上的 MFT/USN、硬链接、单卷自愈与随机操作序列差分（SM-5） |
+| **NTFS / 索引集成测试** | `xtask test-ntfs-vhd` | 内存 `VolumeIndex` 上的 MFT/USN、硬链接、重命名与随机操作序列差分（SM-5）；单卷自愈由 `cairn-service` 的单元测试覆盖 |
 | **安全与权限测试** | `xtask test-security` | 校验默认与管理员 SDDL 字符串：SY/BA/IU 授权，NU/WD 拒绝 |
 | **UI 与无障碍测试** | 真实窗口截图/输入 + 控件注册表测试 | 当前未接入无头 UI 测试；验证键盘流转、焦点、AccessKit 角色与可见状态 |
 | **输入法专项测试** | 手工与集成核验清单 | 微软拼音、搜狗拼音、微信输入法三款主流 IME 组合无丢字、不重字、候选窗不遮挡 |

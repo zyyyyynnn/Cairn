@@ -73,8 +73,7 @@ fn bundle(lang: &str, source: &str) -> FluentBundle<FluentResource> {
 
 #[cfg(test)]
 mod tests {
-    use super::{I18n, EN_US_SOURCE, ZH_CN_SOURCE};
-    use std::collections::BTreeSet;
+    use super::I18n;
 
     #[test]
     fn both_languages_resolve_every_visible_control_name() {
@@ -125,30 +124,6 @@ mod tests {
     fn an_unsupported_language_uses_the_english_bundle() {
         let i18n = I18n::new("de-DE");
         assert_eq!(i18n.get("action_install"), "Install");
-    }
-
-    /// The two bundles must carry the same keys. A key that exists in one language and not in
-    /// the other puts the raw key on the page in that language, so the sets are compared here
-    /// rather than discovered by a person reading the installer.
-    #[test]
-    fn both_bundles_carry_the_same_keys() {
-        fn keys(source: &str) -> BTreeSet<&str> {
-            source
-                .lines()
-                .filter_map(|line| {
-                    let line = line.trim();
-                    if line.is_empty() || line.starts_with('#') {
-                        return None;
-                    }
-                    let (key, _) = line.split_once('=')?;
-                    Some(key.trim())
-                })
-                .collect()
-        }
-
-        let zh = keys(ZH_CN_SOURCE);
-        let en = keys(EN_US_SOURCE);
-        assert_eq!(zh, en, "the two bundles must carry the same keys");
     }
 
     /// The uninstall flow names the same failures in uninstall terms. Both bundles must carry

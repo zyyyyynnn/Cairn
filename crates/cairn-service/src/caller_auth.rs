@@ -162,9 +162,7 @@ mod platform {
         TOKEN_INFORMATION_CLASS, TOKEN_QUERY, TOKEN_USER, WELL_KNOWN_SID_TYPE,
     };
     use windows::Win32::System::Pipes::{GetNamedPipeClientProcessId, ImpersonateNamedPipeClient};
-    use windows::Win32::System::Threading::{
-        GetCurrentProcess, GetCurrentThread, OpenProcessToken, OpenThreadToken,
-    };
+    use windows::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
 
     /// Reverts thread impersonation when dropped, including on early returns.
     pub struct Impersonation;
@@ -266,35 +264,6 @@ mod platform {
             )
         }?;
         Ok(buffer)
-    }
-
-    /// Administrators membership of the current process token, read independently of any pipe
-    /// impersonation. Used by tests to cross-check the impersonated result.
-    pub fn current_process_is_admin() -> bool {
-        // SAFETY: GetCurrentProcess is the current-process pseudo handle (never closed); the token
-        // handle opened next to it is closed before returning.
-        unsafe {
-            let mut token = HANDLE::default();
-            if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() {
-                return false;
-            }
-            let result = well_known_sid(WinBuiltinAdministratorsSid)
-                .and_then(|sid_buffer| {
-                    let mut member = BOOL::default();
-                    // SAFETY: `sid_buffer` holds a valid well-known SID for the duration of the
-                    // call and CheckTokenMembership only reads it.
-                    CheckTokenMembership(
-                        Some(token),
-                        PSID(sid_buffer.as_ptr() as *mut core::ffi::c_void),
-                        &mut member,
-                    )
-                    .ok()
-                    .map(|_| member.as_bool())
-                })
-                .unwrap_or(false);
-            let _ = CloseHandle(token);
-            result
-        }
     }
 
     /// Derives the identity of the process connected to `pipe`.
@@ -418,7 +387,7 @@ mod platform {
 }
 
 #[cfg(windows)]
-pub use platform::{authenticate_pipe_client, current_process_is_admin};
+pub use platform::authenticate_pipe_client;
 
 #[cfg(not(windows))]
 pub fn authenticate_pipe_client(
@@ -427,11 +396,6 @@ pub fn authenticate_pipe_client(
     Err(CallerAuthError::ImpersonationFailed(
         "named pipe impersonation is only available on Windows".to_string(),
     ))
-}
-
-#[cfg(not(windows))]
-pub fn current_process_is_admin() -> bool {
-    false
 }
 
 #[cfg(test)]

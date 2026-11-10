@@ -72,7 +72,6 @@ fn failure_offers_retry(error_key: &str) -> bool {
         "error_not_installed"
             | "error_no_payload"
             | "error_staging"
-            | "error_uninstall_staging"
             | "error_msi_platform"
             | "error_msi_invalid"
             | "error_msi_cleanup_failed"
@@ -1326,7 +1325,6 @@ mod tests {
             "error_not_installed",
             "error_no_payload",
             "error_staging",
-            "error_uninstall_staging",
             "error_msi_platform",
             "error_msi_invalid",
             "error_msi_cleanup_failed",

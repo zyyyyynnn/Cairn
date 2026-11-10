@@ -1829,8 +1829,6 @@ fn render_nested_node(
         return;
     }
 
-    // The cell this path painted in the view being left, if the block survives
-    // the navigation. New blocks fall back to their inset growth.
     // Labels allocate; do it only after culling and flat-fill early return.
     let name = node.item.name.clone();
     let size_str = format_size_bytes(node.item.size);
@@ -2411,7 +2409,7 @@ mod tests {
     }
 
     #[test]
-    fn dimmed_leaf_and_header_fills_match_for_directory_and_file() {
+    fn dimmed_directory_and_file_leaves_match() {
         for is_dark in [false, true] {
             let palette = TreemapPalette::for_mode(is_dark);
             for category in [
@@ -2425,14 +2423,9 @@ mod tests {
                 cairn_core::treemap::TreemapCategory::Other,
             ] {
                 let base_header = palette.directory_header(category);
-                let header_bg_dimmed = palette.dimmed_fill(base_header);
                 let dir_leaf_bg_dimmed = palette.dimmed_fill(base_header);
                 let file_leaf_bg_dimmed = palette.dimmed_fill(palette.fill(category));
 
-                assert_eq!(
-                    dir_leaf_bg_dimmed, header_bg_dimmed,
-                    "compact directory leaf and header must match when dimmed (category {category:?}, is_dark={is_dark})"
-                );
                 assert_eq!(
                     dir_leaf_bg_dimmed, file_leaf_bg_dimmed,
                     "compact directory leaf and file leaf must match when dimmed (category {category:?}, is_dark={is_dark})"

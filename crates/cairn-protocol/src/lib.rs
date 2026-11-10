@@ -12,8 +12,8 @@ pub mod message;
 pub mod status;
 
 pub use codec::{
-    decode_frame, encode_frame, encode_frame_with_version, peek_frame_header, try_decode_frame,
-    CodecError, FrameHeader, HEADER_SIZE, MAX_FRAME_PAYLOAD,
+    encode_frame, encode_frame_with_version, peek_frame_header, try_decode_frame, CodecError,
+    FrameHeader, HEADER_SIZE, MAX_FRAME_PAYLOAD,
 };
 pub use message::{
     ClientRequest, Envelope, FileRowData, QueryDefaults, ResponsePayload,

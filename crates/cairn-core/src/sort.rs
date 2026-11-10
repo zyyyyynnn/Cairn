@@ -112,13 +112,6 @@ pub struct PresortedIndices {
 }
 
 impl PresortedIndices {
-    pub fn is_empty(&self) -> bool {
-        self.by_name.is_empty()
-            && self.by_size.is_empty()
-            && self.by_date_modified.is_empty()
-            && self.by_path.is_empty()
-    }
-
     pub fn clear(&mut self) {
         self.by_name.clear();
         self.by_size.clear();
@@ -126,7 +119,9 @@ impl PresortedIndices {
         self.by_path.clear();
     }
 
-    /// Ensures a single requested column's presorted index is built on-demand.
+    /// Ensures a single requested column's presorted index is built on-demand. Only the name,
+    /// size, modified and path columns have presorted arrays; `DateCreated` and `Extension`
+    /// leave the indices untouched, so callers sort those columns directly.
     pub fn ensure_column(
         &mut self,
         col: SortColumn,
@@ -205,7 +200,8 @@ impl PresortedIndices {
         }
     }
 
-    /// Builds all presorted indices in parallel.
+    /// Builds the four presorted columns (name, size, modified, path). Each column sorts in
+    /// parallel; the columns themselves are built one after another.
     pub fn build(
         records: &[FileRecord],
         arena: &NamePool,
