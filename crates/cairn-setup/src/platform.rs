@@ -765,7 +765,7 @@ fn remove_run_value(root: HKEY, subkey: &str) -> Result<(), String> {
 fn user_profiles() -> Vec<(String, PathBuf)> {
     const PROFILE_LIST: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList";
     let mut profiles = Vec::new();
-    for sid in subkeys(PROFILE_LIST, KEY_READ | KEY_WOW64_64KEY) {
+    for sid in subkeys(PROFILE_LIST, KEY_WOW64_64KEY) {
         let subkey = format!(r"{PROFILE_LIST}\{sid}");
         let Some(path) = read_hklm_string(
             &subkey,

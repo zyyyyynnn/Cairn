@@ -27,9 +27,16 @@ enum ContentAction {
 const STATUS_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const STATUS_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const STATUS_MAX_CONSECUTIVE_FAILURES: u32 = 3;
+/// Connection attempts keep the status poll alive across an SCM auto-restart: the retry loop
+/// sleeps 250 ms per attempt, so 40 attempts cover about ten seconds (the restart delay is 5 s).
+const STATUS_MAX_CONNECT_FAILURES: u32 = 40;
 
 fn status_failure_is_terminal(consecutive_failures: u32) -> bool {
     consecutive_failures >= STATUS_MAX_CONSECUTIVE_FAILURES
+}
+
+fn connect_failure_is_terminal(consecutive_failures: u32) -> bool {
+    consecutive_failures >= STATUS_MAX_CONNECT_FAILURES
 }
 
 /// What the status poll does after one answer, and whether it keeps polling.
@@ -181,7 +188,7 @@ impl CairnApp {
                         }
                         Err(error) => {
                             consecutive_failures += 1;
-                            if status_failure_is_terminal(consecutive_failures) {
+                            if connect_failure_is_terminal(consecutive_failures) {
                                 let _ = tx.send(Err(error));
                                 break;
                             }
@@ -363,8 +370,10 @@ impl CairnApp {
                     }
                 }
                 // The service reports Running only after its data layout is secured; the pipe
-                // becomes available at the same point. Poll long enough for a cold cache load.
-                for _ in 0..30 {
+                // becomes available at the same point. Connection attempts fail fast now, so this
+                // loop owns the whole cold-start budget instead of inheriting a per-attempt wait.
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+                while std::time::Instant::now() < deadline {
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     if let Ok(mut client) = cairn_client::client::CairnClient::connect().await {
                         let status = client.get_status().await;
@@ -574,8 +583,8 @@ mod tests {
     use core::prelude::rust_2021::test;
 
     use super::{
-        status_failure_is_terminal, status_refresh_decision, volume_status_visibility_changed,
-        StatusRefreshDecision,
+        connect_failure_is_terminal, status_failure_is_terminal, status_refresh_decision,
+        volume_status_visibility_changed, StatusRefreshDecision,
     };
     use cairn_protocol::status::{VolumeState, VolumeStatusSummary};
 
@@ -585,6 +594,8 @@ mod tests {
         assert!(!status_failure_is_terminal(2));
         assert!(status_failure_is_terminal(3));
         assert!(status_failure_is_terminal(4));
+        assert!(!connect_failure_is_terminal(39));
+        assert!(connect_failure_is_terminal(40));
     }
 
     fn volume(status: VolumeState, indexed_count: u64) -> VolumeStatusSummary {

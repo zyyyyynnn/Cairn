@@ -244,7 +244,8 @@ fn build_package(
 
     // 4. Append the MSI to the GPUI setup front end.
     let setup_path = staging_dir.join(SETUP_EXE_NAME);
-    cairn_setup::payload::append_payload(&setup_path, &msi_path)?;
+    cairn_setup::payload::append_payload(&setup_path, &msi_path)
+        .map_err(|error| format!("embed the MSI into {}: {error}", setup_path.display()))?;
     println!(
         "Built installer: {} ({} bytes)",
         setup_path.display(),
@@ -785,6 +786,13 @@ mod tests {
             sha256_digest(b"abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+
+        // NIST test vector: the 448-bit message, which pads into a second block and covers the
+        // multi-block path that the empty and `abc` vectors never reach.
+        assert_eq!(
+            sha256_digest(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
+            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+        );
     }
 
     #[test]
@@ -1029,9 +1037,8 @@ mod tests {
         validate.args(["msi", "validate"]).arg(&msi_path);
         run_command(&mut validate, "WiX MSI validation").expect("MSI must pass `wix msi validate`");
 
-        // The setup binary carries the exact MSI that was built, with a checked payload footer.
-        // Read it with both the packager's reader and the production reader: a format drift between
-        // the two halves must fail here, not on a first launch.
+        // The setup binary carries the exact MSI that was built. Its production reader must
+        // extract the writer's output: a format drift fails here, not on a first launch.
         let extracted_msi = temp_dir.path().join("payload.msi");
         cairn_setup::payload::extract_payload(&setup_path, &extracted_msi)
             .expect("extract setup payload");
@@ -1039,14 +1046,6 @@ mod tests {
             sha256_digest(&fs::read(&extracted_msi).expect("read extracted MSI")),
             sha256_digest(&fs::read(&msi_path).expect("read built MSI")),
             "the MSI inside CairnSetup.exe differs from cairn.msi"
-        );
-        let production_msi = temp_dir.path().join("payload-production.msi");
-        cairn_setup::payload::extract_payload(&setup_path, &production_msi)
-            .expect("the production payload reader must accept the packaged setup");
-        assert_eq!(
-            sha256_digest(&fs::read(&production_msi).expect("read production payload")),
-            sha256_digest(&fs::read(&msi_path).expect("read built MSI")),
-            "the production reader extracted a different MSI"
         );
 
         // The guard is what enforces the Program Files rule for a direct `msiexec` invocation.

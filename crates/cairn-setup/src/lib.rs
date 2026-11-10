@@ -16,8 +16,8 @@ pub(crate) mod installed;
 pub(crate) mod model;
 pub(crate) mod msi;
 /// The payload format is a contract between the packaging step that writes it and this crate
-/// that reads it, so both ends stay published: the writer half is what builds the fixture the
-/// crate's own round-trip test checks the reader against.
+/// that reads it, so both ends stay published: `xtask` packaging calls the writer, and the setup
+/// binary and the packaging test call the reader.
 pub mod payload;
 pub(crate) mod platform;
 mod preview;

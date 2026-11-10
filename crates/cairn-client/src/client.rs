@@ -393,6 +393,22 @@ mod tests {
     #[cfg(windows)]
     use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 
+    #[tokio::test]
+    #[cfg(windows)]
+    async fn a_missing_pipe_fails_without_waiting_out_the_backoff() {
+        let started = std::time::Instant::now();
+        let pipe = format!(r"\\.\pipe\cairn.client.missing.{}", std::process::id());
+        let error = match CairnClient::connect_to(&pipe).await {
+            Ok(_) => panic!("a missing pipe cannot connect"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, ClientError::ConnectFailed(_)));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "a missing pipe must fail immediately, not wait out the retry backoff"
+        );
+    }
+
     #[test]
     fn only_a_busy_pipe_counts_as_a_transient_open_failure() {
         assert!(pipe_is_busy(&std::io::Error::from_raw_os_error(231)));

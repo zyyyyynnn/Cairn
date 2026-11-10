@@ -912,7 +912,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tray-icon",
- "unic-langid",
  "windows 0.62.2",
  "winres",
 ]
@@ -1036,7 +1035,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
- "unic-langid",
  "windows 0.62.2",
 ]
 
