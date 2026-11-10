@@ -3,10 +3,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Paint geometry for Treemap tiles: the shared inset and radius constants,
-//! the painted-rect derivation, and device-pixel snapping shared by the
-//! canvas, hit testing and the zoom viewport.
+//! the painted-rect derivation, device-pixel snapping shared by the canvas,
+//! hit testing and the zoom viewport, and the shaped text width the canvas
+//! and path band fit their labels with.
 
+use crate::shell::theme;
 use cairn_core::treemap::TreemapRect;
+use gpui_kit::gpui::{rems, FontWeight, Window};
 
 /// Every tile paints inside its layout cell, and the canvas edge is inset by half a gutter, so
 /// adjacent cells and the outer edge share one even device-pixel rhythm at every nesting depth.
@@ -72,6 +75,26 @@ pub(super) fn snap_rect_to_device_pixels(rect: TreemapRect, scale_factor: f32) -
         top,
         (right - left).max(min_px),
         (bottom - top).max(min_px),
+    )
+}
+
+/// Shapes a label at the size and weight it will be painted, so fit decisions
+/// use real glyph advances (CJK, emoji and zoom changes included) instead of a
+/// per-character estimate.
+pub(super) fn text_width(window: &Window, text: &str, weight: FontWeight) -> f32 {
+    if text.is_empty() {
+        return 0.0;
+    }
+    let mut style = window.text_style();
+    style.font_size = rems(theme::SMALL_TEXT_SIZE).into();
+    style.font_weight = weight;
+    style.font_features = theme::tabular_figures();
+    let font_size = style.font_size.to_pixels(window.rem_size());
+    f32::from(
+        window
+            .text_system()
+            .layout_line(text, font_size, &[style.to_run(text.len())], None)
+            .width,
     )
 }
 

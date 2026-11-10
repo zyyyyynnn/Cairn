@@ -87,6 +87,7 @@ cargo test --workspace
 cargo deny check
 cargo run -p xtask -- check-i18n
 cargo run -p xtask -- check-docs
+cargo run -p xtask -- check-size
 ```
 
 ## 仓库结构

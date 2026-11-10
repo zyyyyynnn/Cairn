@@ -108,5 +108,5 @@ Treemap 呈现驱动器内文件与目录的磁盘空间占用。顶部路径带
 app 层按特征目录组织（`search/`、`table/`、`treemap/`、`service/`、`shell/`），目录内文件名不带板块前缀。
 
 - `crates/cairn-core/src/treemap/`：核心 Treemap 领域组件（`geometry` 领域矩形、`path`、`category`、`tree`、`squarify`、`index` CSR 目录聚合索引、`layout` 嵌套布局与 3:1/最小尺寸收口及回归测试），统一经 `cairn_core::treemap` 导出。
-- `crates/cairn-app/src/treemap/`：应用层 Treemap 模块（`view` 渲染与交互、`state` 视图状态与增量事件消费、`navigation` 目录历史、`paint` 绘制矩形与设备像素对齐、`zoom` 视图变换与指针锚点缩放、`palette` 类别色板与对比度测试）。
+- `crates/cairn-app/src/treemap/`：应用层 Treemap 模块（`view` 画布渲染与交互、`path_band` 路径带与面包屑、`scan` 导航与扫描生命周期、`context_menu` 区块右键菜单、`state` 视图状态与增量事件消费、`navigation` 目录历史与路径包含判定、`paint` 绘制矩形、设备像素对齐与文本测量、`zoom` 视图变换与指针锚点缩放、`palette` 类别色板与对比度测试）。
 - `crates/cairn-app/src/shell/status_bar_view.rs`：状态摘要与类别图例。

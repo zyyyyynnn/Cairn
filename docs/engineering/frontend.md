@@ -94,7 +94,7 @@
 ### 4. 验证位置
 
 - `crates/cairn-app/src/search/input.rs`：快照栈、词边界、IME 范围替换及单测。
-- `crates/cairn-app/src/shell/menu_actions.rs`：撤销/重做/剪切/粘贴动作与焦点恢复。
+- `crates/cairn-app/src/shell/query_edit.rs`：撤销/重做/剪切/粘贴动作与焦点恢复。
 - `crates/cairn-app/src/shell/commands.rs`：全局键位与必选绑定。
 - `crates/cairn-app/src/main.rs`：单实例唤醒、托盘。
 - `crates/cairn-app/src/shell/sidebar_view.rs`：焦点模态与键盘导航。
