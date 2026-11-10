@@ -43,12 +43,13 @@ cargo run -p xtask -- package
 ## 5. 发布状态
 
 - 代码签名（REL-02）尚未完成前，不得把未签名产物描述为已签名发布。
-- 版本取自 workspace `Cargo.toml`，升级码由 `cairn-setup` 持有、由 `xtask` 注入打包产物；发布前运行完整测试、`cargo fmt --all --check`、clippy `-D warnings`、`cargo doc`、`check-i18n`、`check-docs` 与 `cargo deny check`。
+- 版本取自 workspace `Cargo.toml`，升级码由 `cairn-setup` 持有、由 `xtask` 注入打包产物；发布前运行完整测试、`cargo fmt --all --check`、clippy `-D warnings`、`cargo doc`、`check-i18n`、`check-docs`、`check-size` 与 `cargo deny check`。
 
 ## 代码位置
 
 - `xtask/src/package.rs`：WiX MSI、GPUI Setup 封装与 checksum 生成。
 - `xtask/src/docs_check.rs`：文档相对链接与必需页面检查。
+- `xtask/src/size_check.rs`：Rust 源文件 2000 行上限检查。
 - `crates/cairn-app/build.rs`、`assets/icons/`：图标嵌入。
 
 技术选型与供应链约束见 [architecture.md](architecture.md)。

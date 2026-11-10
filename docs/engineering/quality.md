@@ -21,7 +21,8 @@
 1. `cargo fmt --all --check`
 2. `cargo clippy --workspace --all-targets -- -D warnings`（零警告）
 3. `cargo run -p xtask -- check-i18n`（`zh-CN.ftl` 与 `en-US.ftl` 翻译键 100% 对齐）
-4. `cargo deny check`（许可证、安全漏洞与 yanked 检查；仓库已提供 `deny.toml`）
+4. `cargo run -p xtask -- check-size`（任何 Rust 源文件不超过 2000 行）
+5. `cargo deny check`（许可证、安全漏洞与 yanked 检查；仓库已提供 `deny.toml`）
 
 文档-only PR 只运行 `check-docs`；逐层测试、Tooling 与 Release job 跳过，Dependency Policy 与 Installer Package 以 no-op 成功结束。代码变更必须通过完整门禁，安装器打包等待质量检查通过。
 

@@ -8,6 +8,7 @@ mod bench;
 mod corpus;
 mod docs_check;
 mod i18n_check;
+mod size_check;
 mod test_security;
 mod test_vhd;
 
@@ -33,6 +34,12 @@ enum Commands {
     /// Check required documentation pages and Markdown relative links
     CheckDocs {
         /// The workspace root that holds the documented crates.
+        #[arg(default_value = ".")]
+        workspace: PathBuf,
+    },
+    /// Check that no Rust source file exceeds the 2000-line monolith limit
+    CheckSize {
+        /// The workspace root that holds the crates.
         #[arg(default_value = ".")]
         workspace: PathBuf,
     },
@@ -71,6 +78,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::CheckDocs { workspace } => {
             docs_check::check_docs(&workspace)?;
+        }
+        Commands::CheckSize { workspace } => {
+            size_check::check_size(&workspace)?;
         }
         Commands::Package { out_dir } => {
             package::run_package(out_dir)?;
