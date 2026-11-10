@@ -901,6 +901,7 @@ mod tests {
         include_str!("../service/config_submission.rs"),
         include_str!("../search/filters.rs"),
         include_str!("../treemap/view.rs"),
+        include_str!("../treemap/path_band.rs"),
         include_str!("../service/ipc_tasks.rs"),
         include_str!("menu_actions.rs"),
         include_str!("nav_history.rs"),
@@ -922,6 +923,7 @@ mod tests {
         include_str!("toast.rs"),
         include_str!("../table/results_view.rs"),
         include_str!("../treemap/view.rs"),
+        include_str!("../treemap/path_band.rs"),
     ];
 
     fn zh() -> I18nManager {
