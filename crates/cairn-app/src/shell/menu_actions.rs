@@ -580,16 +580,9 @@ impl CairnApp {
             // The two facts the popup carries beside that state.
             GroupCommand::ContentSearchUsage => self.content_search_usage_label(),
             GroupCommand::ContentSearchUpdated => self.content_search_updated_label(),
-            GroupCommand::DeleteSelected if self.recycle_bin.is_open() => {
-                self.i18n.get_text("ctx_delete_permanently")
-            }
-            GroupCommand::SortBy(column) if self.recycle_bin.is_open() => {
-                self.i18n.get_text(column.recycle_bin_label_key())
-            }
-            GroupCommand::CopyPaths if self.recycle_bin.is_open() => {
-                self.i18n.get_text("ctx_copy_original_location")
-            }
-            _ => self.i18n.get_text(command.label_key()),
+            _ => self
+                .i18n
+                .get_text(command.label_key_in(self.recycle_bin.is_open())),
         }
     }
 
@@ -854,14 +847,6 @@ impl CairnApp {
             GroupCommand::CheckForUpdates => {
                 self.close_group();
                 self.start_update_check(window, cx);
-                let view = cx.entity();
-                window.defer(cx, move |window, cx| {
-                    view.update(cx, |this, cx| {
-                        if this.is_checking_update {
-                            this.show_group(MenuGroup::Help, window, cx);
-                        }
-                    });
-                });
             }
             GroupCommand::About => {
                 self.close_group();

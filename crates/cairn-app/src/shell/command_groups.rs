@@ -64,19 +64,31 @@ impl MenuGroup {
         }
     }
 
-    /// The Alt mnemonic that opens this menu. Every top-level menu has one, so a keyboard user can
-    /// reach the whole bar without a pointer.
+    /// The Action that toggles this menu from the keyboard.
     #[cfg(test)]
-    pub const fn keys(self) -> &'static [&'static str] {
+    pub fn open_action(self) -> Box<dyn Action> {
+        use crate::shell::commands::{
+            OpenEditMenu, OpenFileMenu, OpenHelpMenu, OpenSearchMenu, OpenToolsMenu, OpenViewMenu,
+        };
         match self {
-            MenuGroup::File => &["alt-f"],
-            MenuGroup::Edit => &["alt-e"],
-            // Alt+P cycles the filter category; both keys belong to the View group.
-            MenuGroup::View => &["alt-v", "alt-p"],
-            MenuGroup::Search => &["alt-s"],
-            MenuGroup::Tools => &["alt-t"],
-            MenuGroup::Help => &["alt-h"],
+            MenuGroup::File => Box::new(OpenFileMenu),
+            MenuGroup::Edit => Box::new(OpenEditMenu),
+            MenuGroup::View => Box::new(OpenViewMenu),
+            MenuGroup::Search => Box::new(OpenSearchMenu),
+            MenuGroup::Tools => Box::new(OpenToolsMenu),
+            MenuGroup::Help => Box::new(OpenHelpMenu),
         }
+    }
+
+    /// The Alt mnemonic that opens this menu, derived from [`crate::shell::commands::key_bindings`].
+    #[cfg(test)]
+    pub fn keys(self) -> Vec<&'static str> {
+        let action_name = self.open_action().name();
+        crate::shell::commands::key_bindings()
+            .into_iter()
+            .filter(|entry| entry.action == action_name)
+            .map(|entry| entry.shortcut)
+            .collect()
     }
 }
 
@@ -248,6 +260,22 @@ impl GroupCommand {
         }
     }
 
+    /// The Fluent message that names this command in the active location. Inside the Recycle Bin,
+    /// deletion is permanent, copying paths copies the original location, and sort columns use the
+    /// bin's column captions.
+    pub fn label_key_in(self, in_recycle_bin: bool) -> &'static str {
+        if in_recycle_bin {
+            match self {
+                GroupCommand::DeleteSelected => "ctx_delete_permanently",
+                GroupCommand::CopyPaths => "ctx_copy_original_location",
+                GroupCommand::SortBy(column) => column.recycle_bin_label_key(),
+                _ => self.label_key(),
+            }
+        } else {
+            self.label_key()
+        }
+    }
+
     /// The Action this item runs, when a keymap Action already owns the command. Dispatching it lets
     /// the menu read its hint from the keymap instead of repeating a keystroke here, and keeps the
     /// item and its shortcut on one implementation.
@@ -291,33 +319,19 @@ impl GroupCommand {
         }
     }
 
-    /// The keystroke a person reads beside this item, as the keymap binds it.
+    /// The primary keystroke the keymap binds for this item's Action (or hint Action).
     ///
     /// A dropdown item drawn by [`gpui_kit::component::menu::PopupMenu`] resolves its own hint from
-    /// the binding of its Action, so the hint can only be checked against the keymap by name. This
-    /// is that name, and [`crate::accessibility`] requires every one of them to still be bound: an
-    /// item that promises a key nobody bound is a silent failure.
+    /// the binding of its Action, so deriving the shortcut from [`crate::shell::commands::key_bindings`]
+    /// keeps the menu model and the keymap on one definition.
     #[cfg(test)]
-    pub const fn shortcut(self) -> Option<&'static str> {
-        match self {
-            GroupCommand::OpenSelected => Some("enter"),
-            GroupCommand::RevealLocation => Some("ctrl-enter"),
-            GroupCommand::UndoQueryText => Some("ctrl-z"),
-            GroupCommand::RedoQueryText => Some("ctrl-y"),
-            GroupCommand::CutQueryText => Some("ctrl-x"),
-            GroupCommand::CopyPaths => Some("ctrl-shift-c"),
-            GroupCommand::CopyNames => Some("ctrl-shift-n"),
-            GroupCommand::PasteQueryText => Some("ctrl-v"),
-            GroupCommand::ShowProperties => Some("alt-enter"),
-            GroupCommand::DeleteSelected => Some("delete"),
-            GroupCommand::SelectAll => Some("ctrl-a"),
-            GroupCommand::ClearQuery => Some("escape"),
-            GroupCommand::ToggleCase => Some("ctrl-i"),
-            GroupCommand::ToggleWholeWord => Some("ctrl-b"),
-            GroupCommand::ToggleMatchPath => Some("ctrl-u"),
-            GroupCommand::ToggleRegex => Some("ctrl-r"),
-            _ => None,
-        }
+    pub fn shortcut(self) -> Option<&'static str> {
+        let action = self.action().or_else(|| self.hint_action())?;
+        let action_name = action.name();
+        crate::shell::commands::key_bindings()
+            .into_iter()
+            .find(|entry| entry.action == action_name)
+            .map(|entry| entry.shortcut)
     }
 
     /// Headings are section labels, not rows a person can run. The menu builder draws them through
@@ -715,7 +729,7 @@ mod tests {
         for spec in menu_groups() {
             for key in spec.group.keys() {
                 assert!(
-                    seen.insert(*key),
+                    seen.insert(key),
                     "{} repeats the mnemonic {key}",
                     spec.group.label_key()
                 );

@@ -239,23 +239,6 @@ fn column_label_key(column: SortColumn, in_recycle_bin: bool) -> &'static str {
     }
 }
 
-/// A command's wording can change with the location. The bin's delete is permanent, so it must
-/// not share the reversible table command's label; the project confirmation names the
-/// irreversible result before the shell runs.
-fn result_command_label_key(command: GroupCommand, in_recycle_bin: bool) -> &'static str {
-    if in_recycle_bin {
-        match command {
-            GroupCommand::DeleteSelected => "ctx_delete_permanently",
-            // The row's path is the original location, which no longer exists;
-            // name the value the command actually copies.
-            GroupCommand::CopyPaths => "ctx_copy_original_location",
-            _ => command.label_key(),
-        }
-    } else {
-        command.label_key()
-    }
-}
-
 /// Which lane a heading cell occupies. The names are the row's own parts, so a heading and a cell
 /// cannot be given different widths by accident.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -999,7 +982,7 @@ impl CairnApp {
                         menu = menu.separator();
                     }
                     menu = menu.menu(
-                        i18n.get_text(result_command_label_key(*command, in_bin)),
+                        i18n.get_text(command.label_key_in(in_bin)),
                         command
                             .action()
                             .expect("a result command is an Action the root already handles"),
@@ -1470,8 +1453,8 @@ mod tests {
     use core::prelude::rust_2021::test;
 
     use super::{
-        column_label_key, content_query_notice, result_command_label_key, result_row_icon,
-        result_surface, rows_band_local_top, rows_to_paint, ContentQueryNotice, ResultSurface,
+        column_label_key, content_query_notice, result_row_icon, result_surface,
+        rows_band_local_top, rows_to_paint, ContentQueryNotice, ResultSurface,
     };
     use crate::shell::command_groups::GroupCommand;
     use crate::table::model::SortColumn;
@@ -1564,15 +1547,19 @@ mod tests {
     #[test]
     fn a_bin_delete_is_words_apart_from_the_reversible_delete() {
         assert_eq!(
-            result_command_label_key(GroupCommand::DeleteSelected, true),
+            GroupCommand::DeleteSelected.label_key_in(true),
             "ctx_delete_permanently"
         );
         assert_eq!(
-            result_command_label_key(GroupCommand::DeleteSelected, false),
+            GroupCommand::DeleteSelected.label_key_in(false),
             "ctx_delete"
         );
         assert_eq!(
-            result_command_label_key(GroupCommand::RestoreSelected, true),
+            GroupCommand::CopyPaths.label_key_in(true),
+            "ctx_copy_original_location"
+        );
+        assert_eq!(
+            GroupCommand::RestoreSelected.label_key_in(true),
             "ctx_restore"
         );
     }

@@ -226,9 +226,7 @@ impl AppSettings {
 
     pub fn save(&self) -> std::io::Result<()> {
         let path = default_settings_path();
-        self.save_to_path(&path)?;
-        let _ = set_autostart_registry(self.autostart);
-        Ok(())
+        self.save_to_path(&path)
     }
 
     pub fn save_to_path(&self, path: &Path) -> std::io::Result<()> {

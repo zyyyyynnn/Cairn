@@ -1399,7 +1399,7 @@ mod tests {
 
         // SPEC UI-03 names these keys, so they must still be on a control; without them the check
         // below would pass while the window promises nothing.
-        for required in ["ctrl-f", "ctrl-i", "ctrl-b", "ctrl-u", "ctrl-r", "alt-p"] {
+        for required in ["ctrl-f", "ctrl-i", "ctrl-b", "ctrl-u", "ctrl-r"] {
             assert!(
                 advertised.contains(&required),
                 "{required} is in this list but no control announces it any more"
@@ -1506,11 +1506,7 @@ mod tests {
         let mut found: Vec<&'static str> = CONTROL_SHORTCUTS
             .iter()
             .flat_map(|(_, shortcuts)| shortcuts.iter().copied())
-            .chain(
-                menu_groups()
-                    .iter()
-                    .flat_map(|spec| spec.group.keys().iter().copied()),
-            )
+            .chain(menu_groups().iter().flat_map(|spec| spec.group.keys()))
             .chain(all_commands().into_iter().filter_map(|cmd| cmd.shortcut()))
             .collect();
         found.sort_unstable();

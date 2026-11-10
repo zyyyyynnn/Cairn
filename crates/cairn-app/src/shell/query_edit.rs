@@ -25,11 +25,7 @@ impl CairnApp {
         _w: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match self.selected_query_text() {
-            Some(text) => copy_lines(&[text]),
-            None => copy_lines(&self.collect_selected_paths()),
-        }
-        cx.notify();
+        self.apply_copy_text_or_paths(cx);
     }
 
     pub fn paste_query_text(
@@ -38,19 +34,8 @@ impl CairnApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.drive_view.is_some() {
-            return;
-        }
-        if let Some(text) = crate::shell::os::get_clipboard_text() {
-            let text = text.replace("\r\n", " ").replace('\n', " ");
-            if !text.is_empty() {
-                self.query
-                    .search_input
-                    .handle_replace_text_in_range(None, &text);
-                self.trigger_search(cx);
-                self.query.search_focus.focus(window, cx);
-                cx.notify();
-            }
+        if self.apply_query_paste(cx) {
+            self.query.search_focus.focus(window, cx);
         }
     }
 
@@ -60,13 +45,8 @@ impl CairnApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.drive_view.is_some() {
-            return;
-        }
-        if self.query.search_input.undo() {
-            self.trigger_search(cx);
+        if self.apply_query_undo(cx) {
             self.query.search_focus.focus(window, cx);
-            cx.notify();
         }
     }
 
@@ -76,13 +56,8 @@ impl CairnApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.drive_view.is_some() {
-            return;
-        }
-        if self.query.search_input.redo() {
-            self.trigger_search(cx);
+        if self.apply_query_redo(cx) {
             self.query.search_focus.focus(window, cx);
-            cx.notify();
         }
     }
 
@@ -92,16 +67,68 @@ impl CairnApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.drive_view.is_some() {
-            return;
-        }
-        if let Some(text) = self.selected_query_text() {
-            let _ = crate::shell::os::set_clipboard_text(&text);
-            self.query.search_input.delete_backward();
-            self.trigger_search(cx);
+        if self.apply_query_cut(cx) {
             self.query.search_focus.focus(window, cx);
-            cx.notify();
         }
+    }
+
+    fn apply_copy_text_or_paths(&mut self, cx: &mut Context<Self>) {
+        match self.selected_query_text() {
+            Some(text) => copy_lines(&[text]),
+            None => copy_lines(&self.collect_selected_paths()),
+        }
+        cx.notify();
+    }
+
+    fn apply_query_paste(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.drive_view.is_some() {
+            return false;
+        }
+        let Some(text) = crate::shell::os::get_clipboard_text() else {
+            return false;
+        };
+        let text = text.replace("\r\n", " ").replace('\n', " ");
+        if text.is_empty() {
+            return false;
+        }
+        self.query
+            .search_input
+            .handle_replace_text_in_range(None, &text);
+        self.trigger_search(cx);
+        cx.notify();
+        true
+    }
+
+    fn apply_query_undo(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.drive_view.is_some() || !self.query.search_input.undo() {
+            return false;
+        }
+        self.trigger_search(cx);
+        cx.notify();
+        true
+    }
+
+    fn apply_query_redo(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.drive_view.is_some() || !self.query.search_input.redo() {
+            return false;
+        }
+        self.trigger_search(cx);
+        cx.notify();
+        true
+    }
+
+    fn apply_query_cut(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.drive_view.is_some() {
+            return false;
+        }
+        let Some(text) = self.selected_query_text() else {
+            return false;
+        };
+        let _ = crate::shell::os::set_clipboard_text(&text);
+        self.query.search_input.delete_backward();
+        self.trigger_search(cx);
+        cx.notify();
+        true
     }
 
     pub fn selected_query_text(&self) -> Option<String> {
@@ -118,45 +145,23 @@ impl CairnApp {
         let ctrl = event.keystroke.modifiers.control;
 
         if ctrl && !shift && key == "z" {
-            if self.query.search_input.undo() {
-                self.trigger_search(cx);
-                cx.notify();
-            }
+            self.apply_query_undo(cx);
             return;
         }
         if (ctrl && key == "y") || (ctrl && shift && key == "z") {
-            if self.query.search_input.redo() {
-                self.trigger_search(cx);
-                cx.notify();
-            }
+            self.apply_query_redo(cx);
             return;
         }
         if (ctrl && key == "x") || (shift && key == "delete") {
-            if let Some(text) = self.selected_query_text() {
-                let _ = crate::shell::os::set_clipboard_text(&text);
-                self.query.search_input.delete_backward();
-                self.trigger_search(cx);
-                cx.notify();
-            }
+            self.apply_query_cut(cx);
             return;
         }
         if (ctrl && key == "c") || (ctrl && key == "insert") {
-            if let Some(text) = self.selected_query_text() {
-                let _ = crate::shell::os::set_clipboard_text(&text);
-            }
+            self.apply_copy_text_or_paths(cx);
             return;
         }
         if (ctrl && key == "v") || (shift && key == "insert") {
-            if let Some(text) = crate::shell::os::get_clipboard_text() {
-                let text = text.replace("\r\n", " ").replace('\n', " ");
-                if !text.is_empty() {
-                    self.query
-                        .search_input
-                        .handle_replace_text_in_range(None, &text);
-                    self.trigger_search(cx);
-                    cx.notify();
-                }
-            }
+            self.apply_query_paste(cx);
             return;
         }
         if ctrl && key == "backspace" {
