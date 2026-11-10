@@ -48,4 +48,4 @@
 
 - `crates/cairn-service/src/sync_engine/`：USN、日记账、内容索引与卷同步。
 - `crates/cairn-core/src/engine.rs`、`crates/cairn-core/src/syntax.rs`：查询与过滤。
-- `crates/cairn-core/src/treemap/`：磁盘空间语义、CSR 目录聚合索引与嵌套布局。服务的 `GetTree` 请求从活跃卷索引直接构建目录树供 Treemap 一次往返取用（`sync_engine.rs::treemap_tree`）；未索引路径显示不可用态。
+- `crates/cairn-core/src/treemap/`：磁盘空间语义、CSR 目录聚合索引与嵌套布局。服务的 `GetTree` 请求从活跃卷索引直接构建目录树供 Treemap 一次往返取用（`sync_engine/treemap_build.rs::treemap_tree`）；未索引路径显示不可用态。

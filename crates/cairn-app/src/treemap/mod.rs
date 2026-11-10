@@ -2,9 +2,12 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Drive disk space Treemap: view rendering and interaction, view state and
-//! incremental scan ingestion, directory history, paint geometry, category
-//! palette and viewport zoom.
+//! Drive disk space Treemap: canvas rendering and interaction (`view`), the path
+//! band and breadcrumb (`path_band`), navigation and scan lifecycle (`scan`),
+//! block context menus (`context_menu`), view state and incremental scan
+//! ingestion (`state`), directory history and path semantics (`navigation`),
+//! paint geometry and text measurement (`paint`), category palette (`palette`)
+//! and viewport zoom (`zoom`).
 
 pub(crate) mod context_menu;
 pub(crate) mod navigation;

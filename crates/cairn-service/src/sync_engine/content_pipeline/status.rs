@@ -67,12 +67,12 @@ impl MultiVolumeEngine {
         self.content_status.read().unwrap().clone()
     }
 
-    pub(crate) fn set_content_state(&self, state: ContentIndexState) {
+    pub(in crate::sync_engine) fn set_content_state(&self, state: ContentIndexState) {
         let mut status = self.content_status.write().unwrap();
         status.state = state;
     }
 
-    pub(crate) fn set_content_progress(&self, processed: u64, total: u64) {
+    pub(in crate::sync_engine) fn set_content_progress(&self, processed: u64, total: u64) {
         let mut status = self.content_status.write().unwrap();
         status.state = ContentIndexState::Backfilling { processed, total };
     }

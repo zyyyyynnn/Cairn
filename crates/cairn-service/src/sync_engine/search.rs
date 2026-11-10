@@ -2,14 +2,14 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Metadata and content search across all indexed volumes.
+//! Metadata and content search: query evaluation, exclusion filtering, result
+//! ordering and snippets.
 
 use super::{MultiVolumeEngine, VolumeIndex};
 use cairn_content::CONTENT_RESULT_TOP_K;
 use cairn_core::engine::CancellationToken;
 use cairn_core::sort::{SortColumn, SortDirection};
 use cairn_core::syntax::{parse_query_with, QueryDefaults, QueryExpr};
-use cairn_protocol::status::VolumeStatusSummary;
 use rayon::prelude::*;
 use rayon::slice::ParallelSliceMut;
 use std::collections::{HashMap, HashSet};
@@ -39,64 +39,6 @@ pub type MultiSearchResult = (
 );
 
 impl MultiVolumeEngine {
-    fn collect_volume_summaries(volumes: &HashMap<char, VolumeIndex>) -> Vec<VolumeStatusSummary> {
-        let mut summaries: Vec<_> = volumes.values().map(|v| v.to_summary()).collect();
-        summaries.sort_by_key(|s| s.drive_letter);
-        summaries
-    }
-
-    fn filter_excluded_drives(
-        &self,
-        summaries: Vec<VolumeStatusSummary>,
-    ) -> Vec<VolumeStatusSummary> {
-        let cfg = self.config.read().unwrap();
-        summaries
-            .into_iter()
-            .filter(|s| {
-                !cfg.excluded_drives
-                    .iter()
-                    .any(|&ex| ex.eq_ignore_ascii_case(&s.drive_letter))
-            })
-            .collect()
-    }
-
-    /// Cached summaries for ordinary envelopes. A query holds the volume read lock for seconds;
-    /// a handshake must still complete, so a summary one query old is served instead of waiting.
-    pub fn get_volume_summaries(&self) -> Vec<VolumeStatusSummary> {
-        let summaries = match self.volumes.try_read() {
-            Ok(volumes) => {
-                let summaries = Self::collect_volume_summaries(&volumes);
-                *self.summary_cache.lock().unwrap() = summaries.clone();
-                summaries
-            }
-            Err(_) => {
-                let cached = self.summary_cache.lock().unwrap().clone();
-                if cached.is_empty() {
-                    let volumes = self.volumes.read().unwrap();
-                    let summaries = Self::collect_volume_summaries(&volumes);
-                    *self.summary_cache.lock().unwrap() = summaries.clone();
-                    summaries
-                } else {
-                    cached
-                }
-            }
-        };
-        self.filter_excluded_drives(summaries)
-    }
-
-    /// Fresh summaries for the answer to a query: its final volume state decides whether the
-    /// client shows an animating scan or a settled result. The query has already released the
-    /// index, so this read only waits for an unrelated short writer critical section.
-    pub fn get_volume_summaries_fresh(&self) -> Vec<VolumeStatusSummary> {
-        let summaries = {
-            let volumes = self.volumes.read().unwrap();
-            let summaries = Self::collect_volume_summaries(&volumes);
-            *self.summary_cache.lock().unwrap() = summaries.clone();
-            summaries
-        };
-        self.filter_excluded_drives(summaries)
-    }
-
     /// Evaluates search across all volumes, filtering excluded paths, sorting by column,
     /// returning highlight terms and content snippets. `defaults` carries the query-wide match
     /// toggles and attribute filters the client sent with the text.
@@ -657,38 +599,6 @@ impl MultiVolumeEngine {
 
         let total = all_results.len();
         (all_results, total, highlight_terms, snippets, total_bytes)
-    }
-
-    pub fn with_volumes<F, R>(&self, f: F) -> R
-    where
-        F: FnOnce(&HashMap<char, VolumeIndex>) -> R,
-    {
-        let lock = self.volumes.read().unwrap();
-        f(&lock)
-    }
-
-    #[cfg(test)]
-    pub fn with_primary_volume<F, R>(&self, f: F) -> Option<R>
-    where
-        F: FnOnce(&VolumeIndex) -> R,
-    {
-        let lock = self.volumes.read().unwrap();
-        let vol = lock.get(&'C').or_else(|| lock.values().next())?;
-        Some(f(vol))
-    }
-
-    #[cfg(test)]
-    pub fn with_primary_volume_mut<F, R>(&self, f: F) -> Option<R>
-    where
-        F: FnOnce(&mut VolumeIndex) -> R,
-    {
-        let mut lock = self.volumes.write().unwrap();
-        let vol = if lock.contains_key(&'C') {
-            lock.get_mut(&'C')?
-        } else {
-            lock.values_mut().next()?
-        };
-        Some(f(vol))
     }
 }
 

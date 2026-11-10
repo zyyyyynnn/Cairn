@@ -9,8 +9,8 @@ use crate::app::{element_id, layout, CairnApp};
 use crate::shell::accessibility;
 use crate::shell::theme::{self, ShellTokens};
 use crate::treemap::navigation::path_segments;
+use crate::treemap::paint::text_width;
 use crate::treemap::path_input::normalize_treemap_path;
-use crate::treemap::view::text_width;
 use fluent_bundle::FluentArgs;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::input::Input;
@@ -788,53 +788,11 @@ impl CairnApp {
     }
 }
 
-/// Whether `candidate` is `ancestor` itself or a path beneath it. Comparison is ASCII
-/// case-insensitive and requires a separator boundary, so `C:\Windows` does not contain
-/// `C:\WindowsApps`.
-pub(super) fn path_is_within(candidate: &str, ancestor: &str) -> bool {
-    let ancestor = ancestor.trim_end_matches('\\');
-    if candidate.eq_ignore_ascii_case(ancestor) {
-        return true;
-    }
-    if candidate.len() <= ancestor.len() {
-        return false;
-    }
-    let Some(prefix) = candidate.get(..ancestor.len()) else {
-        return false;
-    };
-    if !prefix.eq_ignore_ascii_case(ancestor) {
-        return false;
-    }
-    let rest = &candidate[ancestor.len()..];
-    rest.starts_with('\\') || rest.starts_with('/') || rest.starts_with("::")
-}
-
-pub(super) fn same_directory(left: &str, right: &str) -> bool {
-    left.trim_end_matches(['\\', '/'])
-        .eq_ignore_ascii_case(right.trim_end_matches(['\\', '/']))
-}
-
 #[cfg(test)]
 mod tests {
     use core::prelude::rust_2021::test;
 
     use super::*;
-
-    /// Selecting a directory keeps its whole subtree in focus; only the separator boundary
-    /// decides, so a sibling whose name shares a prefix is outside.
-    #[test]
-    fn a_path_contains_itself_and_its_descendants_only() {
-        assert!(path_is_within(r"C:\Windows", r"C:\Windows"));
-        assert!(path_is_within(r"C:\Windows\System32", r"C:\Windows"));
-        assert!(path_is_within(r"C:\Windows::<tail:Other>", r"C:\Windows"));
-        assert!(!path_is_within(r"C:\Windows", r"C:\Windows\System32"));
-        assert!(path_is_within(
-            r"C:\Users\Alice\AppData",
-            r"C:\Users\Alice\AppData\"
-        ));
-        assert!(!path_is_within(r"C:\WindowsApps", r"C:\Windows"));
-        assert!(!path_is_within(r"C:\Win", r"C:\Windows"));
-    }
 
     /// The path menu reads the directory as it stands on disk: child folders
     /// only, in display order, each joined to an absolute path the Treemap can
@@ -887,29 +845,5 @@ mod tests {
         let listed = path_menu_directories(&base);
         assert_eq!(listed.len(), PATH_MENU_LIMIT + 1);
         assert!(listed.windows(2).all(|pair| pair[0].0 <= pair[1].0));
-    }
-
-    #[test]
-    fn same_directory_compares_drive_roots_and_trailing_separators() {
-        assert!(same_directory(r"C:\", r"C:\"));
-        assert!(same_directory(r"C:\users", r"C:\Users\\"));
-        assert!(!same_directory(r"C:\", r"C:\Windows"));
-        assert!(!same_directory(r"C:\a", r"D:\a"));
-    }
-
-    #[test]
-    fn path_is_within_handles_both_separators_and_aggregates() {
-        assert!(path_is_within("C:\\Users\\Alice", "C:\\Users"));
-        assert!(path_is_within("C:/Users/Alice", "C:/Users"));
-        assert!(path_is_within(
-            "C:/Users/Alice::<tail:documents>",
-            "C:/Users/Alice"
-        ));
-        assert!(path_is_within(
-            "C:\\Users\\Alice::<tail:documents>",
-            "C:\\Users\\Alice"
-        ));
-        assert!(!path_is_within("C:\\UsersExtended", "C:\\Users"));
-        assert!(!path_is_within("C:/UsersExtended", "C:/Users"));
     }
 }

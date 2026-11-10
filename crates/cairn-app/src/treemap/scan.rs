@@ -10,7 +10,7 @@ use crate::search::filters::FilterCategory;
 use crate::service::ipc_tasks::get_tokio_runtime;
 use crate::shell::os::open_file;
 use crate::shell::status_bar::format_count;
-use crate::treemap::path_band::same_directory;
+use crate::treemap::navigation::same_directory;
 use crate::treemap::state::{
     next_tree_request_epoch, tree_unavailable_from_code, TreemapUnavailable, TreemapViewState,
 };

@@ -13,7 +13,11 @@ const MAX_LINES: usize = 2000;
 pub fn check_size(workspace: &Path) -> Result<(), String> {
     let mut files = Vec::new();
     for root in ["crates", "xtask"] {
-        collect_rust_files(&workspace.join(root), &mut files);
+        let dir = workspace.join(root);
+        if !dir.is_dir() {
+            return Err(format!("source root does not exist: {}", dir.display()));
+        }
+        collect_rust_files(&dir, &mut files);
     }
     files.sort();
 
@@ -79,6 +83,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let src = temp.path().join("crates").join("demo").join("src");
         fs::create_dir_all(&src).expect("create src");
+        fs::create_dir_all(temp.path().join("xtask")).expect("create xtask root");
         fs::write(src.join("ok.rs"), "x\n".repeat(MAX_LINES)).expect("write at limit");
         check_size(temp.path()).expect("a file at the limit passes");
 
@@ -95,7 +100,19 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let src = temp.path().join("crates").join("demo").join("src");
         fs::create_dir_all(&src).expect("create src");
+        fs::create_dir_all(temp.path().join("xtask")).expect("create xtask root");
         fs::write(src.join("notes.md"), "x\n".repeat(MAX_LINES + 1)).expect("write markdown");
         check_size(temp.path()).expect("only Rust sources are gated");
+    }
+
+    #[test]
+    fn a_missing_source_root_is_an_error_not_a_silent_pass() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join("crates")).expect("create crates");
+        let err = check_size(temp.path()).expect_err("a workspace without xtask must fail");
+        assert!(
+            err.contains("xtask"),
+            "the error must name the missing root: {err}"
+        );
     }
 }

@@ -13,12 +13,12 @@ use crate::shell::state_view::{icon_action, render_state_band};
 use crate::shell::status_bar::format_count;
 use crate::shell::theme::{self, ShellTokens};
 use crate::treemap::context_menu::{build_block_context_menu, build_context_menu};
+use crate::treemap::navigation::path_is_within;
 use crate::treemap::paint::{
-    inset_device_pixels, painted_gutter_device, snap_rect_to_device_pixels, TREEMAP_RADIUS,
-    TREEMAP_TILE_INSET,
+    inset_device_pixels, painted_gutter_device, snap_rect_to_device_pixels, text_width,
+    TREEMAP_RADIUS, TREEMAP_TILE_INSET,
 };
 use crate::treemap::palette::{block_fill_states, TreemapPalette};
-use crate::treemap::path_band::path_is_within;
 use crate::treemap::state::TreemapUnavailable;
 use crate::treemap::zoom::TreemapViewport;
 use cairn_core::format_size_bytes;
@@ -56,28 +56,8 @@ const TREEMAP_MIN_HEADER_NAME_WIDTH: f32 = 28.0;
 
 /// The device scale the canvas paints at, clamped once at the read: every gutter, snap
 /// and hit test divides by it, so the helpers take it as given.
-pub(super) fn canvas_scale(window: &Window) -> f32 {
+fn canvas_scale(window: &Window) -> f32 {
     window.scale_factor().max(1.0)
-}
-
-/// Shapes a label at the size and weight it will be painted, so fit decisions
-/// use real glyph advances (CJK, emoji and zoom changes included) instead of a
-/// per-character estimate.
-pub(super) fn text_width(window: &Window, text: &str, weight: FontWeight) -> f32 {
-    if text.is_empty() {
-        return 0.0;
-    }
-    let mut style = window.text_style();
-    style.font_size = rems(theme::SMALL_TEXT_SIZE).into();
-    style.font_weight = weight;
-    style.font_features = theme::tabular_figures();
-    let font_size = style.font_size.to_pixels(window.rem_size());
-    f32::from(
-        window
-            .text_system()
-            .layout_line(text, font_size, &[style.to_run(text.len())], None)
-            .width,
-    )
 }
 
 /// One wheel line is one zoom step. Windows reports a mouse notch as the
