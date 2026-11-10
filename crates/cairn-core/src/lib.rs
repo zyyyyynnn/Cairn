@@ -13,6 +13,7 @@ pub mod arena;
 pub mod engine;
 pub mod filter;
 pub mod format;
+pub mod index_file;
 pub mod model;
 pub mod path_cache;
 pub mod sort;

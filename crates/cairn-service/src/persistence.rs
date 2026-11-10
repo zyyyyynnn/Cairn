@@ -2,25 +2,19 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Fast atomic index persistence and verification for Cairn (IDX-04, NFR-09).
+//! Fast atomic index persistence and verification for Cairn (IDX-04, NFR-09). The byte layout
+//! belongs to `cairn_core::index_file`; this module owns the file IO and the atomic replace.
 
 use cairn_core::arena::NamePool;
+use cairn_core::index_file::{
+    decode_record, encode_record, IndexFileError, IndexHeader, HEADER_SIZE, RECORD_SIZE,
+};
 use cairn_core::model::FileRecord;
 use crc32fast::Hasher;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
-
-pub const INDEX_MAGIC: &[u8; 8] = b"CAIRNIDX";
-pub const INDEX_VERSION: u32 = 1;
-pub const HEADER_SIZE: usize = 64;
-
-/// Header byte 13 says whether the saved records already carry correct recursive directory sizes.
-/// Caches written before folder sizes existed leave it zero, so a loader can tell that it must
-/// aggregate once instead of trusting the stored zeroes. The byte was reserved (always zero) in the
-/// original header, which keeps every older cache loadable without a version bump.
-const HEADER_DIRECTORY_SIZES_VALID: usize = 13;
 
 #[derive(Error, Debug)]
 pub enum PersistenceError {
@@ -67,44 +61,50 @@ pub fn save_volume_index_atomic(
     let target_path = dir.join(&file_name);
     let tmp_path = dir.join(format!("{}.tmp", file_name));
 
-    let records_byte_len = std::mem::size_of_val(records);
     let (arena_bytes, folded_bytes) = arena.raw_parts();
+    let record_count =
+        u32::try_from(records.len()).map_err(|_| PersistenceError::InvalidPayloadLength)?;
+    let arena_len =
+        u32::try_from(arena_bytes.len()).map_err(|_| PersistenceError::InvalidPayloadLength)?;
+    let folded_len =
+        u32::try_from(folded_bytes.len()).map_err(|_| PersistenceError::InvalidPayloadLength)?;
 
-    // Compute CRC32 checksum across all payload bytes
+    // The checksum covers the encoded payload exactly as it will be written.
     let mut hasher = Hasher::new();
-    // SAFETY: FileRecord is a #[repr(C)] POD struct with primitive integer fields.
-    let records_slice =
-        unsafe { std::slice::from_raw_parts(records.as_ptr() as *const u8, records_byte_len) };
-    hasher.update(records_slice);
+    let mut record_buf = [0u8; RECORD_SIZE];
+    for record in records {
+        encode_record(record, &mut record_buf);
+        hasher.update(&record_buf);
+    }
     hasher.update(arena_bytes);
     hasher.update(folded_bytes);
     let checksum = hasher.finalize();
 
-    // Construct 64-byte header
-    let mut header = [0u8; HEADER_SIZE];
-    header[0..8].copy_from_slice(INDEX_MAGIC);
-    header[8..12].copy_from_slice(&INDEX_VERSION.to_le_bytes());
-    header[12] = drive_letter as u8;
-    header[HEADER_DIRECTORY_SIZES_VALID] = u8::from(directory_sizes_valid);
-    header[16..24].copy_from_slice(&volume_serial.to_le_bytes());
-    header[24..32].copy_from_slice(&journal_id.to_le_bytes());
-    header[32..40].copy_from_slice(&last_usn.to_le_bytes());
-    header[40..44].copy_from_slice(&(records.len() as u32).to_le_bytes());
-    header[44..48].copy_from_slice(&(arena_bytes.len() as u32).to_le_bytes());
-    header[48..52].copy_from_slice(&(folded_bytes.len() as u32).to_le_bytes());
-    header[52..56].copy_from_slice(&checksum.to_le_bytes());
+    let header = IndexHeader {
+        drive_letter,
+        directory_sizes_valid,
+        volume_serial,
+        journal_id,
+        last_usn,
+        record_count,
+        arena_len,
+        folded_len,
+        checksum,
+    }
+    .encode();
 
-    // Write to temporary file
     {
-        let mut f = File::create(&tmp_path)?;
-        f.write_all(&header)?;
-        f.write_all(records_slice)?;
-        f.write_all(arena_bytes)?;
-        f.write_all(folded_bytes)?;
-        f.flush()?;
+        let mut file = File::create(&tmp_path)?;
+        file.write_all(&header)?;
+        for record in records {
+            encode_record(record, &mut record_buf);
+            file.write_all(&record_buf)?;
+        }
+        file.write_all(arena_bytes)?;
+        file.write_all(folded_bytes)?;
+        file.flush()?;
     }
 
-    // Atomic replace
     atomic_replace_file(&tmp_path, &target_path)?;
 
     Ok(target_path)
@@ -112,85 +112,68 @@ pub fn save_volume_index_atomic(
 
 /// Loads and validates an index file from disk.
 pub fn load_volume_index(path: &Path) -> Result<LoadedIndexData, PersistenceError> {
-    let mut f = File::open(path)?;
-    let mut header = [0u8; HEADER_SIZE];
-    f.read_exact(&mut header)?;
+    let mut file = File::open(path)?;
+    let mut header_bytes = [0u8; HEADER_SIZE];
+    file.read_exact(&mut header_bytes)?;
+    let header = IndexHeader::decode(&header_bytes).map_err(|error| match error {
+        IndexFileError::InvalidMagic => PersistenceError::InvalidMagic,
+        IndexFileError::UnsupportedVersion(version) => {
+            PersistenceError::UnsupportedVersion(version)
+        }
+    })?;
 
-    if &header[0..8] != INDEX_MAGIC {
-        return Err(PersistenceError::InvalidMagic);
-    }
-
-    let version = u32::from_le_bytes(header[8..12].try_into().unwrap());
-    if version != INDEX_VERSION {
-        return Err(PersistenceError::UnsupportedVersion(version));
-    }
-
-    let drive_letter = header[12] as char;
-    let directory_sizes_valid = header[HEADER_DIRECTORY_SIZES_VALID] != 0;
-    let volume_serial = u64::from_le_bytes(header[16..24].try_into().unwrap());
-    let journal_id = u64::from_le_bytes(header[24..32].try_into().unwrap());
-    let last_usn = i64::from_le_bytes(header[32..40].try_into().unwrap());
-    let record_count = u32::from_le_bytes(header[40..44].try_into().unwrap()) as usize;
-    let arena_len = u32::from_le_bytes(header[44..48].try_into().unwrap()) as usize;
-    let folded_len = u32::from_le_bytes(header[48..52].try_into().unwrap()) as usize;
-    let expected_checksum = u32::from_le_bytes(header[52..56].try_into().unwrap());
-
-    let record_size = std::mem::size_of::<FileRecord>();
-    let records_byte_len = record_count
-        .checked_mul(record_size)
+    let records_byte_len = (header.record_count as usize)
+        .checked_mul(RECORD_SIZE)
         .ok_or(PersistenceError::InvalidPayloadLength)?;
     let expected_file_len = HEADER_SIZE
         .checked_add(records_byte_len)
-        .and_then(|n| n.checked_add(arena_len))
-        .and_then(|n| n.checked_add(folded_len))
+        .and_then(|n| n.checked_add(header.arena_len as usize))
+        .and_then(|n| n.checked_add(header.folded_len as usize))
         .ok_or(PersistenceError::InvalidPayloadLength)?;
-    let actual_file_len =
-        usize::try_from(f.metadata()?.len()).map_err(|_| PersistenceError::InvalidPayloadLength)?;
+    let actual_file_len = usize::try_from(file.metadata()?.len())
+        .map_err(|_| PersistenceError::InvalidPayloadLength)?;
     if actual_file_len != expected_file_len {
         return Err(PersistenceError::InvalidPayloadLength);
     }
-    if arena_len != folded_len {
+    if header.arena_len != header.folded_len {
         return Err(PersistenceError::InvalidPayloadLength);
     }
 
     let mut records_buf = vec![0u8; records_byte_len];
-    f.read_exact(&mut records_buf)?;
+    file.read_exact(&mut records_buf)?;
 
-    let mut arena_buf = vec![0u8; arena_len];
-    f.read_exact(&mut arena_buf)?;
+    let mut arena_buf = vec![0u8; header.arena_len as usize];
+    file.read_exact(&mut arena_buf)?;
 
-    let mut folded_buf = vec![0u8; folded_len];
-    f.read_exact(&mut folded_buf)?;
+    let mut folded_buf = vec![0u8; header.folded_len as usize];
+    file.read_exact(&mut folded_buf)?;
 
-    // Verify CRC32
     let mut hasher = Hasher::new();
     hasher.update(&records_buf);
     hasher.update(&arena_buf);
     hasher.update(&folded_buf);
-    let computed_checksum = hasher.finalize();
-
-    if computed_checksum != expected_checksum {
+    if hasher.finalize() != header.checksum {
         return Err(PersistenceError::ChecksumMismatch);
     }
 
-    // Convert records_buf to Vec<FileRecord>
-    let mut records = Vec::with_capacity(record_count);
-    for chunk in records_buf.chunks_exact(record_size) {
-        // SAFETY: FileRecord is #[repr(C)] POD, length matches exact struct size.
-        let rec = unsafe { std::ptr::read_unaligned(chunk.as_ptr() as *const FileRecord) };
-        records.push(rec);
+    let (chunks, remainder) = records_buf.as_chunks::<RECORD_SIZE>();
+    debug_assert!(
+        remainder.is_empty(),
+        "record buffer is a whole number of records"
+    );
+    let mut records = Vec::with_capacity(chunks.len());
+    for chunk in chunks {
+        records.push(decode_record(chunk));
     }
 
-    let arena = NamePool::from_raw_parts(arena_buf, folded_buf);
-
     Ok(LoadedIndexData {
-        drive_letter,
-        volume_serial,
-        journal_id,
-        last_usn,
+        drive_letter: header.drive_letter,
+        volume_serial: header.volume_serial,
+        journal_id: header.journal_id,
+        last_usn: header.last_usn,
         records,
-        arena,
-        directory_sizes_valid,
+        arena: NamePool::from_raw_parts(arena_buf, folded_buf),
+        directory_sizes_valid: header.directory_sizes_valid,
     })
 }
 
@@ -238,6 +221,7 @@ fn atomic_replace_file(src: &Path, dst: &Path) -> Result<(), std::io::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cairn_core::index_file::HEADER_DIRECTORY_SIZES_VALID;
     use tempfile::tempdir;
 
     #[test]
@@ -359,7 +343,8 @@ mod tests {
             .expect("save should succeed");
 
         let mut bytes = fs::read(&saved_path).expect("read cache");
-        // Set record_count = u32::MAX (~192 GiB if allocated unchecked) on a 64-byte file.
+        // Set record_count = u32::MAX (~192 GiB if allocated unchecked) on a 64-byte file. The
+        // count lives at header bytes 40..44.
         bytes[40..44].copy_from_slice(&u32::MAX.to_le_bytes());
         fs::write(&saved_path, &bytes).expect("write corrupted header");
 

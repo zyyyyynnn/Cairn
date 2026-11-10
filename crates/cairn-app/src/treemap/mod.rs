@@ -12,5 +12,4 @@ pub(crate) mod palette;
 pub(crate) mod path_input;
 pub(crate) mod state;
 pub(crate) mod view;
-pub(crate) mod volume_index;
 pub(crate) mod zoom;
