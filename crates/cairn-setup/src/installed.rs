@@ -15,13 +15,11 @@ use windows::Win32::System::ApplicationInstallationAndServicing::{
     MsiEnumRelatedProductsW, MsiGetProductInfoW, INSTALLPROPERTY_INSTALLLOCATION,
     INSTALLPROPERTY_VERSIONSTRING,
 };
-use windows::Win32::System::Registry::{
-    RegCloseKey, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW, HKEY, HKEY_LOCAL_MACHINE, KEY_READ,
-    KEY_WOW64_32KEY, KEY_WOW64_64KEY, RRF_RT_REG_SZ,
-};
+use windows::Win32::System::Registry::{KEY_WOW64_32KEY, KEY_WOW64_64KEY, RRF_RT_REG_SZ};
 
 use crate::model::{default_install_dir, InstalledProduct};
 use crate::msi::LegacyUninstall;
+use crate::registry::{read_hklm_string, subkeys, wide};
 
 const PRODUCT_KEY: &str = r"Software\Cairn";
 const ARP_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Cairn";
@@ -36,12 +34,14 @@ pub fn installed_product() -> Option<InstalledProduct> {
     if let Some(product_code) = find_product_code() {
         let version = product_info(&product_code, INSTALLPROPERTY_VERSIONSTRING)
             .filter(|value| !value.is_empty())
-            .or_else(|| read_hklm_string(PRODUCT_KEY, "Version"))
+            .or_else(|| read_hklm_string(PRODUCT_KEY, "Version", RRF_RT_REG_SZ))
             .unwrap_or_default();
         let install_dir = product_info(&product_code, INSTALLPROPERTY_INSTALLLOCATION)
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
-            .or_else(|| read_hklm_string(PRODUCT_KEY, "InstallFolder").map(PathBuf::from))
+            .or_else(|| {
+                read_hklm_string(PRODUCT_KEY, "InstallFolder", RRF_RT_REG_SZ).map(PathBuf::from)
+            })
             .unwrap_or_else(default_install_dir);
         return Some(InstalledProduct {
             version,
@@ -50,12 +50,12 @@ pub fn installed_product() -> Option<InstalledProduct> {
         });
     }
 
-    let version = read_hklm_string(PRODUCT_KEY, "Version")
-        .or_else(|| read_hklm_string(ARP_KEY, "DisplayVersion"));
-    let install_dir = read_hklm_string(PRODUCT_KEY, "InstallFolder")
-        .or_else(|| read_hklm_string(ARP_KEY, "InstallLocation"));
+    let version = read_hklm_string(PRODUCT_KEY, "Version", RRF_RT_REG_SZ)
+        .or_else(|| read_hklm_string(ARP_KEY, "DisplayVersion", RRF_RT_REG_SZ));
+    let install_dir = read_hklm_string(PRODUCT_KEY, "InstallFolder", RRF_RT_REG_SZ)
+        .or_else(|| read_hklm_string(ARP_KEY, "InstallLocation", RRF_RT_REG_SZ));
     if version.is_none() && install_dir.is_none() {
-        if read_hklm_string(ARP_KEY, "DisplayName")
+        if read_hklm_string(ARP_KEY, "DisplayName", RRF_RT_REG_SZ)
             .is_some_and(|name| name.eq_ignore_ascii_case("Cairn"))
         {
             return Some(InstalledProduct {
@@ -142,12 +142,12 @@ pub fn legacy_burn_uninstallers() -> Vec<LegacyUninstall> {
     {
         for subkey in subkeys(base, view) {
             let path = format!(r"{base}\{subkey}");
-            let display = read_hklm_string(&path, "DisplayName").unwrap_or_default();
+            let display = read_hklm_string(&path, "DisplayName", RRF_RT_REG_SZ).unwrap_or_default();
             if !display.eq_ignore_ascii_case("Cairn") {
                 continue;
             }
-            let Some(command) = read_hklm_string(&path, "QuietUninstallString")
-                .or_else(|| read_hklm_string(&path, "UninstallString"))
+            let Some(command) = read_hklm_string(&path, "QuietUninstallString", RRF_RT_REG_SZ)
+                .or_else(|| read_hklm_string(&path, "UninstallString", RRF_RT_REG_SZ))
             else {
                 continue;
             };
@@ -209,84 +209,6 @@ fn product_info(product_code: &str, attribute: PCWSTR) -> Option<String> {
     }
     let length = (length as usize).min(buffer.len());
     Some(String::from_utf16_lossy(&buffer[..length]))
-}
-
-fn read_hklm_string(subkey: &str, value: &str) -> Option<String> {
-    let subkey = wide(std::ffi::OsStr::new(subkey));
-    let value = wide(std::ffi::OsStr::new(value));
-    let mut buffer = [0u16; 1024];
-    let mut size = (buffer.len() * 2) as u32;
-    let status = unsafe {
-        RegGetValueW(
-            HKEY_LOCAL_MACHINE,
-            PCWSTR(subkey.as_ptr()),
-            PCWSTR(value.as_ptr()),
-            RRF_RT_REG_SZ,
-            None,
-            Some(buffer.as_mut_ptr() as *mut core::ffi::c_void),
-            Some(&mut size),
-        )
-    };
-    if status != ERROR_SUCCESS {
-        return None;
-    }
-    let length = (size as usize / 2).saturating_sub(1);
-    Some(String::from_utf16_lossy(
-        &buffer[..length.min(buffer.len())],
-    ))
-}
-
-fn subkeys(base: &str, view: windows::Win32::System::Registry::REG_SAM_FLAGS) -> Vec<String> {
-    let base_wide = wide(std::ffi::OsStr::new(base));
-    let mut key = HKEY::default();
-    let status = unsafe {
-        RegOpenKeyExW(
-            HKEY_LOCAL_MACHINE,
-            PCWSTR(base_wide.as_ptr()),
-            None,
-            KEY_READ | view,
-            &mut key,
-        )
-    };
-    if status != ERROR_SUCCESS {
-        return Vec::new();
-    }
-
-    let mut names = Vec::new();
-    let mut index = 0;
-    loop {
-        let mut name = [0u16; 256];
-        let mut length = name.len() as u32;
-        let status = unsafe {
-            RegEnumKeyExW(
-                key,
-                index,
-                Some(windows::core::PWSTR(name.as_mut_ptr())),
-                &mut length,
-                None,
-                None,
-                None,
-                None,
-            )
-        };
-        if status == ERROR_NO_MORE_ITEMS {
-            break;
-        }
-        if status != ERROR_SUCCESS {
-            break;
-        }
-        names.push(String::from_utf16_lossy(&name[..length as usize]));
-        index += 1;
-    }
-    unsafe {
-        let _ = RegCloseKey(key);
-    }
-    names
-}
-
-fn wide(value: &std::ffi::OsStr) -> Vec<u16> {
-    use std::os::windows::ffi::OsStrExt;
-    value.encode_wide().chain(std::iter::once(0)).collect()
 }
 
 fn utf16_until_nul(buffer: &[u16]) -> String {

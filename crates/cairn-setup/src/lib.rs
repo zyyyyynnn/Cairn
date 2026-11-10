@@ -22,6 +22,7 @@ pub mod payload;
 pub(crate) mod platform;
 mod preview;
 pub mod quiet;
+pub(crate) mod registry;
 pub mod run;
 pub(crate) mod view;
 
