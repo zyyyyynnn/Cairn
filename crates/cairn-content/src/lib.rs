@@ -18,5 +18,7 @@ pub use extractor::{
     CompositeExtractor, ExtractError, OfficeExtractor, PdfExtractor, PlainTextExtractor,
     TextExtractor,
 };
-pub use indexer::{ContentHit, ContentIndex, ContentIndexError, ContentSearcher};
+pub use indexer::{
+    ContentHit, ContentIndex, ContentIndexError, ContentSearcher, CONTENT_RESULT_TOP_K,
+};
 pub use tokenizer::{CjkBigramLatinTokenizer, CJK_BIGRAM_LATIN_TOKENIZER};

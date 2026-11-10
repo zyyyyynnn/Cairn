@@ -4,7 +4,7 @@
 
 //! Multi-volume synchronization engine and index lifecycle manager.
 
-use cairn_content::ContentSearcher;
+use cairn_content::{ContentSearcher, CONTENT_RESULT_TOP_K};
 use cairn_core::arena::NamePool;
 use cairn_core::engine::CancellationToken;
 use cairn_core::model::FileRecord;
@@ -2185,13 +2185,14 @@ impl MultiVolumeEngine {
                 // The scored top-k bound is historical: truncation shortens the reply before the
                 // metadata filter runs, so a conjunction over a very common word can show fewer
                 // rows than its true match set.
-                let content_hits = match searcher.search_terms(&content_queries, 50_000) {
-                    Ok(hits) => hits,
-                    Err(err) => {
-                        tracing::warn!("content search for {content_queries:?} failed: {err}");
-                        return (Vec::new(), 0, highlight_terms, snippets, 0);
-                    }
-                };
+                let content_hits =
+                    match searcher.search_terms(&content_queries, CONTENT_RESULT_TOP_K) {
+                        Ok(hits) => hits,
+                        Err(err) => {
+                            tracing::warn!("content search for {content_queries:?} failed: {err}");
+                            return (Vec::new(), 0, highlight_terms, snippets, 0);
+                        }
+                    };
 
                 if cancel.is_cancelled() || content_hits.is_empty() {
                     return (all_results, 0, highlight_terms, snippets, 0);
@@ -2206,6 +2207,7 @@ impl MultiVolumeEngine {
 
                 // Acquire read lock with minimal critical section to convert and merge results
                 lock = self.volumes.read().unwrap();
+                let exclusion_masks = path_exclusion_masks(&lock, &excluded_paths);
                 let mut tantivy_vol_matches: HashMap<char, Vec<u32>> = HashMap::new();
 
                 for hit in &content_hits {
@@ -2250,7 +2252,14 @@ impl MultiVolumeEngine {
                                 continue;
                             }
                         }
-                        if !excluded_paths.is_empty() {
+                        if exclusion_masks.as_ref().is_some_and(|masks| {
+                            masks.get(&vol.drive_letter).is_some_and(|mask| {
+                                mask.get(idx as usize).copied().unwrap_or(false)
+                            })
+                        }) {
+                            continue;
+                        }
+                        if exclusion_masks.is_none() && !excluded_paths.is_empty() {
                             let full_path = vol.path_cache.get_full_path(
                                 &vol.records,
                                 &vol.arena,
@@ -2292,21 +2301,41 @@ impl MultiVolumeEngine {
                     .enumerate()
                     .map(|(index, term)| (term.as_str(), index))
                     .collect();
+                let positive_terms: HashSet<String> = query_expr
+                    .extract_positive_content_queries()
+                    .into_iter()
+                    .collect();
                 let mut hits_by_drive: HashMap<char, Vec<HashSet<u64>>> = HashMap::new();
                 let mut snippets_by_key: HashMap<(char, u64), String> = HashMap::new();
                 for (term_slot, term) in content_queries.iter().enumerate() {
                     if cancel.is_cancelled() {
                         return (Vec::new(), 0, highlight_terms, snippets, 0);
                     }
-                    let capped = match searcher.search(term, 50_000) {
-                        Ok(hits) => hits,
-                        Err(err) => {
-                            tracing::warn!("content search for {term:?} failed: {err}");
-                            return (Vec::new(), 0, highlight_terms, snippets, 0);
+                    // Snippets exist only for terms whose polarity can make a row match. A term
+                    // below a Not never explains the result, and its snippet would mislabel rows
+                    // that another branch matched.
+                    let wants_snippet = positive_terms.contains(term);
+                    let complete_scored = if wants_snippet {
+                        match searcher.count_hits(term) {
+                            Ok(0) => continue,
+                            Ok(count) => count < CONTENT_RESULT_TOP_K,
+                            Err(err) => {
+                                tracing::warn!("content count for {term:?} failed: {err}");
+                                return (Vec::new(), 0, highlight_terms, snippets, 0);
+                            }
                         }
+                    } else {
+                        false
                     };
-                    if capped.len() < 50_000 {
-                        for hit in &capped {
+                    if complete_scored {
+                        let hits = match searcher.search(term, CONTENT_RESULT_TOP_K) {
+                            Ok(hits) => hits,
+                            Err(err) => {
+                                tracing::warn!("content search for {term:?} failed: {err}");
+                                return (Vec::new(), 0, highlight_terms, snippets, 0);
+                            }
+                        };
+                        for hit in &hits {
                             if hit.volume_id >= 26 {
                                 continue;
                             }
@@ -2534,6 +2563,9 @@ impl MultiVolumeEngine {
             }
 
             if single_vol_presorted {
+                if cancel.is_cancelled() {
+                    return (Vec::new(), 0, highlight_terms, snippets, 0);
+                }
                 let total = all_results.len();
                 return (all_results, total, highlight_terms, snippets, total_bytes);
             }
@@ -4902,9 +4934,34 @@ mod tests {
     }
 
     #[test]
+    fn a_negated_content_term_never_supplies_a_content_snippet() {
+        let (engine, _dir) = engine_with_indexed_content();
+        let cancel = CancellationToken::new();
+        let (results, .., snippets, _) = engine.execute_search_multi(
+            "report|!content:needle",
+            &QueryDefaults::default(),
+            SortColumn::Name,
+            true,
+            &cancel,
+        );
+        let volumes = engine.volumes.read().unwrap();
+        for item in &results {
+            let frn = volumes[&item.drive_letter].records[item.record_idx as usize].frn;
+            assert!(
+                !snippets.contains_key(&(item.drive_letter, frn)),
+                "row frn {frn} must not carry a snippet from a negated content term"
+            );
+        }
+    }
+
+    #[test]
     fn a_cancelled_query_returns_no_rows_in_either_content_shape() {
         let (engine, _dir) = engine_with_indexed_content();
-        for query in ["!content:needle", "content:needle|content:quarterly"] {
+        for query in [
+            "!content:needle",
+            "content:needle|content:quarterly",
+            "content:needle",
+        ] {
             let cancel = CancellationToken::new();
             cancel.cancel();
             let (results, total, ..) = engine.execute_search_multi(

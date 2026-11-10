@@ -174,6 +174,38 @@ impl QueryExpr {
         }
     }
 
+    /// The content terms written under a positive polarity. A term below an odd number of Not
+    /// nodes can never be the reason a row matched, so it must not contribute a snippet or a
+    /// content badge either.
+    pub fn extract_positive_content_queries(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        self.collect_positive_content_queries(true, &mut out);
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    fn collect_positive_content_queries(&self, positive: bool, out: &mut Vec<String>) {
+        match self {
+            QueryExpr::Term(term) => {
+                if positive {
+                    if let Some(ref content) = term.content_query {
+                        let trimmed = content.trim();
+                        if !trimmed.is_empty() {
+                            out.push(trimmed.to_string());
+                        }
+                    }
+                }
+            }
+            QueryExpr::And(subs) | QueryExpr::Or(subs) => {
+                for sub in subs {
+                    sub.collect_positive_content_queries(positive, out);
+                }
+            }
+            QueryExpr::Not(inner) => inner.collect_positive_content_queries(!positive, out),
+        }
+    }
+
     /// Strips out `content:` constraints from this expression to evaluate MFT metadata/path filters.
     /// Returns `None` if the expression only contained content search constraints.
     pub fn strip_content_queries(&self) -> Option<QueryExpr> {
