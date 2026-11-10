@@ -4945,6 +4945,16 @@ mod tests {
             &cancel,
         );
         let volumes = engine.volumes.read().unwrap();
+        let mut frns: Vec<u64> = results
+            .iter()
+            .map(|item| volumes[&item.drive_letter].records[item.record_idx as usize].frn)
+            .collect();
+        frns.sort_unstable();
+        assert_eq!(
+            frns,
+            vec![1, 9, 101, 102, 104],
+            "the union of the report branch and the negated term must be present"
+        );
         for item in &results {
             let frn = volumes[&item.drive_letter].records[item.record_idx as usize].frn;
             assert!(

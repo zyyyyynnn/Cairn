@@ -724,12 +724,7 @@ pub fn parse_search_term(raw_token: &str, defaults: &QueryDefaults) -> SearchTer
             term.parent_filter = Some(unquote(rest).trim_end_matches('\\').to_string());
             return term;
         } else if let Some(rest) = remaining.strip_prefix("content:") {
-            let content = unquote(rest).trim();
-            if content.is_empty() || content.len() > MAX_CONTENT_TERM_BYTES {
-                term.match_nothing = true;
-            } else {
-                term.content_query = Some(content.to_string());
-            }
+            apply_content_query(&mut term, unquote(rest));
             return term;
         } else if let Some(rest) = remaining.strip_prefix("audio:") {
             term.ext_filter = "mp3;wav;flac;aac;ogg;wma;m4a;opus;ape"
@@ -819,15 +814,22 @@ pub fn parse_search_term(raw_token: &str, defaults: &QueryDefaults) -> SearchTer
     }
     if defaults.content && !term.text.is_empty() {
         let text = std::mem::take(&mut term.text);
-        let text = text.trim();
-        if text.len() > MAX_CONTENT_TERM_BYTES {
-            term.match_nothing = true;
-        } else {
-            term.content_query = Some(text.to_string());
-        }
+        apply_content_query(&mut term, &text);
     }
 
     term
+}
+
+/// Applies the content-term policy shared by the `content:` prefix and the content default: a
+/// term with no text — or a paste-sized one, which the tokenizer would expand into millions of
+/// tokens — constrains nothing and must match nothing.
+fn apply_content_query(term: &mut SearchTerm, raw: &str) {
+    let content = raw.trim();
+    if content.is_empty() || content.len() > MAX_CONTENT_TERM_BYTES {
+        term.match_nothing = true;
+    } else {
+        term.content_query = Some(content.to_string());
+    }
 }
 
 fn unquote(s: &str) -> &str {
@@ -1213,6 +1215,15 @@ mod tests {
             &format!("content:{oversized_text}"),
             &QueryDefaults::default(),
         );
+        assert!(oversized.match_nothing);
+        assert!(oversized.content_query.is_none());
+
+        // The content default applies the same policy as the written prefix.
+        let content_defaults = QueryDefaults {
+            content: true,
+            ..Default::default()
+        };
+        let oversized = parse_search_term(&oversized_text, &content_defaults);
         assert!(oversized.match_nothing);
         assert!(oversized.content_query.is_none());
 

@@ -30,8 +30,6 @@ pub const CONTENT_RESULT_TOP_K: usize = 50_000;
 pub enum ContentIndexError {
     #[error("Tantivy error: {0}")]
     Tantivy(#[from] tantivy::TantivyError),
-    #[error("Query parse error: {0}")]
-    QueryParse(#[from] tantivy::query::QueryParserError),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
     #[error("content index writer is still in use")]
