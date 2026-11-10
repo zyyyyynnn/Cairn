@@ -121,34 +121,27 @@ fn init_system_tray() -> Option<tray_icon::TrayIcon> {
     let show_id = item_show.id().clone();
     let exit_id = item_exit.id().clone();
 
-    std::thread::spawn(move || {
-        let menu_rx = tray_icon::menu::MenuEvent::receiver();
-        let tray_rx = tray_icon::TrayIconEvent::receiver();
-
-        loop {
-            while let Ok(event) = menu_rx.try_recv() {
-                if event.id == show_id {
-                    activate_existing_cairn_window();
-                } else if event.id == exit_id {
-                    std::process::exit(0);
-                }
+    tray_icon::menu::MenuEvent::set_event_handler(Some(
+        move |event: tray_icon::menu::MenuEvent| {
+            if event.id == show_id {
+                activate_existing_cairn_window();
+            } else if event.id == exit_id {
+                std::process::exit(0);
             }
+        },
+    ));
 
-            while let Ok(event) = tray_rx.try_recv() {
-                if matches!(
-                    event,
-                    tray_icon::TrayIconEvent::Click {
-                        button: tray_icon::MouseButton::Left,
-                        ..
-                    } | tray_icon::TrayIconEvent::DoubleClick { .. }
-                ) {
-                    activate_existing_cairn_window();
-                }
-            }
-
-            std::thread::sleep(std::time::Duration::from_millis(100));
+    tray_icon::TrayIconEvent::set_event_handler(Some(|event: tray_icon::TrayIconEvent| {
+        if matches!(
+            event,
+            tray_icon::TrayIconEvent::Click {
+                button: tray_icon::MouseButton::Left,
+                ..
+            } | tray_icon::TrayIconEvent::DoubleClick { .. }
+        ) {
+            activate_existing_cairn_window();
         }
-    });
+    }));
 
     Some(tray)
 }

@@ -8,9 +8,9 @@
 use crate::app::{element_id, layout, CairnApp};
 use crate::shell::accessibility;
 use crate::shell::theme::{self, ShellTokens};
-use crate::treemap::navigation::path_segments;
 use crate::treemap::paint::text_width;
 use crate::treemap::path_input::normalize_treemap_path;
+use cairn_core::treemap::path_segments;
 use fluent_bundle::FluentArgs;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::input::Input;

@@ -307,6 +307,15 @@ impl CairnApp {
         self.is_checking_update = true;
         cx.notify();
 
+        let menu_view = cx.entity();
+        window.defer(cx, move |window, cx| {
+            menu_view.update(cx, |this, cx| {
+                if this.is_checking_update {
+                    this.show_group(crate::shell::command_groups::MenuGroup::Help, window, cx);
+                }
+            });
+        });
+
         let handle = window.window_handle();
         let view = cx.entity().downgrade();
         let (tx, rx) = tokio::sync::oneshot::channel();

@@ -8,16 +8,19 @@ use crate::treemap::navigation::TreemapNavigation;
 use crate::treemap::paint::painted_gutter_device;
 use crate::treemap::zoom::TreemapZoom;
 use cairn_core::treemap::{
-    aggregate_parent_path, is_drive_root, layout_nested_treemap, NestedTreemapLayoutNode,
-    NestedTreemapOptions, TreemapCategory, TreemapRect, TreemapTreeNode,
+    aggregate_parent_path, is_drive_root, layout_nested_treemap, path_is_within, relative_segments,
+    same_directory, NestedTreemapLayoutNode, NestedTreemapOptions, TreemapCategory, TreemapRect,
+    TreemapTreeNode,
 };
 use cairn_protocol::message::{
     TreeEntryData, ERROR_CODE_TREE_NOT_DIRECTORY, ERROR_CODE_TREE_NOT_INDEXED,
     ERROR_CODE_TREE_TOO_LARGE,
 };
 use gpui_kit::gpui::*;
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -122,6 +125,9 @@ pub struct TreemapViewState {
     pub(super) last_window_size: (f32, f32),
     /// Last observed window scale factor for device-pixel snapping.
     pub(super) last_scale_factor: f32,
+    /// Actual canvas bounds published by the paint callback, used by pointer pan and wheel zoom
+    /// instead of window-chrome subtraction once the canvas has painted its first frame.
+    pub(super) painted_canvas_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// Generation counter for the scan/load overlay fade-out animation.
     pub(crate) scan_fade_epoch: u64,
     /// Highest scan fade epoch for which a cleanup timer has been scheduled.
@@ -172,6 +178,7 @@ impl TreemapViewState {
             last_bounds: (800.0, 600.0),
             last_window_size: (0.0, 0.0),
             last_scale_factor: 1.0,
+            painted_canvas_bounds: Rc::new(Cell::new(None)),
             scan_fade_epoch: 0,
             scan_fade_timer_armed: 0,
             is_scanning: false,
@@ -184,6 +191,16 @@ impl TreemapViewState {
 
         let scan_target = state.load_current_dir();
         (state, scan_target)
+    }
+
+    pub(super) fn canvas_origin(&self, fallback: (f32, f32)) -> (f32, f32) {
+        self.painted_canvas_bounds
+            .get()
+            .filter(|bounds| {
+                f32::from(bounds.size.width) > 0.0 && f32::from(bounds.size.height) > 0.0
+            })
+            .map(|bounds| (f32::from(bounds.origin.x), f32::from(bounds.origin.y)))
+            .unwrap_or(fallback)
     }
 
     #[cfg(test)]
@@ -209,6 +226,7 @@ impl TreemapViewState {
             last_bounds: (800.0, 600.0),
             last_window_size: (0.0, 0.0),
             last_scale_factor: 1.0,
+            painted_canvas_bounds: Rc::new(Cell::new(None)),
             scan_fade_epoch: 0,
             scan_fade_timer_armed: 0,
             is_scanning: false,
@@ -547,33 +565,11 @@ impl TreemapViewState {
         let Some(tree) = self.root_tree.as_deref() else {
             return &[];
         };
-        let root = self.navigation.current_dir();
-
-        let base_parts: Vec<&str> = root.split(['\\', '/']).filter(|s| !s.is_empty()).collect();
-        let target_parts: Vec<&str> = parent_path
-            .split(['\\', '/'])
-            .filter(|s| !s.is_empty())
-            .collect();
-
-        if target_parts.len() < base_parts.len() {
+        let Some(remaining) = relative_segments(self.navigation.current_dir(), parent_path) else {
             return &[];
-        }
-
-        for (i, (b, t)) in base_parts.iter().zip(target_parts.iter()).enumerate() {
-            if i == 0 {
-                let b_norm = b.trim_end_matches(':');
-                let t_norm = t.trim_end_matches(':');
-                if !b_norm.eq_ignore_ascii_case(t_norm) {
-                    return &[];
-                }
-            } else if !b.eq_ignore_ascii_case(t) {
-                return &[];
-            }
-        }
-
-        let remaining = &target_parts[base_parts.len()..];
+        };
         let mut node = tree;
-        for &segment in remaining {
+        for segment in remaining {
             match node
                 .children
                 .iter()
@@ -685,20 +681,12 @@ impl TreemapViewState {
         };
 
         if let Some(ref layer) = self.virtual_layer {
-            let parent = layer.parent_path.trim_end_matches(['\\', '/']);
-            let target = target_path.trim_end_matches(['\\', '/']);
-            if target.eq_ignore_ascii_case(parent)
-                || resolve_relative_segments(&layer.parent_path, target_path).is_some()
-            {
+            if path_is_within(target_path, &layer.parent_path) {
                 self.discard_virtual_layer();
             }
         }
         if let Some(ref layer) = self.forward_layer {
-            let parent = layer.parent_path.trim_end_matches(['\\', '/']);
-            let target = target_path.trim_end_matches(['\\', '/']);
-            if target.eq_ignore_ascii_case(parent)
-                || resolve_relative_segments(&layer.parent_path, target_path).is_some()
-            {
+            if path_is_within(target_path, &layer.parent_path) {
                 self.forward_layer = None;
             }
         }
@@ -707,19 +695,14 @@ impl TreemapViewState {
 
         // Keep cached scan totals updated for ancestors, drop deleted subtrees,
         // and avoid double-decrementing the current directory.
-        let target_trimmed = target_path.trim_end_matches(['\\', '/']);
-        let current_trimmed = current_dir.trim_end_matches(['\\', '/']);
         self.scanned_item_totals.retain(|dir, total| {
-            let dir_trimmed = dir.trim_end_matches(['\\', '/']);
-            if dir_trimmed.eq_ignore_ascii_case(target_trimmed)
-                || resolve_relative_segments(target_path, dir).is_some()
-            {
+            if path_is_within(dir, target_path) {
                 // The directory or its ancestor was deleted
                 false
-            } else if dir_trimmed.eq_ignore_ascii_case(current_trimmed) {
+            } else if same_directory(dir, &current_dir) {
                 *total = self.current_dir_total_items;
                 true
-            } else if resolve_relative_segments(dir, target_path).is_some() {
+            } else if path_is_within(target_path, dir) {
                 // Ancestor directory of deleted target
                 *total = total.saturating_sub(count);
                 true
@@ -733,10 +716,7 @@ impl TreemapViewState {
             .or_insert(self.current_dir_total_items);
 
         if let Some(ref sel) = self.selected_path {
-            let sel_trimmed = sel.trim_end_matches(['\\', '/']);
-            if sel_trimmed.eq_ignore_ascii_case(target_trimmed)
-                || resolve_relative_segments(target_path, sel).is_some()
-            {
+            if path_is_within(sel, target_path) {
                 self.selected_path = None;
             }
         }
@@ -751,28 +731,7 @@ fn resolve_relative_segments<'a>(
     base_dir: &str,
     target_path: &'a str,
 ) -> Option<(Vec<&'a str>, &'a str)> {
-    let base_parts: Vec<&str> = base_dir
-        .split(['\\', '/'])
-        .filter(|s| !s.is_empty())
-        .collect();
-    let target_parts: Vec<&str> = target_path
-        .split(['\\', '/'])
-        .filter(|s| !s.is_empty())
-        .collect();
-
-    if target_parts.len() <= base_parts.len() {
-        return None;
-    }
-
-    for (b, t) in base_parts.iter().zip(target_parts.iter()) {
-        let b_norm = b.trim_end_matches(['\\', '/', ':']);
-        let t_norm = t.trim_end_matches(['\\', '/', ':']);
-        if !b_norm.eq_ignore_ascii_case(t_norm) {
-            return None;
-        }
-    }
-
-    let remaining = &target_parts[base_parts.len()..];
+    let remaining = relative_segments(base_dir, target_path)?;
     let (&name, segments) = remaining.split_last()?;
     Some((segments.to_vec(), name))
 }

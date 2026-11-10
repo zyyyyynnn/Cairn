@@ -219,6 +219,9 @@ impl CairnApp {
         }
         self.settings.autostart = enable;
         self.save_settings();
+        if let Err(err) = crate::shell::settings::set_autostart_registry(enable) {
+            tracing::warn!("Failed to update autostart registry entry: {err}");
+        }
         self.repaint_shell_and_overlays(cx);
     }
 

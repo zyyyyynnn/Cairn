@@ -89,4 +89,47 @@ impl FileRecord {
     pub fn mark_tombstone(&mut self) {
         self.flags |= FLAG_TOMBSTONE;
     }
+
+    /// Encodes a drive letter (`A`..=`Z`, case-insensitive) into a zero-based `volume_id` (`0`..`26`).
+    #[inline(always)]
+    pub const fn volume_id_from_drive(drive: char) -> Option<u16> {
+        let upper = drive.to_ascii_uppercase();
+        if upper.is_ascii_uppercase() {
+            Some((upper as u8 - b'A') as u16)
+        } else {
+            None
+        }
+    }
+
+    /// Decodes a zero-based `volume_id` (`0`..`26`) back into an uppercase ASCII drive letter (`A`..=`Z`).
+    #[inline(always)]
+    pub const fn drive_from_volume_id(volume_id: u16) -> Option<char> {
+        if volume_id < 26 {
+            Some((b'A' + volume_id as u8) as char)
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FileRecord;
+
+    #[test]
+    fn volume_id_roundtrips_every_ascii_drive_letter() {
+        for (idx, letter) in ('A'..='Z').enumerate() {
+            let id = idx as u16;
+            assert_eq!(FileRecord::volume_id_from_drive(letter), Some(id));
+            assert_eq!(
+                FileRecord::volume_id_from_drive(letter.to_ascii_lowercase()),
+                Some(id)
+            );
+            assert_eq!(FileRecord::drive_from_volume_id(id), Some(letter));
+        }
+        assert_eq!(FileRecord::volume_id_from_drive('1'), None);
+        assert_eq!(FileRecord::volume_id_from_drive('?'), None);
+        assert_eq!(FileRecord::drive_from_volume_id(26), None);
+        assert_eq!(FileRecord::drive_from_volume_id(u16::MAX), None);
+    }
 }

@@ -145,17 +145,7 @@ impl CairnApp {
                 match outcome {
                     Ok(res) => match res {
                         Ok(envelope) => {
-                            this.service.is_service_connected = true;
-                            this.service.service_issue = None;
-                            this.service.has_attempted_silent_start = false;
-                            this.service.status.update_volumes(envelope.volumes);
-                            this.start_status_refresh(cx);
-                            // A connection probe must not replace the location the
-                            // person is reading; the bin does not need the index.
-                            if !this.recycle_bin.is_open() {
-                                this.trigger_search(cx);
-                            }
-                            this.refresh_content_status(cx);
+                            this.apply_service_connected(envelope.volumes, cx);
                         }
                         Err(e) => {
                             this.service.is_service_connected = false;
@@ -296,6 +286,25 @@ impl CairnApp {
         .detach();
     }
 
+    fn apply_service_connected(
+        &mut self,
+        volumes: Vec<VolumeStatusSummary>,
+        cx: &mut Context<Self>,
+    ) {
+        self.service.is_service_connected = true;
+        self.service.service_issue = None;
+        self.service.service_installed = true;
+        self.service.has_attempted_silent_start = false;
+        self.service.status.update_volumes(volumes);
+        self.start_status_refresh(cx);
+        // A connection probe must not replace the location the person is reading;
+        // the bin does not need the index.
+        if !self.recycle_bin.is_open() {
+            self.trigger_search(cx);
+        }
+        self.refresh_content_status(cx);
+    }
+
     fn service_issue_after_probe(&mut self) -> ServiceIssue {
         self.service.service_installed = crate::service::service_control::service_is_installed();
         if self.service.service_installed {
@@ -404,26 +413,10 @@ impl CairnApp {
             let _ = this.update(cx, |this: &mut CairnApp, cx| {
                 this.service.is_probing_service = false;
                 if let Ok(Ok(envelope)) = outcome {
-                    this.service.is_service_connected = true;
-                    this.service.service_issue = None;
-                    this.service.service_installed = true;
-                    this.service.has_attempted_silent_start = false;
-                    this.service.status.update_volumes(envelope.volumes);
-                    this.start_status_refresh(cx);
-                    if !this.recycle_bin.is_open() {
-                        this.trigger_search(cx);
-                    }
-                    this.refresh_content_status(cx);
+                    this.apply_service_connected(envelope.volumes, cx);
                 } else {
                     this.service.is_service_connected = false;
-                    this.service.service_installed =
-                        crate::service::service_control::service_is_installed();
-                    let issue = if this.service.service_installed {
-                        ServiceIssue::NotRunning
-                    } else {
-                        ServiceIssue::NotInstalled
-                    };
-                    this.service.service_issue = Some(issue);
+                    this.service.service_issue = Some(this.service_issue_after_probe());
                 }
                 cx.notify();
             });
