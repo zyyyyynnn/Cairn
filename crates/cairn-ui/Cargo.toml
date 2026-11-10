@@ -8,6 +8,8 @@ publish.workspace = true
 
 [dependencies]
 gpui-kit.workspace = true
+fluent-bundle.workspace = true
+unic-langid.workspace = true
 
 [dependencies.windows]
 workspace = true

@@ -1051,7 +1051,9 @@ dependencies = [
 name = "cairn-ui"
 version = "0.2.0"
 dependencies = [
+ "fluent-bundle",
  "gpui-kit",
+ "unic-langid",
  "windows 0.62.2",
 ]
 

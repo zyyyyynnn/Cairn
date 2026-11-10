@@ -5,16 +5,15 @@
 //! The installer's two Fluent bundles. The setup window follows the Windows UI language; it has no
 //! language selector of its own.
 
-use fluent_bundle::{FluentArgs, FluentBundle, FluentResource};
-use unic_langid::LanguageIdentifier;
+use cairn_ui::i18n::Messages;
+use fluent_bundle::FluentArgs;
 
 const ZH_CN_SOURCE: &str = include_str!("../locales/zh-CN.ftl");
 const EN_US_SOURCE: &str = include_str!("../locales/en-US.ftl");
 
 pub struct I18n {
     lang: String,
-    zh: FluentBundle<FluentResource>,
-    en: FluentBundle<FluentResource>,
+    messages: Messages,
 }
 
 impl I18n {
@@ -25,16 +24,7 @@ impl I18n {
             } else {
                 "en-US".to_string()
             },
-            zh: bundle("zh-CN", ZH_CN_SOURCE),
-            en: bundle("en-US", EN_US_SOURCE),
-        }
-    }
-
-    fn active(&self) -> &FluentBundle<FluentResource> {
-        if self.lang.starts_with("zh") {
-            &self.zh
-        } else {
-            &self.en
+            messages: Messages::new(ZH_CN_SOURCE, EN_US_SOURCE),
         }
     }
 
@@ -43,32 +33,14 @@ impl I18n {
     }
 
     pub fn format(&self, key: &str, args: &[(&str, &str)]) -> String {
-        let bundle = self.active();
-        let Some(message) = bundle.get_message(key) else {
-            return key.to_string();
-        };
-        let Some(pattern) = message.value() else {
-            return key.to_string();
-        };
         let mut fluent_args = FluentArgs::new();
         for (name, value) in args {
             fluent_args.set(*name, *value);
         }
-        let mut errors = Vec::new();
-        bundle
-            .format_pattern(pattern, Some(&fluent_args), &mut errors)
-            .to_string()
+        self.messages
+            .format(&self.lang, key, Some(&fluent_args))
+            .unwrap_or_else(|| key.to_string())
     }
-}
-
-fn bundle(lang: &str, source: &str) -> FluentBundle<FluentResource> {
-    let identifier: LanguageIdentifier = lang.parse().expect("supported locale identifier");
-    let resource = FluentResource::try_new(source.to_string()).expect("valid Fluent resource");
-    let mut bundle = FluentBundle::new(vec![identifier]);
-    bundle
-        .add_resource(resource)
-        .expect("one resource per bundle");
-    bundle
 }
 
 #[cfg(test)]

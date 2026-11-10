@@ -4,17 +4,16 @@
 
 //! Fluent i18n bundle manager with embedded zh-CN and en-US locales.
 
-use fluent_bundle::{FluentBundle, FluentResource};
+use cairn_ui::i18n::Messages;
+use fluent_bundle::FluentArgs;
 use std::sync::RwLock;
-use unic_langid::LanguageIdentifier;
 
-pub static ZH_CN_SOURCE: &str = include_str!("../../locales/zh-CN.ftl");
-pub static EN_US_SOURCE: &str = include_str!("../../locales/en-US.ftl");
+const ZH_CN_SOURCE: &str = include_str!("../../locales/zh-CN.ftl");
+const EN_US_SOURCE: &str = include_str!("../../locales/en-US.ftl");
 
 pub struct I18nManager {
     current_lang: RwLock<String>,
-    bundle_zh: FluentBundle<FluentResource>,
-    bundle_en: FluentBundle<FluentResource>,
+    messages: Messages,
 }
 
 impl Default for I18nManager {
@@ -25,20 +24,9 @@ impl Default for I18nManager {
 
 impl I18nManager {
     pub fn new(default_lang: &str) -> Self {
-        let lang_zh: LanguageIdentifier = "zh-CN".parse().unwrap();
-        let res_zh = FluentResource::try_new(ZH_CN_SOURCE.to_string()).unwrap();
-        let mut bundle_zh = FluentBundle::new(vec![lang_zh]);
-        bundle_zh.add_resource(res_zh).unwrap();
-
-        let lang_en: LanguageIdentifier = "en-US".parse().unwrap();
-        let res_en = FluentResource::try_new(EN_US_SOURCE.to_string()).unwrap();
-        let mut bundle_en = FluentBundle::new(vec![lang_en]);
-        bundle_en.add_resource(res_en).unwrap();
-
         Self {
             current_lang: RwLock::new(default_lang.to_string()),
-            bundle_zh,
-            bundle_en,
+            messages: Messages::new(ZH_CN_SOURCE, EN_US_SOURCE),
         }
     }
 
@@ -48,11 +36,15 @@ impl I18nManager {
         }
     }
 
+    fn language(&self) -> String {
+        self.current_lang.read().unwrap().clone()
+    }
+
     /// `true` when every active locale resolves `key` to a message. Used by the UI-07 regression
     /// tests so a state or command that gained a message id in code cannot ship untranslated.
     #[cfg(test)]
     pub fn has_key(&self, key: &str) -> bool {
-        self.bundle_zh.get_message(key).is_some() && self.bundle_en.get_message(key).is_some()
+        self.messages.has_message("zh-CN", key) && self.messages.has_message("en-US", key)
     }
 
     /// The `key` message as text in the language this manager currently speaks, or `None` when the
@@ -62,18 +54,7 @@ impl I18nManager {
     /// whitespace, is no name at all.
     #[cfg(test)]
     pub fn try_text(&self, key: &str) -> Option<String> {
-        let lang = self.current_lang.read().unwrap().clone();
-        let bundle = if lang.starts_with("zh") {
-            &self.bundle_zh
-        } else {
-            &self.bundle_en
-        };
-
-        let pattern = bundle.get_message(key)?.value()?;
-        let mut errors = vec![];
-        let text = bundle
-            .format_pattern(pattern, None, &mut errors)
-            .to_string();
+        let text = self.messages.value(&self.language(), key)?;
         if text.trim().is_empty() {
             None
         } else {
@@ -82,40 +63,14 @@ impl I18nManager {
     }
 
     pub fn get_text(&self, key: &str) -> String {
-        let lang = self.current_lang.read().unwrap().clone();
-        let bundle = if lang.starts_with("zh") {
-            &self.bundle_zh
-        } else {
-            &self.bundle_en
-        };
-
-        if let Some(msg) = bundle.get_message(key) {
-            if let Some(pattern) = msg.value() {
-                let mut errors = vec![];
-                let value = bundle.format_pattern(pattern, None, &mut errors);
-                return value.to_string();
-            }
-        }
-
-        key.to_string()
+        self.messages
+            .value(&self.language(), key)
+            .unwrap_or_else(|| key.to_string())
     }
 
-    pub fn get_text_with_args(&self, key: &str, args: &fluent_bundle::FluentArgs) -> String {
-        let lang = self.current_lang.read().unwrap().clone();
-        let bundle = if lang.starts_with("zh") {
-            &self.bundle_zh
-        } else {
-            &self.bundle_en
-        };
-
-        if let Some(msg) = bundle.get_message(key) {
-            if let Some(pattern) = msg.value() {
-                let mut errors = vec![];
-                let value = bundle.format_pattern(pattern, Some(args), &mut errors);
-                return value.to_string();
-            }
-        }
-
-        key.to_string()
+    pub fn get_text_with_args(&self, key: &str, args: &FluentArgs) -> String {
+        self.messages
+            .format(&self.language(), key, Some(args))
+            .unwrap_or_else(|| key.to_string())
     }
 }
