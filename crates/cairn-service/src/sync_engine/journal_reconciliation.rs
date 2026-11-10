@@ -29,18 +29,6 @@ pub fn catch_up_state(start_usn: i64, applied_usn: i64, tail_usn: i64) -> Volume
     VolumeState::CatchingUp(((done * 100 / total).min(99)) as u8)
 }
 
-/// State a live poll should report after applying a batch of changes that moved the volume from
-/// `previous_usn` to `next_usn`, given the journal tail read after that batch.
-///
-/// `None` means the poll has no new proof of freshness, so the volume keeps the state it had.
-pub fn live_state_after_poll(
-    previous_usn: i64,
-    next_usn: i64,
-    tail_usn: Option<i64>,
-) -> Option<VolumeState> {
-    tail_usn.map(|tail| catch_up_state(previous_usn, next_usn, tail))
-}
-
 /// Whether a volume in `state` should update its live synchronization state when a USN poll
 /// succeeds. Including [`VolumeState::Offline`] allows an ejected or temporarily disconnected
 /// volume to recover automatically to a live state once it reconnects and its USN journal
@@ -96,7 +84,7 @@ pub fn replay_usn_backlog(
         vol.path_cache.clear();
         vol.presorted_dirty = true;
     }
-    vol.status = catch_up_state(start_usn, vol.last_usn, tail_usn);
+    vol.status.reconcile(start_usn, vol.last_usn, tail_usn);
     Ok(())
 }
 
@@ -146,7 +134,7 @@ pub fn finalize_scanned_volume(
     let drive = vol.drive_letter;
     let Some((handle, t0)) = scan_start else {
         vol.usn_enabled = false;
-        vol.status = VolumeState::SnapshotMode;
+        vol.status.set(VolumeState::SnapshotMode);
         save_scanned_index(vol, index_dir);
         return Ok(());
     };
@@ -201,59 +189,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn live_poll_reports_catch_up_while_the_tail_is_ahead() {
-        assert_eq!(
-            live_state_after_poll(1000, 2000, Some(2001)),
-            Some(VolumeState::CatchingUp(99)),
-            "one byte of backlog is still a backlog, never Synced (IDX-07)"
-        );
-    }
-
-    #[test]
-    fn live_poll_keeps_the_previous_state_when_the_tail_is_unknown() {
-        assert_eq!(
-            live_state_after_poll(1000, 2000, None),
-            None,
-            "without a journal tail the poll cannot prove freshness"
-        );
-    }
-
-    #[test]
-    fn live_poll_at_the_journal_tail_is_synced() {
-        assert_eq!(
-            live_state_after_poll(1000, 2000, Some(2000)),
-            Some(VolumeState::Synced)
-        );
-    }
-
-    #[test]
-    fn an_empty_batch_at_the_real_tail_is_synced() {
-        assert_eq!(
-            live_state_after_poll(2000, 2000, Some(2000)),
-            Some(VolumeState::Synced),
-            "a caught-up volume whose journal read returned no records must still leave CatchingUp"
-        );
-    }
-
-    #[test]
-    fn an_empty_batch_with_a_real_backlog_stays_catching_up() {
-        assert_eq!(
-            live_state_after_poll(2000, 2000, Some(3000)),
-            Some(VolumeState::CatchingUp(0)),
-            "an empty read is not proof of freshness when the real tail is ahead"
-        );
-    }
-
-    #[test]
-    fn live_poll_tolerates_positions_moving_backwards() {
-        assert_eq!(
-            live_state_after_poll(2000, 1000, Some(1500)),
-            Some(VolumeState::CatchingUp(0))
-        );
-        assert_eq!(live_state_after_poll(2000, 1000, None), None);
-    }
-
-    #[test]
     fn offline_volume_is_trackable_for_live_recovery_and_device_removal_codes_are_recognized() {
         assert!(is_live_poll_trackable(VolumeState::Offline));
         assert!(is_live_poll_trackable(VolumeState::Synced));
@@ -284,7 +219,7 @@ mod tests {
         assert!(vol.last_usn >= t0);
         assert!(!vol.records.is_empty());
         assert!(matches!(
-            vol.status,
+            vol.status.state(),
             VolumeState::Synced | VolumeState::CatchingUp(_)
         ));
         assert_eq!(

@@ -5,7 +5,6 @@
 //! Post-scan decision machine: determines the terminal state of a volume that was rebuilt
 //! from a full MFT scan (IDX-05, IDX-07).
 
-use super::journal_reconciliation::catch_up_state;
 use super::VolumeIndex;
 use cairn_protocol::status::VolumeState;
 
@@ -15,8 +14,13 @@ pub enum PostScanDecision {
     /// The snapshot cannot be placed on a trustworthy journal timeline, so it is dropped and the
     /// volume is rebuilt rather than being served or persisted (IDX-05).
     Rebuild,
-    /// The snapshot may be served and its freshness is exactly the carried state (IDX-07).
-    Fresh(VolumeState),
+    /// The snapshot may be served; its freshness is the catch-up between the scan start and the
+    /// journal tail (IDX-07). A missing tail leaves catch-up to the polling loop.
+    Fresh {
+        scan_start_usn: i64,
+        applied_usn: i64,
+        tail_usn: Option<i64>,
+    },
 }
 
 /// Decides the terminal state of a volume that was rebuilt from a full MFT scan.
@@ -35,11 +39,12 @@ pub fn post_scan_decision(
         return PostScanDecision::Rebuild;
     }
     match (replayed_to, tail_usn) {
-        (Some(applied_usn), Some(tail_usn)) => {
-            PostScanDecision::Fresh(catch_up_state(scan_start_usn, applied_usn, tail_usn))
-        }
+        (Some(applied_usn), tail_usn) => PostScanDecision::Fresh {
+            scan_start_usn,
+            applied_usn,
+            tail_usn,
+        },
         (None, _) => PostScanDecision::Rebuild,
-        (Some(_), None) => PostScanDecision::Fresh(VolumeState::CatchingUp(0)),
     }
 }
 
@@ -51,11 +56,18 @@ pub fn apply_post_scan_decision(vol: &mut VolumeIndex, decision: PostScanDecisio
         PostScanDecision::Rebuild => {
             vol.clear();
             vol.usn_enabled = false;
-            vol.status = VolumeState::Rebuilding;
+            vol.status.set(VolumeState::Rebuilding);
             false
         }
-        PostScanDecision::Fresh(state) => {
-            vol.status = state;
+        PostScanDecision::Fresh {
+            scan_start_usn,
+            applied_usn,
+            tail_usn,
+        } => {
+            match tail_usn {
+                Some(tail_usn) => vol.status.reconcile(scan_start_usn, applied_usn, tail_usn),
+                None => vol.status.set(VolumeState::CatchingUp(0)),
+            }
             true
         }
     }
@@ -66,27 +78,36 @@ mod tests {
     use super::*;
     use cairn_ntfs::mft::ExtractedItem;
 
+    fn applied_state(decision: PostScanDecision) -> Option<VolumeState> {
+        let mut vol = VolumeIndex::new('C');
+        if apply_post_scan_decision(&mut vol, decision) {
+            Some(vol.status.state())
+        } else {
+            None
+        }
+    }
+
     #[test]
     fn test_post_scan_decision_only_syncs_at_the_journal_tail() {
         assert_eq!(
-            post_scan_decision(false, 1000, Some(2000), Some(2000)),
-            PostScanDecision::Fresh(VolumeState::Synced)
+            applied_state(post_scan_decision(false, 1000, Some(2000), Some(2000))),
+            Some(VolumeState::Synced)
         );
         assert_eq!(
-            post_scan_decision(false, 1000, Some(2500), Some(2000)),
-            PostScanDecision::Fresh(VolumeState::Synced)
+            applied_state(post_scan_decision(false, 1000, Some(2500), Some(2000))),
+            Some(VolumeState::Synced)
         );
         assert_eq!(
-            post_scan_decision(false, 1000, Some(1500), Some(2000)),
-            PostScanDecision::Fresh(VolumeState::CatchingUp(50))
+            applied_state(post_scan_decision(false, 1000, Some(1500), Some(2000))),
+            Some(VolumeState::CatchingUp(50))
         );
         assert_eq!(
-            post_scan_decision(false, 1000, Some(1999), Some(2000)),
-            PostScanDecision::Fresh(VolumeState::CatchingUp(99))
+            applied_state(post_scan_decision(false, 1000, Some(1999), Some(2000))),
+            Some(VolumeState::CatchingUp(99))
         );
         assert_eq!(
-            post_scan_decision(false, 1000, Some(1000), Some(2000)),
-            PostScanDecision::Fresh(VolumeState::CatchingUp(0))
+            applied_state(post_scan_decision(false, 1000, Some(1000), Some(2000))),
+            Some(VolumeState::CatchingUp(0))
         );
     }
 
@@ -107,8 +128,8 @@ mod tests {
             PostScanDecision::Rebuild
         );
         assert_eq!(
-            post_scan_decision(false, 1000, Some(1500), None),
-            PostScanDecision::Fresh(VolumeState::CatchingUp(0)),
+            applied_state(post_scan_decision(false, 1000, Some(1500), None)),
+            Some(VolumeState::CatchingUp(0)),
             "unknown post-scan tail leaves catch-up to the polling loop"
         );
     }
@@ -137,11 +158,11 @@ mod tests {
         assert!(apply_post_scan_decision(&mut vol, decision));
 
         assert_ne!(
-            vol.status,
+            vol.status.state(),
             VolumeState::Synced,
             "a snapshot with an open backlog is the exact IDX-07 violation this state machine forbids"
         );
-        assert!(matches!(vol.status, VolumeState::CatchingUp(_)));
+        assert!(matches!(vol.status.state(), VolumeState::CatchingUp(_)));
         assert_eq!(vol.records.len(), 1, "the partial index is still served");
         assert_eq!(
             vol.last_usn, 1500,

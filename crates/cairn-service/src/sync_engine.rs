@@ -121,14 +121,17 @@ pub mod content_pipeline;
 pub mod journal_reconciliation;
 pub mod post_scan;
 pub mod presorted;
+mod volume_status;
 
 pub use journal_reconciliation::*;
 pub use post_scan::*;
 
+use volume_status::VolumeStatus;
+
 pub struct VolumeIndex {
     pub drive_letter: char,
     pub volume_guid: String,
-    pub status: VolumeState,
+    status: VolumeStatus,
     pub(crate) records: Vec<FileRecord>,
     pub(crate) arena: NamePool,
     pub(crate) path_cache: DirectoryPathCache,
@@ -162,7 +165,7 @@ impl VolumeIndex {
         Self {
             drive_letter,
             volume_guid: format!("VOL_{}:", drive_letter),
-            status: VolumeState::Rebuilding,
+            status: VolumeStatus::rebuilding(),
             records: Vec::new(),
             arena: NamePool::default(),
             path_cache: DirectoryPathCache::new(),
@@ -354,7 +357,7 @@ impl VolumeIndex {
         // A snapshot by itself proves nothing about freshness: the journal position is only known
         // once the scan has been reconciled with the change journal. Until then the volume is
         // still being rebuilt, so no path can report it as in sync with data it never read.
-        self.status = VolumeState::Rebuilding;
+        self.status.set(VolumeState::Rebuilding);
     }
 
     /// Appends extracted items without discarding what the volume already holds. A scan
@@ -977,7 +980,7 @@ impl VolumeIndex {
         VolumeStatusSummary {
             drive_letter: self.drive_letter,
             volume_guid: self.volume_guid.clone(),
-            status: self.status,
+            status: self.status.state(),
             indexed_count: self.live_count,
             usn_enabled: self.usn_enabled,
         }
@@ -1282,7 +1285,7 @@ impl MultiVolumeEngine {
                                                 usn_data.next_usn
                                             );
                                             vol.clear();
-                                            vol.status = VolumeState::Rebuilding;
+                                            vol.status.set(VolumeState::Rebuilding);
                                             loaded_ok = false;
                                         } else if Self::backlog_is_too_large(
                                             vol.last_usn,
@@ -1294,7 +1297,7 @@ impl MultiVolumeEngine {
                                                 usn_data.next_usn.saturating_sub(vol.last_usn)
                                             );
                                             vol.clear();
-                                            vol.status = VolumeState::Rebuilding;
+                                            vol.status.set(VolumeState::Rebuilding);
                                             loaded_ok = false;
                                         } else {
                                             // Replay the change journal from the saved position up to
@@ -1325,7 +1328,7 @@ impl MultiVolumeEngine {
                                                         e
                                                     );
                                                     vol.clear();
-                                                    vol.status = VolumeState::Rebuilding;
+                                                    vol.status.set(VolumeState::Rebuilding);
                                                     loaded_ok = false;
                                                 }
                                             }
@@ -1337,7 +1340,7 @@ impl MultiVolumeEngine {
                                             d,
                                             e
                                         );
-                                        vol.status = VolumeState::SnapshotMode;
+                                        vol.status.set(VolumeState::SnapshotMode);
                                         vol.usn_enabled = false;
                                         loaded_ok = true;
                                     }
@@ -1350,21 +1353,21 @@ impl MultiVolumeEngine {
                                         d,
                                         e
                                     );
-                                    vol.status = VolumeState::Offline;
+                                    vol.status.set(VolumeState::Offline);
                                     loaded_ok = true;
                                 }
                             }
                         } else {
                             // The drive is not present anymore: the cached index can only be stale.
                             tracing::info!("Volume {} is no longer enumerated: marked Offline", d);
-                            vol.status = VolumeState::Offline;
+                            vol.status.set(VolumeState::Offline);
                             loaded_ok = true;
                         }
                         #[cfg(not(windows))]
                         {
                             // No change journal exists here, so the cached index is served as a
                             // snapshot whose freshness nobody has proven (IDX-07).
-                            vol.status = VolumeState::SnapshotMode;
+                            vol.status.set(VolumeState::SnapshotMode);
                             vol.usn_enabled = false;
                             loaded_ok = true;
                         }
@@ -1376,13 +1379,13 @@ impl MultiVolumeEngine {
                             e
                         );
                         vol.clear();
-                        vol.status = VolumeState::Rebuilding;
+                        vol.status.set(VolumeState::Rebuilding);
                         loaded_ok = false;
                     }
                 }
             }
 
-            if !loaded_ok && vol.status != VolumeState::Offline {
+            if !loaded_ok && vol.status.state() != VolumeState::Offline {
                 let mut scan_succeeded = false;
                 #[cfg(windows)]
                 {
@@ -1417,7 +1420,7 @@ impl MultiVolumeEngine {
                 // reported as fresh data (IDX-05, IDX-07).
                 if !scan_succeeded {
                     vol.clear();
-                    vol.status = VolumeState::Rebuilding;
+                    vol.status.set(VolumeState::Rebuilding);
                 }
             }
 
@@ -1742,7 +1745,7 @@ impl MultiVolumeEngine {
             let vols = self.volumes.read().unwrap();
             let cfg = self.config.read().unwrap();
             vols.values()
-                .filter(|v| v.status == VolumeState::SnapshotMode)
+                .filter(|v| v.status.state() == VolumeState::SnapshotMode)
                 .map(|v| v.drive_letter)
                 .filter(|d| {
                     !cfg.excluded_drives
@@ -1765,8 +1768,8 @@ impl MultiVolumeEngine {
         let previous = {
             let mut volumes = self.volumes.write().unwrap();
             let volume = volumes.get_mut(&drive)?;
-            let previous = volume.status;
-            volume.status = VolumeState::Rebuilding;
+            let previous = volume.status.state();
+            volume.status.set(VolumeState::Rebuilding);
             previous
         };
         self.set_cached_summary_status(drive, VolumeState::Rebuilding);
@@ -1776,7 +1779,7 @@ impl MultiVolumeEngine {
     #[cfg(windows)]
     fn restore_volume_status(&self, drive: char, status: VolumeState) {
         if let Some(volume) = self.volumes.write().unwrap().get_mut(&drive) {
-            volume.status = status;
+            volume.status.restore(status);
         }
         self.set_cached_summary_status(drive, status);
     }
@@ -1924,7 +1927,7 @@ impl MultiVolumeEngine {
     pub fn is_catching_up(&self) -> bool {
         self.volumes.read().unwrap().values().any(|volume| {
             matches!(
-                volume.status,
+                volume.status.state(),
                 VolumeState::CatchingUp(_) | VolumeState::Rebuilding
             )
         })
@@ -1957,12 +1960,12 @@ impl MultiVolumeEngine {
                     // definition, so it must not stay reported as Synced (IDX-07).
                     let mut lock = self.volumes.write().unwrap();
                     if let Some(vol) = lock.get_mut(&drive) {
-                        if vol.status != VolumeState::Offline {
+                        if vol.status.state() != VolumeState::Offline {
                             tracing::info!(
                                 "Volume {} disappeared from the system: marked Offline",
                                 drive
                             );
-                            vol.status = VolumeState::Offline;
+                            vol.status.set(VolumeState::Offline);
                         }
                     }
                     continue;
@@ -1988,13 +1991,13 @@ impl MultiVolumeEngine {
                     {
                         let mut lock = self.volumes.write().unwrap();
                         if let Some(vol) = lock.get_mut(&drive) {
-                            if vol.status != VolumeState::Offline {
+                            if vol.status.state() != VolumeState::Offline {
                                 tracing::info!(
                                     "Volume {} open failed with Win32 error {:#x}: marked Offline",
                                     drive,
                                     code
                                 );
-                                vol.status = VolumeState::Offline;
+                                vol.status.set(VolumeState::Offline);
                             }
                         }
                         continue;
@@ -2010,7 +2013,7 @@ impl MultiVolumeEngine {
                         {
                             let mut lock = self.volumes.write().unwrap();
                             if let Some(vol) = lock.get_mut(&drive) {
-                                vol.status = VolumeState::Offline;
+                                vol.status.set(VolumeState::Offline);
                             }
                             continue;
                         }
@@ -2038,12 +2041,8 @@ impl MultiVolumeEngine {
                                 // Mark dirty; do NOT synchronously rebuild PresortedIndices under write lock (SPEC SM-4, QRY-05)
                                 vol.presorted_dirty = true;
                             }
-                            if is_live_poll_trackable(vol.status) {
-                                if let Some(state) =
-                                    live_state_after_poll(previous_usn, next_usn, tail_usn)
-                                {
-                                    vol.status = state;
-                                }
+                            if is_live_poll_trackable(vol.status.state()) {
+                                vol.status.reconcile_poll(previous_usn, next_usn, tail_usn);
                             }
                         }
                     }
@@ -2052,13 +2051,13 @@ impl MultiVolumeEngine {
                     {
                         let mut lock = self.volumes.write().unwrap();
                         if let Some(vol) = lock.get_mut(&drive) {
-                            if vol.status != VolumeState::Offline {
+                            if vol.status.state() != VolumeState::Offline {
                                 tracing::info!(
                                     "USN read on drive {}: failed with device error {:#x}: marked Offline",
                                     drive,
                                     code
                                 );
-                                vol.status = VolumeState::Offline;
+                                vol.status.set(VolumeState::Offline);
                             }
                         }
                     }
@@ -2229,7 +2228,7 @@ impl MultiVolumeEngine {
                     let Some(vol) = lock.get(&drive_letter) else {
                         continue;
                     };
-                    if !vol.status.is_synced() && vol.records.is_empty() {
+                    if !vol.status.state().is_synced() && vol.records.is_empty() {
                         continue;
                     }
                     let Some(indices) = vol.frn_to_idx.get(&hit.frn) else {
@@ -2383,7 +2382,7 @@ impl MultiVolumeEngine {
                     {
                         continue;
                     }
-                    if !vol.status.is_synced() && vol.records.is_empty() {
+                    if !vol.status.state().is_synced() && vol.records.is_empty() {
                         continue;
                     }
                     let matcher = |term: &str, frn: u64| {
@@ -2458,7 +2457,7 @@ impl MultiVolumeEngine {
                     {
                         return false;
                     }
-                    v.status.is_synced() || !v.records.is_empty()
+                    v.status.state().is_synced() || !v.records.is_empty()
                 })
                 .collect();
 
@@ -3235,7 +3234,7 @@ mod tests {
         vol.journal_id = 9;
         vol.volume_serial = 42;
         vol.usn_enabled = false;
-        vol.status = VolumeState::CatchingUp(50);
+        vol.status.set(VolumeState::CatchingUp(50));
         assert_eq!(vol.records.len(), 10);
 
         // 2, 4, 7 and 8 are service data (7 is also a tombstone); 9 and 6 are tombstones. 10's
@@ -3258,7 +3257,7 @@ mod tests {
         assert_eq!(vol.journal_id, 9);
         assert_eq!(vol.volume_serial, 42);
         assert!(!vol.usn_enabled);
-        assert_eq!(vol.status, VolumeState::CatchingUp(50));
+        assert_eq!(vol.status.state(), VolumeState::CatchingUp(50));
         assert!(!vol.presorted_dirty);
         assert_eq!(vol.presorted.by_name.len(), 4);
 
@@ -3779,7 +3778,7 @@ mod tests {
         );
 
         // Must be marked Rebuilding with records wiped (never Synced with stale data)
-        assert_eq!(vol.status, VolumeState::Rebuilding);
+        assert_eq!(vol.status.state(), VolumeState::Rebuilding);
         assert_eq!(vol.records.len(), 0);
         assert_eq!(vol.arena.len(), 0);
     }
@@ -3829,60 +3828,6 @@ mod tests {
             ts: 300,
         });
         assert_eq!(vol.records.len(), 2);
-    }
-
-    #[test]
-    fn test_full_scan_paths_can_only_reach_synced_through_journal_reconciliation() {
-        let src = include_str!("sync_engine.rs");
-        let production = &src[..src.find("#[cfg(test)]").expect("unit test module")];
-        let recon_src = include_str!("sync_engine/journal_reconciliation.rs");
-        let recon_prod = &recon_src[..recon_src.find("#[cfg(test)]").unwrap_or(recon_src.len())];
-
-        // `catch_up_state` is the one producer of `Synced` and the polling loop only recognises it.
-        // A third mention means some path declared itself fresh without a journal position.
-        let total_synced_count = production.matches("VolumeState::Synced").count()
-            + recon_prod.matches("VolumeState::Synced").count();
-        assert_eq!(
-            total_synced_count, 2,
-            "`Synced` may only be handed out by catch_up_state and matched by the polling gate"
-        );
-
-        for entry_point in [
-            "if !loaded_ok && vol.status != VolumeState::Offline",
-            "pub fn rescan_volume(",
-        ] {
-            let body = body_of(src, entry_point);
-            assert!(
-                !body.contains("VolumeState::Synced"),
-                "{entry_point} is assigning a terminal state itself instead of reconciling"
-            );
-            assert!(
-                body.contains("finalize_scanned_volume"),
-                "{entry_point} must hand its scan result to the journal reconciliation"
-            );
-        }
-    }
-
-    /// Byte slice from the first `{` after `needle` up to its matching closing brace.
-    fn body_of<'a>(src: &'a str, needle: &str) -> &'a str {
-        let start = src
-            .find(needle)
-            .unwrap_or_else(|| panic!("`{needle}` is gone from sync_engine.rs"));
-        let open = start + src[start..].find('{').expect("an opening brace");
-        let mut depth = 0usize;
-        for (offset, ch) in src[open..].char_indices() {
-            match ch {
-                '{' => depth += 1,
-                '}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return &src[open..open + offset + 1];
-                    }
-                }
-                _ => {}
-            }
-        }
-        panic!("unterminated body after `{needle}`");
     }
 
     #[test]
@@ -4158,7 +4103,7 @@ mod tests {
         }]);
 
         // Downgrade to SnapshotMode (IDX-08)
-        vol.status = VolumeState::SnapshotMode;
+        vol.status.set(VolumeState::SnapshotMode);
         vol.usn_enabled = false;
 
         engine.add_volume(vol);
@@ -4767,7 +4712,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let engine = MultiVolumeEngine::with_index_dir_and_drives(temp.path(), Vec::new());
         let mut volume = VolumeIndex::new('C');
-        volume.status = VolumeState::Synced;
+        volume.status.reconcile(0, 0, 0);
         engine.add_volume(volume);
         let _ = engine.get_volume_summaries();
 
