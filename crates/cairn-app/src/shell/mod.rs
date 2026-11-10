@@ -8,6 +8,7 @@
 //! bar views.
 
 pub(crate) mod accessibility;
+pub(crate) mod bin_commands;
 pub(crate) mod command_groups;
 pub(crate) mod commands;
 pub(crate) mod dialogs;
@@ -19,9 +20,11 @@ pub(crate) mod motion;
 pub(crate) mod nav_history;
 pub(crate) mod os;
 pub(crate) mod perf;
+pub(crate) mod query_edit;
 pub(crate) mod recycle_bin;
 pub(crate) mod reveal;
 pub(crate) mod settings;
+pub(crate) mod settings_actions;
 pub(crate) mod sidebar_view;
 pub(crate) mod state_view;
 pub(crate) mod status_bar;
