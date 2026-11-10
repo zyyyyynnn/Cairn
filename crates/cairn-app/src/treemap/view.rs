@@ -518,7 +518,7 @@ impl CairnApp {
 
     /// Loads the Treemap for `scan_path` from the service's live index.
     ///
-    /// The cached volume index and the stored drive tree are consulted before
+    /// The stored drive tree and the cached directory trees are consulted before
     /// this call. A path they do not hold is answered by one pipe round-trip;
     /// when the service cannot answer, the canvas reports the directory as
     /// unavailable rather than scanning the disk itself.

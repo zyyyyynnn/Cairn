@@ -294,7 +294,8 @@ impl TreemapViewState {
             }
         }
 
-        // 3. The service's live index has to answer before the canvas can draw.        self.root_tree = None;
+        // 3. The service's live index has to answer before the canvas can draw.
+        self.root_tree = None;
         self.layout_nodes.clear();
         self.content_revealed = false;
         self.current_dir_total_size = 0;

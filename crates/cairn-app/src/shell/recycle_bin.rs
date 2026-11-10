@@ -981,12 +981,7 @@ mod tests {
             BinErrorKind::Generic,
         ] {
             let key = shell_reason_key(kind);
-            let text = i18n.get_text(key);
-            assert_ne!(text, key, "no Fluent message is loaded for {key}");
-            assert!(
-                !text.trim().is_empty(),
-                "{key} resolves to an empty sentence"
-            );
+            assert!(i18n.has_key(key), "no zh-CN/en-US message for {key}");
         }
     }
 

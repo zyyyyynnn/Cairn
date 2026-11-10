@@ -3,8 +3,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Volume status transitions. The journal ledger's catch-up is the only path that can produce
-//! `Synced`; every other transition goes through [`VolumeStatus::set`], which rejects it, so no
-//! scan, poll or recovery path can hand-pick freshness without a journal position.
+//! `Synced`; every newly chosen state goes through [`VolumeStatus::set`], which rejects it, so no
+//! scan, poll or recovery path can hand-pick freshness without a journal position. [`VolumeStatus::restore`]
+//! only rolls back a state the volume already held.
 
 use super::journal_reconciliation::catch_up_state;
 use cairn_protocol::status::VolumeState;

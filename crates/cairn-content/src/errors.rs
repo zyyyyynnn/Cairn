@@ -64,6 +64,11 @@ mod tests {
     #[test]
     fn tantivy_variants_expose_the_os_code_hidden_from_the_source_chain() {
         let io_wrapped = TantivyError::IoError(io_error(32));
+        assert_eq!(
+            io_wrapped.source().and_then(io_code_from_source),
+            None,
+            "the chain must lose the code for this test to prove anything"
+        );
         assert_eq!(raw_os_error(&io_wrapped), Some(32));
 
         let lock_wrapped = TantivyError::LockFailure(
@@ -78,6 +83,17 @@ mod tests {
         });
         assert_eq!(raw_os_error(&directory_wrapped), Some(5));
 
+        let temp_dir_wrapped = TantivyError::OpenDirectoryError(
+            OpenDirectoryError::FailedToCreateTempDir(io_error(5)),
+        );
+        assert_eq!(raw_os_error(&temp_dir_wrapped), Some(5));
+
+        let read_wrapped = TantivyError::OpenReadError(OpenReadError::IoError {
+            io_error: io_error(32),
+            filepath: PathBuf::from("segment.meta"),
+        });
+        assert_eq!(raw_os_error(&read_wrapped), Some(32));
+
         let write_wrapped = TantivyError::OpenWriteError(OpenWriteError::IoError {
             io_error: io_error(32),
             filepath: PathBuf::from("segment.meta"),
@@ -89,6 +105,14 @@ mod tests {
             None,
             "a busy lock carries no OS code"
         );
+    }
+
+    /// What a plain source-chain walk can still see, used to prove the Tantivy variants hide the
+    /// code from it.
+    fn io_code_from_source(error: &(dyn Error + 'static)) -> Option<i32> {
+        error
+            .downcast_ref::<io::Error>()
+            .and_then(io::Error::raw_os_error)
     }
 
     #[test]
