@@ -700,11 +700,15 @@ pub fn trim_working_set() {}
 /// Hides the main Cairn window to the system tray and aggressively trims the process working set.
 #[cfg(windows)]
 pub fn hide_main_window() {
-    use windows::core::w;
+    use windows::core::PCWSTR;
     use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, ShowWindow, SW_HIDE};
 
+    let title: Vec<u16> = crate::WINDOW_TITLE
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
     unsafe {
-        if let Ok(hwnd) = FindWindowW(None, w!("Cairn")) {
+        if let Ok(hwnd) = FindWindowW(None, PCWSTR(title.as_ptr())) {
             if !hwnd.0.is_null() {
                 let _ = ShowWindow(hwnd, SW_HIDE);
                 trim_working_set();

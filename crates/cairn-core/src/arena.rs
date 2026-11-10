@@ -18,6 +18,35 @@ pub struct NamePool {
     folded_arena: Vec<u8>,
 }
 
+/// Appends the case-folded form of `text`. A character whose lowercase form changes the UTF-8
+/// byte length keeps its original bytes, so the result stays one byte per original byte and
+/// arena offsets remain aligned between the original and folded copies.
+fn fold_append(text: &str, folded: &mut Vec<u8>) {
+    if text.is_ascii() {
+        let start = folded.len();
+        folded.extend_from_slice(text.as_bytes());
+        folded[start..].make_ascii_lowercase();
+        return;
+    }
+    for ch in text.chars() {
+        if ch.is_ascii() {
+            folded.push(ch.to_ascii_lowercase() as u8);
+        } else {
+            let ch_len = ch.len_utf8();
+            let lower_count: usize = ch.to_lowercase().map(|c| c.len_utf8()).sum();
+            if lower_count == ch_len {
+                for lower_ch in ch.to_lowercase() {
+                    let mut buf = [0u8; 4];
+                    folded.extend_from_slice(lower_ch.encode_utf8(&mut buf).as_bytes());
+                }
+            } else {
+                let mut buf = [0u8; 4];
+                folded.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+            }
+        }
+    }
+}
+
 impl NamePool {
     /// Exposes raw internal byte slices for persistence.
     pub fn raw_parts(&self) -> (&[u8], &[u8]) {
@@ -64,35 +93,7 @@ impl NamePool {
         let slice = valid_str.as_bytes();
 
         self.arena.extend_from_slice(slice);
-
-        // Fast path for ASCII filenames (overwhelming majority on Windows)
-        if valid_str.is_ascii() {
-            let prev_folded_len = self.folded_arena.len();
-            self.folded_arena.extend_from_slice(slice);
-            self.folded_arena[prev_folded_len..].make_ascii_lowercase();
-        } else {
-            // Append case-folded characters ensuring exact byte length alignment
-            for ch in valid_str.chars() {
-                if ch.is_ascii() {
-                    self.folded_arena.push(ch.to_ascii_lowercase() as u8);
-                } else {
-                    let ch_len = ch.len_utf8();
-                    let lower_count: usize = ch.to_lowercase().map(|c| c.len_utf8()).sum();
-                    if lower_count == ch_len {
-                        for lower_ch in ch.to_lowercase() {
-                            let mut lower_buf = [0u8; 4];
-                            self.folded_arena
-                                .extend_from_slice(lower_ch.encode_utf8(&mut lower_buf).as_bytes());
-                        }
-                    } else {
-                        // If Unicode lowercase changes byte length, preserve original character bytes
-                        let mut orig_buf = [0u8; 4];
-                        self.folded_arena
-                            .extend_from_slice(ch.encode_utf8(&mut orig_buf).as_bytes());
-                    }
-                }
-            }
-        }
+        fold_append(valid_str, &mut self.folded_arena);
         debug_assert_eq!(self.arena.len(), self.folded_arena.len());
 
         // Calculate extension offset
@@ -106,30 +107,8 @@ impl NamePool {
 
     /// Folds a search query using the identical Unicode folding strategy as `insert`.
     pub fn fold_query_bytes(query: &str) -> Vec<u8> {
-        if query.is_ascii() {
-            let mut out = query.as_bytes().to_vec();
-            out.make_ascii_lowercase();
-            return out;
-        }
-
         let mut out = Vec::with_capacity(query.len());
-        for ch in query.chars() {
-            if ch.is_ascii() {
-                out.push(ch.to_ascii_lowercase() as u8);
-            } else {
-                let ch_len = ch.len_utf8();
-                let lower_count: usize = ch.to_lowercase().map(|c| c.len_utf8()).sum();
-                if lower_count == ch_len {
-                    for lower_ch in ch.to_lowercase() {
-                        let mut buf = [0u8; 4];
-                        out.extend_from_slice(lower_ch.encode_utf8(&mut buf).as_bytes());
-                    }
-                } else {
-                    let mut buf = [0u8; 4];
-                    out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
-                }
-            }
-        }
+        fold_append(query, &mut out);
         out
     }
 

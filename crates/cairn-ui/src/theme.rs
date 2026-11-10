@@ -554,27 +554,35 @@ fn apply_danger_button_palette(theme: &mut Theme) {
 /// in a second edit against the palette the mode switch just installed.
 pub fn apply_appearance(dark: bool, zoom: f32, cx: &mut App) {
     crate::brand::init_fonts(cx);
-    set_mode(dark, cx);
-    settle_overlay(dark, cx);
+    switch_mode(dark, cx);
     Theme::update(cx, |theme| {
         theme.font_size = px(BASE_FONT_PX * clamp_zoom(zoom));
         theme.focus_ring = false;
         theme.radius = RADIUS;
         theme.radius_lg = RADIUS;
     });
-    raise_failing_ink(cx);
-    strengthen_ghost_hover(cx);
-    paint_danger_button(cx);
+    settle_roles(cx);
 }
 
 /// Switches the light or dark palette and returns the value to persist.
 pub fn set_dark_mode(dark: bool, cx: &mut App) -> bool {
+    switch_mode(dark, cx);
+    settle_roles(cx);
+    dark
+}
+
+/// Installs the mode's palette and the overlay layer that belongs to it.
+fn switch_mode(dark: bool, cx: &mut App) {
     set_mode(dark, cx);
     settle_overlay(dark, cx);
+}
+
+/// Re-derives the role colors the mode switch cannot carry: the ink floor, ghost hover and the
+/// danger fill are computed from the palette that just landed.
+fn settle_roles(cx: &mut App) {
     raise_failing_ink(cx);
     strengthen_ghost_hover(cx);
     paint_danger_button(cx);
-    dark
 }
 
 /// The dialog's raised surface. Light keeps the page white; dark uses the frame step so the modal

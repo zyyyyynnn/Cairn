@@ -172,18 +172,21 @@ impl CairnClient {
     }
 
     fn handshake_error(code: u32, message: &str) -> ClientError {
+        Self::service_error(code, message.to_string())
+    }
+
+    /// The one code-to-error mapping both the handshake and the reply envelope use.
+    fn service_error(code: u32, message: String) -> ClientError {
         match code {
             ERROR_CODE_PROTOCOL_VERSION_MISMATCH | ERROR_CODE_HANDSHAKE_REQUIRED => {
-                ClientError::HandshakeRejected {
-                    message: message.to_string(),
-                }
+                ClientError::HandshakeRejected { message }
             }
-            ERROR_CODE_UNAUTHORIZED | ERROR_CODE_ADMIN_ONLY_QUERY => ClientError::Unauthorized {
-                message: message.to_string(),
-            },
-            _ => ClientError::ServerProtocolError {
-                code,
-                message: message.to_string(),
+            ERROR_CODE_UNAUTHORIZED | ERROR_CODE_ADMIN_ONLY_QUERY => {
+                ClientError::Unauthorized { message }
+            }
+            other => ClientError::ServerProtocolError {
+                code: other,
+                message,
             },
         }
     }
@@ -191,18 +194,7 @@ impl CairnClient {
     /// Turns a service denial payload into a typed error, leaving successful payloads alone.
     fn unwrap_service_error(payload: ResponsePayload) -> Result<ResponsePayload, ClientError> {
         match payload {
-            ResponsePayload::Error { code, message } => Err(match code {
-                ERROR_CODE_UNAUTHORIZED | ERROR_CODE_ADMIN_ONLY_QUERY => {
-                    ClientError::Unauthorized { message }
-                }
-                ERROR_CODE_PROTOCOL_VERSION_MISMATCH | ERROR_CODE_HANDSHAKE_REQUIRED => {
-                    ClientError::HandshakeRejected { message }
-                }
-                other => ClientError::ServerProtocolError {
-                    code: other,
-                    message,
-                },
-            }),
+            ResponsePayload::Error { code, message } => Err(Self::service_error(code, message)),
             other => Ok(other),
         }
     }

@@ -18,6 +18,9 @@ mod win32;
 use app::CairnApp;
 use gpui_kit::gpui::*;
 
+/// The window title. Single-instance activation and tray hiding match by this exact text.
+pub(crate) const WINDOW_TITLE: &str = "Cairn";
+
 #[cfg(windows)]
 fn activate_existing_cairn_window() -> bool {
     use windows::core::BOOL;
@@ -38,7 +41,7 @@ fn activate_existing_cairn_window() -> bool {
         let title_len = GetWindowTextW(hwnd, &mut title_buf);
         if title_len > 0 {
             let title = String::from_utf16_lossy(&title_buf[..title_len as usize]);
-            if title == "Cairn" {
+            if title == WINDOW_TITLE {
                 ctx.found = Some(hwnd);
                 return BOOL(0);
             }
@@ -204,7 +207,7 @@ fn main() {
             let base = gpui_kit::component::TitleBar::window_options();
             let window_options = WindowOptions {
                 titlebar: Some(TitlebarOptions {
-                    title: Some("Cairn".into()),
+                    title: Some(WINDOW_TITLE.into()),
                     ..base.titlebar.unwrap_or_default()
                 }),
                 // Centered rather than at (0, 0): a top-left origin pushes the status line under
