@@ -1026,6 +1026,7 @@ dependencies = [
 name = "cairn-setup"
 version = "0.2.0"
 dependencies = [
+ "cairn-protocol",
  "cairn-ui",
  "crc32fast",
  "fluent-bundle",
@@ -9488,10 +9489,10 @@ dependencies = [
  "cairn-service",
  "cairn-setup",
  "clap",
- "crc32fast",
  "rayon",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "tempfile",
  "thiserror 2.0.21",
  "toml 1.2.0+spec-1.1.0",

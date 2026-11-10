@@ -11,6 +11,7 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::registry::{read_hklm_string, subkeys, wide};
+use cairn_protocol::message::SERVICE_NAME;
 
 use windows::core::{BOOL, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
@@ -787,7 +788,6 @@ fn user_profiles() -> Vec<(String, PathBuf)> {
     profiles
 }
 
-const SERVICE_NAME: &str = "CairnService";
 const ENVIRONMENT_KEY: &str = r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment";
 
 /// Removes the leftover registration of a Cairn entry whose MSI product record is gone. The ARP
@@ -1101,7 +1101,7 @@ pub fn run_install_dir_cleanup(install_dir: &Path, wait_pid: u32) {
     schedule_self_delete();
 }
 
-const PRODUCT_FILES: [&str; 6] = [
+pub const PRODUCT_FILES: [&str; 6] = [
     "Cairn.exe",
     "CairnService.exe",
     "CairnCli.exe",

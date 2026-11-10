@@ -27,7 +27,10 @@ pub mod run;
 pub(crate) mod view;
 
 /// The product upgrade code the MSI and the uninstaller agree on.
-pub(crate) const MSI_UPGRADE_CODE: &str = "4C65A8E1-7F89-4D12-9A4B-3D8F42D8E6C0";
+pub const MSI_UPGRADE_CODE: &str = "4C65A8E1-7F89-4D12-9A4B-3D8F42D8E6C0";
+
+/// The six installed product executables; the packaging step and the uninstaller share the list.
+pub use platform::PRODUCT_FILES;
 
 /// The product version this setup binary installs.
 pub(crate) const PRODUCT_VERSION: &str = env!("CARGO_PKG_VERSION");

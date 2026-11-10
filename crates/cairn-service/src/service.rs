@@ -5,6 +5,7 @@
 //! Windows Service dispatcher and background lifecycle controller.
 
 use crate::startup::ServiceRuntime;
+use cairn_protocol::message::SERVICE_NAME;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -18,8 +19,6 @@ use windows_service::{
     service_control_handler::{self, ServiceControlHandlerResult, ServiceStatusHandle},
     service_dispatcher,
 };
-
-pub const SERVICE_NAME: &str = "CairnService";
 
 /// Time allowed by the SCM for the service to report the next checkpoint.
 const START_WAIT_HINT: Duration = Duration::from_secs(3);

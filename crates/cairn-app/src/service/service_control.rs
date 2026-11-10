@@ -12,7 +12,7 @@
 use crate::service::elevation::{run_elevated_self, ElevationError};
 
 /// The name the service is registered under. This is the one place the name is written down.
-pub const SERVICE_NAME: &str = "CairnService";
+pub use cairn_protocol::message::SERVICE_NAME;
 
 /// The single argument that turns this process into the elevated start command.
 pub const START_SERVICE_FLAG: &str = "--start-service";
