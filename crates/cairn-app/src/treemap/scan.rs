@@ -10,10 +10,10 @@ use crate::search::filters::FilterCategory;
 use crate::service::ipc_tasks::get_tokio_runtime;
 use crate::shell::os::open_file;
 use crate::shell::status_bar::format_count;
-use crate::treemap::navigation::same_directory;
 use crate::treemap::state::{
     next_tree_request_epoch, tree_unavailable_from_code, TreemapUnavailable, TreemapViewState,
 };
+use cairn_core::treemap::same_directory;
 use cairn_protocol::message::{ResponsePayload, MAX_TREE_DEPTH};
 use fluent_bundle::FluentArgs;
 use gpui_kit::gpui::*;
@@ -206,62 +206,32 @@ impl CairnApp {
         {
             return;
         }
-        let scan_target = if let Some(ref mut st) = self.treemap_state {
-            st.drill_down(target_path)
-        } else {
-            None
-        };
-        if let Some(path) = scan_target {
-            self.start_treemap_scan(path, cx);
-        } else {
-            self.arm_treemap_scan_fade_cleanup(cx);
-        }
-        self.focus_treemap_canvas(window, cx);
-        cx.notify();
+        self.navigate_treemap(|st| st.drill_down(target_path), window, cx);
     }
 
     /// Moves to the parent directory as a history step. At the drive root the
     /// control is disabled and this does nothing.
     pub fn treemap_drill_up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.cancel_treemap_path_edit(window, cx);
-        let scan_target = if let Some(ref mut st) = self.treemap_state {
-            st.drill_up()
-        } else {
-            None
-        };
-        if let Some(path) = scan_target {
-            self.start_treemap_scan(path, cx);
-        } else {
-            self.arm_treemap_scan_fade_cleanup(cx);
-        }
-        self.focus_treemap_canvas(window, cx);
-        cx.notify();
+        self.navigate_treemap(TreemapViewState::drill_up, window, cx);
     }
 
     /// Returns to the directory most recently left by any drill step.
     pub fn treemap_drill_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.cancel_treemap_path_edit(window, cx);
-        let scan_target = if let Some(ref mut st) = self.treemap_state {
-            st.drill_back()
-        } else {
-            None
-        };
-        if let Some(path) = scan_target {
-            self.start_treemap_scan(path, cx);
-        } else {
-            self.arm_treemap_scan_fade_cleanup(cx);
-        }
-        self.focus_treemap_canvas(window, cx);
-        cx.notify();
+        self.navigate_treemap(TreemapViewState::drill_back, window, cx);
     }
 
     pub fn treemap_drill_forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.navigate_treemap(TreemapViewState::drill_forward, window, cx);
+    }
+
+    fn navigate_treemap(
+        &mut self,
+        step: impl FnOnce(&mut TreemapViewState) -> Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.cancel_treemap_path_edit(window, cx);
-        let scan_target = if let Some(ref mut st) = self.treemap_state {
-            st.drill_forward()
-        } else {
-            None
-        };
+        let scan_target = self.treemap_state.as_mut().and_then(step);
         if let Some(path) = scan_target {
             self.start_treemap_scan(path, cx);
         } else {

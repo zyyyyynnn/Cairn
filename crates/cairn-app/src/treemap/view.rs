@@ -13,7 +13,6 @@ use crate::shell::state_view::{icon_action, render_state_band};
 use crate::shell::status_bar::format_count;
 use crate::shell::theme::{self, ShellTokens};
 use crate::treemap::context_menu::{build_block_context_menu, build_context_menu};
-use crate::treemap::navigation::path_is_within;
 use crate::treemap::paint::{
     inset_device_pixels, painted_gutter_device, snap_rect_to_device_pixels, text_width,
     TREEMAP_RADIUS, TREEMAP_TILE_INSET,
@@ -23,7 +22,8 @@ use crate::treemap::state::TreemapUnavailable;
 use crate::treemap::zoom::TreemapViewport;
 use cairn_core::format_size_bytes;
 use cairn_core::treemap::{
-    aggregate_parent_path, FileKind, NestedTreemapLayoutNode, TreemapCategory, TreemapRect,
+    aggregate_parent_path, path_is_within, FileKind, NestedTreemapLayoutNode, TreemapCategory,
+    TreemapRect,
 };
 use fluent_bundle::FluentArgs;
 use gpui_kit::assets::IconName;
@@ -104,10 +104,18 @@ impl CairnApp {
             + f32::from(theme::rem(window) * layout::STATUS_HEIGHT)
             + band_height;
         let avail_h = (f32::from(window_bounds.size.height) - chrome_h - panel_margin).max(100.0);
-        let canvas_origin = (
+        let fallback_origin = (
             sidebar_width + panel_margin,
             f32::from(layout::TITLE_BAR_HEIGHT) + band_height,
         );
+        let canvas_bounds = state.painted_canvas_bounds.clone();
+        let canvas_origin = canvas_bounds
+            .get()
+            .filter(|bounds| {
+                f32::from(bounds.size.width) > 0.0 && f32::from(bounds.size.height) > 0.0
+            })
+            .map(|bounds| (f32::from(bounds.origin.x), f32::from(bounds.origin.y)))
+            .unwrap_or(fallback_origin);
         let canvas_size = (avail_w, avail_h);
         let window_size = (
             f32::from(window_bounds.size.width),
@@ -419,6 +427,17 @@ impl CairnApp {
                     _ => {}
                 }
             }))
+            .child({
+                let bounds_cell = canvas_bounds.clone();
+                canvas(
+                    |_, _, _| {},
+                    move |bounds, _, _, _| {
+                        bounds_cell.set(Some(bounds));
+                    },
+                )
+                .absolute()
+                .inset_0()
+            })
             .child(content)
             // A drag registers frame-scoped window listeners from this paint
             // callback. They exist only while the pan layer is rendered, so a
