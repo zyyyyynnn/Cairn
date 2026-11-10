@@ -193,16 +193,10 @@ impl TreemapTreeNode {
         // a deeper directory is only ever looked up by paths below it, where
         // the first segment names that root's directory.
         if let Some(first) = segments.next() {
-            #[cfg(windows)]
             let root_matches = self
                 .name
                 .trim_end_matches(['\\', '/', ':'])
                 .eq_ignore_ascii_case(first.trim_end_matches(':'));
-            #[cfg(not(windows))]
-            let root_matches = {
-                let _ = first;
-                self.name.trim_end_matches(['\\', '/', ':']) == first.trim_end_matches(':')
-            };
             if !root_matches {
                 node = find_child_by_name(node, first)?;
             }
