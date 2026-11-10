@@ -21,9 +21,10 @@ impl VolumeStatus {
         self.0
     }
 
-    /// Applies a non-synced state. `Synced` is produced only by [`Self::reconcile`].
+    /// Applies a non-synced state. `Synced` is produced only by [`Self::reconcile`] and
+    /// [`Self::reconcile_poll`].
     pub(super) fn set(&mut self, state: VolumeState) {
-        debug_assert!(
+        assert!(
             !matches!(state, VolumeState::Synced),
             "Synced is produced only by journal reconciliation"
         );

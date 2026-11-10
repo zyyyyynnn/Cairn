@@ -37,8 +37,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let _ = tokio::signal::ctrl_c().await;
                 info!("Ctrl+C received, shutting down gracefully...");
             };
-            runtime.run(shutdown).await;
-        });
+            runtime.run(shutdown).await
+        })?;
     } else {
         #[cfg(windows)]
         {

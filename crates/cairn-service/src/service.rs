@@ -92,14 +92,17 @@ pub fn cairn_service_main(_arguments: Vec<std::ffi::OsString>) {
 
     let _ = status_handle.set_service_status(state_after_startup(true).service_status());
 
-    rt.block_on(async move {
+    let served = rt.block_on(async move {
         let shutdown = async move {
             let _ = shutdown_rx.recv().await;
         };
-        runtime.run(shutdown).await;
+        runtime.run(shutdown).await
     });
 
-    let _ = status_handle.set_service_status(stopped_status(0));
+    // A control-channel failure is a failed service, not a clean stop: the SCM failure actions and
+    // the operator both key off a non-zero exit code.
+    let exit_code = u32::from(served.is_err());
+    let _ = status_handle.set_service_status(stopped_status(exit_code));
 }
 
 /// The SCM phases of a service start.

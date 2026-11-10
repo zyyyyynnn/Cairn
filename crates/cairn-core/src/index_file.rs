@@ -4,7 +4,7 @@
 
 //! On-disk snapshot format for a volume index: a fixed header, the compact records and the name
 //! arena. The layout is the persistence contract between the service that writes the cache and
-//! every reader, so it lives here once instead of in per-side parsers.
+//! every reader.
 
 use crate::model::FileRecord;
 use std::mem::size_of;
@@ -15,9 +15,8 @@ pub const INDEX_VERSION: u32 = 1;
 pub const HEADER_SIZE: usize = 64;
 
 /// Header byte 13 says whether the saved records already carry correct recursive directory sizes.
-/// Caches written before folder sizes existed leave it zero, so a loader can tell that it must
-/// aggregate once instead of trusting the stored zeroes. The byte was reserved (always zero) in the
-/// original header, which keeps every older cache loadable without a version bump.
+/// Zero means the writer could not prove them, so a loader must aggregate once instead of trusting
+/// the stored zeroes; the reserved bytes around it stay zero.
 pub const HEADER_DIRECTORY_SIZES_VALID: usize = 13;
 
 /// A record's encoded size. `FileRecord` is `#[repr(C)]` with 8-byte alignment and fields that sum

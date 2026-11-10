@@ -967,22 +967,26 @@ mod tests {
     }
 
     #[test]
-    fn every_failure_class_maps_to_its_localized_sentence() {
-        for (kind, key) in [
-            (BinErrorKind::AccessDenied, "bin_error_access_denied"),
-            (BinErrorKind::ReadOnly, "bin_error_read_only"),
-            (BinErrorKind::Conflict, "bin_error_conflict"),
-            (BinErrorKind::PathTooDeep, "bin_error_path_too_deep"),
-            (BinErrorKind::PathTooLong, "bin_error_path_too_long"),
-            (BinErrorKind::MissingItem, "bin_error_missing_item"),
-            (
-                BinErrorKind::OriginalLocation,
-                "bin_error_original_location",
-            ),
-            (BinErrorKind::NoItems, "bin_error_no_items"),
-            (BinErrorKind::Generic, "bin_error_generic"),
+    fn every_failure_class_has_a_localized_sentence() {
+        let i18n = I18nManager::new("zh-CN");
+        for kind in [
+            BinErrorKind::AccessDenied,
+            BinErrorKind::ReadOnly,
+            BinErrorKind::Conflict,
+            BinErrorKind::PathTooDeep,
+            BinErrorKind::PathTooLong,
+            BinErrorKind::MissingItem,
+            BinErrorKind::OriginalLocation,
+            BinErrorKind::NoItems,
+            BinErrorKind::Generic,
         ] {
-            assert_eq!(shell_reason_key(kind), key);
+            let key = shell_reason_key(kind);
+            let text = i18n.get_text(key);
+            assert_ne!(text, key, "no Fluent message is loaded for {key}");
+            assert!(
+                !text.trim().is_empty(),
+                "{key} resolves to an empty sentence"
+            );
         }
     }
 

@@ -126,7 +126,6 @@ pub struct TreemapViewState {
     pub(crate) scan_fade_epoch: u64,
     /// Highest scan fade epoch for which a cleanup timer has been scheduled.
     pub(crate) scan_fade_timer_armed: u64,
-    /// Loaded in-memory index, if available from index files
     /// Whether a service tree request is in flight.
     pub(super) is_scanning: bool,
     /// Epoch of the directory request the view is waiting for. A late answer
@@ -253,7 +252,7 @@ impl TreemapViewState {
         self.selected_path.take().is_some()
     }
 
-    /// Loads the current directory from the volume index or the stored drive tree.
+    /// Loads the current directory from the stored trees.
     /// Returns `Some(path)` when the service has to answer, or `None` when the
     /// in-memory trees already hold the directory.
     fn load_current_dir(&mut self) -> Option<PathBuf> {
@@ -268,7 +267,7 @@ impl TreemapViewState {
 
         let current_dir = self.navigation.current_dir().to_string();
 
-        // 2. Drive root: instant from stored_drive_tree if already scanned.
+        // 1. Drive root: instant from stored_drive_tree if already scanned.
         if is_drive_root(&current_dir) {
             if let Some(drive_tree) = self.stored_drive_tree.clone() {
                 self.current_dir_total_items = self
@@ -281,7 +280,7 @@ impl TreemapViewState {
                 return None;
             }
         } else {
-            // 3. Subdirectory: check if we previously fetched and cached the full tree for this directory.
+            // 2. Subdirectory: check if we previously fetched and cached the full tree for this directory.
             let dir_key = normalize_dir_key(&current_dir);
             if let Some(cached_tree) = self.cached_dir_trees.get(&dir_key).cloned() {
                 self.current_dir_total_items = self
@@ -295,8 +294,7 @@ impl TreemapViewState {
             }
         }
 
-        // 3. The service's live index has to answer before the canvas can draw.
-        self.root_tree = None;
+        // 3. The service's live index has to answer before the canvas can draw.        self.root_tree = None;
         self.layout_nodes.clear();
         self.content_revealed = false;
         self.current_dir_total_size = 0;

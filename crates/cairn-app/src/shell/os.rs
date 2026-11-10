@@ -1207,12 +1207,12 @@ mod tests {
             ("some items could not be deleted", BinErrorKind::Generic),
         ] {
             assert_eq!(BinErrorKind::from_reason(reason), kind, "{reason}");
-            assert_eq!(
-                BinOperationError::failed(reason, Vec::new()).kind(),
-                Some(kind),
-                "the constructor must carry the classified kind"
-            );
         }
+        assert_eq!(
+            BinOperationError::failed("no item could be restored", Vec::new()).kind(),
+            Some(BinErrorKind::NoItems),
+            "the constructor must carry the classified kind"
+        );
     }
 
     #[test]

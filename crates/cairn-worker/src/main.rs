@@ -151,29 +151,15 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-/// The dominant failure kind the service uses to decide whether a retry can help. Errors from
-/// Tantivy or the extractor wrap the OS error, so the whole source chain is searched.
+/// The dominant failure kind the service uses to decide whether a retry can help. The search
+/// covers wrapped `io::Error`s and the OS codes Tantivy keeps inside its own error variants.
 fn worker_exit_code(error: &(dyn std::error::Error + 'static)) -> u8 {
     use cairn_protocol::worker_exit;
-    match raw_os_error(error) {
+    match cairn_content::raw_os_error(error) {
         Some(5) => worker_exit::ACCESS_DENIED,
         Some(32) => worker_exit::SHARING_VIOLATION,
         _ => worker_exit::FAILED,
     }
-}
-
-fn raw_os_error(error: &(dyn std::error::Error + 'static)) -> Option<i32> {
-    let mut current = Some(error);
-    while let Some(err) = current {
-        if let Some(code) = err
-            .downcast_ref::<std::io::Error>()
-            .and_then(std::io::Error::raw_os_error)
-        {
-            return Some(code);
-        }
-        current = err.source();
-    }
-    None
 }
 
 fn run(args: WorkerCli) -> Result<(), Box<dyn std::error::Error>> {

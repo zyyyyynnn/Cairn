@@ -12,7 +12,7 @@ use cairn_core::index_file::{
 use cairn_core::model::FileRecord;
 use crc32fast::Hasher;
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -94,7 +94,9 @@ pub fn save_volume_index_atomic(
     .encode();
 
     {
-        let mut file = File::create(&tmp_path)?;
+        // Records are encoded one at a time to avoid a second full-size allocation; the buffer
+        // keeps the write pattern batched instead of one syscall per record.
+        let mut file = BufWriter::with_capacity(1 << 20, File::create(&tmp_path)?);
         file.write_all(&header)?;
         for record in records {
             encode_record(record, &mut record_buf);
@@ -323,8 +325,8 @@ mod tests {
 
         let saved_path = save_volume_index_atomic(temp.path(), 'E', 1, 2, 3, &records, &pool, true)
             .expect("save should succeed");
-        // Older builds reserved header byte 13 and always wrote zero there; the rest of the header
-        // and payload are unchanged, so clearing it reproduces exactly such a cache.
+        // A zero validity byte is the on-disk form of a cache whose folder sizes were never
+        // proven; the rest of the file is unchanged, so only that byte needs rewriting.
         let mut bytes = fs::read(&saved_path).expect("read cache");
         bytes[HEADER_DIRECTORY_SIZES_VALID] = 0;
         fs::write(&saved_path, &bytes).expect("write legacy cache");
