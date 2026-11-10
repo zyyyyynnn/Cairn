@@ -16,17 +16,23 @@ pub(crate) mod installed;
 pub(crate) mod model;
 pub(crate) mod msi;
 /// The payload format is a contract between the packaging step that writes it and this crate
-/// that reads it, so both ends stay published: the writer half is what builds the fixture the
-/// crate's own round-trip test checks the reader against.
+/// that reads it, so both ends stay published: `xtask` packaging calls the writer, and the setup
+/// binary and the packaging test call the reader.
 pub mod payload;
 pub(crate) mod platform;
 mod preview;
 pub mod quiet;
+pub(crate) mod registry;
 pub mod run;
 pub(crate) mod view;
 
 /// The product upgrade code the MSI and the uninstaller agree on.
-pub(crate) const MSI_UPGRADE_CODE: &str = "4C65A8E1-7F89-4D12-9A4B-3D8F42D8E6C0";
+pub const MSI_UPGRADE_CODE: &str = "4C65A8E1-7F89-4D12-9A4B-3D8F42D8E6C0";
+
+/// The six product executables: the MSI installs five, while `CairnSetup.exe` is the outer
+/// installer that packaging stages and the forced cleanup removes if an old install left it.
+/// The packaging step and the uninstaller share this list.
+pub use platform::PRODUCT_FILES;
 
 /// The product version this setup binary installs.
 pub(crate) const PRODUCT_VERSION: &str = env!("CARGO_PKG_VERSION");

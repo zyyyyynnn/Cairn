@@ -7,7 +7,6 @@
 
 pub(crate) mod config_submission;
 pub(crate) mod elevation;
-pub(crate) mod ipc_channel;
 pub(crate) mod ipc_tasks;
 pub(crate) mod service_control;
 pub(crate) mod service_issue;

@@ -11,10 +11,10 @@ name = "cairn_setup"
 path = "src/lib.rs"
 
 [dependencies]
+cairn-protocol.workspace = true
 cairn-ui.workspace = true
 gpui-kit.workspace = true
 fluent-bundle.workspace = true
-unic-langid.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 crc32fast.workspace = true

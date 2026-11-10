@@ -6,16 +6,17 @@
 //! launch of the installed app, and cleanup of data the MSI does not own.
 
 use std::ffi::OsStr;
-use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::registry::{read_hklm_string, subkeys, wide};
+use cairn_protocol::message::SERVICE_NAME;
+
 use windows::core::{BOOL, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
     CloseHandle, GetLastError, LocalFree, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND,
-    ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, GENERIC_READ, HANDLE, HLOCAL, LPARAM, WAIT_ABANDONED,
-    WAIT_OBJECT_0, WPARAM,
+    ERROR_SUCCESS, GENERIC_READ, HANDLE, HLOCAL, LPARAM, WAIT_ABANDONED, WAIT_OBJECT_0, WPARAM,
 };
 use windows::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
@@ -37,10 +38,9 @@ use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
 };
 use windows::Win32::System::Registry::{
-    RegCloseKey, RegDeleteTreeW, RegDeleteValueW, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW,
-    RegQueryValueExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, HKEY_USERS,
-    KEY_READ, KEY_SET_VALUE, KEY_WOW64_64KEY, REG_EXPAND_SZ, REG_SAM_FLAGS, REG_SZ,
-    RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ,
+    RegCloseKey, RegDeleteTreeW, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
+    HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, HKEY_USERS, KEY_READ, KEY_SET_VALUE,
+    KEY_WOW64_64KEY, REG_EXPAND_SZ, REG_SZ, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ,
 };
 use windows::Win32::System::Threading::{
     CreateMutexW, OpenProcess, ReleaseMutex, WaitForSingleObject, INFINITE,
@@ -765,9 +765,13 @@ fn remove_run_value(root: HKEY, subkey: &str) -> Result<(), String> {
 fn user_profiles() -> Vec<(String, PathBuf)> {
     const PROFILE_LIST: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList";
     let mut profiles = Vec::new();
-    for sid in registry_subkeys(PROFILE_LIST, KEY_READ | KEY_WOW64_64KEY) {
+    for sid in subkeys(PROFILE_LIST, KEY_WOW64_64KEY) {
         let subkey = format!(r"{PROFILE_LIST}\{sid}");
-        let Some(path) = read_hklm_string(&subkey, "ProfileImagePath") else {
+        let Some(path) = read_hklm_string(
+            &subkey,
+            "ProfileImagePath",
+            RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ,
+        ) else {
             continue;
         };
         let path = PathBuf::from(path);
@@ -784,76 +788,6 @@ fn user_profiles() -> Vec<(String, PathBuf)> {
     profiles
 }
 
-fn registry_subkeys(base: &str, flags: REG_SAM_FLAGS) -> Vec<String> {
-    let base_wide = wide(OsStr::new(base));
-    let mut key = HKEY::default();
-    let status = unsafe {
-        RegOpenKeyExW(
-            HKEY_LOCAL_MACHINE,
-            PCWSTR(base_wide.as_ptr()),
-            None,
-            flags,
-            &mut key,
-        )
-    };
-    if status != ERROR_SUCCESS {
-        return Vec::new();
-    }
-    let mut names = Vec::new();
-    let mut index = 0;
-    loop {
-        let mut name = [0u16; 256];
-        let mut length = name.len() as u32;
-        let status = unsafe {
-            RegEnumKeyExW(
-                key,
-                index,
-                Some(windows::core::PWSTR(name.as_mut_ptr())),
-                &mut length,
-                None,
-                None,
-                None,
-                None,
-            )
-        };
-        if status == ERROR_NO_MORE_ITEMS || status != ERROR_SUCCESS {
-            break;
-        }
-        names.push(String::from_utf16_lossy(&name[..length as usize]));
-        index += 1;
-    }
-    unsafe {
-        let _ = RegCloseKey(key);
-    }
-    names
-}
-
-fn read_hklm_string(subkey: &str, value: &str) -> Option<String> {
-    let subkey_wide = wide(OsStr::new(subkey));
-    let value_wide = wide(OsStr::new(value));
-    let mut buffer = [0u16; 1024];
-    let mut size = (buffer.len() * 2) as u32;
-    let status = unsafe {
-        RegGetValueW(
-            HKEY_LOCAL_MACHINE,
-            PCWSTR(subkey_wide.as_ptr()),
-            PCWSTR(value_wide.as_ptr()),
-            RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ,
-            None,
-            Some(buffer.as_mut_ptr() as *mut core::ffi::c_void),
-            Some(&mut size),
-        )
-    };
-    if status != ERROR_SUCCESS {
-        return None;
-    }
-    let length = (size as usize / 2).saturating_sub(1);
-    Some(String::from_utf16_lossy(
-        &buffer[..length.min(buffer.len())],
-    ))
-}
-
-const SERVICE_NAME: &str = "CairnService";
 const ENVIRONMENT_KEY: &str = r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment";
 
 /// Removes the leftover registration of a Cairn entry whose MSI product record is gone. The ARP
@@ -1167,7 +1101,7 @@ pub fn run_install_dir_cleanup(install_dir: &Path, wait_pid: u32) {
     schedule_self_delete();
 }
 
-const PRODUCT_FILES: [&str; 6] = [
+pub const PRODUCT_FILES: [&str; 6] = [
     "Cairn.exe",
     "CairnService.exe",
     "CairnCli.exe",
@@ -1201,10 +1135,6 @@ pub fn wait_pid_from_args(args: &[String]) -> Option<u32> {
 pub fn cleanup_dir_from_args(args: &[String]) -> Option<PathBuf> {
     let index = args.iter().position(|arg| arg == "--cleanup-install-dir")?;
     args.get(index + 1).map(PathBuf::from)
-}
-
-pub fn wide(value: &OsStr) -> Vec<u16> {
-    value.encode_wide().chain(std::iter::once(0)).collect()
 }
 
 #[cfg(test)]

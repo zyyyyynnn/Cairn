@@ -43,7 +43,7 @@ cargo run -p xtask -- package
 ## 5. 发布状态
 
 - 代码签名（REL-02）尚未完成前，不得把未签名产物描述为已签名发布。
-- 版本与升级码由 `xtask` 统一生成/校验；发布前运行完整测试、`cargo fmt --all --check`、clippy `-D warnings`、`cargo doc`、`check-i18n`、`check-docs` 与 `cargo deny check`。
+- 版本取自 workspace `Cargo.toml`，升级码由 `cairn-setup` 持有、由 `xtask` 注入打包产物；发布前运行完整测试、`cargo fmt --all --check`、clippy `-D warnings`、`cargo doc`、`check-i18n`、`check-docs` 与 `cargo deny check`。
 
 ## 代码位置
 

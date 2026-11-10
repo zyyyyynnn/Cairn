@@ -11,8 +11,9 @@
 
 use crate::service::elevation::{run_elevated_self, ElevationError};
 
-/// The name the service is registered under. This is the one place the name is written down.
-pub const SERVICE_NAME: &str = "CairnService";
+/// The installed service name, shared with the service, the installer and the WiX template;
+/// the value itself lives in `cairn_protocol::message`.
+pub use cairn_protocol::message::SERVICE_NAME;
 
 /// The single argument that turns this process into the elevated start command.
 pub const START_SERVICE_FLAG: &str = "--start-service";

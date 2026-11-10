@@ -40,6 +40,10 @@ const fn pack_major_minor(version: &str) -> u16 {
 
 pub const PIPE_NAME: &str = r"\\.\pipe\Cairn.Service";
 
+/// The installed service's SCM name. The installer registers it, the service hosts it, and the
+/// app starts it by this name.
+pub const SERVICE_NAME: &str = "CairnService";
+
 /// Machine-readable `ResponsePayload::Error` codes. Text stays in English and technical:
 /// localizing it is the presentation layer's responsibility (SPEC UI-07).
 pub const ERROR_CODE_PROTOCOL_VERSION_MISMATCH: u32 = 409;

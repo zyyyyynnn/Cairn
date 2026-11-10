@@ -542,7 +542,7 @@ impl CairnApp {
             let (tx, rx) = tokio::sync::oneshot::channel();
             get_tokio_runtime().spawn(async move {
                 let result = async {
-                    let mut client = crate::service::ipc_channel::connect().await?;
+                    let mut client = cairn_client::client::CairnClient::connect().await?;
                     client.get_tree(&path_for_service, MAX_TREE_DEPTH).await
                 }
                 .await;

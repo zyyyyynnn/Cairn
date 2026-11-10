@@ -27,9 +27,27 @@ enum ContentAction {
 const STATUS_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const STATUS_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const STATUS_MAX_CONSECUTIVE_FAILURES: u32 = 3;
+/// Connection attempts keep the status poll alive across an SCM auto-restart: the retry loop
+/// sleeps 250 ms per attempt, so 40 attempts cover about ten seconds (the restart delay is 5 s).
+const STATUS_MAX_CONNECT_FAILURES: u32 = 40;
 
-fn status_failure_is_terminal(consecutive_failures: u32) -> bool {
-    consecutive_failures >= STATUS_MAX_CONSECUTIVE_FAILURES
+/// Which wait a failure belongs to: reconnecting to a restarting service keeps the ten-second
+/// window, while a service that answers but fails its request is terminal after three tries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StatusFailure {
+    Connect,
+    Request,
+}
+
+fn failure_limit(kind: StatusFailure) -> u32 {
+    match kind {
+        StatusFailure::Connect => STATUS_MAX_CONNECT_FAILURES,
+        StatusFailure::Request => STATUS_MAX_CONSECUTIVE_FAILURES,
+    }
+}
+
+fn failure_is_terminal(kind: StatusFailure, consecutive_failures: u32) -> bool {
+    consecutive_failures >= failure_limit(kind)
 }
 
 /// What the status poll does after one answer, and whether it keeps polling.
@@ -174,14 +192,14 @@ impl CairnApp {
             let mut consecutive_failures = 0u32;
             loop {
                 if client.is_none() {
-                    match crate::service::ipc_channel::connect().await {
+                    match cairn_client::client::CairnClient::connect().await {
                         Ok(connected) => {
                             client = Some(connected);
                             consecutive_failures = 0;
                         }
                         Err(error) => {
                             consecutive_failures += 1;
-                            if status_failure_is_terminal(consecutive_failures) {
+                            if failure_is_terminal(StatusFailure::Connect, consecutive_failures) {
                                 let _ = tx.send(Err(error));
                                 break;
                             }
@@ -207,7 +225,7 @@ impl CairnApp {
                     Err(error) => {
                         client = None;
                         consecutive_failures += 1;
-                        if status_failure_is_terminal(consecutive_failures) {
+                        if failure_is_terminal(StatusFailure::Request, consecutive_failures) {
                             let _ = tx.send(Err(error));
                             break;
                         }
@@ -363,8 +381,10 @@ impl CairnApp {
                     }
                 }
                 // The service reports Running only after its data layout is secured; the pipe
-                // becomes available at the same point. Poll long enough for a cold cache load.
-                for _ in 0..30 {
+                // becomes available at the same point. Connection attempts fail fast now, so this
+                // loop owns the whole cold-start budget instead of inheriting a per-attempt wait.
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+                while std::time::Instant::now() < deadline {
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     if let Ok(mut client) = cairn_client::client::CairnClient::connect().await {
                         let status = client.get_status().await;
@@ -574,17 +594,17 @@ mod tests {
     use core::prelude::rust_2021::test;
 
     use super::{
-        status_failure_is_terminal, status_refresh_decision, volume_status_visibility_changed,
-        StatusRefreshDecision,
+        failure_is_terminal, status_refresh_decision, volume_status_visibility_changed,
+        StatusFailure, StatusRefreshDecision,
     };
     use cairn_protocol::status::{VolumeState, VolumeStatusSummary};
 
     #[test]
-    fn a_status_poll_reports_a_failure_only_after_consecutive_failures() {
-        assert!(!status_failure_is_terminal(1));
-        assert!(!status_failure_is_terminal(2));
-        assert!(status_failure_is_terminal(3));
-        assert!(status_failure_is_terminal(4));
+    fn each_status_failure_kind_has_its_own_terminal_window() {
+        assert!(!failure_is_terminal(StatusFailure::Request, 2));
+        assert!(failure_is_terminal(StatusFailure::Request, 3));
+        assert!(!failure_is_terminal(StatusFailure::Connect, 39));
+        assert!(failure_is_terminal(StatusFailure::Connect, 40));
     }
 
     fn volume(status: VolumeState, indexed_count: u64) -> VolumeStatusSummary {

@@ -17,10 +17,11 @@ cairn-ntfs.workspace = true
 cairn-protocol.workspace = true
 cairn-client.workspace = true
 cairn-service.workspace = true
+cairn-setup.workspace = true
+sha2.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
-crc32fast.workspace = true
 rayon.workspace = true
 thiserror.workspace = true
 
@@ -33,7 +34,6 @@ features = [
 ]
 
 [dev-dependencies]
-cairn-setup.workspace = true
 tempfile.workspace = true
 
 [build-dependencies]

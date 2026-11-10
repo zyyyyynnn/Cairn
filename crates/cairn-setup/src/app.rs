@@ -64,9 +64,10 @@ impl SetupError {
 
     pub fn from_payload(error: &PayloadError) -> Self {
         let key = match error {
-            PayloadError::Missing | PayloadError::TooLarge | PayloadError::AlreadyEmbedded => {
-                "error_no_payload"
-            }
+            PayloadError::Missing
+            | PayloadError::TooLarge
+            | PayloadError::AlreadyEmbedded
+            | PayloadError::EmptyInput => "error_no_payload",
             PayloadError::CorruptFooter | PayloadError::Checksum | PayloadError::SetupHash => {
                 "error_msi_invalid"
             }

@@ -30,6 +30,8 @@ pub enum PayloadError {
     TooLarge,
     #[error("the executable already carries a Cairn MSI payload")]
     AlreadyEmbedded,
+    #[error("refusing to embed an empty Cairn MSI")]
+    EmptyInput,
     #[error("the Cairn MSI payload checksum does not match")]
     Checksum,
     #[error("the setup file does not match the verified download")]
@@ -45,7 +47,7 @@ pub fn append_payload(exe: &Path, msi: &Path) -> Result<(), PayloadError> {
     }
     let msi_bytes = std::fs::read(msi)?;
     if msi_bytes.is_empty() {
-        return Err(PayloadError::Missing);
+        return Err(PayloadError::EmptyInput);
     }
     if msi_bytes.len() as u64 > MAX_PAYLOAD {
         return Err(PayloadError::TooLarge);
@@ -190,6 +192,16 @@ mod tests {
             std::fs::read(&extracted).expect("read extracted"),
             std::fs::read(&msi).expect("read source")
         );
+    }
+
+    #[test]
+    fn embedding_an_empty_msi_fails_with_the_write_side_error() {
+        let (_dir, exe, msi) = fixture();
+        std::fs::write(&msi, b"").expect("empty msi");
+        assert!(matches!(
+            append_payload(&exe, &msi),
+            Err(PayloadError::EmptyInput)
+        ));
     }
 
     #[test]

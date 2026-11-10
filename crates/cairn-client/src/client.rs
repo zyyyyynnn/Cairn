@@ -42,6 +42,13 @@ pub enum ClientError {
     Timeout,
 }
 
+/// `ERROR_PIPE_BUSY`: every instance of the pipe is occupied; the next open may succeed.
+const ERROR_PIPE_BUSY: i32 = 231;
+
+fn pipe_is_busy(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(ERROR_PIPE_BUSY)
+}
+
 impl ClientError {
     /// `true` when the service is reachable and healthy but speaks another protocol version, so a
     /// frontend can distinguish "service not running" from "service needs updating" (SVC-03, SVC-04).
@@ -95,6 +102,12 @@ impl CairnClient {
                     return Ok(client);
                 }
                 Err(e) => {
+                    // Only a busy pipe is transient: every server instance is occupied and the
+                    // next open may succeed. A missing pipe means the service is not running, or
+                    // not installed, which no amount of waiting can fix.
+                    if !pipe_is_busy(&e) {
+                        return Err(ClientError::ConnectFailed(e));
+                    }
                     attempt += 1;
                     if attempt >= max_retries {
                         return Err(ClientError::ConnectFailed(e));
@@ -379,6 +392,31 @@ mod tests {
     use super::*;
     #[cfg(windows)]
     use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
+
+    #[tokio::test]
+    #[cfg(windows)]
+    async fn a_missing_pipe_fails_without_waiting_out_the_backoff() {
+        let started = std::time::Instant::now();
+        let pipe = format!(r"\\.\pipe\cairn.client.missing.{}", std::process::id());
+        let error = match CairnClient::connect_to(&pipe).await {
+            Ok(_) => panic!("a missing pipe cannot connect"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, ClientError::ConnectFailed(_)));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "a missing pipe must fail immediately, not wait out the retry backoff"
+        );
+    }
+
+    #[test]
+    fn only_a_busy_pipe_counts_as_a_transient_open_failure() {
+        assert!(pipe_is_busy(&std::io::Error::from_raw_os_error(231)));
+        assert!(!pipe_is_busy(&std::io::Error::from_raw_os_error(2)));
+        assert!(!pipe_is_busy(&std::io::Error::from(
+            std::io::ErrorKind::NotFound
+        )));
+    }
 
     #[test]
     fn service_denials_are_classified_for_the_frontend() {

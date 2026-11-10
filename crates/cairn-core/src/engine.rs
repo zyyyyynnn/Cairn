@@ -11,7 +11,7 @@ use crate::syntax::{QueryExpr, SearchTerm};
 use memchr::memmem::Finder;
 use rayon::prelude::*;
 use regex::Regex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
@@ -862,53 +862,103 @@ pub fn glob_match(pattern: &str, text: &str, case_sensitive: bool) -> bool {
     match_glob_tokens(&tokens, text, case_sensitive)
 }
 
+/// Matches with a visited-state set over (token, text) positions. Every step advances one of the
+/// two indices, so a repeated state can only repeat a failure; the memo keeps star chains from
+/// backtracking exponentially.
 fn match_glob_recursive(tokens: &[GlobToken], t_chars: &[char], case_sensitive: bool) -> bool {
-    if tokens.is_empty() {
-        return t_chars.is_empty();
+    let mut visited: HashSet<(usize, usize)> = HashSet::new();
+    match_glob_step(tokens, t_chars, case_sensitive, 0, 0, &mut visited)
+}
+
+fn match_glob_step(
+    tokens: &[GlobToken],
+    t_chars: &[char],
+    case_sensitive: bool,
+    token_ix: usize,
+    text_ix: usize,
+    visited: &mut HashSet<(usize, usize)>,
+) -> bool {
+    if token_ix == tokens.len() {
+        return text_ix == t_chars.len();
+    }
+    if !visited.insert((token_ix, text_ix)) {
+        return false;
     }
 
-    match tokens[0] {
+    match tokens[token_ix] {
         GlobToken::DoubleStar => {
-            if match_glob_recursive(&tokens[1..], t_chars, case_sensitive) {
-                return true;
-            }
-            if !t_chars.is_empty() && match_glob_recursive(tokens, &t_chars[1..], case_sensitive) {
-                return true;
-            }
-            false
+            match_glob_step(
+                tokens,
+                t_chars,
+                case_sensitive,
+                token_ix + 1,
+                text_ix,
+                visited,
+            ) || (text_ix < t_chars.len()
+                && match_glob_step(
+                    tokens,
+                    t_chars,
+                    case_sensitive,
+                    token_ix,
+                    text_ix + 1,
+                    visited,
+                ))
         }
         GlobToken::Star => {
-            if match_glob_recursive(&tokens[1..], t_chars, case_sensitive) {
-                return true;
-            }
-            if !t_chars.is_empty()
-                && t_chars[0] != '\\'
-                && t_chars[0] != '/'
-                && match_glob_recursive(tokens, &t_chars[1..], case_sensitive)
-            {
-                return true;
-            }
-            false
+            match_glob_step(
+                tokens,
+                t_chars,
+                case_sensitive,
+                token_ix + 1,
+                text_ix,
+                visited,
+            ) || (text_ix < t_chars.len()
+                && t_chars[text_ix] != '\\'
+                && t_chars[text_ix] != '/'
+                && match_glob_step(
+                    tokens,
+                    t_chars,
+                    case_sensitive,
+                    token_ix,
+                    text_ix + 1,
+                    visited,
+                ))
         }
         GlobToken::Question => {
-            if !t_chars.is_empty() && t_chars[0] != '\\' && t_chars[0] != '/' {
-                match_glob_recursive(&tokens[1..], &t_chars[1..], case_sensitive)
+            text_ix < t_chars.len()
+                && t_chars[text_ix] != '\\'
+                && t_chars[text_ix] != '/'
+                && match_glob_step(
+                    tokens,
+                    t_chars,
+                    case_sensitive,
+                    token_ix + 1,
+                    text_ix + 1,
+                    visited,
+                )
+        }
+        GlobToken::Char(expected) => {
+            if text_ix < t_chars.len() {
+                let actual = if case_sensitive {
+                    t_chars[text_ix]
+                } else {
+                    t_chars[text_ix]
+                        .to_lowercase()
+                        .next()
+                        .unwrap_or(t_chars[text_ix])
+                };
+                actual == expected
+                    && match_glob_step(
+                        tokens,
+                        t_chars,
+                        case_sensitive,
+                        token_ix + 1,
+                        text_ix + 1,
+                        visited,
+                    )
             } else {
                 false
             }
-        }
-        GlobToken::Char(expected) => {
-            if !t_chars.is_empty() {
-                let actual = if case_sensitive {
-                    t_chars[0]
-                } else {
-                    t_chars[0].to_lowercase().next().unwrap_or(t_chars[0])
-                };
-                if actual == expected {
-                    return match_glob_recursive(&tokens[1..], &t_chars[1..], case_sensitive);
-                }
-            }
-            false
         }
     }
 }
@@ -933,6 +983,17 @@ mod tests {
         assert!(!glob_match("*.rs", r"C:\dir\main.rs", false));
         assert!(glob_match(r"**\*.rs", r"C:\dir\main.rs", false));
         assert!(glob_match(r"C:\*\main.rs", r"C:\dir\main.rs", false));
+    }
+
+    #[test]
+    fn glob_matching_stays_linear_for_star_chains() {
+        // Alternating star/literal segments backtrack exponentially without the visited-state
+        // memo; both the failing and the matching case must stay fast and correct.
+        let pattern = "*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*b";
+        let mut text = "a".repeat(400);
+        assert!(!glob_match(pattern, &text, false));
+        text.push('b');
+        assert!(glob_match(pattern, &text, false));
     }
 
     #[test]
