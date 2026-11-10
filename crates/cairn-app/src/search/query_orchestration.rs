@@ -349,7 +349,7 @@ impl CairnApp {
             crate::shell::perf::mark("query start");
             get_tokio_runtime().spawn(async move {
                 let started = std::time::Instant::now();
-                let res = match crate::service::ipc_channel::connect().await {
+                let res = match cairn_client::client::CairnClient::connect().await {
                     Ok(mut client) => {
                         client
                             .query(qid, &q, query_defaults, &sort_by, sort_asc, page_size)
@@ -438,7 +438,7 @@ impl CairnApp {
         cx.spawn(async move |this, cx: &mut AsyncApp| {
             let (tx, rx) = tokio::sync::oneshot::channel();
             get_tokio_runtime().spawn(async move {
-                let res = match crate::service::ipc_channel::connect().await {
+                let res = match cairn_client::client::CairnClient::connect().await {
                     Ok(mut client) => client.get_rows(session_id, offset, limit).await,
                     Err(e) => Err(e),
                 };

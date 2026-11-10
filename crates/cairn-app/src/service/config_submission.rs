@@ -139,7 +139,7 @@ fn prepare_failed(detail: String) -> SubmissionState {
 
 /// Reads the configuration the running service reports (read class).
 async fn read_live_config() -> Result<ServiceConfigDocument, ClientError> {
-    let mut client = crate::service::ipc_channel::connect().await?;
+    let mut client = cairn_client::client::CairnClient::connect().await?;
     client.hello().await?;
     let envelope = client.get_config().await?;
 
@@ -151,7 +151,7 @@ async fn read_live_config() -> Result<ServiceConfigDocument, ClientError> {
 
 /// Sends the edited document to the service, which persists and applies it.
 async fn submit_config(document: &str) -> Result<(bool, String), ClientError> {
-    let mut client = crate::service::ipc_channel::connect().await?;
+    let mut client = cairn_client::client::CairnClient::connect().await?;
     client.hello().await?;
     client.submit_service_config(document).await
 }

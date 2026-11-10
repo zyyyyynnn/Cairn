@@ -174,7 +174,7 @@ impl CairnApp {
             let mut consecutive_failures = 0u32;
             loop {
                 if client.is_none() {
-                    match crate::service::ipc_channel::connect().await {
+                    match cairn_client::client::CairnClient::connect().await {
                         Ok(connected) => {
                             client = Some(connected);
                             consecutive_failures = 0;
