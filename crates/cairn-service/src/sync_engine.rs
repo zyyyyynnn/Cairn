@@ -88,8 +88,8 @@ impl BitSet {
 }
 
 /// A journal backlog beyond this size is cheaper to recover with a fresh `$MFT` scan than by
-/// replaying hundreds of thousands of USN records. It also bounds how long a cold start can show
-/// bounds cold start recovery time.
+/// replaying hundreds of thousands of USN records, and it bounds how long a cold start may spend
+/// catching up.
 const MAX_USN_REPLAY_BACKLOG_BYTES: i64 = 64 * 1024 * 1024;
 
 /// A smaller volume is rebuilt quickly enough that compaction on every start would cost more than

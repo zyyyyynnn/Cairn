@@ -38,9 +38,11 @@ pub struct FileRecord {
     /// Logical size of the default data stream for a file; for a directory, the recursive size of
     /// its live indexed descendants.
     pub size: u64,
-    /// Last modification timestamp (Windows FILETIME or millisecond Unix timestamp).
+    /// Last modification timestamp: Windows FILETIME ticks or Unix seconds; read it through
+    /// [`crate::time::timestamp_to_unix_seconds`].
     pub modified_ts: i64,
-    /// Creation timestamp (Windows FILETIME or millisecond Unix timestamp).
+    /// Creation timestamp: Windows FILETIME ticks or Unix seconds; read it through
+    /// [`crate::time::timestamp_to_unix_seconds`].
     pub created_ts: i64,
 }
 

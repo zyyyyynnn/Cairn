@@ -205,7 +205,8 @@ impl PresortedIndices {
         }
     }
 
-    /// Builds all presorted indices in parallel.
+    /// Builds the four presorted columns (name, size, modified, path). Each column sorts in
+    /// parallel; the columns themselves are built one after another.
     pub fn build(
         records: &[FileRecord],
         arena: &NamePool,

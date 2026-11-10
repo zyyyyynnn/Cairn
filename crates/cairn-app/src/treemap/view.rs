@@ -1829,8 +1829,6 @@ fn render_nested_node(
         return;
     }
 
-    // The cell this path painted in the view being left, if the block survives
-    // the navigation. New blocks fall back to their inset growth.
     // Labels allocate; do it only after culling and flat-fill early return.
     let name = node.item.name.clone();
     let size_str = format_size_bytes(node.item.size);

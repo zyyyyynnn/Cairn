@@ -276,11 +276,14 @@ impl CairnApp {
     }
 
     fn store_column_widths(&mut self) {
-        self.settings.columns.name_width = self.results.column_widths.name * crate::app::PX_PER_REM;
-        self.settings.columns.path_width = self.results.column_widths.path * crate::app::PX_PER_REM;
-        self.settings.columns.size_width = self.results.column_widths.size * crate::app::PX_PER_REM;
+        self.settings.columns.name_width =
+            self.results.column_widths.name * crate::app::COLUMN_WIDTH_STORAGE_UNIT;
+        self.settings.columns.path_width =
+            self.results.column_widths.path * crate::app::COLUMN_WIDTH_STORAGE_UNIT;
+        self.settings.columns.size_width =
+            self.results.column_widths.size * crate::app::COLUMN_WIDTH_STORAGE_UNIT;
         self.settings.columns.modified_width =
-            self.results.column_widths.date * crate::app::PX_PER_REM;
+            self.results.column_widths.date * crate::app::COLUMN_WIDTH_STORAGE_UNIT;
     }
 
     /// Reverses the direction of the column that is already sorting the results.

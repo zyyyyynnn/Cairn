@@ -578,7 +578,6 @@ impl TreemapViewState {
         self.forward_layer = None;
     }
 
-    /// Returns to the real directory a layer was opened from. `true` when one was open.
     /// The children of `parent_path` in the tree the canvas is showing.
     pub(super) fn children_at(&self, parent_path: &str) -> &[TreemapTreeNode] {
         let Some(tree) = self.root_tree.as_deref() else {

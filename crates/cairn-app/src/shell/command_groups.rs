@@ -71,7 +71,7 @@ impl MenuGroup {
         match self {
             MenuGroup::File => &["alt-f"],
             MenuGroup::Edit => &["alt-e"],
-            // Alt+P is the filter-cycle shortcut; it still opens the menu that owns the filters.
+            // Alt+P cycles the filter category; both keys belong to the View group.
             MenuGroup::View => &["alt-v", "alt-p"],
             MenuGroup::Search => &["alt-s"],
             MenuGroup::Tools => &["alt-t"],

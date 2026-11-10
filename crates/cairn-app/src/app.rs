@@ -218,8 +218,10 @@ pub mod layout {
     pub const RESULT_PAGE_SIZE: usize = 200;
 }
 
-/// Stored column widths are logical pixels at 100% zoom; one rem is 16 of them.
-pub(crate) const PX_PER_REM: f32 = 16.0;
+/// Stored column widths are expressed in this fixed unit. Load and save both convert through it,
+/// so the factor cancels; it stays constant so existing settings keep their widths while the
+/// shell's rem follows zoom.
+pub(crate) const COLUMN_WIDTH_STORAGE_UNIT: f32 = 16.0;
 
 /// One in-flight header-boundary drag. The widths at press time are carried so every move
 /// recomputes the same answer instead of accumulating pointer deltas.
@@ -382,9 +384,6 @@ pub struct CairnApp {
     /// The path switch menu anchored to one breadcrumb segment.
     pub(crate) treemap_path_menu: Option<Entity<PopupMenu>>,
     pub(crate) treemap_path_menu_for: Option<String>,
-    /// The segment whose arrow is being pressed. The open menu sees that press
-    /// as an outside click, so its dismissal must not erase the segment the
-    /// same press is about to toggle closed.
     /// The breadcrumb segment whose arrow opened the menu, so dismissing the menu
     /// can hand focus back to its trigger.
     pub(crate) treemap_path_menu_focus: Option<FocusHandle>,
@@ -428,10 +427,14 @@ impl CairnApp {
         table.sort_column = sort_column_from_key(&settings.columns.sort_column);
         table.sort_asc = settings.columns.sort_asc;
         let column_widths = ColumnWidths {
-            name: (settings.columns.name_width / PX_PER_REM).max(layout::NAME_MIN_COLUMN),
-            path: (settings.columns.path_width / PX_PER_REM).max(layout::PATH_MIN_COLUMN),
-            size: (settings.columns.size_width / PX_PER_REM).max(layout::SIZE_COLUMN),
-            date: (settings.columns.modified_width / PX_PER_REM).max(layout::DATE_COLUMN),
+            name: (settings.columns.name_width / COLUMN_WIDTH_STORAGE_UNIT)
+                .max(layout::NAME_MIN_COLUMN),
+            path: (settings.columns.path_width / COLUMN_WIDTH_STORAGE_UNIT)
+                .max(layout::PATH_MIN_COLUMN),
+            size: (settings.columns.size_width / COLUMN_WIDTH_STORAGE_UNIT)
+                .max(layout::SIZE_COLUMN),
+            date: (settings.columns.modified_width / COLUMN_WIDTH_STORAGE_UNIT)
+                .max(layout::DATE_COLUMN),
         };
 
         let search_focus = cx.focus_handle().tab_stop(true);
