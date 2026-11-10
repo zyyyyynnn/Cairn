@@ -10,7 +10,7 @@
 //! the index does not hold.
 
 use crate::app::{layout, CairnApp};
-use crate::shell::os::RecycleBinItem;
+use crate::shell::os::{BinErrorKind, RecycleBinItem};
 use crate::shell::toast::ToastAction;
 use crate::table::model::SortColumn;
 use cairn_protocol::message::FileRowData;
@@ -693,7 +693,7 @@ impl CairnApp {
             failure.items()
         };
         let title = self.i18n.get_text(title_key);
-        let reason = self.shell_reason_text(failure.reason());
+        let reason = self.shell_reason_text(failure);
         let message = if item_names.is_empty() {
             reason
         } else {
@@ -719,42 +719,25 @@ impl CairnApp {
         }
     }
 
-    fn shell_reason_text(&self, reason: &str) -> String {
-        self.i18n.get_text(shell_reason_key(reason))
+    fn shell_reason_text(&self, failure: &crate::shell::os::BinOperationError) -> String {
+        let kind = failure.kind().unwrap_or(BinErrorKind::Generic);
+        self.i18n.get_text(shell_reason_key(kind))
     }
 }
 
-/// Maps the diagnostic text a shell operation produced to one localized sentence. The raw text
-/// stays in the log; the toast never shows an HRESULT to a person.
-fn shell_reason_key(reason: &str) -> &'static str {
-    let reason = reason.to_ascii_lowercase();
-    if reason.contains("0x80270021") || reason.contains("0x80270022") {
-        "bin_error_access_denied"
-    } else if reason.contains("0x8027003f") {
-        "bin_error_read_only"
-    } else if reason.contains("0x80270029")
-        || reason.contains("0x8027002a")
-        || reason.contains("0x8027002b")
-        || reason.contains("0x8027002c")
-    {
-        "bin_error_conflict"
-    } else if reason.contains("0x8027001e") {
-        "bin_error_path_too_deep"
-    } else if reason.contains("0x80270038") || reason.contains("path too long") {
-        "bin_error_path_too_long"
-    } else if reason.contains("access is denied")
-        || reason.contains("access denied")
-        || reason.contains("os error 5")
-    {
-        "bin_error_access_denied"
-    } else if reason.contains("no longer in the recycle bin") {
-        "bin_error_missing_item"
-    } else if reason.contains("original location") {
-        "bin_error_original_location"
-    } else if reason.contains("no item could") {
-        "bin_error_no_items"
-    } else {
-        "bin_error_generic"
+/// One localized sentence per failure class. The raw diagnostic stays in the log; the toast never
+/// shows an HRESULT to a person.
+fn shell_reason_key(kind: BinErrorKind) -> &'static str {
+    match kind {
+        BinErrorKind::AccessDenied => "bin_error_access_denied",
+        BinErrorKind::ReadOnly => "bin_error_read_only",
+        BinErrorKind::Conflict => "bin_error_conflict",
+        BinErrorKind::PathTooDeep => "bin_error_path_too_deep",
+        BinErrorKind::PathTooLong => "bin_error_path_too_long",
+        BinErrorKind::MissingItem => "bin_error_missing_item",
+        BinErrorKind::OriginalLocation => "bin_error_original_location",
+        BinErrorKind::NoItems => "bin_error_no_items",
+        BinErrorKind::Generic => "bin_error_generic",
     }
 }
 
@@ -797,7 +780,7 @@ mod tests {
         RecycleBinView,
     };
     use crate::shell::i18n::I18nManager;
-    use crate::shell::os::RecycleBinItem;
+    use crate::shell::os::{BinErrorKind, RecycleBinItem};
     use crate::table::model::SortColumn;
 
     fn item(name: &str, dir: &str, ts: i64, size: u64) -> RecycleBinItem {
@@ -984,31 +967,23 @@ mod tests {
     }
 
     #[test]
-    fn shell_failures_map_to_readable_reasons() {
-        assert_eq!(
-            shell_reason_key("PerformOperations: 0x80270021"),
-            "bin_error_access_denied"
-        );
-        assert_eq!(
-            shell_reason_key("PerformOperations: 0x80270029"),
-            "bin_error_conflict"
-        );
-        assert_eq!(
-            shell_reason_key("PerformOperations: 0x8027001e"),
-            "bin_error_path_too_deep"
-        );
-        assert_eq!(
-            shell_reason_key("PerformOperations: 0x80270038"),
-            "bin_error_path_too_long"
-        );
-        assert_eq!(
-            shell_reason_key("perform: path too long"),
-            "bin_error_path_too_long"
-        );
-        assert_eq!(
-            shell_reason_key("some unexpected failure"),
-            "bin_error_generic"
-        );
+    fn every_failure_class_maps_to_its_localized_sentence() {
+        for (kind, key) in [
+            (BinErrorKind::AccessDenied, "bin_error_access_denied"),
+            (BinErrorKind::ReadOnly, "bin_error_read_only"),
+            (BinErrorKind::Conflict, "bin_error_conflict"),
+            (BinErrorKind::PathTooDeep, "bin_error_path_too_deep"),
+            (BinErrorKind::PathTooLong, "bin_error_path_too_long"),
+            (BinErrorKind::MissingItem, "bin_error_missing_item"),
+            (
+                BinErrorKind::OriginalLocation,
+                "bin_error_original_location",
+            ),
+            (BinErrorKind::NoItems, "bin_error_no_items"),
+            (BinErrorKind::Generic, "bin_error_generic"),
+        ] {
+            assert_eq!(shell_reason_key(kind), key);
+        }
     }
 
     #[test]
