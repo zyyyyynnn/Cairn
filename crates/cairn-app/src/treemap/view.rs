@@ -2409,7 +2409,7 @@ mod tests {
     }
 
     #[test]
-    fn dimmed_leaf_and_header_fills_match_for_directory_and_file() {
+    fn dimmed_directory_and_file_leaves_match() {
         for is_dark in [false, true] {
             let palette = TreemapPalette::for_mode(is_dark);
             for category in [

@@ -222,7 +222,7 @@ mod tests {
         assert!(!start_exit_code_is_success(1639));
     }
 
-    /// The service name is written down once.
+    /// The installed service identity is pinned to the name `ipc-security.md` documents.
     #[test]
     fn the_service_name_has_one_source() {
         assert_eq!(SERVICE_NAME, "CairnService");

@@ -16,7 +16,7 @@ pub const FLAG_REPARSE_POINT: u16 = 1 << 8;
 use serde::{Deserialize, Serialize};
 
 /// Fixed-size compact record for an indexed file or directory.
-/// Exactly 48 bytes (or 40 without padding) with 8-byte alignment.
+/// Exactly 48 bytes with 8-byte alignment.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileRecord {

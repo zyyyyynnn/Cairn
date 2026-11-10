@@ -71,8 +71,8 @@ fn default_true() -> bool {
     true
 }
 
-/// Stored column widths are logical pixels at 100% zoom; the shell renders them in rem, so they
-/// follow interface zoom. `crate::table::model::ColumnWidths` owns the conversion and the minimums.
+/// Stored column widths use the fixed unit in `crate::app::COLUMN_WIDTH_STORAGE_UNIT`; load and
+/// save both convert through it, so the factor cancels while the shell's rem follows zoom.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ColumnSettings {
     #[serde(default = "default_name_width")]

@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! NTFS & USN integration tests (IDX-05, IDX-06, IDX-08, SM-5 zero-difference verification).
+//! NTFS & USN integration tests (IDX-06, SM-5 zero-difference verification).
 
 use cairn_ntfs::mft::ExtractedItem;
 use cairn_ntfs::usn::{UsnChange, FILE_ATTRIBUTE_DIRECTORY};
@@ -10,7 +10,7 @@ use cairn_service::sync_engine::VolumeIndex;
 use std::collections::HashMap;
 
 pub fn run_vhd_tests() -> Result<(), Box<dyn std::error::Error>> {
-    println!("=== Cairn NTFS & USN Integration Tests (SM-5, IDX-05, IDX-06) ===");
+    println!("=== Cairn NTFS & USN Integration Tests (SM-5, IDX-06) ===");
 
     // 1. Verify Hard Links Independent Entries (IDX-06)
     println!("Test 1: Hard links independent indexing...");

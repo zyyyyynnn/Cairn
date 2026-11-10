@@ -137,9 +137,15 @@ fn parse_size_val(s: &str) -> Option<u64> {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum DateOp {
+    /// Matches `ts < v`. The parser puts `v` at the span start for `<` and at the span end for
+    /// `<=`, so the operator decides which edge of the written date is compared.
     Lt(i64),
+    /// Matches `ts >= v`. The parser puts `v` at the span start for `>=` and at the span end for
+    /// `>`, mirroring [`DateOp::Lt`].
     Gt(i64),
+    /// Matches the half-open span `min <= ts < max` of an equality date.
     Range(i64, i64),
+    /// Matches outside the half-open span.
     Neq(i64, i64),
 }
 
@@ -539,6 +545,17 @@ mod tests {
         assert!(!f_gt.matches(ymd_to_timestamp(2026, 5, 1)));
         assert!(!f_gt.matches(ymd_to_timestamp(2026, 12, 31)));
         assert!(f_gt.matches(ymd_to_timestamp(2027, 1, 1)));
+
+        // `<` stops before the span and `<=` runs to its trailing boundary; the operator
+        // decides which span edge the comparison uses.
+        let f_lt = DateFilter::parse("<07/2026").unwrap();
+        let f_lte = DateFilter::parse("<=07/2026").unwrap();
+        let last_second = ymd_to_timestamp(2026, 8, 1) - 1;
+        assert!(!f_lt.matches(ymd_to_timestamp(2026, 7, 1)));
+        assert!(f_lt.matches(ymd_to_timestamp(2026, 6, 30)));
+        assert!(!f_lt.matches(last_second));
+        assert!(f_lte.matches(last_second));
+        assert!(!f_lte.matches(ymd_to_timestamp(2026, 8, 1)));
 
         // != operator matches timestamps outside the span
         let f_neq = DateFilter::parse("!=07/2026").unwrap();

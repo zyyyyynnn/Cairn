@@ -687,7 +687,7 @@ pub fn parse_search_term(raw_token: &str, defaults: &QueryDefaults) -> SearchTer
             term.parent_filter = Some(unquote(rest).trim_end_matches('\\').to_string());
             return term;
         } else if let Some(rest) = remaining.strip_prefix("content:") {
-            term.content_query = Some(unquote(rest).to_string());
+            term.content_query = Some(unquote(rest).trim().to_string());
             return term;
         } else if let Some(rest) = remaining.strip_prefix("audio:") {
             term.ext_filter = "mp3;wav;flac;aac;ogg;wma;m4a;opus;ape"
@@ -776,7 +776,8 @@ pub fn parse_search_term(raw_token: &str, defaults: &QueryDefaults) -> SearchTer
         term.is_regex = true;
     }
     if defaults.content && !term.text.is_empty() {
-        term.content_query = Some(std::mem::take(&mut term.text));
+        let text = std::mem::take(&mut term.text);
+        term.content_query = Some(text.trim().to_string());
     }
 
     term
@@ -1147,6 +1148,11 @@ mod tests {
             }
             other => panic!("Expected And chain, got {other:?}"),
         }
+
+        // Padding inside the quotes must not leak into the term: the hit resolver keys on the
+        // trimmed text.
+        let expr = parse_query("content:< needled >");
+        assert_eq!(term_of(&expr).content_query.as_deref(), Some("needled"));
 
         // `case:` turning the default off is not possible: a default only ever states the
         // absence of a modifier, so an item that wrote `case:` keeps it.

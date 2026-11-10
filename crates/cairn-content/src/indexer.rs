@@ -144,6 +144,36 @@ impl ContentSearcher {
         dir_size(&self.index_dir)
     }
 
+    /// Returns every `(volume_id, frn)` the query matches, without snippets or scores. Negation
+    /// and disjunction need the complete hit set; the scored top-k search is only for result rows.
+    pub fn search_all_frns(&self, query_str: &str) -> Result<Vec<(u64, u64)>, ContentIndexError> {
+        self.reader.reload()?;
+        let searcher = self.reader.searcher();
+        let mut query_parser = QueryParser::for_index(&self.index, vec![self.f_body, self.f_path]);
+        query_parser.set_conjunction_by_default();
+        let query = query_parser.parse_query(query_str)?;
+
+        let limit = searcher.num_docs() as usize;
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let top_docs = searcher.search(&query, &TopDocs::with_limit(limit).order_by_score())?;
+        let mut pairs = Vec::with_capacity(top_docs.len());
+        for (_score, doc_address) in top_docs {
+            let retrieved_doc: TantivyDocument = searcher.doc(doc_address)?;
+            let volume_id = retrieved_doc
+                .get_first(self.f_volume_id)
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let frn = retrieved_doc
+                .get_first(self.f_frn)
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            pairs.push((volume_id, frn));
+        }
+        Ok(pairs)
+    }
+
     /// Queries the full-text content index.
     pub fn search(
         &self,
