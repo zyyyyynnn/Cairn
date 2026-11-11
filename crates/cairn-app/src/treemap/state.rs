@@ -276,9 +276,7 @@ impl TreemapViewState {
     fn load_current_dir(&mut self) -> Option<PathBuf> {
         // Every navigation starts from the whole-canvas view.
         self.zoom.reset_view();
-        self.request_epoch = next_tree_request_epoch();
-        self.is_scanning = false;
-        self.unavailable = None;
+        self.reset_scan_state();
         self.selected_path = None;
         self.suppress_tooltip = false;
         self.discard_virtual_layer();
@@ -313,15 +311,22 @@ impl TreemapViewState {
         }
 
         // 3. The service's live index has to answer before the canvas can draw.
-        self.root_tree = None;
-        self.layout_nodes.clear();
-        self.content_revealed = false;
         self.current_dir_total_size = 0;
         self.current_dir_total_items = 0;
-        self.unavailable = None;
         self.is_scanning = true;
 
         Some(PathBuf::from(current_dir))
+    }
+
+    /// Starts a new directory request from nothing to draw. The fresh epoch makes a late answer
+    /// for the directory being left unrenderable, and the cleared tree cannot outlive its root.
+    pub(super) fn reset_scan_state(&mut self) {
+        self.request_epoch = next_tree_request_epoch();
+        self.is_scanning = false;
+        self.unavailable = None;
+        self.content_revealed = false;
+        self.layout_nodes.clear();
+        self.root_tree = None;
     }
 
     /// Aggregates, sorts and adopts a freshly built tree. Test entry points build trees through
