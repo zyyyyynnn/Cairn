@@ -1369,7 +1369,8 @@ fn a_content_command_without_a_receiver_reports_an_error() {
 
 /// End-to-end backfill: enables the switch, waits for the controller, and verifies that a file
 /// which existed before enabling becomes searchable. Ignored by default because it needs the
-/// real `CairnWorker` binary beside the test executable.
+/// real `CairnWorker` binary beside the test executable; the Service job in
+/// `.github/workflows/ci.yml` builds the worker and runs it explicitly.
 #[test]
 #[ignore = "requires target/debug/CairnWorker.exe"]
 fn a_full_backfill_reaches_ready_and_indexes_existing_files() {
@@ -1421,6 +1422,10 @@ fn a_full_backfill_reaches_ready_and_indexes_existing_files() {
         content_index_enabled: true,
         content_index_extensions: vec!["txt".to_string()],
         content_index_max_bytes: 1024 * 1024,
+        // The fixture tree lives under %TEMP%, which the shipped content exclusions cover; this
+        // test exercises the backfill pipeline, not the default rule set.
+        excluded_paths: Vec::new(),
+        content_excluded_paths: Vec::new(),
         ..Default::default()
     };
     let engine = Arc::new(MultiVolumeEngine::with_index_dir_drives_and_config(
