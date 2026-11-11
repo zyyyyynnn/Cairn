@@ -288,6 +288,9 @@ impl CairnApp {
             && self.results.table.total_rows() == 0
             && self.service.status.is_any_loading()
         {
+            // An empty query is never refused, so a refusal of the cleared text must not
+            // outlive it and block the all-files view once the index settles.
+            self.query.rejection = None;
             self.start_status_refresh(cx);
             cx.notify();
             return;

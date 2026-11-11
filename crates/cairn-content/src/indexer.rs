@@ -619,6 +619,10 @@ impl ContentIndex {
     }
 }
 
+/// How many query anchors one snippet scans for. A content term may hold thousands of words;
+/// each hit needs only one to anchor its snippet, so the scan is bounded like the term count.
+const MAX_SNIPPET_NEEDLES: usize = 16;
+
 pub fn create_snippet(body: &str, query: &str, max_len: usize) -> String {
     if body.is_empty() {
         return String::new();
@@ -631,6 +635,7 @@ pub fn create_snippet(body: &str, query: &str, max_len: usize) -> String {
     // snippet at a hit; only a query absent from the body falls back to the head.
     let pos = std::iter::once(lower_query.as_str())
         .chain(lower_query.split_whitespace())
+        .take(MAX_SNIPPET_NEEDLES)
         .filter(|needle| !needle.is_empty())
         .filter_map(|needle| lower_body.find(needle))
         .min()
