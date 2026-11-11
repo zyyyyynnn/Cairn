@@ -207,8 +207,10 @@ impl CairnApp {
             return;
         }
         self.settings.language = language.to_string();
-        self.i18n
-            .set_language(&crate::shell::settings::effective_language(language));
+        let effective = crate::shell::settings::effective_language(language);
+        self.i18n.set_language(&effective);
+        #[cfg(windows)]
+        crate::shell::tray::set_language(&effective);
         self.save_settings();
         self.repaint_shell_and_overlays(cx);
     }

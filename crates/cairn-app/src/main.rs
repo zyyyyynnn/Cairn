@@ -22,51 +22,6 @@ use gpui_kit::gpui::*;
 pub(crate) const WINDOW_TITLE: &str = "Cairn";
 
 #[cfg(windows)]
-fn activate_existing_cairn_window() -> bool {
-    use windows::core::BOOL;
-    use windows::Win32::Foundation::{HWND, LPARAM};
-    use windows::Win32::UI::WindowsAndMessaging::{
-        BringWindowToTop, EnumWindows, GetWindowTextW, SetForegroundWindow, ShowWindow, SW_RESTORE,
-    };
-
-    struct EnumCtx {
-        found: Option<HWND>,
-    }
-
-    unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
-        let ctx = &mut *(lparam.0 as *mut EnumCtx);
-        // Match only this product's window title. GPUI's window class is shared
-        // with other applications, so matching it could focus an unrelated window.
-        let mut title_buf = [0u16; 64];
-        let title_len = GetWindowTextW(hwnd, &mut title_buf);
-        if title_len > 0 {
-            let title = String::from_utf16_lossy(&title_buf[..title_len as usize]);
-            if title == WINDOW_TITLE {
-                ctx.found = Some(hwnd);
-                return BOOL(0);
-            }
-        }
-        BOOL(1) // Continue enumeration
-    }
-
-    let mut ctx = EnumCtx { found: None };
-    unsafe {
-        let _ = EnumWindows(Some(enum_proc), LPARAM(&mut ctx as *mut _ as isize));
-    }
-
-    if let Some(hwnd) = ctx.found {
-        unsafe {
-            let _ = ShowWindow(hwnd, SW_RESTORE);
-            let _ = BringWindowToTop(hwnd);
-            let _ = SetForegroundWindow(hwnd);
-        }
-        true
-    } else {
-        false
-    }
-}
-
-#[cfg(windows)]
 fn acquire_single_instance_mutex() -> Option<windows::Win32::Foundation::HANDLE> {
     use windows::core::w;
     use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
@@ -78,7 +33,7 @@ fn acquire_single_instance_mutex() -> Option<windows::Win32::Foundation::HANDLE>
             Ok(h) => {
                 if GetLastError() == ERROR_ALREADY_EXISTS {
                     // Another instance is already running; restore its window and terminate current process (UI-08)
-                    let activated = activate_existing_cairn_window();
+                    let activated = shell::tray::activate_existing_cairn_window();
                     if activated {
                         let _ = windows::Win32::Foundation::CloseHandle(h);
                         return None;
@@ -94,56 +49,6 @@ fn acquire_single_instance_mutex() -> Option<windows::Win32::Foundation::HANDLE>
             Err(_) => None,
         }
     }
-}
-
-#[cfg(windows)]
-fn init_system_tray() -> Option<tray_icon::TrayIcon> {
-    use tray_icon::menu::{Menu, MenuItem};
-    use tray_icon::{Icon, TrayIconBuilder};
-
-    let i18n = crate::shell::i18n::I18nManager::default();
-    let menu = Menu::new();
-    let item_show = MenuItem::new(i18n.get_text("tray_show"), true, None);
-    let item_exit = MenuItem::new(i18n.get_text("tray_exit"), true, None);
-    let _ = menu.append(&item_show);
-    let _ = menu.append(&item_exit);
-
-    // Load official 32x32 RGBA Cairn icon
-    const ICON_BYTES: &[u8] = include_bytes!("../../../assets/icons/cairn-32.rgba");
-    let icon = Icon::from_rgba(ICON_BYTES.to_vec(), 32, 32).ok()?;
-    let tray = TrayIconBuilder::new()
-        .with_tooltip("Cairn")
-        .with_icon(icon)
-        .with_menu(Box::new(menu))
-        .build()
-        .ok()?;
-
-    let show_id = item_show.id().clone();
-    let exit_id = item_exit.id().clone();
-
-    tray_icon::menu::MenuEvent::set_event_handler(Some(
-        move |event: tray_icon::menu::MenuEvent| {
-            if event.id == show_id {
-                activate_existing_cairn_window();
-            } else if event.id == exit_id {
-                std::process::exit(0);
-            }
-        },
-    ));
-
-    tray_icon::TrayIconEvent::set_event_handler(Some(|event: tray_icon::TrayIconEvent| {
-        if matches!(
-            event,
-            tray_icon::TrayIconEvent::Click {
-                button: tray_icon::MouseButton::Left,
-                ..
-            } | tray_icon::TrayIconEvent::DoubleClick { .. }
-        ) {
-            activate_existing_cairn_window();
-        }
-    }));
-
-    Some(tray)
 }
 
 fn main() {
@@ -166,12 +71,16 @@ fn main() {
         None => return,
     };
 
+    // The persisted settings are read before the tray and the window exist, so both open in the
+    // language the user left the app in.
+    let settings = shell::settings::AppSettings::load();
+
     #[cfg(windows)]
-    let _tray = init_system_tray();
+    let _tray = shell::tray::init(&settings.effective_language());
 
     gpui_kit::application()
         .with_assets(gpui_kit::assets::AllAssets)
-        .run(|cx: &mut App| {
+        .run(move |cx: &mut App| {
             // Bootstrap order is fixed by the Coding Guides: initialize the Kit once, install the
             // keymap before any window or menu reads it, then open the window through
             // `gpui_kit::open_window` so `Root` owns the first level of the window.
@@ -182,7 +91,6 @@ fn main() {
 
             // The persisted appearance is installed before the first frame, so the window opens at
             // the palette and density the user left it in rather than repainting after the fact.
-            let settings = shell::settings::AppSettings::load();
             shell::theme::apply(&settings, cx);
 
             // `TitleBar` draws the window's own chrome, owns its drag region and paints the platform
