@@ -361,12 +361,11 @@ fn process_request(
                 _ => SortColumn::Name,
             };
 
-            let query_cancel = sessions.begin_query(query_id, cancel);
             // Request validation, not evaluation: the engine stays a pure evaluator, and a query
-            // above the content-term limit is refused whole before any hit set is built.
+            // above the content-term limit is refused before any hit set is built. The check
+            // precedes begin_query, which cancels every other in-flight query.
             let content_terms = parse_query_with(&raw_query, &defaults).content_term_count();
             if content_terms > MAX_CONTENT_TERMS {
-                sessions.finish_query(query_id);
                 return ResponsePayload::Error {
                     code: ERROR_CODE_QUERY_TOO_COMPLEX,
                     message: format!(
@@ -374,6 +373,7 @@ fn process_request(
                     ),
                 };
             }
+            let query_cancel = sessions.begin_query(query_id, cancel);
             let (matched_items, total_matches, highlight_terms, snippets, total_bytes) = engine
                 .execute_search_multi(&raw_query, &defaults, sort_col, sort_asc, &query_cancel);
             sessions.finish_query(query_id);

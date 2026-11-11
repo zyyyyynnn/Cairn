@@ -20,8 +20,8 @@ use serde::{Deserialize, Serialize};
 const MAX_CONTENT_TERM_BYTES: usize = 4096;
 
 /// The most content terms one query may carry. Boolean evaluation resolves a complete hit set
-/// per term, so the count bounds the query's memory and scan cost; a query above it is rejected
-/// at the request boundary rather than truncated or silently widened.
+/// per term and probes every occurrence per record, so the count bounds the query's memory and
+/// scan cost; a query above it is refused whole at the request boundary.
 pub const MAX_CONTENT_TERMS: usize = 16;
 
 /// Query-wide defaults: what a search item means when the item itself does not say.
@@ -155,8 +155,8 @@ impl QueryExpr {
     }
 
     /// Number of content-term occurrences in the expression. Duplicates and negated terms count
-    /// like any other occurrence: each one costs a hit set, so the request limit applies to this
-    /// count rather than to the distinct terms.
+    /// like any other occurrence: every occurrence adds per-record evaluation work, so the
+    /// request limit applies to this count.
     pub fn content_term_count(&self) -> usize {
         match self {
             QueryExpr::Term(t) => usize::from(t.content_query.is_some()),

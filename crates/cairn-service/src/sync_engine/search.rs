@@ -92,8 +92,11 @@ impl MultiVolumeEngine {
             };
 
             // A disjunction of content-only terms is one merged Tantivy search: the union hit
-            // set answers every branch at once, instead of one complete hit set per term.
+            // set answers every branch at once.
             if let Some(terms) = query_expr.pure_content_disjunction() {
+                if cancel.is_cancelled() {
+                    return (all_results, 0, highlight_terms, snippets, 0);
+                }
                 let union_hits = match searcher.search_all_frns_union(&terms) {
                     Ok(hits) => hits,
                     Err(err) => {
@@ -106,10 +109,13 @@ impl MultiVolumeEngine {
                 }
 
                 // The collector emits one pair per matching document, so the hit set's length is
-                // the union's document count; a second counting search would repeat the work.
+                // the union's document count.
                 let union_count = union_hits.len();
                 let mut frns_by_drive: HashMap<char, Vec<u64>> = HashMap::new();
-                for (volume_id, frn) in union_hits {
+                for (i, (volume_id, frn)) in union_hits.into_iter().enumerate() {
+                    if (i & 0x3FFF) == 0 && cancel.is_cancelled() {
+                        return (Vec::new(), 0, highlight_terms, snippets, 0);
+                    }
                     let Some(drive_letter) = u16::try_from(volume_id)
                         .ok()
                         .and_then(FileRecord::drive_from_volume_id)
@@ -163,7 +169,7 @@ impl MultiVolumeEngine {
                     };
                     // One union bitmap per volume; a hit FRN marks every hardlink row it maps
                     // to. The FRN list is consumed as the bitmap is built.
-                    let union_bits = hit_bitset(vol, &frns);
+                    let union_bits = hit_bitset(vol, &frns, cancel);
                     let mut matches = Vec::new();
                     for (idx, rec) in vol.records.iter().enumerate() {
                         if (idx & 0x3FFF) == 0 && cancel.is_cancelled() {
@@ -388,16 +394,16 @@ impl MultiVolumeEngine {
                         continue;
                     }
                     // One record-index bitmap per content term. A hit FRN sets every record it
-                    // maps to, so each hardlink row of a hit file carries the hit. The FRN lists
-                    // are consumed volume by volume and term by term, so the two representations
-                    // never peak together. A volume without hits keeps an empty list: negation
-                    // still evaluates every record, and the resolver answers false for all terms.
+                    // maps to, so each hardlink row of a hit file carries the hit. Each FRN list
+                    // is released as soon as its term's bitmap is built. A volume without hits
+                    // keeps an empty list: negation still evaluates every record, and the
+                    // resolver answers false for all terms.
                     let sets: Vec<BitSet> = hits_by_drive
                         .remove(&vol.drive_letter)
                         .map(|frns_by_term| {
                             frns_by_term
                                 .into_iter()
-                                .map(|frns| hit_bitset(vol, &frns))
+                                .map(|frns| hit_bitset(vol, &frns, cancel))
                                 .collect()
                         })
                         .unwrap_or_default();
@@ -698,13 +704,17 @@ const HIT_RESOLVE_CHUNK: usize = 16_384;
 
 /// Record-index bitmap for one term's hit FRNs; a hit FRN marks every hardlink row it maps to.
 /// Resolving the list costs the same order of work as a full scan and runs inside the volumes
-/// read lock the USN poller waits on, so it is split into parallel chunks and OR-merged.
-fn hit_bitset(vol: &VolumeIndex, frns: &[u64]) -> BitSet {
+/// read lock the USN poller waits on, so it is split into parallel chunks and OR-merged. A
+/// cancelled query stops at the next chunk.
+fn hit_bitset(vol: &VolumeIndex, frns: &[u64], cancel: &CancellationToken) -> BitSet {
     if frns.is_empty() {
         return BitSet::with_capacity(0);
     }
     frns.par_chunks(HIT_RESOLVE_CHUNK)
         .map(|chunk| {
+            if cancel.is_cancelled() {
+                return BitSet::with_capacity(0);
+            }
             let mut bits = BitSet::with_capacity(vol.records.len());
             for &frn in chunk {
                 if let Some(indices) = vol.frn_to_idx.get(&frn) {

@@ -22,9 +22,8 @@ use thiserror::Error;
 
 /// The scored result bound for content queries. Positive conjunctions answer within it; the
 /// merged disjunction and the slow boolean shapes use it only to decide whether a scored search
-/// is complete enough for snippets. The slow-path completeness decision is not exercised by the
-/// test suite (it needs more matching documents than the bound); the count-based branch is the
-/// only untested arm.
+/// is complete enough for snippets. The bound side of each completeness decision is not
+/// exercised by the test suite: it needs more matching documents than the bound.
 pub const CONTENT_RESULT_TOP_K: usize = 50_000;
 
 #[derive(Error, Debug)]
@@ -749,7 +748,7 @@ mod tests {
     }
 
     #[test]
-    fn search_union_scores_the_disjunction_and_applies_the_top_k_bound() {
+    fn search_union_answers_the_disjunction_with_snippets_and_applies_the_top_k_bound() {
         let temp = tempdir().unwrap();
         let index = ContentIndex::open_or_create(temp.path()).expect("open failed");
         for (frn, body) in [
