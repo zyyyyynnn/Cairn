@@ -369,10 +369,7 @@ impl MultiVolumeEngine {
         if tasks.is_empty() && deletions.is_empty() {
             return;
         }
-        let sender = self.content_commands.lock().unwrap();
-        if let Some(tx) = sender.as_ref() {
-            let _ = tx.send(ContentCommand::IndexChanges { tasks, deletions });
-        }
+        self.send_content_command(ContentCommand::IndexChanges { tasks, deletions });
     }
 }
 

@@ -283,7 +283,7 @@ impl MultiVolumeEngine {
         if self.try_resume_content_index() {
             return;
         }
-        let _ = tx.send(ContentCommand::Start);
+        self.send_content_command(ContentCommand::Start);
     }
 
     fn handle_content_command(&self, command: ContentCommand) {

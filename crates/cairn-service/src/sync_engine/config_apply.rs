@@ -30,22 +30,17 @@ impl MultiVolumeEngine {
             *cfg = new_config.clone();
         }
 
-        let sender = self.content_commands.lock().unwrap().clone();
         if previous_enabled != next_enabled {
             if next_enabled {
                 self.content_cancel
                     .store(false, std::sync::atomic::Ordering::SeqCst);
                 self.set_content_progress(0, 0);
-                if let Some(tx) = sender.clone() {
-                    let _ = tx.send(content_pipeline::ContentCommand::Start);
-                }
+                self.send_content_command(content_pipeline::ContentCommand::Start);
             } else {
                 self.content_cancel
                     .store(true, std::sync::atomic::Ordering::SeqCst);
                 self.set_content_state(ContentIndexState::Disabled);
-                if let Some(tx) = sender {
-                    let _ = tx.send(content_pipeline::ContentCommand::Cancel);
-                }
+                self.send_content_command(content_pipeline::ContentCommand::Cancel);
             }
         } else if next_enabled
             && matches!(
@@ -58,9 +53,7 @@ impl MultiVolumeEngine {
             self.content_cancel
                 .store(false, std::sync::atomic::Ordering::SeqCst);
             self.set_content_progress(0, 0);
-            if let Some(tx) = sender {
-                let _ = tx.send(content_pipeline::ContentCommand::Start);
-            }
+            self.send_content_command(content_pipeline::ContentCommand::Start);
         }
 
         // Remove any volumes that are now excluded so they don't consume memory (IDX-01)

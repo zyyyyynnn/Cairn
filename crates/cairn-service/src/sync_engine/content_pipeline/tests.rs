@@ -1328,6 +1328,26 @@ fn cleanup_keeps_the_backfill_marker_and_remove_deletes_it() {
     assert!(!engine.backfill_marker_path().exists());
 }
 
+#[test]
+fn a_content_command_without_a_receiver_reports_an_error() {
+    let index = tempfile::tempdir().expect("index");
+    let engine = MultiVolumeEngine::with_index_dir_and_drives(index.path(), vec![]);
+    let (tx, rx) = std::sync::mpsc::channel();
+    drop(rx);
+    *engine.content_commands.lock().unwrap() = Some(tx);
+
+    assert!(
+        !engine.send_content_command(ContentCommand::Start),
+        "a command whose receiver is gone was not delivered"
+    );
+    match engine.content_index_status().state {
+        ContentIndexState::Error(message) => {
+            assert!(message.contains("stopped unexpectedly"), "{message}");
+        }
+        other => panic!("a lost content command must be observable, got {other:?}"),
+    }
+}
+
 /// End-to-end backfill: enables the switch, waits for the controller, and verifies that a file
 /// which existed before enabling becomes searchable. Ignored by default because it needs the
 /// real `CairnWorker` binary beside the test executable.
