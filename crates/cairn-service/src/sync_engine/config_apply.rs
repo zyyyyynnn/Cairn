@@ -46,7 +46,11 @@ impl MultiVolumeEngine {
             *cfg = next.clone();
             (previous_enabled, next)
         };
-        self.config_trusted.store(true, Ordering::SeqCst);
+        if persist {
+            // Only a configuration that reached the protected file is trusted; a plain in-memory
+            // update does not vouch for what was on disk at startup.
+            self.config_trusted.store(true, Ordering::SeqCst);
+        }
         self.apply_content_switch(previous_enabled, applied.content_index_enabled);
         self.retain_indexed_volumes(&applied);
         Ok(())

@@ -526,9 +526,7 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         named_by: "",
         requirement: "CNT-01, UI-01",
     },
-    // The Treemap canvas shows the same centred state band as the table: one
-    // sentence for an empty folder or an unavailable tree. The breadcrumb
-    // ancestors are one repeated button family, named by their path segment.
+    // The canvas is one named region; pointer and keyboard navigation both act inside it.
     KeyControl {
         key: "treemap-canvas",
         element: "treemap-canvas-container",
@@ -538,6 +536,9 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         named_by: "",
         requirement: "DSV-04, UI-03",
     },
+    // The Treemap canvas shows the same centred state band as the table: one
+    // sentence for an empty folder or an unavailable tree. The breadcrumb
+    // ancestors are one repeated button family, named by their path segment.
     KeyControl {
         key: "treemap-state",
         element: "treemap-state",
