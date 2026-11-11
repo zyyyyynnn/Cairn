@@ -218,6 +218,7 @@ empty_content_disabled_title = 内容搜索未开启，开启后可搜索文件�
 empty_content_backfilling_title = 正在建立内容索引；完成后才能搜索内容
 empty_content_error_title = 内容搜索不可用，文件名搜索仍可使用
 empty_content_unreadable_title = 内容搜索状态不可用，重新读取后再试
+query_too_complex_title = 内容检索词超过 { $limit } 个，减少后重新搜索
 result_content_match = 内容
 row_loading = 正在加载该段结果
 row_not_loaded = 尚未加载的结果

@@ -62,6 +62,9 @@ pub const ERROR_CODE_TREE_NOT_INDEXED: u32 = 413;
 pub const ERROR_CODE_TREE_NOT_DIRECTORY: u32 = 414;
 /// The directory tree exceeds the one-response entry or payload budget.
 pub const ERROR_CODE_TREE_TOO_LARGE: u32 = 415;
+/// The query carries more content terms than one evaluation may resolve
+/// (`cairn_core::syntax::MAX_CONTENT_TERMS`); the request is refused whole, not truncated.
+pub const ERROR_CODE_QUERY_TOO_COMPLEX: u32 = 416;
 
 /// The deepest tree one response may carry: three levels stay inside the entry and frame budgets
 /// on a full drive (about 42k entries on a 1.8M-record index). A subtree that still overflows is

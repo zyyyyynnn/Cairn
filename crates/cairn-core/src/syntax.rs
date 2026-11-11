@@ -19,6 +19,11 @@ use serde::{Deserialize, Serialize};
 /// nothing like any other unusable item instead of failing the whole query.
 const MAX_CONTENT_TERM_BYTES: usize = 4096;
 
+/// The most content terms one query may carry. Boolean evaluation resolves a complete hit set
+/// per term, so the count bounds the query's memory and scan cost; a query above it is rejected
+/// at the request boundary rather than truncated or silently widened.
+pub const MAX_CONTENT_TERMS: usize = 16;
+
 /// Query-wide defaults: what a search item means when the item itself does not say.
 ///
 /// The UI match toggles (case, whole word, path, regex, content) and the hidden/system
@@ -146,6 +151,19 @@ impl QueryExpr {
                 }
             }
             QueryExpr::Not(inner) => inner.collect_search_texts_inner(out),
+        }
+    }
+
+    /// Number of content-term occurrences in the expression. Duplicates and negated terms count
+    /// like any other occurrence: each one costs a hit set, so the request limit applies to this
+    /// count rather than to the distinct terms.
+    pub fn content_term_count(&self) -> usize {
+        match self {
+            QueryExpr::Term(t) => usize::from(t.content_query.is_some()),
+            QueryExpr::And(subs) | QueryExpr::Or(subs) => {
+                subs.iter().map(Self::content_term_count).sum()
+            }
+            QueryExpr::Not(inner) => inner.content_term_count(),
         }
     }
 
@@ -915,6 +933,37 @@ mod tests {
         let q_angle = parse_query("content:<abc 123>");
         assert_eq!(q_angle.extract_content_queries(), vec!["abc 123"]);
         assert!(q_angle.strip_content_queries().is_none());
+    }
+
+    /// The request boundary rejects a query by its number of content terms, so the count covers
+    /// every occurrence: a duplicate, a negated term and a term inside a nested group each cost
+    /// one hit set of their own.
+    #[test]
+    fn content_term_count_counts_every_occurrence() {
+        let terms = |n: usize| {
+            (0..n)
+                .map(|i| format!("content:t{i}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        assert_eq!(parse_query(&terms(16)).content_term_count(), 16);
+        assert_eq!(parse_query(&terms(17)).content_term_count(), 17);
+        assert_eq!(
+            parse_query("content:a|<content:b content:c>").content_term_count(),
+            3
+        );
+        assert_eq!(parse_query("!content:a content:a").content_term_count(), 2);
+        assert_eq!(
+            parse_query("ext:md size:>1mb report").content_term_count(),
+            0
+        );
+        assert_eq!(parse_query("").content_term_count(), 0);
+
+        let content = QueryDefaults {
+            content: true,
+            ..Default::default()
+        };
+        assert_eq!(parse_query_with("a b", &content).content_term_count(), 2);
     }
 
     /// SPEC QRY-04: `<` `<=` `=` `>` `>=` `!=` are comparison operators of function values.

@@ -504,6 +504,7 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
             "empty_content_disabled_title",
             "empty_content_backfilling_title",
             "empty_content_error_title",
+            "query_too_complex_title",
             "recycle_bin_empty_title",
             "recycle_bin_no_matches_title",
         ],

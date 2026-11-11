@@ -226,6 +226,7 @@ empty_content_disabled_title = Content search is off; turn it on to search file 
 empty_content_backfilling_title = Building the content index; content search starts when it finishes
 empty_content_error_title = Content search is unavailable; filename search still works
 empty_content_unreadable_title = Content search status is unavailable; read it again to retry
+query_too_complex_title = More than { $limit } content terms; remove some and search again
 result_content_match = Content
 row_loading = Loading this part of the results
 row_not_loaded = Result not loaded yet

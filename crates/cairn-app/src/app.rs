@@ -280,6 +280,9 @@ pub struct QueryDomain {
     pub scope_drive: Option<char>,
     pub query_id: u64,
     pub active_session_id: Option<u64>,
+    /// The service's refusal of the current query, if it answered with one. Cleared when a new
+    /// query starts and when a result set arrives, so the band never outlives its query.
+    pub rejection: Option<crate::search::query_orchestration::QueryRejection>,
     pub is_fetching_more: bool,
     pub is_searching: bool,
     /// Byte offset where mouse text drag selection started, if a drag is in progress.
@@ -486,6 +489,7 @@ impl CairnApp {
                 scope_drive: None,
                 query_id: 0,
                 active_session_id: None,
+                rejection: None,
                 is_fetching_more: false,
                 is_searching: false,
                 text_selection_anchor: None,
