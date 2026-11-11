@@ -303,3 +303,63 @@ mod tests {
             .is_some());
     }
 }
+
+/// Pins the bytes a query request puts on the wire.
+///
+/// The postcard payload is positional: adding, removing, reordering or retyping a field changes
+/// these bytes, and the header carries the product wire guard. The typed sort column encodes as
+/// the string the released wire carries, so the layout below is the 0.2 one. A layout change
+/// belongs to a release commit: update this pin together with the product version, so the new
+/// guard makes older clients fail the handshake instead of misreading the payload.
+#[cfg(test)]
+mod wire_layout {
+    use super::encode_frame;
+    use crate::message::{ClientRequest, SortColumn};
+    use std::str::FromStr;
+
+    #[test]
+    fn the_query_wire_layout_is_pinned() {
+        let req = ClientRequest::Query {
+            query_id: 7,
+            raw_query: "rs".to_string(),
+            defaults: crate::message::QueryDefaults::default(),
+            sort_column: SortColumn::Size,
+            sort_asc: true,
+            first_page_limit: 50,
+        };
+        assert_eq!(
+            encode_frame(&req).expect("encode"),
+            vec![
+                19, 0, 0, 0, // payload length
+                2, 0, // wire guard (product major.minor: 0.2)
+                1, // Query variant
+                7, // query_id
+                2, b'r', b's', // raw_query
+                0, 0, 0, 0, 0, 0, 0, // QueryDefaults toggles, in declaration order
+                4, b's', b'i', b'z', b'e', // sort_column, encoded as its key string
+                1,    // sort_asc
+                50,   // first_page_limit
+            ]
+        );
+    }
+
+    /// The typed column keeps the released field shape: the enum's postcard encoding is exactly
+    /// the key string it stands for, and an unknown value is refused rather than defaulted.
+    #[test]
+    fn the_typed_sort_column_travels_as_its_key_string() {
+        let enum_bytes = postcard::to_extend(&SortColumn::Size, Vec::new()).expect("encode enum");
+        let string_bytes =
+            postcard::to_extend(&"size".to_string(), Vec::new()).expect("encode string");
+        assert_eq!(enum_bytes, string_bytes);
+
+        let bogus = postcard::to_extend(&"bogus".to_string(), Vec::new()).expect("encode bogus");
+        assert!(
+            postcard::from_bytes::<SortColumn>(&bogus).is_err(),
+            "an unknown key must not decode into a default"
+        );
+        assert!(cairn_core::sort::SortColumn::from_str("bogus")
+            .expect_err("the key vocabulary is closed")
+            .to_string()
+            .contains("unknown sort column"));
+    }
+}
