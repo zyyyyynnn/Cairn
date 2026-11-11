@@ -839,9 +839,27 @@ impl CairnApp {
                 let message = self.i18n.get_text("menu_about_body");
                 self.show_info_toast(title, message, cx);
             }
-            // Every command with an Action returned above. Reaching this arm means an arm was
-            // left behind for one of them, so the same command would run twice.
-            _ => unreachable!("action-bearing commands dispatch through their Action"),
+            // Every variant below owns an Action and dispatched above. Listing them keeps this
+            // match exhaustive, so a new command must be classified instead of failing at click.
+            GroupCommand::OpenSelected
+            | GroupCommand::RevealLocation
+            | GroupCommand::CopyPaths
+            | GroupCommand::CopyNames
+            | GroupCommand::UndoQueryText
+            | GroupCommand::RedoQueryText
+            | GroupCommand::CutQueryText
+            | GroupCommand::PasteQueryText
+            | GroupCommand::ShowProperties
+            | GroupCommand::DeleteSelected
+            | GroupCommand::RestoreSelected
+            | GroupCommand::RestoreAll
+            | GroupCommand::SelectAll
+            | GroupCommand::ToggleCase
+            | GroupCommand::ToggleWholeWord
+            | GroupCommand::ToggleMatchPath
+            | GroupCommand::ToggleRegex => {
+                unreachable!("action-bearing commands dispatch through their Action")
+            }
         }
     }
 
