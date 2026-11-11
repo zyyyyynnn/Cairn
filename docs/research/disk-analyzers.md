@@ -107,7 +107,7 @@
 ### 2.6 对 Cairn 的可借鉴点
 
 1. **搜索 ⇄ 可视化双向联动**：搜索结果与 Treemap tile 互相定位，是 DSV-06"在表格中查看"逆向方向（表格 ⇄ Treemap 联动）的现成范式（[README](https://github.com/windirstat/windirstat)）。
-2. **MFT 直读的取消路径**：直读作为可选加速 + "Added cancellation support while loading NTFS MFT records"（2.9.0），与 QRY-06 协作式取消同构——Cairn 的 DSV 回退扫描流同样需要中途取消语义（[CHANGELOG.md](https://github.com/windirstat/windirstat/blob/master/CHANGELOG.md)）。
+2. **MFT 直读的取消路径**：直读作为可选加速 + "Added cancellation support while loading NTFS MFT records"（2.9.0），与 QRY-06 协作式取消同构；Cairn 的 Treemap 只向服务请求一次 `GetTree`，不存在本地扫描流（[CHANGELOG.md](https://github.com/windirstat/windirstat/blob/master/CHANGELOG.md)）。
 3. **快照文件 + 命令行导入导出**：CSV/JSON 快照与 `/SaveTo`//`LoadFrom` 为无头回归提供夹具，呼应 IDX-10 MFT 镜像离线构建的可测试性方向。
 
 ---
@@ -234,7 +234,7 @@
 
 ### 5.4 对 Cairn 的可借鉴点
 
-1. **扫描中即可导航的渐进呈现**：RidNacs 与 SpaceSniffer 一致验证了"扫描未完成即开始下钻"的用户价值；Cairn treemap.md §1 的流式扫描已覆盖该能力，无需改动。
+1. **扫描中即可导航的渐进呈现**：RidNacs 与 SpaceSniffer 一致验证了"扫描未完成即开始下钻"的用户价值；Cairn 的 Treemap 数据来自服务索引，一次 `GetTree` 返回后整画布呈现，该模式不适用。
 2. **导出快照做前后对比**：XML/CSV 导出 + 人工 diff 的"清理前后对照"用法，是 IDX-05 一致性测试与 SM-5 零差异验证的终端用户版，可启发 CLI-02 `--export-csv` 的对拍场景设计。
 3. **柱状图对照组**：无 Treemap 的树 + 柱状呈现无法同时表达层级占比与大面积下钻，反向验证 DSV-02 嵌套 Treemap 路线的必要性。
 

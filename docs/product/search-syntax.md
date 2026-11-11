@@ -48,14 +48,14 @@
 | `date-modified:` | `dm:today`、`dm:2026-01-01..2026-10-15` | 修改时间；支持相对时长（`2days`、`3weeks`、`4hours`）、`YYMMDD`、月份星期名、`mtd/ytd/qtd` |
 | `date-created:` | `dc:>2026`、`dc:yesterday` | 创建时间；取值格式与 `dm:` 一致 |
 | `parent:` | `parent:C:\Windows` | 仅匹配指定绝对路径的直接子项，忽略末尾反斜杠 |
-| `content:` | `content:架构`、`content:"error code"` | 触发 Tantivy 全文内容索引；支持复合分组 `content:<abc 123>`；单条查询至多 16 个内容检索项（含否定项），超限请求被拒绝 |
+| `content:` | `content:架构`、`content:"error code"` | 触发 Tantivy 全文内容索引；支持复合分组 `content:<abc 123>`；单条查询至多 16 个内容检索项（按解析后带内容检索的项数计，含重复与否定项），超限在管道请求边界以错误码 416 整体拒绝 |
 
 ### 1.5 快速过滤器宏
 - 内置宏：`audio:`、`doc:`、`exe:`、`image:`、`video:`、`zip:`。
 - 宏支持使用竖线 `|` 组合，例如 `audio:|video:`。各类宏对应的文件扩展名集合可在配置文件中灵活定制。
 
 ### 1.6 正则表达式与 ReDoS 防护
-- 正则表达式采用 Rust 官方 `regex` 库执行，保证 $O(M \times N)$ 线性时间匹配复杂度，天然免疫恶意正则表达式导致的 CPU 拒绝服务（ReDoS）。
+- 正则表达式采用 Rust 官方 `regex` 库执行，匹配时间为 $O(M \times N)$，无回溯型 ReDoS 风险。
 - 正则解析器具有内存编译缓存，快速轮询或百万行滚动时复用已编译的有限状态机。
 
 ### 1.7 与 PCRE / Everything 语法差异

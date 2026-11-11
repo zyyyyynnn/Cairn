@@ -10,10 +10,13 @@
 ```mermaid
 graph TD
     App[cairn-app 免提权 GUI] --> Client[cairn-client 命名管道客户端]
+    App --> UI[cairn-ui 组件与主题]
     CLI[cairn-cli 免提权命令行] --> Client
+    Setup[cairn-setup 安装器] --> UI
     Client --> Protocol[cairn-protocol 消息与编解码]
+    Protocol --> Core[cairn-core 紧凑索引与引擎]
 
-    Service[CairnService.exe Windows服务] --> Core[cairn-core 紧凑索引与引擎]
+    Service[CairnService.exe Windows服务] --> Core
     Service --> NTFS[cairn-ntfs 裸卷MFT与USN]
     Service --> Content[cairn-content Tantivy全文检索]
     Service --> Protocol
@@ -62,7 +65,7 @@ flowchart TD
 - **定长文件记录（`FileRecord`，紧凑对齐，48 字节）**：
   包含 64 位文件引用号（FRN）、父目录下标 `parent_idx`、名称池偏移与长度、扩展名相对偏移、卷标识、DOS 属性与目录标记位、64 位大小、修改与创建时间戳。文件的大小是自身逻辑大小；目录的大小是索引内后代文件逻辑大小之和，随 USN 变更沿父链增量维护，因此表格显示、排序与 `size:` 过滤共用同一值。完整路径按需沿父链回溯解析，内存中仅存储分段文件名与父目录引用。
 - **连续名称池（`NamePool` Arena）**：
-  所有 UTF-8 文件名紧凑连续写入单一字节向量 `Vec<u8>`，并同步维护 Unicode 大小写折叠副本 `folded_arena`，彻底避免数百万次碎片化堆内存分配。
+  所有 UTF-8 文件名紧凑连续写入单一字节向量 `Vec<u8>`，并同步维护 Unicode 大小写折叠副本 `folded_arena`，逐条名称不再单独分配。
 - **路径按需拼接与缓存**：
   仅在匹配带路径查询或客户端拉取分页数据时，沿 `parent_idx` 回溯祖先链即时拼接路径，辅以目录级路径缓存（`DirectoryPathCache`）实现 $O(1)$ 均摊开销。
 - **预排序加速索引**：
