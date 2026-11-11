@@ -626,7 +626,15 @@ pub fn create_snippet(body: &str, query: &str, max_len: usize) -> String {
     let lower_body = body.to_ascii_lowercase();
     let lower_query = query.to_ascii_lowercase();
 
-    let pos = lower_body.find(&lower_query).unwrap_or(0);
+    // A multi-term query reaches this function as space-joined text that may occur nowhere as
+    // a phrase. The earliest position of the whole query or any of its words still anchors the
+    // snippet at a hit; only a query absent from the body falls back to the head.
+    let pos = std::iter::once(lower_query.as_str())
+        .chain(lower_query.split_whitespace())
+        .filter(|needle| !needle.is_empty())
+        .filter_map(|needle| lower_body.find(needle))
+        .min()
+        .unwrap_or(0);
     let target_start = pos.saturating_sub(max_len / 4);
     let start = floor_char_boundary(body, target_start);
 
@@ -745,6 +753,32 @@ mod tests {
             "the merged search must hit exactly the union"
         );
         assert_eq!(union, vec![(0, 1), (0, 2), (0, 3)]);
+    }
+
+    #[test]
+    fn search_union_snippets_anchor_at_a_hit_word() {
+        let temp = tempdir().unwrap();
+        let index = ContentIndex::open_or_create(temp.path()).expect("open failed");
+        let body = format!(
+            "{}alpha and later beta{}",
+            "filler ".repeat(40),
+            " tail".repeat(10)
+        );
+        index
+            .index_document(0, 1, 16, 1, "C:\\docs\\a.txt", &body)
+            .expect("index doc failed");
+
+        let terms = vec!["alpha".to_string(), "beta".to_string()];
+        let hits = index
+            .searcher
+            .search_union(&terms, 10)
+            .expect("scored union");
+        assert_eq!(hits.len(), 1);
+        assert!(
+            hits[0].snippet.contains("alpha"),
+            "the snippet must show a hit word, got: {}",
+            hits[0].snippet
+        );
     }
 
     #[test]

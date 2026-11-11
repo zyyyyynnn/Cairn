@@ -129,6 +129,9 @@ impl MultiVolumeEngine {
                 // complete; a very common disjunction keeps just its hit set.
                 let mut snippets_by_key: HashMap<(char, u64), String> = HashMap::new();
                 if union_count < CONTENT_RESULT_TOP_K {
+                    if cancel.is_cancelled() {
+                        return (Vec::new(), 0, highlight_terms, snippets, 0);
+                    }
                     let hits = match searcher.search_union(&terms, CONTENT_RESULT_TOP_K) {
                         Ok(hits) => hits,
                         Err(err) => {
@@ -713,7 +716,7 @@ fn hit_bitset(vol: &VolumeIndex, frns: &[u64], cancel: &CancellationToken) -> Bi
     frns.par_chunks(HIT_RESOLVE_CHUNK)
         .map(|chunk| {
             if cancel.is_cancelled() {
-                return BitSet::with_capacity(0);
+                return BitSet::with_capacity(vol.records.len());
             }
             let mut bits = BitSet::with_capacity(vol.records.len());
             for &frn in chunk {

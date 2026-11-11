@@ -948,13 +948,15 @@ mod tests {
     }
 
     /// The content-term limit is request validation: a query above it is refused before the
-    /// engine evaluates anything, and a query at it is answered normally.
+    /// engine evaluates anything, and a query at it is answered normally. The refusal must not
+    /// touch the active-query registry, whose new query would cancel every other in-flight one.
     #[test]
     fn a_query_above_the_content_term_limit_is_rejected_before_evaluation() {
         use cairn_core::syntax::MAX_CONTENT_TERMS;
         use cairn_protocol::message::ERROR_CODE_QUERY_TOO_COMPLEX;
 
         let harness = Harness::new(ServiceConfig::default());
+        let in_flight = harness.sessions.begin_query(41, &CancellationToken::new());
         let (code, message) = denial(harness.handle(
             content_query_request(MAX_CONTENT_TERMS + 1),
             CallerAuthorization::Administrator,
@@ -964,6 +966,11 @@ mod tests {
             message.contains(&MAX_CONTENT_TERMS.to_string()),
             "{message}"
         );
+        assert!(
+            !in_flight.is_cancelled(),
+            "a refused request must not cancel another connection's query"
+        );
+        harness.sessions.finish_query(41);
 
         // No content index is ready in this harness, so the query at the limit answers an empty
         // result set instead of a rejection.

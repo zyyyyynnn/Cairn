@@ -302,7 +302,11 @@ impl CairnApp {
     /// Skipped while a query is already in flight; that answer is newer than the request would be.
     /// A hidden table (Treemap or Recycle Bin) is never refreshed in the background.
     pub fn refresh_results(&mut self, cx: &mut Context<Self>) {
-        if self.query.is_searching || self.recycle_bin.is_open() || self.drive_view.is_some() {
+        if self.query.is_searching
+            || self.recycle_bin.is_open()
+            || self.drive_view.is_some()
+            || self.query.rejection.is_some()
+        {
             return;
         }
         self.run_query(cx, false);
