@@ -14,7 +14,7 @@ fn main() {
         let rc_path = Path::new(&out_dir).join("CairnService.rc");
         let res_path = Path::new(&out_dir).join("CairnService.res");
 
-        let mut res = winres::WindowsResource::new();
+        let mut res = winresource::WindowsResource::new();
         if icon_path.exists() {
             res.set_icon(icon_path.to_str().unwrap());
         }

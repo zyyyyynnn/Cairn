@@ -13,7 +13,7 @@ fn main() {
             "missing application icon: {}",
             icon_path.display()
         );
-        let mut res = winres::WindowsResource::new();
+        let mut res = winresource::WindowsResource::new();
         res.set_icon(icon_path.to_str().unwrap());
         res.set("FileDescription", "Cairn Installer");
         res.set("ProductName", "Cairn");

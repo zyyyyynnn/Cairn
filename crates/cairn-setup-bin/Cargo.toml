@@ -25,4 +25,4 @@ test = false
 cairn-setup.workspace = true
 
 [build-dependencies]
-winres.workspace = true
+winresource.workspace = true

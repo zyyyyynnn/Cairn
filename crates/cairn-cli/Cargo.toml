@@ -22,7 +22,7 @@ tracing.workspace = true
 thiserror.workspace = true
 
 [build-dependencies]
-winres.workspace = true
+winresource.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
