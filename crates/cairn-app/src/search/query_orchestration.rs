@@ -380,7 +380,7 @@ impl CairnApp {
             match_path: self.query.match_path,
             is_regex: self.query.use_regex,
             // Content is a query syntax (`content:`), not a modal toggle. The service gates it on
-            // the master switch; the UI no longer carries a second content control.
+            // the master switch.
             content: false,
             exclude_hidden: false,
             exclude_system: false,

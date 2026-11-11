@@ -527,7 +527,6 @@ impl SearchInputState {
         let text_before = &self.text[..cursor];
         let mut chars = text_before.char_indices().rev().peekable();
 
-        // Skip trailing whitespace if any
         while let Some(&(_, ch)) = chars.peek() {
             if ch.is_whitespace() {
                 chars.next();
@@ -565,7 +564,6 @@ impl SearchInputState {
         let text_after = &self.text[cursor..];
         let mut chars = text_after.char_indices().peekable();
 
-        // Skip leading whitespace if any
         while let Some(&(_, ch)) = chars.peek() {
             if ch.is_whitespace() {
                 chars.next();

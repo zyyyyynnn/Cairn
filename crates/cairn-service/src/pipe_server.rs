@@ -69,7 +69,6 @@ impl PipeServer {
         let mut server = self.create_pipe_instance(true)?;
 
         loop {
-            // Wait for client to connect
             server.connect().await?;
             let connected_server = server;
 

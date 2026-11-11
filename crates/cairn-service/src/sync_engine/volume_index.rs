@@ -302,7 +302,6 @@ impl VolumeIndex {
         self.append_items(items);
         self.recompute_directory_sizes();
 
-        // Build presorted indices
         self.presorted = PresortedIndices::build(
             &self.records,
             &self.arena,
