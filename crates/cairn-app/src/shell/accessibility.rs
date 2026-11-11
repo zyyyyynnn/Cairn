@@ -1135,35 +1135,75 @@ mod tests {
         );
     }
 
-    /// The anti-empty-promise check: every registered control must be *requested* by the render path,
-    /// either by its registry key or by the element id it builds. A member of a repeated family counts
-    /// as requested only when the view builds that family (`element_id(prefix, model_key)`) and the
-    /// model really names that member.
+    /// `true` when `sources` request `entry`, under one of the three shapes the render path uses:
+    /// a literal `accessibility::control("key")` lookup, a repeated family the view assembles
+    /// through `element_id("family", ...)` with the member named as its own string literal, or the
+    /// service band's lookup of the key the issue model produces.
+    ///
+    /// Every needle is a complete call or a quoted literal: an element id that merely starts with
+    /// a registered one (`window-minimize-focus` beside `window-minimize`) is a different control.
+    fn is_requested(sources: &[&str], entry: &KeyControl) -> bool {
+        let by_key = sources
+            .iter()
+            .any(|source| source.contains(&format!("accessibility::control(\"{}\")", entry.key)));
+        let by_family = match entry.element.split_once(':') {
+            Some((family, member)) => {
+                let family_built = sources
+                    .iter()
+                    .any(|source| source.contains(&format!("element_id(\"{family}\"")));
+                let member_named = sources
+                    .iter()
+                    .any(|source| source.contains(&format!("\"{member}\"")));
+                family_built && member_named
+            }
+            None => false,
+        };
+        let by_issue_model = sources
+            .iter()
+            .any(|source| source.contains("accessibility::control(issue.accessibility_key())"))
+            && ServiceIssue::ALL
+                .iter()
+                .any(|issue| issue.accessibility_key() == entry.key);
+        by_key || by_family || by_issue_model
+    }
+
+    /// The anti-empty-promise check: every registered control must be requested by the render path
+    /// through one of the shapes [`is_requested`] recognises, so an entry cannot become a promise
+    /// the window never keeps.
     #[test]
     fn every_registered_control_is_requested_by_the_render_path() {
-        let references = |needle: &str| VIEW_SOURCES.iter().any(|source| source.contains(needle));
-
         for entry in KEY_CONTROLS {
-            let by_key = references(entry.key);
-            let by_element = references(entry.element);
-            // A repeated family counts only when the view assembles that family's id *and* the member
-            // exists as its own string literal. Matching the member as a bare substring is not a
-            // check: "all" is inside "small", "install" and "allow", so any short member name would
-            // be reported as requested no matter what the view did.
-            let by_family = match entry.element.split_once(':') {
-                Some((family, member)) => {
-                    references(&format!("element_id(\"{family}\""))
-                        && references(&format!("\"{member}\""))
-                }
-                None => false,
-            };
             assert!(
-                by_key || by_element || by_family,
+                is_requested(VIEW_SOURCES, entry),
                 "{} registers element {}, which neither the view nor its models build",
                 entry.key,
                 entry.element
             );
         }
+    }
+
+    /// A control is not requested by an element id that merely starts with its own: the caption
+    /// button's focus state is keyed `window-minimize-focus`, and deleting the button's real call
+    /// must fail the check instead of being satisfied by that neighbour.
+    #[test]
+    fn a_suffixed_element_id_does_not_request_the_control_that_prefixes_it() {
+        let fake = [
+            r#"window.use_keyed_state("window-minimize-focus", cx, |_, cx| {
+            cx.focus_handle()
+        })"#,
+        ];
+        assert!(!is_requested(&fake, control("window-minimize")));
+        assert!(
+            is_requested(
+                &[r#"let minimize = accessibility::control("window-minimize");"#],
+                control("window-minimize")
+            ),
+            "the check would not recognise the real request either"
+        );
+        assert!(
+            is_requested(VIEW_SOURCES, control("window-minimize")),
+            "the window no longer requests its minimize control"
+        );
     }
 
     /// The view may not name a role, an accessible label or an observation binding inline. The first
