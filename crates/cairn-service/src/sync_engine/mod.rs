@@ -79,7 +79,7 @@ impl MultiVolumeEngine {
         Self::with_paths(
             &root.join("index"),
             &root.join("content"),
-            std::path::Path::new(crate::config::SERVICE_CONFIG_FILE),
+            &crate::config::service_config_path(),
             enumerate_fixed_drives(),
             config,
         )
@@ -120,7 +120,7 @@ impl MultiVolumeEngine {
         Self::with_paths(
             index_dir,
             &index_dir.join("content"),
-            std::path::Path::new(crate::config::SERVICE_CONFIG_FILE),
+            &crate::config::service_config_path(),
             drives,
             config,
         )

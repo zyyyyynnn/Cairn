@@ -8,7 +8,10 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 
-pub const SERVICE_CONFIG_FILE: &str = r"C:\ProgramData\Cairn\service.toml";
+/// The service configuration inside the SPEC SET-02 data root.
+pub fn service_config_path() -> std::path::PathBuf {
+    crate::security::default_service_data_root().join("service.toml")
+}
 
 fn default_excluded_paths() -> Vec<String> {
     vec![
