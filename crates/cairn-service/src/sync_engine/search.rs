@@ -105,6 +105,9 @@ impl MultiVolumeEngine {
                     return (all_results, 0, highlight_terms, snippets, 0);
                 }
 
+                // The collector emits one pair per matching document, so the hit set's length is
+                // the union's document count; a second counting search would repeat the work.
+                let union_count = union_hits.len();
                 let mut frns_by_drive: HashMap<char, Vec<u64>> = HashMap::new();
                 for (volume_id, frn) in union_hits {
                     let Some(drive_letter) = u16::try_from(volume_id)
@@ -119,13 +122,6 @@ impl MultiVolumeEngine {
                 // Snippets are display-only: a scored union search supplies them while it is
                 // complete; a very common disjunction keeps just its hit set.
                 let mut snippets_by_key: HashMap<(char, u64), String> = HashMap::new();
-                let union_count = match searcher.count_hits_union(&terms) {
-                    Ok(count) => count,
-                    Err(err) => {
-                        tracing::warn!("content union count for {terms:?} failed: {err}");
-                        return (Vec::new(), 0, highlight_terms, snippets, 0);
-                    }
-                };
                 if union_count < CONTENT_RESULT_TOP_K {
                     let hits = match searcher.search_union(&terms, CONTENT_RESULT_TOP_K) {
                         Ok(hits) => hits,
@@ -160,18 +156,14 @@ impl MultiVolumeEngine {
                     if !vol.status.state().is_synced() && vol.records.is_empty() {
                         continue;
                     }
+                    // A pure content disjunction can only match where some term hit, so a
+                    // volume without hits has nothing to scan.
+                    let Some(frns) = frns_by_drive.remove(&vol.drive_letter) else {
+                        continue;
+                    };
                     // One union bitmap per volume; a hit FRN marks every hardlink row it maps
                     // to. The FRN list is consumed as the bitmap is built.
-                    let mut union_bits = BitSet::with_capacity(vol.records.len());
-                    if let Some(frns) = frns_by_drive.remove(&vol.drive_letter) {
-                        for frn in frns {
-                            if let Some(indices) = vol.frn_to_idx.get(&frn) {
-                                for &idx in indices {
-                                    union_bits.insert(idx as usize);
-                                }
-                            }
-                        }
-                    }
+                    let union_bits = hit_bitset(vol, &frns);
                     let mut matches = Vec::new();
                     for (idx, rec) in vol.records.iter().enumerate() {
                         if (idx & 0x3FFF) == 0 && cancel.is_cancelled() {
@@ -405,17 +397,7 @@ impl MultiVolumeEngine {
                         .map(|frns_by_term| {
                             frns_by_term
                                 .into_iter()
-                                .map(|frns| {
-                                    let mut bits = BitSet::with_capacity(vol.records.len());
-                                    for frn in frns {
-                                        if let Some(indices) = vol.frn_to_idx.get(&frn) {
-                                            for &idx in indices {
-                                                bits.insert(idx as usize);
-                                            }
-                                        }
-                                    }
-                                    bits
-                                })
+                                .map(|frns| hit_bitset(vol, &frns))
                                 .collect()
                         })
                         .unwrap_or_default();
@@ -709,6 +691,37 @@ fn is_positive_conjunction(expr: &QueryExpr) -> bool {
         QueryExpr::And(subs) => !subs.is_empty() && subs.iter().all(is_positive_conjunction),
         _ => false,
     }
+}
+
+/// How many hit FRNs one resolution chunk covers.
+const HIT_RESOLVE_CHUNK: usize = 16_384;
+
+/// Record-index bitmap for one term's hit FRNs; a hit FRN marks every hardlink row it maps to.
+/// Resolving the list costs the same order of work as a full scan and runs inside the volumes
+/// read lock the USN poller waits on, so it is split into parallel chunks and OR-merged.
+fn hit_bitset(vol: &VolumeIndex, frns: &[u64]) -> BitSet {
+    if frns.is_empty() {
+        return BitSet::with_capacity(0);
+    }
+    frns.par_chunks(HIT_RESOLVE_CHUNK)
+        .map(|chunk| {
+            let mut bits = BitSet::with_capacity(vol.records.len());
+            for &frn in chunk {
+                if let Some(indices) = vol.frn_to_idx.get(&frn) {
+                    for &idx in indices {
+                        bits.insert(idx as usize);
+                    }
+                }
+            }
+            bits
+        })
+        .reduce(
+            || BitSet::with_capacity(vol.records.len()),
+            |mut left, right| {
+                left.merge(&right);
+                left
+            },
+        )
 }
 
 /// Presorted index to use as the order for `sort_by`, or `None` when it cannot be trusted: a

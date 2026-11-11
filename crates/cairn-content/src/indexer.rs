@@ -240,15 +240,6 @@ impl ContentSearcher {
         Ok(searcher.search(query.as_ref(), &Count)?)
     }
 
-    /// Number of documents any of the terms matches. It decides whether a scored union search
-    /// is complete enough to supply snippets for every hit.
-    pub fn count_hits_union(&self, terms: &[String]) -> Result<usize, ContentIndexError> {
-        self.reader.reload()?;
-        let searcher = self.reader.searcher();
-        let query = self.union_query(terms)?;
-        Ok(searcher.search(&query, &Count)?)
-    }
-
     /// One Should clause per parsed term. Parsing each term on its own keeps a term's boolean
     /// syntax from regrouping its siblings, which a joined string would allow.
     fn union_query(&self, terms: &[String]) -> Result<BooleanQuery, ContentIndexError> {
@@ -758,7 +749,7 @@ mod tests {
     }
 
     #[test]
-    fn search_union_scores_the_disjunction_and_counts_it() {
+    fn search_union_scores_the_disjunction_and_applies_the_top_k_bound() {
         let temp = tempdir().unwrap();
         let index = ContentIndex::open_or_create(temp.path()).expect("open failed");
         for (frn, body) in [
@@ -773,15 +764,6 @@ mod tests {
         }
 
         let terms = vec!["alpha".to_string(), "beta".to_string()];
-        assert_eq!(
-            index
-                .searcher
-                .count_hits_union(&terms)
-                .expect("union count"),
-            3,
-            "the count covers every document any term matches"
-        );
-
         let hits = index
             .searcher
             .search_union(&terms, 10)

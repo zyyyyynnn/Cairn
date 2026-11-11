@@ -48,6 +48,14 @@ impl BitSet {
             .get(bit / 64)
             .is_some_and(|word| word & (1u64 << (bit % 64)) != 0)
     }
+
+    /// Unions `other` into `self`. Both sets describe the same record table, so their word
+    /// vectors have equal length.
+    pub(super) fn merge(&mut self, other: &Self) {
+        for (word, &incoming) in self.words.iter_mut().zip(&other.words) {
+            *word |= incoming;
+        }
+    }
 }
 
 /// A smaller volume is rebuilt quickly enough that compaction on every start would cost more than
