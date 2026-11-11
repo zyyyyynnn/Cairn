@@ -308,14 +308,16 @@ impl MultiVolumeEngine {
     /// Disables the master switch and persists it; the controller stops the active batch via the
     /// shared cancellation flag. The index files are left in place until the user clears them.
     pub fn disable_content_index(&self) -> Result<(), String> {
-        let mut cfg = self.get_config();
-        if !cfg.content_index_enabled {
+        if !self.get_config().content_index_enabled {
             return Ok(());
         }
-        cfg.content_index_enabled = false;
-        let config_toml = toml::to_string_pretty(&cfg)
-            .map_err(|err| format!("could not serialize service configuration: {err}"))?;
-        self.apply_config_toml(&config_toml, true)
+        // The switch is flipped on the live configuration under the apply lock, so a concurrent
+        // submission is never overwritten by the snapshot this call read before it.
+        self.apply_config_change(true, |current| {
+            let mut next = current.clone();
+            next.content_index_enabled = false;
+            Ok(next)
+        })
     }
 
     /// Signals any active `CairnWorker` subprocess to terminate on service shutdown without

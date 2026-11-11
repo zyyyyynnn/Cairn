@@ -21,17 +21,40 @@ impl MultiVolumeEngine {
         self.config.read().unwrap().admin_only_query
     }
 
-    /// Updates service configuration dynamically (IDX-09 hot apply).
-    pub fn update_config(&self, new_config: ServiceConfig) {
-        let (previous_enabled, next_enabled) = {
+    /// Applies one configuration change: the new value is built from the live configuration,
+    /// optionally persisted, and installed under one configuration write. Applies are serialized
+    /// from start to finish, so the content-pipeline transition a change triggers runs in the
+    /// same order as the assignment that caused it.
+    ///
+    /// With `persist`, nothing is installed unless the file was written securely, so a
+    /// configuration a standard account could still edit never reaches the running index.
+    pub(super) fn apply_config_change(
+        &self,
+        persist: bool,
+        build: impl FnOnce(&ServiceConfig) -> Result<ServiceConfig, String>,
+    ) -> Result<(), String> {
+        let _serialized = self.config_apply_lock.lock().unwrap();
+        let path = self.config_path.clone();
+        let (previous_enabled, applied) = {
             let mut cfg = self.config.write().unwrap();
+            let next = build(&cfg)?;
+            if persist {
+                next.save_atomic_secure(&path)
+                    .map_err(|e| format!("could not persist {}: {e}", path.display()))?;
+            }
             let previous_enabled = cfg.content_index_enabled;
-            let next_enabled = new_config.content_index_enabled;
-            *cfg = new_config.clone();
-            (previous_enabled, next_enabled)
+            *cfg = next.clone();
+            (previous_enabled, next)
         };
-        self.apply_content_switch(previous_enabled, next_enabled);
-        self.retain_indexed_volumes(&new_config);
+        self.config_trusted.store(true, Ordering::SeqCst);
+        self.apply_content_switch(previous_enabled, applied.content_index_enabled);
+        self.retain_indexed_volumes(&applied);
+        Ok(())
+    }
+
+    /// Updates service configuration dynamically without persisting it (IDX-09 hot apply).
+    pub fn update_config(&self, new_config: ServiceConfig) {
+        let _ = self.apply_config_change(false, |_| Ok(new_config.clone()));
     }
 
     /// Moves the content pipeline when the master switch changed, and retries a failed run when
@@ -82,7 +105,9 @@ impl MultiVolumeEngine {
     }
 
     /// Reloads configuration from an explicit path (IDX-09). A missing file resets the engine to the
-    /// shipped defaults instead of keeping a configuration nobody can account for.
+    /// shipped defaults instead of keeping a configuration nobody can account for. The file is read
+    /// under the same serialized apply, so a value submitted at the same time is not overwritten by
+    /// a copy read before it; a reload never rewrites the file.
     pub fn reload_config_from(&self, path: &std::path::Path) -> Result<(), String> {
         if !self.config_trusted.load(Ordering::SeqCst) {
             return Err(
@@ -90,25 +115,23 @@ impl MultiVolumeEngine {
                     .to_string(),
             );
         }
-        if path.exists() {
-            let new_cfg = ServiceConfig::load(path)
-                .map_err(|e| format!("Failed to load config from {}: {}", path.display(), e))?;
-            self.update_config(new_cfg);
-        } else {
-            self.update_config(ServiceConfig::default());
-        }
-        Ok(())
+        self.apply_config_change(false, |_| {
+            if path.exists() {
+                ServiceConfig::load(path)
+                    .map_err(|e| format!("Failed to load config from {}: {}", path.display(), e))
+            } else {
+                Ok(ServiceConfig::default())
+            }
+        })
     }
 
-    /// Applies a configuration submitted by a privileged caller: validate, persist with the
+    /// Applies a configuration submitted by a caller: validate, persist with the
     /// SYSTEM/Administrators descriptor required by SET-02, then hot-apply (SVC-05, IDX-09).
     ///
     /// The admin-only comparison, the protected write and the in-memory update happen under one
-    /// configuration write, so a concurrent submission is decided against the value that is
-    /// actually current. `allow_admin_only_query_change` carries whether the caller may change
-    /// that switch; keeping the current value is not a change. Nothing is applied unless the file
-    /// could be written securely, so a configuration that a standard account could still edit
-    /// never reaches the running index.
+    /// serialized configuration write, so a concurrent submission is decided against the value
+    /// that is actually current. `allow_admin_only_query_change` carries whether the caller may
+    /// change that switch; keeping the current value is not a change.
     pub fn apply_config_toml(
         &self,
         config_toml: &str,
@@ -116,22 +139,53 @@ impl MultiVolumeEngine {
     ) -> Result<(), String> {
         let parsed: ServiceConfig = toml::from_str(config_toml)
             .map_err(|e| format!("invalid service configuration: {e}"))?;
-        let path = self.config_path.clone();
-        let previous_enabled = {
-            let mut cfg = self.config.write().unwrap();
-            if !allow_admin_only_query_change && cfg.admin_only_query != parsed.admin_only_query {
-                return Err("admin_only_query can only be changed by an administrator".to_string());
-            }
-            parsed
-                .save_atomic_secure(&path)
-                .map_err(|e| format!("could not persist {}: {e}", path.display()))?;
-            let previous_enabled = cfg.content_index_enabled;
-            *cfg = parsed.clone();
-            previous_enabled
-        };
-        self.config_trusted.store(true, Ordering::SeqCst);
-        self.apply_content_switch(previous_enabled, parsed.content_index_enabled);
-        self.retain_indexed_volumes(&parsed);
-        Ok(())
+        self.apply_config_change(true, |current| {
+            check_admin_only_query_change(current, &parsed, allow_admin_only_query_change)?;
+            Ok(parsed.clone())
+        })
+    }
+}
+
+/// The administrators-only query mode decides who may query at all, so only an administrator may
+/// change it (SPEC SVC-05); a submission that keeps the current value is not a change.
+fn check_admin_only_query_change(
+    current: &ServiceConfig,
+    submitted: &ServiceConfig,
+    allow_change: bool,
+) -> Result<(), String> {
+    if !allow_change && current.admin_only_query != submitted.admin_only_query {
+        return Err("admin_only_query can only be changed by an administrator".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_admin_only_query_change;
+    use crate::config::ServiceConfig;
+
+    fn config(admin_only_query: bool) -> ServiceConfig {
+        ServiceConfig {
+            admin_only_query,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn only_an_administrator_may_change_the_administrators_only_query_mode() {
+        let off = config(false);
+        let on = config(true);
+        assert!(check_admin_only_query_change(&off, &on, false)
+            .expect_err("a standard user must not switch the mode on")
+            .contains("administrator"));
+        assert!(check_admin_only_query_change(&on, &off, false)
+            .expect_err("a standard user must not switch the mode off")
+            .contains("administrator"));
+        check_admin_only_query_change(&off, &off, false)
+            .expect("keeping the mode as it is is not a change");
+        check_admin_only_query_change(&on, &on, false)
+            .expect("keeping the mode as it is is not a change");
+        check_admin_only_query_change(&off, &on, true).expect("an administrator may switch it on");
+        check_admin_only_query_change(&on, &off, true).expect("an administrator may switch it off");
     }
 }

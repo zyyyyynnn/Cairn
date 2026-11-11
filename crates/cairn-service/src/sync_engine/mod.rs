@@ -49,6 +49,9 @@ pub struct MultiVolumeEngine {
     self_data_dirs: Vec<std::path::PathBuf>,
     config_path: std::path::PathBuf,
     config: RwLock<ServiceConfig>,
+    /// Serializes configuration applies from the comparison through the content-pipeline
+    /// transition, so a switch command cannot be overtaken by the change that reverses it.
+    config_apply_lock: Mutex<()>,
     content_searcher: RwLock<Option<Arc<ContentSearcher>>>,
     content_status: RwLock<ContentIndexStatus>,
     content_cancel: Arc<AtomicBool>,
@@ -404,6 +407,7 @@ impl MultiVolumeEngine {
             self_data_dirs,
             config_path: config_path.to_path_buf(),
             config: RwLock::new(config),
+            config_apply_lock: Mutex::new(()),
             content_searcher: RwLock::new(None),
             content_status: RwLock::new(if content_enabled {
                 ContentIndexStatus {

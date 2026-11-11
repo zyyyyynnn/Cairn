@@ -795,11 +795,14 @@ fn changing_admin_only_query_requires_privilege_inside_the_configuration_write()
     assert!(err.contains("administrator"), "{err}");
     assert!(!engine.get_config().admin_only_query);
 
-    if let Err(err) = engine.apply_config_toml("admin_only_query = false\n", false) {
-        assert!(
+    // The secure write restores a trusted owner, which needs SeRestorePrivilege; an
+    // unelevated test process can only reach the ACL refusal.
+    match engine.apply_config_toml("admin_only_query = false\n", false) {
+        Ok(()) => assert!(!engine.get_config().admin_only_query),
+        Err(err) => assert!(
             err.contains("could not persist"),
             "keeping the switch must only be refused by the protected write: {err}"
-        );
+        ),
     }
     assert!(!engine.get_config().admin_only_query);
 
@@ -823,6 +826,8 @@ fn an_administrator_may_change_admin_only_query_inside_the_configuration_write()
     let temp = tempfile::tempdir().expect("tempdir");
     let engine = engine_with_config_file(temp.path());
 
+    // The secure write restores a trusted owner, which needs SeRestorePrivilege; an
+    // unelevated test process can only reach the ACL refusal.
     match engine.apply_config_toml("admin_only_query = true\n", true) {
         Ok(()) => assert!(engine.get_config().admin_only_query),
         Err(err) => assert!(
