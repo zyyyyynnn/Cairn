@@ -747,6 +747,68 @@ fn an_untrusted_configuration_cannot_be_reloaded() {
     assert!(!engine.get_config().admin_only_query);
 }
 
+fn engine_with_config_file(temp: &std::path::Path) -> MultiVolumeEngine {
+    MultiVolumeEngine::with_paths(
+        &temp.join("index"),
+        &temp.join("content"),
+        &temp.join("service.toml"),
+        Vec::new(),
+        ServiceConfig::default(),
+    )
+}
+
+/// The admin-only switch is compared against the live value while the configuration is being
+/// written, so the decision cannot be taken against a value another connection has replaced.
+/// A submission that keeps the current value is not a change and stays available to standard
+/// users; only the secure persistence of `service.toml` can still refuse it.
+#[test]
+fn changing_admin_only_query_requires_privilege_inside_the_configuration_write() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let engine = engine_with_config_file(temp.path());
+
+    let err = engine
+        .apply_config_toml("admin_only_query = true\n", false)
+        .expect_err("a standard user must not switch administrators-only mode on");
+    assert!(err.contains("administrator"), "{err}");
+    assert!(!engine.get_config().admin_only_query);
+
+    if let Err(err) = engine.apply_config_toml("admin_only_query = false\n", false) {
+        assert!(
+            err.contains("could not persist"),
+            "keeping the switch must only be refused by the protected write: {err}"
+        );
+    }
+    assert!(!engine.get_config().admin_only_query);
+
+    // The comparison uses the live value: a standard user's request that was authorized while
+    // the mode was off must not switch off an enabled mode.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let engine = engine_with_config_file(temp.path());
+    engine.update_config(ServiceConfig {
+        admin_only_query: true,
+        ..engine.get_config()
+    });
+    let err = engine
+        .apply_config_toml("admin_only_query = false\n", false)
+        .expect_err("a standard user must not defeat an enabled administrators-only mode");
+    assert!(err.contains("administrator"), "{err}");
+    assert!(engine.get_config().admin_only_query);
+}
+
+#[test]
+fn an_administrator_may_change_admin_only_query_inside_the_configuration_write() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let engine = engine_with_config_file(temp.path());
+
+    match engine.apply_config_toml("admin_only_query = true\n", true) {
+        Ok(()) => assert!(engine.get_config().admin_only_query),
+        Err(err) => assert!(
+            err.contains("could not persist"),
+            "a privileged change must only be refused by the protected write: {err}"
+        ),
+    }
+}
+
 #[cfg(windows)]
 #[test]
 fn a_rebuild_is_visible_in_the_cached_summary() {

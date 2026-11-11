@@ -23,13 +23,21 @@ impl MultiVolumeEngine {
 
     /// Updates service configuration dynamically (IDX-09 hot apply).
     pub fn update_config(&self, new_config: ServiceConfig) {
-        let previous_enabled = self.config.read().unwrap().content_index_enabled;
-        let next_enabled = new_config.content_index_enabled;
-        {
+        let (previous_enabled, next_enabled) = {
             let mut cfg = self.config.write().unwrap();
+            let previous_enabled = cfg.content_index_enabled;
+            let next_enabled = new_config.content_index_enabled;
             *cfg = new_config.clone();
-        }
+            (previous_enabled, next_enabled)
+        };
+        self.apply_content_switch(previous_enabled, next_enabled);
+        self.retain_indexed_volumes(&new_config);
+    }
 
+    /// Moves the content pipeline when the master switch changed, and retries a failed run when
+    /// the same enabled value is submitted again. Runs outside the configuration lock: the
+    /// content thread reads that configuration when it handles the command.
+    fn apply_content_switch(&self, previous_enabled: bool, next_enabled: bool) {
         if previous_enabled != next_enabled {
             if next_enabled {
                 self.content_cancel
@@ -55,12 +63,13 @@ impl MultiVolumeEngine {
             self.set_content_progress(0, 0);
             self.send_content_command(content_pipeline::ContentCommand::Start);
         }
+    }
 
-        // Remove any volumes that are now excluded so they don't consume memory (IDX-01)
+    /// Drops volumes whose drive is no longer indexed (IDX-01).
+    fn retain_indexed_volumes(&self, cfg: &ServiceConfig) {
         let mut lock = self.volumes.write().unwrap();
         lock.retain(|&d, _| {
-            !new_config
-                .excluded_drives
+            !cfg.excluded_drives
                 .iter()
                 .any(|&ex| ex.eq_ignore_ascii_case(&d))
         });
@@ -94,17 +103,35 @@ impl MultiVolumeEngine {
     /// Applies a configuration submitted by a privileged caller: validate, persist with the
     /// SYSTEM/Administrators descriptor required by SET-02, then hot-apply (SVC-05, IDX-09).
     ///
-    /// Nothing is applied unless the file could be written securely, so a configuration that a
-    /// standard account could still edit never reaches the running index.
-    pub fn apply_config_toml(&self, config_toml: &str) -> Result<(), String> {
+    /// The admin-only comparison, the protected write and the in-memory update happen under one
+    /// configuration write, so a concurrent submission is decided against the value that is
+    /// actually current. `allow_admin_only_query_change` carries whether the caller may change
+    /// that switch; keeping the current value is not a change. Nothing is applied unless the file
+    /// could be written securely, so a configuration that a standard account could still edit
+    /// never reaches the running index.
+    pub fn apply_config_toml(
+        &self,
+        config_toml: &str,
+        allow_admin_only_query_change: bool,
+    ) -> Result<(), String> {
         let parsed: ServiceConfig = toml::from_str(config_toml)
             .map_err(|e| format!("invalid service configuration: {e}"))?;
         let path = self.config_path.clone();
-        parsed
-            .save_atomic_secure(&path)
-            .map_err(|e| format!("could not persist {}: {e}", path.display()))?;
+        let previous_enabled = {
+            let mut cfg = self.config.write().unwrap();
+            if !allow_admin_only_query_change && cfg.admin_only_query != parsed.admin_only_query {
+                return Err("admin_only_query can only be changed by an administrator".to_string());
+            }
+            parsed
+                .save_atomic_secure(&path)
+                .map_err(|e| format!("could not persist {}: {e}", path.display()))?;
+            let previous_enabled = cfg.content_index_enabled;
+            *cfg = parsed.clone();
+            previous_enabled
+        };
         self.config_trusted.store(true, Ordering::SeqCst);
-        self.update_config(parsed);
+        self.apply_content_switch(previous_enabled, parsed.content_index_enabled);
+        self.retain_indexed_volumes(&parsed);
         Ok(())
     }
 }

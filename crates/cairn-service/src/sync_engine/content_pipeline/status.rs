@@ -315,7 +315,7 @@ impl MultiVolumeEngine {
         cfg.content_index_enabled = false;
         let config_toml = toml::to_string_pretty(&cfg)
             .map_err(|err| format!("could not serialize service configuration: {err}"))?;
-        self.apply_config_toml(&config_toml)
+        self.apply_config_toml(&config_toml, true)
     }
 
     /// Signals any active `CairnWorker` subprocess to terminate on service shutdown without

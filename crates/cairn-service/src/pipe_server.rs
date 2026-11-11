@@ -9,9 +9,7 @@
 //! the engine currently holds, so `admin_only_query` takes effect on the next request rather than on
 //! the next pipe instance.
 
-use crate::caller_auth::{
-    authenticate_pipe_client, authorize, may_change_admin_only_query, CallerAuthorization,
-};
+use crate::caller_auth::{authenticate_pipe_client, authorize, CallerAuthorization};
 use crate::security::SafeSecurityDescriptor;
 use crate::session::{RowsError, SessionManager};
 use crate::sync_engine::MultiVolumeEngine;
@@ -478,27 +476,10 @@ fn process_request(
         ClientRequest::SetConfig { config_toml } => {
             // Index configuration is a local-user operation, but `admin_only_query` decides who
             // may query at all. A standard user must not be able to switch that mode on (locking
-            // everyone else out) or off (defeating it); only an administrator may change it.
-            let parsed: crate::config::ServiceConfig = match toml::from_str(&config_toml) {
-                Ok(config) => config,
-                Err(err) => {
-                    return ResponsePayload::SetConfigAck {
-                        success: false,
-                        message: format!("invalid service configuration: {err}"),
-                    }
-                }
-            };
-            if !may_change_admin_only_query(
-                caller,
-                engine.get_config().admin_only_query,
-                parsed.admin_only_query,
-            ) {
-                return ResponsePayload::SetConfigAck {
-                    success: false,
-                    message: "admin_only_query can only be changed by an administrator".to_string(),
-                };
-            }
-            match engine.apply_config_toml(&config_toml) {
+            // everyone else out) or off (defeating it); only an administrator may change it. The
+            // engine compares the submitted value with the live one inside its configuration
+            // write, so two concurrent submissions cannot both be decided against a stale value.
+            match engine.apply_config_toml(&config_toml, caller.is_privileged()) {
                 Ok(()) => ResponsePayload::SetConfigAck {
                     success: true,
                     message: "Service configuration persisted and applied".to_string(),
@@ -692,6 +673,49 @@ mod tests {
             !harness.engine.get_config().admin_only_query,
             "the refused configuration must never reach the engine"
         );
+    }
+
+    /// Keeping the current value is not a change to the switch, so the authorization gate lets it
+    /// through; only the protected write of `service.toml` can still refuse it in this process.
+    #[test]
+    fn a_standard_user_may_submit_the_current_admin_only_query_value() {
+        let harness = Harness::new(ServiceConfig::default());
+        match harness.handle(
+            ClientRequest::SetConfig {
+                config_toml: "admin_only_query = false".to_string(),
+            },
+            CallerAuthorization::StandardUser,
+        ) {
+            ResponsePayload::SetConfigAck { message, .. } => assert!(
+                !message.contains("administrator"),
+                "a same-value submission must not be refused as an administrative change: {message}"
+            ),
+            other => panic!("unexpected response: {other:?}"),
+        }
+        assert!(!harness.engine.get_config().admin_only_query);
+    }
+
+    #[test]
+    fn an_administrator_may_change_admin_only_query() {
+        let harness = Harness::new(ServiceConfig::default());
+        match harness.handle(
+            ClientRequest::SetConfig {
+                config_toml: "admin_only_query = true".to_string(),
+            },
+            CallerAuthorization::Administrator,
+        ) {
+            ResponsePayload::SetConfigAck { success, message } => {
+                if success {
+                    assert!(harness.engine.get_config().admin_only_query);
+                } else {
+                    assert!(
+                        message.contains("could not persist"),
+                        "a privileged change must only be refused by the protected write: {message}"
+                    );
+                }
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
     }
 
     #[test]
