@@ -230,7 +230,7 @@ impl CairnClient {
             query_id,
             raw_query: raw_query.to_string(),
             defaults,
-            sort_column,
+            sort_by_name: sort_column.key().to_string(),
             sort_asc,
             first_page_limit,
         })
@@ -528,7 +528,7 @@ mod tests {
             ClientRequest::Query {
                 raw_query,
                 defaults: received,
-                sort_column,
+                sort_by_name,
                 first_page_limit,
                 ..
             } => {
@@ -538,7 +538,7 @@ mod tests {
                     "toggles must not be spliced into the text"
                 );
                 assert_eq!(received, defaults);
-                assert_eq!(sort_column, SortColumn::Name);
+                assert_eq!(sort_by_name, "name");
                 assert_eq!(first_page_limit, 10);
             }
             other => panic!("Expected a Query request, got {other:?}"),

@@ -45,6 +45,12 @@ cargo run -p xtask -- package
 - 代码签名（REL-02）尚未完成前，不得把未签名产物描述为已签名发布。
 - 版本取自 workspace `Cargo.toml`，升级码由 `cairn-setup` 持有、由 `xtask` 注入打包产物；发布前运行完整测试、`cargo fmt --all --check`、clippy `-D warnings`、`cargo doc`、`check-i18n`、`check-docs`、`check-size` 与 `cargo deny check`。
 
+## 6. 版本与协议兼容
+
+- 版本号只在发布提交中变更；重构、性能与功能 PR 不得修改 workspace 版本。
+- 命名管道负载是 postcard 位置编码，`crates/cairn-protocol/src/codec.rs` 的 wire 布局测试固定请求字节。字段的增删、顺序调整或类型变化属于协议发布：随发布提交提升 major.minor，并同步更新该测试，使新旧版本在握手阶段互相拒绝。
+- 内部类型只用于 API 与 CLI 边界（例如排序枚举），wire 保持既有字段形态；服务端对无法解释的取值显式拒绝，不静默回退。
+
 ## 代码位置
 
 - `xtask/src/package.rs`：WiX MSI、GPUI Setup 封装与 checksum 生成。

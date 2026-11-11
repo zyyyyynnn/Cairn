@@ -137,7 +137,7 @@ pub fn try_decode_frame<T: DeserializeOwned>(buf: &[u8]) -> Result<Option<(usize
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::message::{ClientRequest, SortColumn};
+    use crate::message::ClientRequest;
 
     #[test]
     fn test_encode_decode_roundtrip() {
@@ -183,7 +183,7 @@ mod tests {
             query_id: 7,
             raw_query: "报告 季度".to_string(),
             defaults,
-            sort_column: SortColumn::Name,
+            sort_by_name: "name".to_string(),
             sort_asc: false,
             first_page_limit: 50,
         };
@@ -199,14 +199,14 @@ mod tests {
                 query_id,
                 raw_query,
                 defaults: received,
-                sort_column,
+                sort_by_name,
                 sort_asc,
                 first_page_limit,
             } => {
                 assert_eq!(query_id, 7);
                 assert_eq!(raw_query, "报告 季度");
                 assert_eq!(received, defaults, "toggles must survive the frame");
-                assert_eq!(sort_column, SortColumn::Name);
+                assert_eq!(sort_by_name, "name");
                 assert!(!sort_asc);
                 assert_eq!(first_page_limit, 50);
             }
@@ -221,7 +221,7 @@ mod tests {
             query_id: 7,
             raw_query: "报告 季度".to_string(),
             defaults: flipped,
-            sort_column: SortColumn::Name,
+            sort_by_name: "name".to_string(),
             sort_asc: false,
             first_page_limit: 50,
         };
@@ -301,5 +301,43 @@ mod tests {
         assert!(try_decode_frame::<ClientRequest>(&frame)
             .expect("complete")
             .is_some());
+    }
+}
+
+/// Pins the bytes a query request puts on the wire.
+///
+/// The postcard payload is positional: adding, removing, reordering or retyping a field changes
+/// these bytes, and the header carries the product wire guard. A layout change therefore belongs
+/// to a protocol release, not to a refactor: update this pin together with the product version,
+/// so the new guard makes older clients fail the handshake instead of misreading the payload.
+#[cfg(test)]
+mod wire_layout {
+    use super::encode_frame;
+    use crate::message::{ClientRequest, QueryDefaults};
+
+    #[test]
+    fn the_query_wire_layout_is_pinned() {
+        let req = ClientRequest::Query {
+            query_id: 7,
+            raw_query: "rs".to_string(),
+            defaults: QueryDefaults::default(),
+            sort_by_name: "size".to_string(),
+            sort_asc: true,
+            first_page_limit: 50,
+        };
+        assert_eq!(
+            encode_frame(&req).expect("encode"),
+            vec![
+                19, 0, 0, 0, // payload length
+                2, 0, // wire guard (product major.minor: 0.2)
+                1, // Query variant
+                7, // query_id
+                2, b'r', b's', // raw_query
+                0, 0, 0, 0, 0, 0, 0, // QueryDefaults toggles, in declaration order
+                4, b's', b'i', b'z', b'e', // sort_by_name
+                1,    // sort_asc
+                50,   // first_page_limit
+            ]
+        );
     }
 }

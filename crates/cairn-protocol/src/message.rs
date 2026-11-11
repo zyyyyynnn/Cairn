@@ -66,6 +66,8 @@ pub const ERROR_CODE_TREE_TOO_LARGE: u32 = 415;
 /// The query carries more content terms than one evaluation may resolve
 /// (`cairn_core::syntax::MAX_CONTENT_TERMS`); the request is refused before evaluation.
 pub const ERROR_CODE_QUERY_TOO_COMPLEX: u32 = 416;
+/// A request field holds a value the service cannot interpret; the request is refused whole.
+pub const ERROR_CODE_INVALID_REQUEST: u32 = 417;
 
 /// The deepest tree one response may carry: three levels stay inside the entry and frame budgets
 /// on a full drive (about 42k entries on a 1.8M-record index). A subtree that still overflows is
@@ -93,7 +95,7 @@ pub enum ClientRequest {
         query_id: u64,
         raw_query: String,
         defaults: QueryDefaults,
-        sort_column: SortColumn,
+        sort_by_name: String,
         sort_asc: bool,
         first_page_limit: usize,
     },
@@ -393,7 +395,7 @@ mod tests {
                     query_id: 1,
                     raw_query: String::new(),
                     defaults: QueryDefaults::default(),
-                    sort_column: SortColumn::Name,
+                    sort_by_name: String::new(),
                     sort_asc: true,
                     first_page_limit: 0,
                 },

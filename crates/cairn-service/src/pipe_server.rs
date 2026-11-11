@@ -14,12 +14,13 @@ use crate::security::SafeSecurityDescriptor;
 use crate::session::{RowsError, SessionManager};
 use crate::sync_engine::MultiVolumeEngine;
 use cairn_core::engine::CancellationToken;
+use cairn_core::sort::SortColumn;
 use cairn_core::syntax::{parse_query_with, MAX_CONTENT_TERMS};
 use cairn_protocol::codec::{encode_frame_into, peek_frame_header, try_decode_frame};
 use cairn_protocol::message::{
     ClientRequest, Envelope, ResponsePayload, ERROR_CODE_HANDSHAKE_REQUIRED,
-    ERROR_CODE_PROTOCOL_VERSION_MISMATCH, ERROR_CODE_QUERY_TOO_COMPLEX, ERROR_CODE_SESSION_EXPIRED,
-    MAX_TREE_DEPTH, PIPE_NAME, PRODUCT_VERSION, WIRE_GUARD,
+    ERROR_CODE_INVALID_REQUEST, ERROR_CODE_PROTOCOL_VERSION_MISMATCH, ERROR_CODE_QUERY_TOO_COMPLEX,
+    ERROR_CODE_SESSION_EXPIRED, MAX_TREE_DEPTH, PIPE_NAME, PRODUCT_VERSION, WIRE_GUARD,
 };
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -344,13 +345,22 @@ fn process_request(
             query_id,
             raw_query,
             defaults,
-            sort_column,
+            sort_by_name,
             sort_asc,
             first_page_limit,
         } => {
             // Request validation, not evaluation: the engine stays a pure evaluator, and a query
-            // above the content-term limit is refused before any hit set is built. The check
-            // precedes begin_query, which cancels every other in-flight query.
+            // above the content-term limit is refused before any hit set is built. The checks
+            // precede begin_query, which cancels every other in-flight query.
+            let sort_col = match sort_by_name.parse::<SortColumn>() {
+                Ok(column) => column,
+                Err(err) => {
+                    return ResponsePayload::Error {
+                        code: ERROR_CODE_INVALID_REQUEST,
+                        message: err.to_string(),
+                    }
+                }
+            };
             let content_terms = parse_query_with(&raw_query, &defaults).content_term_count();
             if content_terms > MAX_CONTENT_TERMS {
                 return ResponsePayload::Error {
@@ -362,7 +372,7 @@ fn process_request(
             }
             let query_cancel = sessions.begin_query(query_id, cancel);
             let (matched_items, total_matches, highlight_terms, snippets, total_bytes) = engine
-                .execute_search_multi(&raw_query, &defaults, sort_column, sort_asc, &query_cancel);
+                .execute_search_multi(&raw_query, &defaults, sort_col, sort_asc, &query_cancel);
             sessions.finish_query(query_id);
 
             let session_id =
@@ -549,7 +559,6 @@ mod tests {
     }
     use super::*;
     use crate::config::ServiceConfig;
-    use cairn_core::sort::SortColumn;
     use cairn_protocol::message::ERROR_CODE_ADMIN_ONLY_QUERY;
 
     struct Harness {
@@ -739,7 +748,7 @@ mod tests {
                 query_id: 1,
                 raw_query: "rs".to_string(),
                 defaults: Default::default(),
-                sort_column: SortColumn::Name,
+                sort_by_name: "name".to_string(),
                 sort_asc: true,
                 first_page_limit: 10,
             },
@@ -873,7 +882,7 @@ mod tests {
                 query_id: 1,
                 raw_query: "notes".to_string(),
                 defaults: Default::default(),
-                sort_column: SortColumn::Name,
+                sort_by_name: "name".to_string(),
                 sort_asc: true,
                 first_page_limit: 10,
             },
@@ -955,10 +964,32 @@ mod tests {
             query_id: 1,
             raw_query,
             defaults: Default::default(),
-            sort_column: SortColumn::Name,
+            sort_by_name: "name".to_string(),
             sort_asc: true,
             first_page_limit: 10,
         }
+    }
+
+    /// A sort column the service cannot interpret is a malformed request: it is refused before any
+    /// query is registered, instead of silently answering by name.
+    #[test]
+    fn an_unknown_sort_column_is_refused_before_evaluation() {
+        use cairn_protocol::message::ERROR_CODE_INVALID_REQUEST;
+
+        let harness = Harness::new(ServiceConfig::default());
+        let (code, message) = denial(harness.handle(
+            ClientRequest::Query {
+                query_id: 7,
+                raw_query: String::new(),
+                defaults: Default::default(),
+                sort_by_name: "bogus".to_string(),
+                sort_asc: true,
+                first_page_limit: 10,
+            },
+            CallerAuthorization::Administrator,
+        ));
+        assert_eq!(code, ERROR_CODE_INVALID_REQUEST);
+        assert!(message.contains("bogus"), "{message}");
     }
 
     /// The content-term limit is request validation: a query above it is refused before the
