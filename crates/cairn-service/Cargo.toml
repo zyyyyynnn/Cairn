@@ -52,4 +52,4 @@ tempfile.workspace = true
 cairn-client.workspace = true
 
 [build-dependencies]
-winres.workspace = true
+winresource.workspace = true

@@ -47,7 +47,7 @@ toml = "1.1"
 rayon = "1.10"
 memchr = "2.7"
 regex = "1.11"
-tokio = { version = "1.43", features = ["full"] }
+tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "net", "fs", "signal"] }
 
 # Windows OS APIs
 windows = { version = "0.62.2" }
@@ -79,7 +79,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 proptest = "1.12"
 thiserror = "2.0"
 tempfile = "3.27"
-winres = "0.1.12"
+winresource = "0.1.34"
 
 [profile.release]
 opt-level = 3
