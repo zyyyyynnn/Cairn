@@ -773,7 +773,7 @@ fn test_content_query_intersection_with_mft() {
     // 2. Index documents with a writer (the worker's role), then publish a read-only searcher.
     let writer = ContentIndex::open_or_create(&engine.content_dir).expect("content index");
     writer
-        .index_document(
+        .index_document_deferred(
             2,
             101,
             2048,
@@ -783,7 +783,7 @@ fn test_content_query_intersection_with_mft() {
         )
         .expect("index doc 101");
     writer
-        .index_document(
+        .index_document_deferred(
             2,
             102,
             1024,
@@ -792,6 +792,7 @@ fn test_content_query_intersection_with_mft() {
             "使用指南与操作说明",
         )
         .expect("index doc 102");
+    writer.commit().expect("commit content index");
     writer.finish().expect("finish content index");
     assert!(engine.get_or_create_content_searcher().is_some());
     engine.mark_content_index_ready_for_test();
@@ -893,8 +894,9 @@ fn test_clear_content_index_roundtrip() {
 
     let writer = ContentIndex::open_or_create(&engine.content_dir).expect("content index");
     writer
-        .index_document(2, 101, 100, 100, r"C:\test.txt", "全文搜索关键词")
+        .index_document_deferred(2, 101, 100, 100, r"C:\test.txt", "全文搜索关键词")
         .unwrap();
+    writer.commit().expect("commit content index");
     writer.finish().expect("finish content index");
     assert!(engine.get_or_create_content_searcher().is_some());
     engine.mark_content_index_ready_for_test();
@@ -1010,8 +1012,9 @@ fn engine_with_completed_backfill(
         MultiVolumeEngine::with_index_dir_drives_and_config(index_dir, vec![], config.clone());
     let writer = ContentIndex::open_or_create(&engine.content_dir).expect("content index");
     writer
-        .index_document(2, 101, 7, 1, r"C:\docs\note.txt", "resumable needle")
+        .index_document_deferred(2, 101, 7, 1, r"C:\docs\note.txt", "resumable needle")
         .expect("index document");
+    writer.commit().expect("commit content index");
     writer.finish().expect("finish content index");
     assert!(engine.get_or_create_content_searcher().is_some());
     engine.mark_content_index_ready_for_test();
@@ -1031,8 +1034,9 @@ fn the_backfill_marker_keeps_the_configuration_the_backfill_ran_with() {
         MultiVolumeEngine::with_index_dir_drives_and_config(index.path(), vec![], config.clone());
     let writer = ContentIndex::open_or_create(&engine.content_dir).expect("content index");
     writer
-        .index_document(2, 101, 7, 1, r"C:\docs\note.txt", "resumable needle")
+        .index_document_deferred(2, 101, 7, 1, r"C:\docs\note.txt", "resumable needle")
         .expect("index document");
+    writer.commit().expect("commit content index");
     writer.finish().expect("finish content index");
     assert!(engine.get_or_create_content_searcher().is_some());
     engine.mark_content_index_ready_for_test();
@@ -1266,8 +1270,9 @@ fn an_incremental_commit_keeps_the_index_searchable_until_reopen() {
     // Finished backfill: one committed document and a published read-only searcher.
     let writer = ContentIndex::open_or_create(&engine.content_dir).expect("content index");
     writer
-        .index_document(2, 101, 7, 1, r"C:\docs\first.txt", "first needle")
+        .index_document_deferred(2, 101, 7, 1, r"C:\docs\first.txt", "first needle")
         .expect("index first document");
+    writer.commit().expect("commit content index");
     writer.finish().expect("finish content index");
     assert!(engine.get_or_create_content_searcher().is_some());
     engine.mark_content_index_ready_for_test();
@@ -1277,8 +1282,9 @@ fn an_incremental_commit_keeps_the_index_searchable_until_reopen() {
     let worker =
         ContentIndex::open_or_create(&engine.content_dir).expect("incremental content index");
     worker
-        .index_document(2, 102, 7, 1, r"C:\docs\second.txt", "second needle")
+        .index_document_deferred(2, 102, 7, 1, r"C:\docs\second.txt", "second needle")
         .expect("index second document");
+    worker.commit().expect("commit incremental batch");
     worker.finish().expect("finish incremental batch");
 
     assert!(

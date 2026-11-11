@@ -7,7 +7,6 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-cairn-core.workspace = true
 tantivy.workspace = true
 chardetng.workspace = true
 encoding_rs.workspace = true
