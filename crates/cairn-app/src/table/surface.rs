@@ -169,4 +169,31 @@ mod tests {
             ResultSurface::Empty
         );
     }
+
+    /// The bin is a location the app can answer without the service, so it keeps the empty band
+    /// even when the service is stopped.
+    #[test]
+    fn an_open_bin_keeps_the_empty_band_without_a_service() {
+        assert_eq!(
+            result_surface(ResultSurfaceInputs {
+                recycle_bin_open: true,
+                service_connected: false,
+                ..Default::default()
+            }),
+            ResultSurface::Empty
+        );
+    }
+
+    /// A typed query is the request in flight; index progress only covers the all-files view.
+    #[test]
+    fn a_typed_query_does_not_borrow_the_index_build_cover() {
+        assert_eq!(
+            result_surface(ResultSurfaceInputs {
+                has_query: true,
+                index_catching_up: true,
+                ..Default::default()
+            }),
+            ResultSurface::Empty
+        );
+    }
 }
