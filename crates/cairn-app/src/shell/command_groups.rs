@@ -697,6 +697,45 @@ mod tests {
         }
     }
 
+    /// `run_group_command` dispatches a command through its Action when it has one, so its
+    /// retained match may only cover the commands without an Action. This lists the arms that
+    /// match really keeps: a command whose Action appears here, or a command without one that is
+    /// missing, would reach the fallback `unreachable!` instead of its owner method.
+    #[test]
+    fn the_directly_dispatched_commands_are_exactly_the_ones_without_an_action() {
+        let direct = [
+            GroupCommand::ClearQuery,
+            GroupCommand::EmptyRecycleBin,
+            GroupCommand::SortBy(SortColumn::Name),
+            GroupCommand::ReverseOrder,
+            GroupCommand::SetTheme(crate::shell::settings::THEME_SYSTEM),
+            GroupCommand::SetZoom(ZoomPreset::Standard),
+            GroupCommand::Heading("menu_startup"),
+            GroupCommand::Submenu("menu_sort", &[]),
+            GroupCommand::SetLanguage(crate::shell::settings::LANGUAGE_SYSTEM),
+            GroupCommand::ToggleAutostart,
+            GroupCommand::ToggleContentSearch,
+            GroupCommand::ContentSearchDetailsMenu,
+            GroupCommand::ContentSearchDetails,
+            GroupCommand::ContentSearchUsage,
+            GroupCommand::ContentSearchUpdated,
+            GroupCommand::RetryContentSearch,
+            GroupCommand::ClearContentSearch,
+            GroupCommand::CheckForUpdates,
+            GroupCommand::About,
+        ];
+        for command in all_commands() {
+            let arm_matches = direct.iter().any(|candidate| {
+                core::mem::discriminant(candidate) == core::mem::discriminant(&command)
+            });
+            assert_eq!(
+                arm_matches,
+                command.action().is_none(),
+                "{command:?} does not agree with the arms run_group_command keeps"
+            );
+        }
+    }
+
     /// The Edit menu's 清空搜索 row dispatches the command itself; Escape is only the hint beside
     /// its label. Dispatching EscapeQuery would close the menu and return before touching the query.
     #[test]
