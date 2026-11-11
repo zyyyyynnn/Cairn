@@ -206,7 +206,18 @@ impl MultiVolumeEngine {
 
         match ContentSearcher::open(&self.content_dir) {
             Ok(searcher) => {
-                let documents = searcher.document_count().unwrap_or(0);
+                let documents = match searcher.document_count() {
+                    Ok(documents) => documents,
+                    Err(err) => {
+                        tracing::warn!(
+                            "Could not read the content index at {}: {}; rebuilding",
+                            self.content_dir.display(),
+                            err
+                        );
+                        self.remove_backfill_marker();
+                        return false;
+                    }
+                };
                 if documents == 0 {
                     tracing::warn!(
                         "Content index at {} is empty despite a completed backfill; rebuilding",
@@ -426,7 +437,18 @@ impl MultiVolumeEngine {
                     self.set_content_state(ContentIndexState::Disabled);
                     return;
                 }
-                let documents = searcher.document_count().unwrap_or(0);
+                let documents = match searcher.document_count() {
+                    Ok(documents) => documents,
+                    Err(err) => {
+                        // A published Ready with no readable count answers `content:` queries as
+                        // empty. Report the failure instead: the index exists but cannot be read.
+                        self.set_content_error(format!(
+                            "content index could not be read at {}: {err}",
+                            self.content_dir.display()
+                        ));
+                        return;
+                    }
+                };
                 let bytes = searcher.index_size_bytes();
                 self.set_content_searcher(Arc::new(searcher));
                 self.set_content_ready(documents, bytes);
