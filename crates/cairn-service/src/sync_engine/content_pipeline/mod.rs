@@ -48,13 +48,18 @@ impl crate::sync_engine::MultiVolumeEngine {
         let Some(tx) = sender.as_ref() else {
             return false;
         };
+        // A stop cannot make the Disabled state already published untrue; every other command
+        // leaves work unapplied, which the status must show.
+        let failure_is_visible = !matches!(command, ContentCommand::Cancel);
         let delivered = tx.send(command).is_ok();
         drop(sender);
         if !delivered {
             tracing::error!(
                 "content command could not be delivered: the content thread has stopped"
             );
-            self.set_content_error("content indexing stopped unexpectedly".to_string());
+            if failure_is_visible {
+                self.set_content_error("content indexing stopped unexpectedly".to_string());
+            }
         }
         delivered
     }
