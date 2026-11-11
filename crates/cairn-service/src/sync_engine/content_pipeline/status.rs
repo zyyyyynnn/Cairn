@@ -16,6 +16,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::config::ServiceConfig;
 use crate::sync_engine::MultiVolumeEngine;
 
 impl MultiVolumeEngine {
@@ -111,21 +112,23 @@ impl MultiVolumeEngine {
     }
 
     /// Records a completed full backfill so the next process can reopen the index read-only
-    /// instead of clearing and re-extracting every eligible file. The marker is replaced
-    /// atomically; a write failure is logged but never turns the already published index into an
-    /// error, because the running index is still fully usable.
-    pub(super) fn write_backfill_marker(&self) {
+    /// instead of clearing and re-extracting every eligible file. `cfg` is the configuration the
+    /// backfill ran with: a change that arrived while it was running cannot cover files already
+    /// skipped, so the marker must keep the scope the index actually describes and let the next
+    /// start reject it. The marker is replaced atomically; a write failure is logged but never
+    /// turns the already published index into an error, because the running index is still fully
+    /// usable.
+    pub(super) fn write_backfill_marker(&self, cfg: &ServiceConfig) {
         let status = self.content_index_status();
         if !status.state.is_ready() {
             return;
         }
-        let cfg = self.get_config();
         let marker = BackfillMarker {
             schema: CONTENT_BACKFILL_SCHEMA,
-            extensions: cfg.content_index_extensions,
+            extensions: cfg.content_index_extensions.clone(),
             max_bytes: cfg.content_index_max_bytes,
-            excluded_paths: cfg.excluded_paths,
-            content_excluded_paths: cfg.content_excluded_paths,
+            excluded_paths: cfg.excluded_paths.clone(),
+            content_excluded_paths: cfg.content_excluded_paths.clone(),
             documents: status.indexed_documents,
             completed_ts: unix_now(),
         };
@@ -203,7 +206,18 @@ impl MultiVolumeEngine {
 
         match ContentSearcher::open(&self.content_dir) {
             Ok(searcher) => {
-                let documents = searcher.document_count().unwrap_or(0);
+                let documents = match searcher.document_count() {
+                    Ok(documents) => documents,
+                    Err(err) => {
+                        tracing::warn!(
+                            "Could not read the content index at {}: {}; rebuilding",
+                            self.content_dir.display(),
+                            err
+                        );
+                        self.remove_backfill_marker();
+                        return false;
+                    }
+                };
                 if documents == 0 {
                     tracing::warn!(
                         "Content index at {} is empty despite a completed backfill; rebuilding",
@@ -269,7 +283,7 @@ impl MultiVolumeEngine {
         if self.try_resume_content_index() {
             return;
         }
-        let _ = tx.send(ContentCommand::Start);
+        self.send_content_command(ContentCommand::Start);
     }
 
     fn handle_content_command(&self, command: ContentCommand) {
@@ -294,14 +308,16 @@ impl MultiVolumeEngine {
     /// Disables the master switch and persists it; the controller stops the active batch via the
     /// shared cancellation flag. The index files are left in place until the user clears them.
     pub fn disable_content_index(&self) -> Result<(), String> {
-        let mut cfg = self.get_config();
-        if !cfg.content_index_enabled {
+        if !self.get_config().content_index_enabled {
             return Ok(());
         }
-        cfg.content_index_enabled = false;
-        let config_toml = toml::to_string_pretty(&cfg)
-            .map_err(|err| format!("could not serialize service configuration: {err}"))?;
-        self.apply_config_toml(&config_toml)
+        // The switch is flipped on the live configuration under the apply lock, so a concurrent
+        // submission is never overwritten by the snapshot this call read before it.
+        self.apply_config_change(true, |current| {
+            let mut next = current.clone();
+            next.content_index_enabled = false;
+            Ok(next)
+        })
     }
 
     /// Signals any active `CairnWorker` subprocess to terminate on service shutdown without
@@ -423,7 +439,18 @@ impl MultiVolumeEngine {
                     self.set_content_state(ContentIndexState::Disabled);
                     return;
                 }
-                let documents = searcher.document_count().unwrap_or(0);
+                let documents = match searcher.document_count() {
+                    Ok(documents) => documents,
+                    Err(err) => {
+                        // A published Ready with no readable count answers `content:` queries as
+                        // empty. Report the failure instead: the index exists but cannot be read.
+                        self.set_content_error(format!(
+                            "content index could not be read at {}: {err}",
+                            self.content_dir.display()
+                        ));
+                        return;
+                    }
+                };
                 let bytes = searcher.index_size_bytes();
                 self.set_content_searcher(Arc::new(searcher));
                 self.set_content_ready(documents, bytes);

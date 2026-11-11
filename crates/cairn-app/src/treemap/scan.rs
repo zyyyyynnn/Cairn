@@ -10,9 +10,7 @@ use crate::search::filters::FilterCategory;
 use crate::service::ipc_tasks::get_tokio_runtime;
 use crate::shell::os::open_file;
 use crate::shell::status_bar::format_count;
-use crate::treemap::state::{
-    next_tree_request_epoch, tree_unavailable_from_code, TreemapUnavailable, TreemapViewState,
-};
+use crate::treemap::state::{tree_unavailable_from_code, TreemapUnavailable, TreemapViewState};
 use cairn_core::treemap::same_directory;
 use cairn_protocol::message::{ResponsePayload, MAX_TREE_DEPTH};
 use fluent_bundle::FluentArgs;
@@ -98,14 +96,10 @@ impl CairnApp {
         let Some(ref mut state) = self.treemap_state else {
             return;
         };
-        state.request_epoch = next_tree_request_epoch();
-        let epoch = state.request_epoch;
-        state.is_scanning = true;
+        state.reset_scan_state();
         state.scan_fade_epoch = 0;
-        state.content_revealed = false;
-        state.unavailable = None;
-        state.layout_nodes.clear();
-        state.root_tree = None;
+        state.is_scanning = true;
+        let epoch = state.request_epoch;
         cx.notify();
 
         let path_for_service = scan_path.to_string_lossy().into_owned();

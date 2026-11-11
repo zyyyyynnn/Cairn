@@ -22,6 +22,52 @@ pub enum SortColumn {
     Extension,
 }
 
+impl SortColumn {
+    /// The stable spelling shared by the CLI `--sort` value and the stored settings key.
+    pub const fn key(self) -> &'static str {
+        match self {
+            SortColumn::Name => "name",
+            SortColumn::Path => "path",
+            SortColumn::Size => "size",
+            SortColumn::DateModified => "modified",
+            SortColumn::DateCreated => "created",
+            SortColumn::Extension => "ext",
+        }
+    }
+}
+
+/// A sort key that names no [`SortColumn`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnknownSortColumn(String);
+
+impl fmt::Display for UnknownSortColumn {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "unknown sort column `{}`; expected name, path, size, modified, created, or ext",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for UnknownSortColumn {}
+
+impl FromStr for SortColumn {
+    type Err = UnknownSortColumn;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_ascii_lowercase().as_str() {
+            "name" => Ok(SortColumn::Name),
+            "path" => Ok(SortColumn::Path),
+            "size" => Ok(SortColumn::Size),
+            "modified" | "datemodified" => Ok(SortColumn::DateModified),
+            "created" | "datecreated" => Ok(SortColumn::DateCreated),
+            "ext" | "extension" => Ok(SortColumn::Extension),
+            _ => Err(UnknownSortColumn(value.to_string())),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum SortDirection {
     #[default]
@@ -30,6 +76,8 @@ pub enum SortDirection {
 }
 
 use std::cmp::Ordering;
+use std::fmt;
+use std::str::FromStr;
 
 /// Compares two strings using Natural Sort Order (numbers compared numerically).
 pub fn natural_cmp(a: &str, b: &str) -> Ordering {
@@ -297,6 +345,32 @@ pub fn sort_indices(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_sort_column_round_trips_through_its_key() {
+        for column in [
+            SortColumn::Name,
+            SortColumn::Path,
+            SortColumn::Size,
+            SortColumn::DateModified,
+            SortColumn::DateCreated,
+            SortColumn::Extension,
+        ] {
+            assert_eq!(column.key().parse::<SortColumn>(), Ok(column));
+        }
+        assert_eq!("Name".parse::<SortColumn>(), Ok(SortColumn::Name));
+        assert_eq!(
+            "DATEMODIFIED".parse::<SortColumn>(),
+            Ok(SortColumn::DateModified)
+        );
+        assert_eq!("extension".parse::<SortColumn>(), Ok(SortColumn::Extension));
+    }
+
+    #[test]
+    fn an_unknown_sort_key_is_refused() {
+        let error = "bogus".parse::<SortColumn>().expect_err("unknown key");
+        assert!(error.to_string().contains("bogus"));
+    }
 
     #[test]
     fn test_natural_sort_numeric() {

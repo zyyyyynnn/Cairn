@@ -140,6 +140,14 @@ jobs:
           save-if: false
       - name: Run tests
         run: ${{ matrix.command }}
+      - name: Content backfill end-to-end test
+        if: matrix.name == 'Service'
+        shell: pwsh
+        run: |
+          cargo build -p cairn-worker
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test -p cairn-service a_full_backfill_reaches_ready_and_indexes_existing_files -- --ignored
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   tooling:
     name: Test / Tooling

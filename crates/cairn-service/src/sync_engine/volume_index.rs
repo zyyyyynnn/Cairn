@@ -302,7 +302,6 @@ impl VolumeIndex {
         self.append_items(items);
         self.recompute_directory_sizes();
 
-        // Build presorted indices
         self.presorted = PresortedIndices::build(
             &self.records,
             &self.arena,
@@ -812,28 +811,25 @@ impl VolumeIndex {
         self.subtree_states_by(|_, record| self.excluded_frns.contains(&record.frn))
     }
 
-    /// Precomputes which records the query's `excluded_paths` rules remove.
+    /// Precomputes which records the given single-segment rules remove.
     ///
     /// Rebuilding and normalizing a full path for every match just to test a handful of segment
-    /// rules is O(records × path). For the common rule form — a bare directory/file segment such
-    /// as `$Recycle.Bin` or `System Volume Information` — the same verdict is a name comparison
-    /// along the parent chain, so one memoized pass produces an O(1) lookup table. Rules with globs, embedded separators,
-    /// or a drive-qualified path keep the reference full-path behavior: this returns `None` and
-    /// the caller applies `is_path_excluded` per match.
-    pub(crate) fn excluded_record_mask(&self, rules: &[String]) -> Option<Vec<bool>> {
-        let segments = crate::exclusion::ExclusionRules::parse(rules).single_segments()?;
+    /// rules is O(records × path). For a bare directory/file segment such as `$Recycle.Bin` or
+    /// `System Volume Information` the same verdict is a name comparison along the parent chain,
+    /// so one memoized pass produces an O(1) lookup table. Rules with globs, embedded separators,
+    /// or a drive-qualified path never reach this method; `PathExclusions` answers those from the
+    /// parsed rule set against the full path.
+    pub(crate) fn excluded_record_mask(&self, segments: &[String]) -> Vec<bool> {
         let states = self.subtree_states_by(|_, record| {
             let name = self.arena.get_name(record.name_offset, record.name_len);
             segments
                 .iter()
                 .any(|segment| name.eq_ignore_ascii_case(segment))
         });
-        Some(
-            states
-                .into_iter()
-                .map(|state| state == SUBTREE_EXCLUDED)
-                .collect(),
-        )
+        states
+            .into_iter()
+            .map(|state| state == SUBTREE_EXCLUDED)
+            .collect()
     }
 
     /// Rewrites the table without tombstones or excluded subtrees, returning how many records were

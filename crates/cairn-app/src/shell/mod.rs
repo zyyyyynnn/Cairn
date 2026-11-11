@@ -31,5 +31,7 @@ pub(crate) mod status_bar;
 pub(crate) mod status_bar_view;
 pub(crate) mod theme;
 pub(crate) mod toast;
+#[cfg(windows)]
+pub(crate) mod tray;
 pub(crate) mod update;
 pub(crate) mod window_resize;

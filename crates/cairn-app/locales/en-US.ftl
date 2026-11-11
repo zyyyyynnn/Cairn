@@ -236,6 +236,7 @@ tray_exit = Exit
 
 view_in_table = View in table
 treemap_retry = Retry
+treemap_canvas_label = Disk usage chart
 treemap_path_placeholder = C:\Users
 treemap_path_label = Path
 treemap_path_clear = Clear path

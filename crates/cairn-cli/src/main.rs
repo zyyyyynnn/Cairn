@@ -8,9 +8,16 @@
 
 use cairn_client::client::CairnClient;
 use cairn_core::format_size_bytes;
+use cairn_core::sort::{SortColumn, UnknownSortColumn};
 use cairn_protocol::message::ResponsePayload;
 use clap::Parser;
 use std::path::PathBuf;
+
+fn parse_sort_column(value: &str) -> Result<SortColumn, String> {
+    value
+        .parse()
+        .map_err(|error: UnknownSortColumn| error.to_string())
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "CairnCli", about = "Cairn CLI")]
@@ -36,8 +43,8 @@ struct CliArgs {
     max: usize,
 
     /// Column to sort results by: name, path, size, modified, created, ext
-    #[arg(short, long, default_value = "name")]
-    sort: String,
+    #[arg(short, long, default_value = "name", value_parser = parse_sort_column)]
+    sort: SortColumn,
 
     /// Sort direction: ascending
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
@@ -90,7 +97,7 @@ async fn main() {
             1,
             &args.query,
             cairn_protocol::message::QueryDefaults::default(),
-            &args.sort,
+            args.sort,
             args.asc,
             args.max,
         )
@@ -228,9 +235,17 @@ mod tests {
         assert!(args.status);
         assert!(args.json);
         assert_eq!(args.max, 50);
-        assert_eq!(args.sort, "size");
+        assert_eq!(args.sort, SortColumn::Size);
         assert!(!args.asc);
         assert_eq!(args.export_csv, Some(PathBuf::from("results.csv")));
+    }
+
+    #[test]
+    fn an_unknown_sort_column_is_refused_at_the_command_line() {
+        assert!(
+            CliArgs::try_parse_from(["CairnCli", "--sort", "bogus"]).is_err(),
+            "an unknown column must be refused, not silently answered as name"
+        );
     }
 
     #[test]

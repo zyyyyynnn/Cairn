@@ -20,7 +20,6 @@ use crate::search::filters::FilterCategory;
 use crate::search::input::{QueryTextMetrics, SearchInputState};
 use crate::shell::command_groups::MenuGroup;
 use crate::shell::i18n::I18nManager;
-use crate::shell::menu_actions::sort_column_from_key;
 use crate::shell::settings::AppSettings;
 use crate::shell::status_bar::StatusBarModel;
 use crate::shell::window_resize::Observed;
@@ -427,7 +426,7 @@ impl CairnApp {
         // `TableState` keeps its fetched window private, so the restored sort state is assigned
         // through its public fields instead of a struct literal.
         let mut table = TableState::default();
-        table.sort_column = sort_column_from_key(&settings.columns.sort_column);
+        table.sort_column = settings.columns.sort_column.parse().unwrap_or_default();
         table.sort_asc = settings.columns.sort_asc;
         let column_widths = ColumnWidths {
             name: (settings.columns.name_width / COLUMN_WIDTH_STORAGE_UNIT)

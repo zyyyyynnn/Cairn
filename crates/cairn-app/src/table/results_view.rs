@@ -13,7 +13,8 @@ use crate::shell::file_icon::file_kind_icon;
 use crate::shell::menu_rules::IndexMenuState;
 use crate::shell::state_view::{icon_action, render_state_band};
 use crate::shell::theme::{self, ShellTokens};
-use crate::table::model::{format_timestamp, ColumnBoundary, SortColumn};
+use crate::table::model::{format_timestamp, ColumnBoundary, SortColumn, SortColumnLabel};
+use crate::table::surface::{result_surface, ResultSurface, ResultSurfaceInputs};
 use crate::view::announce_shortcut;
 use cairn_core::format_size_bytes;
 use cairn_core::treemap::FileKind;
@@ -240,29 +241,6 @@ enum HeaderLane {
     Date,
 }
 
-/// What the result region shows while it holds no rows.
-///
-/// The loading cover answers a request that is actually in flight and nothing
-/// else: a service problem or an empty answer is content with its own recovery
-/// actions, and covering it would hide the only way out (SPEC SVC-04).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ResultSurface {
-    Rows,
-    Loading,
-    StateBand,
-}
-
-/// Decides the result surface from the two facts the panel can observe.
-fn result_surface(has_content: bool, is_loading: bool) -> ResultSurface {
-    if has_content {
-        ResultSurface::Rows
-    } else if is_loading {
-        ResultSurface::Loading
-    } else {
-        ResultSurface::StateBand
-    }
-}
-
 impl CairnApp {
     /// The heading row plus whatever the band under it holds: the rows, the empty state, or the
     /// reason there are no rows to show.
@@ -297,42 +275,29 @@ impl CairnApp {
         // Once any rows exist the table wins even if the index is still catching up: the cached
         // results are usable, and the single "synchronizing" capsule describes their freshness.
         // A background refresh of an index that already shows rows must leave those rows in place.
-        let bin_loading = self.recycle_bin.is_open() && self.recycle_bin.is_loading();
-        let first_page_loading = (!self.recycle_bin.is_open()
-            && self.results.table.total_rows() == 0
-            && (self.query.is_searching
-                || (self.service.is_probing_service && self.service.is_service_connected)))
-            || (bin_loading && self.results.table.total_rows() == 0);
-        let index_loading = !self.recycle_bin.is_open()
-            && !self.has_query()
-            && self.service.status.is_any_loading()
-            && self.results.table.total_rows() == 0;
-        let is_loading = first_page_loading || index_loading;
-        // The bin is shell data, not index data: a stopped service must not replace it
-        // with the offline band, and an empty bin is its own state, not an offline one.
-        let local_location = self.recycle_bin.is_open() || self.service.is_service_connected;
-        let rows = if self.recycle_bin.error().is_some() {
-            // An unreadable bin is authoritative over any rows still in the table. The state band
-            // below owns the retry path; stale rows must never become actionable again.
-            None
-        } else if local_location && self.results.table.total_rows() > 0 {
-            Some(self.render_rows_band(tokens, visible, row_height, cx))
-        } else {
-            None
-        };
-        let has_content = rows.is_some();
-        let surface = result_surface(has_content, is_loading);
-        let state = if surface != ResultSurface::StateBand {
-            None
-        } else if local_location {
-            Some(self.render_empty_state(tokens, cx))
-        } else {
-            Some(self.render_service_offline_state(tokens, cx))
+        let surface = result_surface(ResultSurfaceInputs {
+            total_rows: self.results.table.total_rows(),
+            recycle_bin_open: self.recycle_bin.is_open(),
+            recycle_bin_loading: self.recycle_bin.is_loading(),
+            recycle_bin_error: self.recycle_bin.error().is_some(),
+            query_in_flight: self.query.is_searching,
+            index_catching_up: self.service.status.is_any_loading(),
+            service_connected: self.service.is_service_connected,
+            probing_service: self.service.is_probing_service,
+            has_query: self.has_query(),
+        });
+        let rows = (surface == ResultSurface::Rows)
+            .then(|| self.render_rows_band(tokens, visible, row_height, cx));
+        let state = match surface {
+            ResultSurface::Empty => Some(self.render_empty_state(tokens, cx)),
+            ResultSurface::Offline => Some(self.render_service_offline_state(tokens, cx)),
+            ResultSurface::Rows | ResultSurface::Loading => None,
         };
 
         // The header is outside this wrapper, so a refresh never blanks or
         // re-fades the column labels. The fade overlay dissolves over
         // MASK_DISSOLVE, with a cleanup timer scheduled at the entrance source.
+        let has_content = rows.is_some();
         let has_state = state.is_some();
         let rows = rows.map(|body| body.into_any_element());
         let state = state.map(|body| body.into_any_element());
@@ -694,13 +659,7 @@ impl CairnApp {
             .service_issue
             .unwrap_or(ServiceIssue::NotRunning);
         let control = accessibility::control(issue.accessibility_key());
-        let message_key = match issue {
-            ServiceIssue::NotRunning => "service_not_running_title",
-            ServiceIssue::NotInstalled => "service_not_installed_title",
-            ServiceIssue::ProtocolIncompatible => "service_incompatible_title",
-            ServiceIssue::Unauthorized => "service_unauthorized_title",
-        };
-        let message = self.i18n.get_text(message_key);
+        let message = self.i18n.get_text(issue.message_key());
         let retry = accessibility::control("service-retry-button");
         let retry_label = accessibility::name(retry, &self.i18n);
         let start = accessibility::control("service-start-button");
@@ -1462,23 +1421,13 @@ mod tests {
     use core::prelude::rust_2021::test;
 
     use super::{
-        content_query_notice, result_row_icon, result_surface, rows_band_local_top, rows_to_paint,
-        ContentQueryNotice, ResultSurface,
+        content_query_notice, result_row_icon, rows_band_local_top, rows_to_paint,
+        ContentQueryNotice,
     };
     use crate::shell::command_groups::GroupCommand;
-    use crate::table::model::SortColumn;
+    use crate::table::model::{SortColumn, SortColumnLabel};
     use cairn_protocol::status::ContentIndexState;
 
-    #[test]
-    fn rows_beat_the_cover_and_a_stopped_service_beats_neither() {
-        // The cover answers an in-flight request only. With nothing in flight and no rows the band
-        // owns the region, because its recovery actions are the only way out of a stopped service
-        // (SPEC SVC-04).
-        assert_eq!(result_surface(false, false), ResultSurface::StateBand);
-        assert_eq!(result_surface(false, true), ResultSurface::Loading);
-        assert_eq!(result_surface(true, true), ResultSurface::Rows);
-        assert_eq!(result_surface(true, false), ResultSurface::Rows);
-    }
     use gpui_kit::assets::IconName as AssetIconName;
 
     #[test]

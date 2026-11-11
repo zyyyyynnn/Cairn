@@ -5,6 +5,7 @@
 //! Named Pipe IPC protocol messages and row formats.
 
 use crate::status::{ContentIndexStatus, VolumeStatusSummary};
+pub use cairn_core::sort::SortColumn;
 pub use cairn_core::syntax::QueryDefaults;
 use serde::{Deserialize, Serialize};
 
@@ -92,7 +93,7 @@ pub enum ClientRequest {
         query_id: u64,
         raw_query: String,
         defaults: QueryDefaults,
-        sort_by_name: String,
+        sort_column: SortColumn,
         sort_asc: bool,
         first_page_limit: usize,
     },
@@ -392,7 +393,7 @@ mod tests {
                     query_id: 1,
                     raw_query: String::new(),
                     defaults: QueryDefaults::default(),
-                    sort_by_name: String::new(),
+                    sort_column: SortColumn::Name,
                     sort_asc: true,
                     first_page_limit: 0,
                 },

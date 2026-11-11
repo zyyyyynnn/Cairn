@@ -456,20 +456,6 @@ impl ContentIndex {
         Ok(Self { searcher, writer })
     }
 
-    /// Indexes or updates a document.
-    pub fn index_document(
-        &self,
-        volume_id: u64,
-        frn: u64,
-        size: u64,
-        modified_ts: i64,
-        path: &str,
-        body: &str,
-    ) -> Result<(), ContentIndexError> {
-        self.index_document_deferred(volume_id, frn, size, modified_ts, path, body)?;
-        self.commit()
-    }
-
     /// Adds or replaces one document without committing. A backfill batch uses this for every
     /// file and commits once at the end; committing per document turns a large batch into an
     /// fsync storm.
@@ -525,16 +511,6 @@ impl ContentIndex {
             )?;
         }
         Ok(())
-    }
-
-    /// Removes documents and commits immediately. An empty batch is a no-op: committing it would
-    /// rewrite `meta.json` and feed the index's own write back to the change journal.
-    pub fn delete_documents(&self, documents: &[(u64, u64)]) -> Result<(), ContentIndexError> {
-        if documents.is_empty() {
-            return Ok(());
-        }
-        self.delete_documents_deferred(documents)?;
-        self.commit()
     }
 
     fn delete_from(
@@ -672,6 +648,19 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    fn index_committed(
+        index: &ContentIndex,
+        volume_id: u64,
+        frn: u64,
+        size: u64,
+        modified_ts: i64,
+        path: &str,
+        body: &str,
+    ) -> Result<(), ContentIndexError> {
+        index.index_document_deferred(volume_id, frn, size, modified_ts, path, body)?;
+        index.commit()
+    }
+
     #[test]
     fn content_writer_threads_follow_the_quarter_machine_quota() {
         assert_eq!(content_writer_threads(1), 1);
@@ -695,16 +684,16 @@ mod tests {
         let temp = tempdir().unwrap();
         let index = ContentIndex::open_or_create(temp.path()).expect("open failed");
         for frn in [1u64, 2, 3] {
-            index
-                .index_document(
-                    0,
-                    frn,
-                    16,
-                    1,
-                    &format!("C:\\docs\\{frn}.txt"),
-                    "shared needle body",
-                )
-                .expect("index doc failed");
+            index_committed(
+                &index,
+                0,
+                frn,
+                16,
+                1,
+                &format!("C:\\docs\\{frn}.txt"),
+                "shared needle body",
+            )
+            .expect("index doc failed");
         }
 
         let top = index.search("needle", 1).expect("search failed");
@@ -733,8 +722,7 @@ mod tests {
             (3, "alpha beta"),
             (4, "gamma"),
         ] {
-            index
-                .index_document(0, frn, 16, 1, &format!("C:\\docs\\{frn}.txt"), body)
+            index_committed(&index, 0, frn, 16, 1, &format!("C:\\docs\\{frn}.txt"), body)
                 .expect("index doc failed");
         }
 
@@ -769,9 +757,7 @@ mod tests {
             "filler ".repeat(40),
             " tail".repeat(10)
         );
-        index
-            .index_document(0, 1, 16, 1, "C:\\docs\\a.txt", &body)
-            .expect("index doc failed");
+        index_committed(&index, 0, 1, 16, 1, "C:\\docs\\a.txt", &body).expect("index doc failed");
 
         let terms = vec!["alpha".to_string(), "beta".to_string()];
         let hits = index
@@ -796,8 +782,7 @@ mod tests {
             (3, "alpha beta"),
             (4, "gamma"),
         ] {
-            index
-                .index_document(0, frn, 16, 1, &format!("C:\\docs\\{frn}.txt"), body)
+            index_committed(&index, 0, frn, 16, 1, &format!("C:\\docs\\{frn}.txt"), body)
                 .expect("index doc failed");
         }
 
@@ -827,8 +812,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let index = ContentIndex::open_or_create(temp.path()).expect("open failed");
         for (frn, body) in [(1u64, "alpha"), (2, "alpha gamma"), (3, "beta gamma")] {
-            index
-                .index_document(0, frn, 16, 1, &format!("C:\\docs\\{frn}.txt"), body)
+            index_committed(&index, 0, frn, 16, 1, &format!("C:\\docs\\{frn}.txt"), body)
                 .expect("index doc failed");
         }
 
@@ -847,9 +831,16 @@ mod tests {
     fn content_search_degrades_unparseable_text_to_its_tokens() {
         let temp = tempdir().unwrap();
         let index = ContentIndex::open_or_create(temp.path()).expect("open failed");
-        index
-            .index_document(0, 1, 16, 1, r"C:\docs\note.txt", "cairn docs project")
-            .expect("index doc failed");
+        index_committed(
+            &index,
+            0,
+            1,
+            16,
+            1,
+            r"C:\docs\note.txt",
+            "cairn docs project",
+        )
+        .expect("index doc failed");
 
         let hits = index.search("cairn:docs", 10).expect("fallback search");
         assert_eq!(
@@ -869,16 +860,16 @@ mod tests {
         let temp = tempdir().unwrap();
         let index = ContentIndex::open_or_create(temp.path()).expect("open failed");
 
-        index
-            .index_document(
-                0,
-                1001,
-                1024,
-                1600000000,
-                "C:\\docs\\arch.md",
-                "Cairn 架构设计与高性能全文检索系统",
-            )
-            .expect("index doc failed");
+        index_committed(
+            &index,
+            0,
+            1001,
+            1024,
+            1600000000,
+            "C:\\docs\\arch.md",
+            "Cairn 架构设计与高性能全文检索系统",
+        )
+        .expect("index doc failed");
 
         let hits = index.search("架构设计", 10).expect("search failed");
         assert_eq!(hits.len(), 1);
@@ -891,12 +882,8 @@ mod tests {
         let temp = tempdir().unwrap();
         let index = ContentIndex::open_or_create(temp.path()).expect("open failed");
 
-        index
-            .index_document(2, 101, 10, 1, r"C:\a.md", "alpha unique")
-            .unwrap();
-        index
-            .index_document(3, 101, 10, 1, r"D:\b.md", "beta unique")
-            .unwrap();
+        index_committed(&index, 2, 101, 10, 1, r"C:\a.md", "alpha unique").unwrap();
+        index_committed(&index, 3, 101, 10, 1, r"D:\b.md", "beta unique").unwrap();
 
         let alpha = index.search("alpha", 10).unwrap();
         assert_eq!(alpha.len(), 1);
@@ -905,9 +892,7 @@ mod tests {
         assert_eq!(beta.len(), 1);
         assert_eq!(beta[0].volume_id, 3);
 
-        index
-            .index_document(2, 101, 10, 2, r"C:\a.md", "replaced alpha")
-            .unwrap();
+        index_committed(&index, 2, 101, 10, 2, r"C:\a.md", "replaced alpha").unwrap();
         assert!(index.search("unique", 10).unwrap().len() == 1);
         let replaced = index.search("replaced", 10).unwrap();
         assert_eq!(replaced.len(), 1);
@@ -923,17 +908,41 @@ mod tests {
     fn test_delete_by_volume_and_frn_keeps_other_documents() {
         let temp = tempdir().unwrap();
         let index = ContentIndex::open_or_create(temp.path()).expect("open failed");
-        index
-            .index_document(0, 1001, 1, 1, "C:\\gone.txt", "needle in the gone file")
-            .unwrap();
-        index
-            .index_document(1, 1001, 1, 1, "D:\\kept.txt", "needle on another volume")
-            .unwrap();
-        index
-            .index_document(0, 1002, 1, 1, "C:\\kept.txt", "needle in another file")
-            .unwrap();
+        index_committed(
+            &index,
+            0,
+            1001,
+            1,
+            1,
+            "C:\\gone.txt",
+            "needle in the gone file",
+        )
+        .unwrap();
+        index_committed(
+            &index,
+            1,
+            1001,
+            1,
+            1,
+            "D:\\kept.txt",
+            "needle on another volume",
+        )
+        .unwrap();
+        index_committed(
+            &index,
+            0,
+            1002,
+            1,
+            1,
+            "C:\\kept.txt",
+            "needle in another file",
+        )
+        .unwrap();
 
-        index.delete_documents(&[(0, 1001)]).expect("delete failed");
+        index
+            .delete_documents_deferred(&[(0, 1001)])
+            .expect("delete failed");
+        index.commit().expect("commit delete");
 
         let hits = index.search("needle", 10).expect("search failed");
         assert_eq!(hits.len(), 2);
@@ -949,9 +958,16 @@ mod tests {
         let temp = tempdir().unwrap();
         {
             let index = ContentIndex::open_or_create(temp.path()).expect("open failed");
-            index
-                .index_document(1, 7, 10, 1, r"C:\readme.txt", "only searchable text")
-                .expect("index doc failed");
+            index_committed(
+                &index,
+                1,
+                7,
+                10,
+                1,
+                r"C:\readme.txt",
+                "only searchable text",
+            )
+            .expect("index doc failed");
             index.finish().expect("finish failed");
         }
 

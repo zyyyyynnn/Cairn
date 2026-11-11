@@ -97,21 +97,23 @@ impl ColumnWidths {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum SortColumn {
-    #[default]
-    Name,
-    Path,
-    Size,
-    DateModified,
-    DateCreated,
-    Extension,
+pub use cairn_core::sort::SortColumn;
+
+/// The Fluent message naming a sort column, shared by its table header and its 排序 item so one
+/// column never carries two wordings.
+pub trait SortColumnLabel {
+    fn label_key(self) -> &'static str;
+
+    /// The same column in the active location. Inside the Recycle Bin, the path and
+    /// modification-time lanes hold the original location and the deletion time.
+    fn label_key_in(self, in_recycle_bin: bool) -> &'static str;
+
+    /// The Recycle Bin caption for the lanes that change meaning there.
+    fn recycle_bin_label_key(self) -> &'static str;
 }
 
-impl SortColumn {
-    /// The Fluent message naming this column, shared by its table header and its 排序 item so one
-    /// column never carries two wordings.
-    pub const fn label_key(self) -> &'static str {
+impl SortColumnLabel for SortColumn {
+    fn label_key(self) -> &'static str {
         match self {
             SortColumn::Name => "col_name",
             SortColumn::Path => "col_path",
@@ -122,9 +124,7 @@ impl SortColumn {
         }
     }
 
-    /// The Fluent message naming this column in the active location. Inside the Recycle Bin, the
-    /// path and modification-time lanes hold the original location and the deletion time.
-    pub const fn label_key_in(self, in_recycle_bin: bool) -> &'static str {
+    fn label_key_in(self, in_recycle_bin: bool) -> &'static str {
         if in_recycle_bin {
             self.recycle_bin_label_key()
         } else {
@@ -132,9 +132,7 @@ impl SortColumn {
         }
     }
 
-    /// The same column inside the Recycle Bin holds the original location and the deletion time,
-    /// so its header and its 排序 item have to carry those names instead.
-    pub const fn recycle_bin_label_key(self) -> &'static str {
+    fn recycle_bin_label_key(self) -> &'static str {
         match self {
             SortColumn::Path => "col_original_location",
             SortColumn::DateModified => "col_deleted",

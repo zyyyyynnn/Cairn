@@ -28,9 +28,10 @@ fn engine_with_indexed_content() -> (MultiVolumeEngine, tempfile::TempDir) {
         (104, r"C:\docs\other-notes.txt", "plain filler"),
     ] {
         writer
-            .index_document(2, frn, 16, 1, path, body)
+            .index_document_deferred(2, frn, 16, 1, path, body)
             .expect("index document");
     }
+    writer.commit().expect("commit content index");
     writer.finish().expect("finish content index");
     assert!(engine.get_or_create_content_searcher().is_some());
     engine.mark_content_index_ready_for_test();
@@ -82,9 +83,10 @@ fn engine_with_hardlinked_content() -> (MultiVolumeEngine, tempfile::TempDir) {
         (202, r"C:\docs\plain.txt", "beta filler"),
     ] {
         writer
-            .index_document(2, frn, 16, 1, path, body)
+            .index_document_deferred(2, frn, 16, 1, path, body)
             .expect("index document");
     }
+    writer.commit().expect("commit content index");
     writer.finish().expect("finish content index");
     assert!(engine.get_or_create_content_searcher().is_some());
     engine.mark_content_index_ready_for_test();

@@ -9,14 +9,11 @@
 //! the engine currently holds, so `admin_only_query` takes effect on the next request rather than on
 //! the next pipe instance.
 
-use crate::caller_auth::{
-    authenticate_pipe_client, authorize, may_change_admin_only_query, CallerAuthorization,
-};
+use crate::caller_auth::{authenticate_pipe_client, authorize, CallerAuthorization};
 use crate::security::SafeSecurityDescriptor;
 use crate::session::{RowsError, SessionManager};
 use crate::sync_engine::MultiVolumeEngine;
 use cairn_core::engine::CancellationToken;
-use cairn_core::sort::SortColumn;
 use cairn_core::syntax::{parse_query_with, MAX_CONTENT_TERMS};
 use cairn_protocol::codec::{encode_frame_into, peek_frame_header, try_decode_frame};
 use cairn_protocol::message::{
@@ -72,7 +69,6 @@ impl PipeServer {
         let mut server = self.create_pipe_instance(true)?;
 
         loop {
-            // Wait for client to connect
             server.connect().await?;
             let connected_server = server;
 
@@ -348,19 +344,10 @@ fn process_request(
             query_id,
             raw_query,
             defaults,
-            sort_by_name,
+            sort_column,
             sort_asc,
             first_page_limit,
         } => {
-            let sort_col = match sort_by_name.to_ascii_lowercase().as_str() {
-                "path" => SortColumn::Path,
-                "size" => SortColumn::Size,
-                "modified" | "datemodified" => SortColumn::DateModified,
-                "created" | "datecreated" => SortColumn::DateCreated,
-                "ext" | "extension" => SortColumn::Extension,
-                _ => SortColumn::Name,
-            };
-
             // Request validation, not evaluation: the engine stays a pure evaluator, and a query
             // above the content-term limit is refused before any hit set is built. The check
             // precedes begin_query, which cancels every other in-flight query.
@@ -375,7 +362,7 @@ fn process_request(
             }
             let query_cancel = sessions.begin_query(query_id, cancel);
             let (matched_items, total_matches, highlight_terms, snippets, total_bytes) = engine
-                .execute_search_multi(&raw_query, &defaults, sort_col, sort_asc, &query_cancel);
+                .execute_search_multi(&raw_query, &defaults, sort_column, sort_asc, &query_cancel);
             sessions.finish_query(query_id);
 
             let session_id =
@@ -478,27 +465,10 @@ fn process_request(
         ClientRequest::SetConfig { config_toml } => {
             // Index configuration is a local-user operation, but `admin_only_query` decides who
             // may query at all. A standard user must not be able to switch that mode on (locking
-            // everyone else out) or off (defeating it); only an administrator may change it.
-            let parsed: crate::config::ServiceConfig = match toml::from_str(&config_toml) {
-                Ok(config) => config,
-                Err(err) => {
-                    return ResponsePayload::SetConfigAck {
-                        success: false,
-                        message: format!("invalid service configuration: {err}"),
-                    }
-                }
-            };
-            if !may_change_admin_only_query(
-                caller,
-                engine.get_config().admin_only_query,
-                parsed.admin_only_query,
-            ) {
-                return ResponsePayload::SetConfigAck {
-                    success: false,
-                    message: "admin_only_query can only be changed by an administrator".to_string(),
-                };
-            }
-            match engine.apply_config_toml(&config_toml) {
+            // everyone else out) or off (defeating it); only an administrator may change it. The
+            // engine compares the submitted value with the live one inside its configuration
+            // write, so two concurrent submissions cannot both be decided against a stale value.
+            match engine.apply_config_toml(&config_toml, caller.is_privileged()) {
                 Ok(()) => ResponsePayload::SetConfigAck {
                     success: true,
                     message: "Service configuration persisted and applied".to_string(),
@@ -579,6 +549,7 @@ mod tests {
     }
     use super::*;
     use crate::config::ServiceConfig;
+    use cairn_core::sort::SortColumn;
     use cairn_protocol::message::ERROR_CODE_ADMIN_ONLY_QUERY;
 
     struct Harness {
@@ -694,6 +665,49 @@ mod tests {
         );
     }
 
+    /// Keeping the current value is not a change to the switch, so the authorization gate lets it
+    /// through; only the protected write of `service.toml` can still refuse it in this process.
+    #[test]
+    fn a_standard_user_may_submit_the_current_admin_only_query_value() {
+        let harness = Harness::new(ServiceConfig::default());
+        match harness.handle(
+            ClientRequest::SetConfig {
+                config_toml: "admin_only_query = false".to_string(),
+            },
+            CallerAuthorization::StandardUser,
+        ) {
+            ResponsePayload::SetConfigAck { message, .. } => assert!(
+                !message.contains("administrator"),
+                "a same-value submission must not be refused as an administrative change: {message}"
+            ),
+            other => panic!("unexpected response: {other:?}"),
+        }
+        assert!(!harness.engine.get_config().admin_only_query);
+    }
+
+    #[test]
+    fn an_administrator_may_change_admin_only_query() {
+        let harness = Harness::new(ServiceConfig::default());
+        match harness.handle(
+            ClientRequest::SetConfig {
+                config_toml: "admin_only_query = true".to_string(),
+            },
+            CallerAuthorization::Administrator,
+        ) {
+            ResponsePayload::SetConfigAck { success, message } => {
+                if success {
+                    assert!(harness.engine.get_config().admin_only_query);
+                } else {
+                    assert!(
+                        message.contains("could not persist"),
+                        "a privileged change must only be refused by the protected write: {message}"
+                    );
+                }
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+    }
+
     #[test]
     fn reload_config_is_applied_for_an_administrator_caller() {
         let harness = Harness::new(ServiceConfig::default());
@@ -725,7 +739,7 @@ mod tests {
                 query_id: 1,
                 raw_query: "rs".to_string(),
                 defaults: Default::default(),
-                sort_by_name: "name".to_string(),
+                sort_column: SortColumn::Name,
                 sort_asc: true,
                 first_page_limit: 10,
             },
@@ -859,7 +873,7 @@ mod tests {
                 query_id: 1,
                 raw_query: "notes".to_string(),
                 defaults: Default::default(),
-                sort_by_name: "name".to_string(),
+                sort_column: SortColumn::Name,
                 sort_asc: true,
                 first_page_limit: 10,
             },
@@ -941,7 +955,7 @@ mod tests {
             query_id: 1,
             raw_query,
             defaults: Default::default(),
-            sort_by_name: "name".to_string(),
+            sort_column: SortColumn::Name,
             sort_asc: true,
             first_page_limit: 10,
         }

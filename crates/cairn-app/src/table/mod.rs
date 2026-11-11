@@ -7,3 +7,4 @@
 
 pub(crate) mod model;
 pub(crate) mod results_view;
+pub(crate) mod surface;

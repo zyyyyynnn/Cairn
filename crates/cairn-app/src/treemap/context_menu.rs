@@ -145,7 +145,7 @@ pub(super) fn build_context_menu(
         .item(
             PopupMenuItem::new(i18n.get_text("ctx_delete")).on_click(move |_, window, cx| {
                 delete_view.update(cx, |this, cx| {
-                    this.confirm_delete_paths(vec![delete_path.clone()], window, cx);
+                    this.open_delete_confirmation(vec![delete_path.clone()], window, cx);
                 });
             }),
         )

@@ -24,7 +24,7 @@ use crate::shell::commands::{
 use crate::shell::settings::{
     LANGUAGE_EN_US, LANGUAGE_SYSTEM, LANGUAGE_ZH_CN, THEME_DARK, THEME_LIGHT, THEME_SYSTEM,
 };
-use crate::table::model::SortColumn;
+use crate::table::model::{SortColumn, SortColumnLabel};
 use gpui_kit::gpui::Action;
 
 /// One top-level menu in the title bar. One popup is open at a time, the way a desktop menu bar
@@ -240,7 +240,7 @@ impl GroupCommand {
             GroupCommand::ToggleWholeWord => "toggle_whole_word_label",
             GroupCommand::ToggleMatchPath => "toggle_match_path_label",
             GroupCommand::ToggleRegex => "toggle_regex_label",
-            GroupCommand::SortBy(column) => SortColumn::label_key(column),
+            GroupCommand::SortBy(column) => column.label_key(),
             GroupCommand::ReverseOrder => "sort_reverse",
             GroupCommand::SetTheme(mode) => theme_label_key(mode),
             GroupCommand::SetZoom(preset) => preset.label_key(),
@@ -694,6 +694,45 @@ mod tests {
                 }
                 _ => assert!(has_action, "{command:?} lost the Action that runs it"),
             }
+        }
+    }
+
+    /// `run_group_command` dispatches a command through its Action when it has one, so its
+    /// retained match may only cover the commands without an Action. This lists the arms that
+    /// match really keeps: a command whose Action appears here, or a command without one that is
+    /// missing, would reach the fallback `unreachable!` instead of its owner method.
+    #[test]
+    fn the_directly_dispatched_commands_are_exactly_the_ones_without_an_action() {
+        let direct = [
+            GroupCommand::ClearQuery,
+            GroupCommand::EmptyRecycleBin,
+            GroupCommand::SortBy(SortColumn::Name),
+            GroupCommand::ReverseOrder,
+            GroupCommand::SetTheme(crate::shell::settings::THEME_SYSTEM),
+            GroupCommand::SetZoom(ZoomPreset::Standard),
+            GroupCommand::Heading("menu_startup"),
+            GroupCommand::Submenu("menu_sort", &[]),
+            GroupCommand::SetLanguage(crate::shell::settings::LANGUAGE_SYSTEM),
+            GroupCommand::ToggleAutostart,
+            GroupCommand::ToggleContentSearch,
+            GroupCommand::ContentSearchDetailsMenu,
+            GroupCommand::ContentSearchDetails,
+            GroupCommand::ContentSearchUsage,
+            GroupCommand::ContentSearchUpdated,
+            GroupCommand::RetryContentSearch,
+            GroupCommand::ClearContentSearch,
+            GroupCommand::CheckForUpdates,
+            GroupCommand::About,
+        ];
+        for command in all_commands() {
+            let arm_matches = direct.iter().any(|candidate| {
+                core::mem::discriminant(candidate) == core::mem::discriminant(&command)
+            });
+            assert_eq!(
+                arm_matches,
+                command.action().is_none(),
+                "{command:?} does not agree with the arms run_group_command keeps"
+            );
         }
     }
 

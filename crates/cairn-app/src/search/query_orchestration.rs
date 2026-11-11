@@ -7,7 +7,6 @@
 use crate::app::{layout, CairnApp, HighlightSpan};
 use crate::service::ipc_tasks::get_tokio_runtime;
 use crate::service::service_issue::ServiceIssue;
-use crate::shell::menu_actions::sort_column_key;
 use gpui_kit::gpui::{AsyncApp, Context, Pixels, Point};
 use std::ops::Range;
 
@@ -155,6 +154,10 @@ pub enum QueryRejection {
 }
 
 impl QueryRejection {
+    /// Every refusal the service can report, for the checks that walk the vocabulary.
+    #[cfg(test)]
+    pub const ALL: &[Self] = &[Self::TooManyContentTerms];
+
     /// The rejection a service error code names, if any.
     pub fn from_error_code(code: u32) -> Option<Self> {
         match code {
@@ -189,6 +192,18 @@ fn page_response_is_current(
 
 fn rows_error_requires_refresh(code: u32) -> bool {
     code == cairn_protocol::message::ERROR_CODE_SESSION_EXPIRED
+}
+
+/// Whether the active session can accept a page request. Wheel, keyboard and post-frame paging
+/// all consult this one predicate, so no scroll source asks for a page the service cannot answer.
+fn rows_page_ready(
+    service_connected: bool,
+    searching: bool,
+    probing: bool,
+    fetching_more: bool,
+    has_session: bool,
+) -> bool {
+    service_connected && !searching && !probing && !fetching_more && has_session
 }
 
 /// A slow query is not a missing service. Only failures that close the channel or prevent the
@@ -234,10 +249,13 @@ impl CairnApp {
             self.fill_recycle_bin_page(row_height, cx);
             return;
         }
-        if self.query.is_searching
-            || self.query.is_fetching_more
-            || self.query.active_session_id.is_none()
-        {
+        if !rows_page_ready(
+            self.service.is_service_connected,
+            self.query.is_searching,
+            self.service.is_probing_service,
+            self.query.is_fetching_more,
+            self.query.active_session_id.is_some(),
+        ) {
             return;
         }
         // Read the scroll owner now instead of the value the previous frame published: a wheel event
@@ -267,16 +285,17 @@ impl CairnApp {
         if self.recycle_bin.is_open() {
             return self.needs_recycle_bin_page(visible);
         }
-        self.service.is_service_connected
-            && !self.query.is_searching
-            && !self.service.is_probing_service
-            && !self.query.is_fetching_more
-            && self.query.active_session_id.is_some()
-            && self
-                .results
-                .table
-                .page_request(visible, layout::RESULT_PAGE_SIZE)
-                .is_some()
+        rows_page_ready(
+            self.service.is_service_connected,
+            self.query.is_searching,
+            self.service.is_probing_service,
+            self.query.is_fetching_more,
+            self.query.active_session_id.is_some(),
+        ) && self
+            .results
+            .table
+            .page_request(visible, layout::RESULT_PAGE_SIZE)
+            .is_some()
     }
 
     pub fn trigger_search(&mut self, cx: &mut Context<Self>) {
@@ -361,7 +380,7 @@ impl CairnApp {
             match_path: self.query.match_path,
             is_regex: self.query.use_regex,
             // Content is a query syntax (`content:`), not a modal toggle. The service gates it on
-            // the master switch; the UI no longer carries a second content control.
+            // the master switch.
             content: false,
             exclude_hidden: false,
             exclude_system: false,
@@ -374,7 +393,7 @@ impl CairnApp {
             q = format!("{}: {q}", drive.to_ascii_uppercase());
         }
 
-        let sort_by = sort_column_key(self.results.table.sort_column).to_string();
+        let sort_column = self.results.table.sort_column;
         let sort_asc = self.results.table.sort_asc;
         let page_size = layout::RESULT_PAGE_SIZE;
 
@@ -386,7 +405,7 @@ impl CairnApp {
                 let res = match cairn_client::client::CairnClient::connect().await {
                     Ok(mut client) => {
                         client
-                            .query(qid, &q, query_defaults, &sort_by, sort_asc, page_size)
+                            .query(qid, &q, query_defaults, sort_column, sort_asc, page_size)
                             .await
                     }
                     Err(e) => Err(e),
@@ -398,75 +417,82 @@ impl CairnApp {
                 let _ = tx.send(res);
             });
 
-            if let Ok(res) = rx.await {
-                this.update(cx, |this: &mut CairnApp, cx| {
-                    if this.query.query_id != qid {
+            let res = rx.await;
+            this.update(cx, |this: &mut CairnApp, cx| {
+                if this.query.query_id != qid {
+                    return;
+                }
+                let res = match res {
+                    Ok(res) => res,
+                    Err(e) => {
+                        this.query.is_searching = false;
+                        // The background task ended without answering, so no later response will
+                        // end the loading state this query started.
+                        tracing::warn!("Cairn query response task lost: {e}");
+                        cx.notify();
                         return;
                     }
-                    this.query.is_searching = false;
-                    match res {
-                        Ok(envelope) => {
-                            this.service.is_service_connected = true;
-                            this.service.service_issue = None;
-                            this.service.status.update_volumes(envelope.volumes);
-                            this.start_status_refresh(cx);
-                            match envelope.payload {
-                                cairn_protocol::message::ResponsePayload::QueryResult {
-                                    session_id,
-                                    total_matches,
-                                    total_bytes,
-                                    first_page,
-                                    ..
-                                } => {
-                                    this.query.rejection = None;
-                                    this.query.active_session_id = Some(session_id);
-                                    if clear_rows {
-                                        this.results.table.set_rows(first_page, total_matches);
-                                    } else {
-                                        this.results.table.refresh_rows(first_page, total_matches);
-                                    }
-                                    crate::shell::perf::mark(&format!(
-                                        "query applied id={qid} total={total_matches}"
-                                    ));
-                                    // The entrance starts with the first visible content, not when the
-                                    // request left the input handler. An empty answer reveals the state
-                                    // band through the same entrance.
-                                    this.note_table_content(cx);
-                                    if total_matches == 0 {
-                                        this.note_table_empty(cx);
-                                    }
-                                    // The band shows the exact total only after the result set has
-                                    // settled; there is no animated or partial number.
-                                    this.service
-                                        .status
-                                        .set_objects_summary(total_matches, total_bytes);
+                };
+                this.query.is_searching = false;
+                match res {
+                    Ok(envelope) => {
+                        this.service.is_service_connected = true;
+                        this.service.service_issue = None;
+                        this.service.status.update_volumes(envelope.volumes);
+                        this.start_status_refresh(cx);
+                        match envelope.payload {
+                            cairn_protocol::message::ResponsePayload::QueryResult {
+                                session_id,
+                                total_matches,
+                                total_bytes,
+                                first_page,
+                                ..
+                            } => {
+                                this.query.rejection = None;
+                                this.query.active_session_id = Some(session_id);
+                                if clear_rows {
+                                    this.results.table.set_rows(first_page, total_matches);
+                                } else {
+                                    this.results.table.refresh_rows(first_page, total_matches);
                                 }
-                                cairn_protocol::message::ResponsePayload::Error {
-                                    code, ..
-                                } => {
-                                    this.query.rejection = QueryRejection::from_error_code(code);
-                                    if this.query.rejection.is_some() {
-                                        // The refusal band is content too; it enters through the
-                                        // same reveal as an empty answer.
-                                        this.note_table_empty(cx);
-                                    }
+                                crate::shell::perf::mark(&format!(
+                                    "query applied id={qid} total={total_matches}"
+                                ));
+                                // The entrance starts with the first visible content, not when the
+                                // request left the input handler. An empty answer reveals the state
+                                // band through the same entrance.
+                                this.note_table_content(cx);
+                                if total_matches == 0 {
+                                    this.note_table_empty(cx);
                                 }
-                                _ => {}
+                                // The band shows the exact total only after the result set has
+                                // settled; there is no animated or partial number.
+                                this.service
+                                    .status
+                                    .set_objects_summary(total_matches, total_bytes);
                             }
-                        }
-                        Err(e) => {
-                            tracing::warn!("Cairn IPC query error: {}", e);
-                            if query_error_marks_service_down(&e) {
-                                this.service.is_service_connected = false;
-                                this.service.service_issue =
-                                    Some(ServiceIssue::from_client_error(&e));
+                            cairn_protocol::message::ResponsePayload::Error { code, .. } => {
+                                this.query.rejection = QueryRejection::from_error_code(code);
+                                if this.query.rejection.is_some() {
+                                    // The refusal band is content too; it enters through the
+                                    // same reveal as an empty answer.
+                                    this.note_table_empty(cx);
+                                }
                             }
+                            _ => {}
                         }
                     }
-                    cx.notify();
-                })
-                .ok();
-            }
+                    Err(e) => {
+                        tracing::warn!("Cairn IPC query error: {}", e);
+                        if query_error_marks_service_down(&e) {
+                            this.service.is_service_connected = false;
+                            this.service.service_issue = Some(ServiceIssue::from_client_error(&e));
+                        }
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
         })
         .detach();
     }
@@ -669,6 +695,22 @@ mod tests {
     }
 
     #[test]
+    fn a_page_needs_a_connected_idle_session() {
+        assert!(rows_page_ready(true, false, false, false, true));
+        assert!(
+            !rows_page_ready(false, false, false, false, true),
+            "a stopped service cannot answer a page"
+        );
+        assert!(
+            !rows_page_ready(true, false, true, false, true),
+            "probing owns the connection until it finishes"
+        );
+        assert!(!rows_page_ready(true, true, false, false, true));
+        assert!(!rows_page_ready(true, false, false, true, true));
+        assert!(!rows_page_ready(true, false, false, false, false));
+    }
+
+    #[test]
     fn a_slow_query_does_not_report_the_service_as_down() {
         assert!(!query_error_marks_service_down(
             &cairn_client::client::ClientError::Timeout
@@ -694,6 +736,23 @@ mod tests {
             QueryRejection::TooManyContentTerms.message_key(),
             "query_too_complex_title"
         );
+    }
+
+    /// Every refusal the service states must be a message the result band already registers for
+    /// its own state row, or the band would show a raw id.
+    #[test]
+    fn every_query_rejection_speaks_a_message_the_result_band_registers() {
+        let result_state = crate::shell::accessibility::KEY_CONTROLS
+            .iter()
+            .find(|entry| entry.key == "result-state")
+            .expect("the result band is a registered control");
+        for rejection in QueryRejection::ALL {
+            assert!(
+                result_state.messages.contains(&rejection.message_key()),
+                "{rejection:?} states {:?}, which the result band does not register",
+                rejection.message_key()
+            );
+        }
     }
 
     #[test]

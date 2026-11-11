@@ -130,17 +130,19 @@ fn the_exclusion_mask_matches_the_full_path_reference() {
         "System Volume Information".to_string(),
         "node_modules".to_string(),
     ];
-
-    let mask = vol
-        .excluded_record_mask(&rules)
+    let parsed = crate::exclusion::ExclusionRules::parse(&rules);
+    let segments = parsed
+        .single_segments()
         .expect("bare segment rules must use the memoized mask");
+
+    let mask = vol.excluded_record_mask(&segments);
     for (idx, excluded) in mask.iter().enumerate() {
         let path = vol
             .path_cache
             .get_full_path(&vol.records, &vol.arena, 'C', idx as u32);
         assert_eq!(
             *excluded,
-            crate::exclusion::is_path_excluded(&path, &rules),
+            parsed.excludes(&crate::exclusion::ExclusionPath::new(&path)),
             "mask disagrees with the reference for {path}"
         );
     }
@@ -234,21 +236,42 @@ fn the_query_total_bytes_sum_matched_files_without_double_counting_directories()
     assert_eq!(bytes, 0, "directory contributes zero bytes");
 }
 
+/// A rule the per-record mask cannot express is still answered by the same exclusion view, which
+/// reads the record's full path with the once-parsed rule set.
 #[test]
 fn unsupported_exclusion_rule_forms_keep_the_reference_fallback() {
     let mut vol = VolumeIndex::new('C');
-    vol.ingest_items(vec![index_item(1, 0, "C:", true)]);
-    for rule in ["*.tmp", "target\\debug", r"C:\Users"] {
+    vol.ingest_items(vec![
+        index_item(1, 0, "", true),
+        index_item(2, 1, "proj", true),
+        index_item(3, 2, "a.tmp", false),
+        index_item(4, 2, "a.txt", false),
+        index_item(5, 2, "target", true),
+        index_item(6, 5, "debug", true),
+        index_item(7, 6, "out.txt", false),
+        index_item(8, 1, "Users", true),
+        index_item(9, 8, "alice.txt", false),
+    ]);
+    let volumes = std::collections::HashMap::from([('C', vol)]);
+    let volume = &volumes[&'C'];
+    let index_of = |frn: u64| record_index(volume, frn);
+
+    for (rule, excluded_frn, kept_frn) in [
+        ("*.tmp", 3, 4),
+        (r"target\debug", 7, 4),
+        (r"C:\Users", 9, 4),
+    ] {
+        let exclusions =
+            crate::sync_engine::path_exclusions::PathExclusions::new(&volumes, &[rule.to_string()]);
         assert!(
-            vol.excluded_record_mask(&[rule.to_string()]).is_none(),
-            "{rule} must fall back to the full-path reference"
+            exclusions.excludes(volume, index_of(excluded_frn)),
+            "{rule} must exclude its path through the full-path fallback"
+        );
+        assert!(
+            !exclusions.excludes(volume, index_of(kept_frn)),
+            "{rule} must not exclude an unrelated path"
         );
     }
-    assert_eq!(
-        vol.excluded_record_mask(&[]),
-        Some(vec![false]),
-        "no rules means nothing is excluded"
-    );
 }
 
 #[test]
@@ -745,6 +768,73 @@ fn an_untrusted_configuration_cannot_be_reloaded() {
         "a configuration rejected at startup must not become trusted on reload"
     );
     assert!(!engine.get_config().admin_only_query);
+}
+
+fn engine_with_config_file(temp: &std::path::Path) -> MultiVolumeEngine {
+    MultiVolumeEngine::with_paths(
+        &temp.join("index"),
+        &temp.join("content"),
+        &temp.join("service.toml"),
+        Vec::new(),
+        ServiceConfig::default(),
+    )
+}
+
+/// The admin-only switch is compared against the live value while the configuration is being
+/// written, so the decision cannot be taken against a value another connection has replaced.
+/// A submission that keeps the current value is not a change and stays available to standard
+/// users; only the secure persistence of `service.toml` can still refuse it.
+#[test]
+fn changing_admin_only_query_requires_privilege_inside_the_configuration_write() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let engine = engine_with_config_file(temp.path());
+
+    let err = engine
+        .apply_config_toml("admin_only_query = true\n", false)
+        .expect_err("a standard user must not switch administrators-only mode on");
+    assert!(err.contains("administrator"), "{err}");
+    assert!(!engine.get_config().admin_only_query);
+
+    // The secure write restores a trusted owner, which needs SeRestorePrivilege; an
+    // unelevated test process can only reach the ACL refusal.
+    match engine.apply_config_toml("admin_only_query = false\n", false) {
+        Ok(()) => assert!(!engine.get_config().admin_only_query),
+        Err(err) => assert!(
+            err.contains("could not persist"),
+            "keeping the switch must only be refused by the protected write: {err}"
+        ),
+    }
+    assert!(!engine.get_config().admin_only_query);
+
+    // The comparison uses the live value: a standard user's request that was authorized while
+    // the mode was off must not switch off an enabled mode.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let engine = engine_with_config_file(temp.path());
+    engine.update_config(ServiceConfig {
+        admin_only_query: true,
+        ..engine.get_config()
+    });
+    let err = engine
+        .apply_config_toml("admin_only_query = false\n", false)
+        .expect_err("a standard user must not defeat an enabled administrators-only mode");
+    assert!(err.contains("administrator"), "{err}");
+    assert!(engine.get_config().admin_only_query);
+}
+
+#[test]
+fn an_administrator_may_change_admin_only_query_inside_the_configuration_write() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let engine = engine_with_config_file(temp.path());
+
+    // The secure write restores a trusted owner, which needs SeRestorePrivilege; an
+    // unelevated test process can only reach the ACL refusal.
+    match engine.apply_config_toml("admin_only_query = true\n", true) {
+        Ok(()) => assert!(engine.get_config().admin_only_query),
+        Err(err) => assert!(
+            err.contains("could not persist"),
+            "a privileged change must only be refused by the protected write: {err}"
+        ),
+    }
 }
 
 #[cfg(windows)]

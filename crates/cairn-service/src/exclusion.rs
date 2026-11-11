@@ -159,26 +159,14 @@ impl ExclusionRules {
     }
 }
 
-/// Whether a path falls under any of the configured rules (IDX-09).
-pub fn is_path_excluded(full_path: &str, rules: &[String]) -> bool {
-    if rules.is_empty() || full_path.is_empty() {
-        return false;
-    }
-    let parsed = ExclusionRules::parse(rules);
-    if parsed.is_empty() {
-        return false;
-    }
-    parsed.excludes(&ExclusionPath::new(full_path))
-}
-
 #[cfg(test)]
 mod tests {
     use core::prelude::rust_2021::test;
 
-    use super::{is_path_excluded, ExclusionPath, ExclusionRule, ExclusionRules};
+    use super::{ExclusionPath, ExclusionRule, ExclusionRules};
 
     fn excluded(path: &str, rule: &str) -> bool {
-        is_path_excluded(path, &[rule.to_string()])
+        ExclusionRules::parse(&[rule.to_string()]).excludes(&ExclusionPath::new(path))
     }
 
     /// A bare segment names a directory, so it excludes that directory and everything under it —
@@ -229,10 +217,10 @@ mod tests {
         assert!(ExclusionRules::parse(&[String::new()]).is_empty());
     }
 
-    /// The fast path and the full-path check read the same rule, so they must answer the same
-    /// question.
+    /// A mixed rule set cannot use the per-record mask; each form still answers from the parsed
+    /// rules against a full path.
     #[test]
-    fn the_fast_path_and_the_full_path_check_agree_on_every_rule() {
+    fn a_mixed_rule_set_falls_back_to_the_full_path_check() {
         let rules = vec![
             "node_modules".to_string(),
             r"target\debug".to_string(),
@@ -248,18 +236,17 @@ mod tests {
             "a rule set that mixes segment, path, pattern and prefix rules cannot use the fast path"
         );
 
-        for path in [
-            r"C:\proj\node_modules\a.txt",
-            r"C:\proj\node_modules_cache\a.txt",
-            r"C:\proj\target\debug\a.txt",
-            r"C:\proj\a.tmp",
-            r"C:\Users\alice\a.txt",
+        for (path, expected) in [
+            (r"C:\proj\node_modules\a.txt", true),
+            (r"C:\proj\node_modules_cache\a.txt", false),
+            (r"C:\proj\target\debug\a.txt", true),
+            (r"C:\proj\a.tmp", true),
+            (r"C:\Users\alice\a.txt", true),
         ] {
-            let full_path = ExclusionPath::new(path);
             assert_eq!(
-                parsed.excludes(&full_path),
-                is_path_excluded(path, &rules),
-                "the two routes disagree about {path}"
+                parsed.excludes(&ExclusionPath::new(path)),
+                expected,
+                "{path}"
             );
         }
 

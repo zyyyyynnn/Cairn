@@ -38,6 +38,33 @@ pub enum ContentCommand {
     Clear,
 }
 
+impl crate::sync_engine::MultiVolumeEngine {
+    /// Delivers one command to the content thread. A receiver that is gone means the thread has
+    /// stopped; the command would never be applied, so the failure is logged and published as a
+    /// content error instead of leaving a Backfilling state or an incremental batch unapplied.
+    /// The send happens under the sender lock; the error publication happens after it is released.
+    pub(super) fn send_content_command(&self, command: ContentCommand) -> bool {
+        let sender = self.content_commands.lock().unwrap();
+        let Some(tx) = sender.as_ref() else {
+            return false;
+        };
+        // A stop cannot make the Disabled state already published untrue; every other command
+        // leaves work unapplied, which the status must show.
+        let failure_is_visible = !matches!(command, ContentCommand::Cancel);
+        let delivered = tx.send(command).is_ok();
+        drop(sender);
+        if !delivered {
+            tracing::error!(
+                "content command could not be delivered: the content thread has stopped"
+            );
+            if failure_is_visible {
+                self.set_content_error("content indexing stopped unexpectedly".to_string());
+            }
+        }
+        delivered
+    }
+}
+
 enum BatchOutcome {
     Completed,
     Cancelled,

@@ -17,7 +17,7 @@ use crate::shell::os::{
 };
 use crate::shell::reveal::{reveal_targets, MAX_REVEAL_TARGETS};
 use crate::shell::status_bar::format_count;
-use crate::table::model::{format_timestamp, SortColumn, SELECT_ALL_LIMIT};
+use crate::table::model::{format_timestamp, SELECT_ALL_LIMIT};
 use crate::view;
 use cairn_core::format_size_bytes;
 use cairn_protocol::status::ContentIndexState;
@@ -56,28 +56,6 @@ pub fn copy_lines(lines: &[String]) {
         return;
     }
     let _ = set_clipboard_text(&lines.join("\r\n"));
-}
-
-pub fn sort_column_key(col: SortColumn) -> &'static str {
-    match col {
-        SortColumn::Name => "name",
-        SortColumn::Path => "path",
-        SortColumn::Size => "size",
-        SortColumn::DateModified => "modified",
-        SortColumn::DateCreated => "created",
-        SortColumn::Extension => "ext",
-    }
-}
-
-pub fn sort_column_from_key(key: &str) -> SortColumn {
-    match key.to_ascii_lowercase().as_str() {
-        "path" => SortColumn::Path,
-        "size" => SortColumn::Size,
-        "modified" | "datemodified" => SortColumn::DateModified,
-        "created" | "datecreated" => SortColumn::DateCreated,
-        "ext" | "extension" => SortColumn::Extension,
-        _ => SortColumn::Name,
-    }
 }
 
 /// Builds the rows of one menu. A submenu's own popup is created here because its items carry the
@@ -774,35 +752,20 @@ impl CairnApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A command the keymap already owns runs through its Action, so the menu item and its
+        // shortcut reach one implementation.
+        if let Some(action) = command.action() {
+            window.dispatch_action(action, cx);
+            return;
+        }
         match command {
-            GroupCommand::OpenSelected => self.open_selected(&OpenSelected, window, cx),
-            GroupCommand::RevealLocation => {
-                self.reveal_selected_location(&RevealSelectedLocation, window, cx)
-            }
-            GroupCommand::CopyPaths => self.copy_full_paths(&CopyFullPaths, window, cx),
-            GroupCommand::CopyNames => self.copy_file_names(&CopyFileNames, window, cx),
-            GroupCommand::UndoQueryText => self.undo_query_text(&UndoQueryText, window, cx),
-            GroupCommand::RedoQueryText => self.redo_query_text(&RedoQueryText, window, cx),
-            GroupCommand::CutQueryText => self.cut_query_text(&CutQueryText, window, cx),
-            GroupCommand::PasteQueryText => self.paste_query_text(&PasteQueryText, window, cx),
-            GroupCommand::ShowProperties => self.show_properties(&ShowProperties, window, cx),
-            GroupCommand::DeleteSelected => self.delete_selected(&DeleteSelected, window, cx),
-            GroupCommand::RestoreSelected => self.restore_selected(&RestoreSelected, window, cx),
-            GroupCommand::RestoreAll => self.restore_all(window, cx),
-            GroupCommand::EmptyRecycleBin => self.empty_bin(window, cx),
-            GroupCommand::SelectAll => self.select_all(&SelectAll, window, cx),
             GroupCommand::ClearQuery => {
                 // A command names one action. Running the Escape cascade here would dismiss an
                 // unrelated toast/menu first and leave the query untouched.
                 self.close_group();
                 self.clear_query_and_scope(window, cx);
             }
-            GroupCommand::ToggleCase => {
-                self.toggle_case_sensitive(&ToggleCaseSensitive, window, cx)
-            }
-            GroupCommand::ToggleWholeWord => self.toggle_whole_word(&ToggleWholeWord, window, cx),
-            GroupCommand::ToggleMatchPath => self.toggle_match_path(&ToggleMatchPath, window, cx),
-            GroupCommand::ToggleRegex => self.toggle_regex(&ToggleRegex, window, cx),
+            GroupCommand::EmptyRecycleBin => self.empty_bin(window, cx),
             GroupCommand::SortBy(column) => self.toggle_table_sort(column, cx),
             GroupCommand::ReverseOrder => self.toggle_sort_direction(cx),
             GroupCommand::SetTheme(mode) => self.set_theme_mode(mode, cx),
@@ -853,6 +816,27 @@ impl CairnApp {
                 let title = format!("Cairn {}", env!("CARGO_PKG_VERSION"));
                 let message = self.i18n.get_text("menu_about_body");
                 self.show_info_toast(title, message, cx);
+            }
+            // Every variant below owns an Action and dispatched above. Listing them keeps this
+            // match exhaustive, so a new command must be classified instead of failing at click.
+            GroupCommand::OpenSelected
+            | GroupCommand::RevealLocation
+            | GroupCommand::CopyPaths
+            | GroupCommand::CopyNames
+            | GroupCommand::UndoQueryText
+            | GroupCommand::RedoQueryText
+            | GroupCommand::CutQueryText
+            | GroupCommand::PasteQueryText
+            | GroupCommand::ShowProperties
+            | GroupCommand::DeleteSelected
+            | GroupCommand::RestoreSelected
+            | GroupCommand::RestoreAll
+            | GroupCommand::SelectAll
+            | GroupCommand::ToggleCase
+            | GroupCommand::ToggleWholeWord
+            | GroupCommand::ToggleMatchPath
+            | GroupCommand::ToggleRegex => {
+                unreachable!("action-bearing commands dispatch through their Action")
             }
         }
     }
