@@ -5,6 +5,7 @@
 //! Windows FILETIME, the timestamp unit the index stores (`$MFT` and the file APIs differ only in
 //! how they hand it over).
 
+use cairn_core::time::{FILETIME_TICKS_PER_SECOND, FILETIME_UNIX_EPOCH_TICKS};
 use std::io;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -16,12 +17,11 @@ pub fn system_time_to_filetime(time: io::Result<SystemTime>) -> i64 {
     };
     match time.duration_since(UNIX_EPOCH) {
         Ok(elapsed) => {
-            const EPOCH_OFFSET_SECS: u64 = 11_644_473_600;
             let intervals = elapsed
                 .as_secs()
-                .saturating_add(EPOCH_OFFSET_SECS)
-                .saturating_mul(10_000_000)
-                .saturating_add(u64::from(elapsed.subsec_nanos()) / 100);
+                .saturating_mul(FILETIME_TICKS_PER_SECOND)
+                .saturating_add(u64::from(elapsed.subsec_nanos()) / 100)
+                .saturating_add(FILETIME_UNIX_EPOCH_TICKS);
             i64::try_from(intervals).unwrap_or(i64::MAX)
         }
         Err(_) => 0,
