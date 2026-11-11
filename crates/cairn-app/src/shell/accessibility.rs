@@ -530,6 +530,15 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
     // sentence for an empty folder or an unavailable tree. The breadcrumb
     // ancestors are one repeated button family, named by their path segment.
     KeyControl {
+        key: "treemap-canvas",
+        element: "treemap-canvas-container",
+        indexed: false,
+        role: Role::Group,
+        messages: &["treemap_canvas_label"],
+        named_by: "",
+        requirement: "DSV-04, UI-03",
+    },
+    KeyControl {
         key: "treemap-state",
         element: "treemap-state",
         indexed: false,

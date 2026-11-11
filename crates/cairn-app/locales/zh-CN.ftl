@@ -228,6 +228,7 @@ tray_exit = 退出
 
 view_in_table = 在表格中查看
 treemap_retry = 重试
+treemap_canvas_label = 磁盘容量图
 treemap_path_placeholder = C:\Users
 treemap_path_label = 路径
 treemap_path_clear = 清除路径

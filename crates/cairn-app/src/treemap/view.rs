@@ -20,6 +20,7 @@ use crate::treemap::paint::{
 use crate::treemap::palette::{block_fill_states, TreemapPalette};
 use crate::treemap::state::TreemapUnavailable;
 use crate::treemap::zoom::TreemapViewport;
+use crate::view::announce_shortcut;
 use cairn_core::format_size_bytes;
 use cairn_core::treemap::{
     aggregate_parent_path, path_is_within, FileKind, NestedTreemapLayoutNode, TreemapCategory,
@@ -263,14 +264,17 @@ impl CairnApp {
             tiles_layer.into_any_element()
         };
 
-        let mut canvas_element = v_flex()
-            .id("treemap-canvas-container")
-            .relative()
-            .flex_1()
-            .w_full()
-            .h_full()
-            .bg(tokens.muted)
-            .overflow_hidden();
+        let canvas_control = accessibility::control("treemap-canvas");
+        let mut canvas_element =
+            announce_shortcut(accessibility::element(canvas_control), canvas_control)
+                .aria_label(accessibility::name(canvas_control, &self.i18n))
+                .v_flex()
+                .relative()
+                .flex_1()
+                .w_full()
+                .h_full()
+                .bg(tokens.muted)
+                .overflow_hidden();
         if let Some(ref focus) = focus {
             canvas_element = canvas_element.track_focus(focus);
         }
