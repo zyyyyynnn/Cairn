@@ -12,7 +12,7 @@ use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
 use thiserror::Error;
-use zip::ZipArchive;
+use zip::{ZipArchive, ZipReadOptions};
 
 #[derive(Error, Debug)]
 pub enum ExtractError {
@@ -132,10 +132,14 @@ impl TextExtractor for OfficeExtractor {
         let mut archive = ZipArchive::new(file)?;
         let mut extracted_text = String::new();
         let mut total_uncompressed = 0usize;
-        let max_uncompressed_limit = max_bytes * 10; // Expansion ratio defense
+        let max_uncompressed_limit = max_bytes.saturating_mul(10); // Expansion ratio defense
 
         for i in 0..archive.len() {
-            let mut zip_file = archive.by_index(i)?;
+            // A local header that disagrees with the central directory can smuggle a different
+            // entry past the name-based selection below, so every entry is read with consistency
+            // enforced.
+            let mut zip_file = archive
+                .by_index_with_options(i, ZipReadOptions::new().enforce_header_consistency(true))?;
             let file_name = match zip_file.name() {
                 Ok(n) => n.to_string(),
                 Err(_) => continue,
@@ -152,10 +156,19 @@ impl TextExtractor for OfficeExtractor {
                 continue;
             }
 
+            // The central directory declares the uncompressed size: refuse an entry that cannot
+            // fit before it is decompressed, then cap the read so a lying header cannot exceed
+            // the budget either.
+            let remaining = max_uncompressed_limit.saturating_sub(total_uncompressed);
+            if zip_file.size() > remaining as u64 {
+                return Err(ExtractError::ExpansionLimitExceeded);
+            }
             let mut xml_bytes = Vec::new();
-            zip_file.read_to_end(&mut xml_bytes)?;
+            (&mut zip_file)
+                .take(remaining as u64 + 1)
+                .read_to_end(&mut xml_bytes)?;
             total_uncompressed += xml_bytes.len();
-            if total_uncompressed > max_uncompressed_limit {
+            if xml_bytes.len() > remaining {
                 return Err(ExtractError::ExpansionLimitExceeded);
             }
 
@@ -293,5 +306,51 @@ mod tests {
             .extract(&target, 1024)
             .expect("regular file extracts");
         assert_eq!(text, "payload");
+    }
+
+    fn write_zip(path: &std::path::Path, entries: &[(&str, &str)]) {
+        use std::io::Write as _;
+
+        let file = std::fs::File::create(path).expect("zip file");
+        let mut writer = zip::ZipWriter::new(file);
+        for (name, body) in entries {
+            writer
+                .start_file(*name, zip::write::SimpleFileOptions::default())
+                .expect("start entry");
+            writer.write_all(body.as_bytes()).expect("write entry");
+        }
+        writer.finish().expect("finish zip");
+    }
+
+    #[test]
+    fn office_extraction_reads_text_from_content_xml() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("report.docx");
+        write_zip(
+            &path,
+            &[
+                (
+                    "word/document.xml",
+                    "<w:document><w:body><w:p><w:t>quarterly report</w:t></w:p></w:body></w:document>",
+                ),
+                ("word/media/image1.png", "not xml content"),
+            ],
+        );
+
+        let text = OfficeExtractor.extract(&path, 4096).expect("extract");
+        assert!(text.contains("quarterly report"), "{text}");
+    }
+
+    #[test]
+    fn office_extraction_refuses_an_entry_beyond_the_expansion_budget() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("bomb.docx");
+        let payload = "a".repeat(256 * 1024);
+        write_zip(&path, &[("word/document.xml", &payload)]);
+
+        let err = OfficeExtractor
+            .extract(&path, 1024)
+            .expect_err("an entry larger than the budget must be refused");
+        assert!(matches!(err, ExtractError::ExpansionLimitExceeded));
     }
 }
