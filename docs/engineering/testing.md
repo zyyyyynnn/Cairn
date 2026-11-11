@@ -39,6 +39,8 @@
 
 需要管理员运行的开发入口：`CairnService.exe --console`（先停止已安装的 `CairnService`，验证结束后重新启动）。
 
+服务配置的安全写入（`ServiceConfig::save_atomic_secure` 的受限 ACL）需要 `SeRestorePrivilege`：非提权运行时，`apply_config_toml` 只可能返回 `could not persist` 拒绝，测试接受该路径；成功路径在提权 PowerShell 中执行 `cargo test -p cairn-service admin_only_query` 并确认通过，确认 `service.toml` 的所有者与 DACL 已受限。
+
 当前清单：裸盘 MFT/USN 实机索引与增量、服务安装/启动/卸载、UAC 同意对话框的名称与图标、MSI 升级与卸载。
 
 ## 被忽略的测试
