@@ -438,6 +438,11 @@ impl CairnApp {
                                     code, ..
                                 } => {
                                     this.query.rejection = QueryRejection::from_error_code(code);
+                                    if this.query.rejection.is_some() {
+                                        // The refusal band is content too; it enters through the
+                                        // same reveal as an empty answer.
+                                        this.note_table_empty(cx);
+                                    }
                                 }
                                 _ => {}
                             }
