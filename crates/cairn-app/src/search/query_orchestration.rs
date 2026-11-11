@@ -155,6 +155,10 @@ pub enum QueryRejection {
 }
 
 impl QueryRejection {
+    /// Every refusal the service can report, for the checks that walk the vocabulary.
+    #[cfg(test)]
+    pub const ALL: &[Self] = &[Self::TooManyContentTerms];
+
     /// The rejection a service error code names, if any.
     pub fn from_error_code(code: u32) -> Option<Self> {
         match code {
@@ -701,6 +705,23 @@ mod tests {
             QueryRejection::TooManyContentTerms.message_key(),
             "query_too_complex_title"
         );
+    }
+
+    /// Every refusal the service states must be a message the result band already registers for
+    /// its own state row, or the band would show a raw id.
+    #[test]
+    fn every_query_rejection_speaks_a_message_the_result_band_registers() {
+        let result_state = crate::shell::accessibility::KEY_CONTROLS
+            .iter()
+            .find(|entry| entry.key == "result-state")
+            .expect("the result band is a registered control");
+        for rejection in QueryRejection::ALL {
+            assert!(
+                result_state.messages.contains(&rejection.message_key()),
+                "{rejection:?} states {:?}, which the result band does not register",
+                rejection.message_key()
+            );
+        }
     }
 
     #[test]
