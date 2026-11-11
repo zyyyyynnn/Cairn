@@ -996,9 +996,51 @@ fn engine_with_completed_backfill(
     writer.finish().expect("finish content index");
     assert!(engine.get_or_create_content_searcher().is_some());
     engine.mark_content_index_ready_for_test();
-    engine.write_backfill_marker();
+    engine.write_backfill_marker(config);
     assert!(engine.backfill_marker_path().exists(), "marker was written");
     engine
+}
+
+/// The marker has to describe the configuration the backfill ran with. A change made while the
+/// job is running cannot retroactively cover the files it already skipped, so the marker must
+/// keep the old scope; the restart check then sees the difference and rebuilds.
+#[test]
+fn the_backfill_marker_keeps_the_configuration_the_backfill_ran_with() {
+    let index = tempfile::tempdir().expect("index");
+    let config = backfill_config();
+    let engine =
+        MultiVolumeEngine::with_index_dir_drives_and_config(index.path(), vec![], config.clone());
+    let writer = ContentIndex::open_or_create(&engine.content_dir).expect("content index");
+    writer
+        .index_document(2, 101, 7, 1, r"C:\docs\note.txt", "resumable needle")
+        .expect("index document");
+    writer.finish().expect("finish content index");
+    assert!(engine.get_or_create_content_searcher().is_some());
+    engine.mark_content_index_ready_for_test();
+
+    let snapshot = engine.get_config();
+    let mut changed = snapshot.clone();
+    changed.content_index_extensions = vec!["md".to_string()];
+    changed
+        .content_excluded_paths
+        .push("changed-during-backfill".to_string());
+    engine.update_config(changed);
+
+    engine.write_backfill_marker(&snapshot);
+
+    let marker: BackfillMarker =
+        serde_json::from_slice(&std::fs::read(engine.backfill_marker_path()).expect("marker file"))
+            .expect("decode marker");
+    assert_eq!(
+        marker.extensions, snapshot.content_index_extensions,
+        "the marker must describe the scope the backfill actually indexed"
+    );
+    assert_eq!(marker.max_bytes, snapshot.content_index_max_bytes);
+    assert_eq!(marker.excluded_paths, snapshot.excluded_paths);
+    assert_eq!(
+        marker.content_excluded_paths,
+        snapshot.content_excluded_paths
+    );
 }
 
 #[test]
@@ -1175,12 +1217,13 @@ fn a_marker_without_a_usable_index_is_discarded() {
 
     // The index opens but holds no documents.
     let empty = tempfile::tempdir().expect("index");
-    let engine = MultiVolumeEngine::with_index_dir_drives_and_config(empty.path(), vec![], config);
+    let engine =
+        MultiVolumeEngine::with_index_dir_drives_and_config(empty.path(), vec![], config.clone());
     let writer = ContentIndex::open_or_create(&engine.content_dir).expect("content index");
     writer.finish().expect("finish empty index");
     assert!(engine.get_or_create_content_searcher().is_some());
     engine.mark_content_index_ready_for_test();
-    engine.write_backfill_marker();
+    engine.write_backfill_marker(&config);
     assert!(engine.backfill_marker_path().exists());
     assert!(
         !engine.try_resume_content_index(),

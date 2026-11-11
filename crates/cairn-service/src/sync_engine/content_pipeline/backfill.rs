@@ -454,8 +454,9 @@ impl MultiVolumeEngine {
         }
         self.reopen_content_index_ready();
         // Only a published Ready index is a reusable backfill. `write_backfill_marker` re-checks
-        // the state, so a reopen failure leaves no marker behind.
-        self.write_backfill_marker();
+        // the state, so a reopen failure leaves no marker behind. The marker records `cfg`, the
+        // snapshot this run was built from, not a configuration that changed mid-run.
+        self.write_backfill_marker(&cfg);
     }
 
     pub(super) fn run_incremental(&self, tasks: Vec<ContentIndexTask>, deletions: Vec<(u64, u64)>) {

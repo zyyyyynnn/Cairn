@@ -16,6 +16,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::config::ServiceConfig;
 use crate::sync_engine::MultiVolumeEngine;
 
 impl MultiVolumeEngine {
@@ -111,21 +112,23 @@ impl MultiVolumeEngine {
     }
 
     /// Records a completed full backfill so the next process can reopen the index read-only
-    /// instead of clearing and re-extracting every eligible file. The marker is replaced
-    /// atomically; a write failure is logged but never turns the already published index into an
-    /// error, because the running index is still fully usable.
-    pub(super) fn write_backfill_marker(&self) {
+    /// instead of clearing and re-extracting every eligible file. `cfg` is the configuration the
+    /// backfill ran with: a change that arrived while it was running cannot cover files already
+    /// skipped, so the marker must keep the scope the index actually describes and let the next
+    /// start reject it. The marker is replaced atomically; a write failure is logged but never
+    /// turns the already published index into an error, because the running index is still fully
+    /// usable.
+    pub(super) fn write_backfill_marker(&self, cfg: &ServiceConfig) {
         let status = self.content_index_status();
         if !status.state.is_ready() {
             return;
         }
-        let cfg = self.get_config();
         let marker = BackfillMarker {
             schema: CONTENT_BACKFILL_SCHEMA,
-            extensions: cfg.content_index_extensions,
+            extensions: cfg.content_index_extensions.clone(),
             max_bytes: cfg.content_index_max_bytes,
-            excluded_paths: cfg.excluded_paths,
-            content_excluded_paths: cfg.content_excluded_paths,
+            excluded_paths: cfg.excluded_paths.clone(),
+            content_excluded_paths: cfg.content_excluded_paths.clone(),
             documents: status.indexed_documents,
             completed_ts: unix_now(),
         };
