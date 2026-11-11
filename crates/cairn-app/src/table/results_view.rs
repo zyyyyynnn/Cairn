@@ -240,7 +240,7 @@ enum HeaderLane {
     Date,
 }
 
-/// What the result region shows while it holds no rows.
+/// What the result region shows.
 ///
 /// The loading cover answers a request that is actually in flight and nothing
 /// else: a service problem or an empty answer is content with its own recovery
@@ -249,17 +249,67 @@ enum HeaderLane {
 enum ResultSurface {
     Rows,
     Loading,
-    StateBand,
+    Empty,
+    Offline,
 }
 
-/// Decides the result surface from the two facts the panel can observe.
-fn result_surface(has_content: bool, is_loading: bool) -> ResultSurface {
+/// The panel facts that decide what the result region shows.
+#[derive(Clone, Copy, Debug)]
+struct ResultSurfaceInputs {
+    total_rows: usize,
+    recycle_bin_open: bool,
+    recycle_bin_loading: bool,
+    recycle_bin_error: bool,
+    query_in_flight: bool,
+    index_catching_up: bool,
+    service_connected: bool,
+    probing_service: bool,
+    has_query: bool,
+}
+
+impl Default for ResultSurfaceInputs {
+    fn default() -> Self {
+        Self {
+            total_rows: 0,
+            recycle_bin_open: false,
+            recycle_bin_loading: false,
+            recycle_bin_error: false,
+            query_in_flight: false,
+            index_catching_up: false,
+            service_connected: true,
+            probing_service: false,
+            has_query: false,
+        }
+    }
+}
+
+/// Decides the result surface from the panel facts, in precedence order: rows in hand win over a
+/// cover, a request actually in flight wins over a band, and only a location that can answer gets
+/// the empty band instead of the offline one.
+fn result_surface(inputs: ResultSurfaceInputs) -> ResultSurface {
+    let bin_loading = inputs.recycle_bin_open && inputs.recycle_bin_loading;
+    let first_page_loading = (!inputs.recycle_bin_open
+        && inputs.total_rows == 0
+        && (inputs.query_in_flight || (inputs.probing_service && inputs.service_connected)))
+        || (bin_loading && inputs.total_rows == 0);
+    let index_loading = !inputs.recycle_bin_open
+        && !inputs.has_query
+        && inputs.index_catching_up
+        && inputs.total_rows == 0;
+    // The bin is shell data, not index data: a stopped service must not replace it
+    // with the offline band, and an empty bin is its own state, not an offline one.
+    let local_location = inputs.recycle_bin_open || inputs.service_connected;
+    // An unreadable bin is authoritative over any rows still in the table. The state band owns the
+    // retry path; stale rows must never become actionable again.
+    let has_content = !inputs.recycle_bin_error && local_location && inputs.total_rows > 0;
     if has_content {
         ResultSurface::Rows
-    } else if is_loading {
+    } else if first_page_loading || index_loading {
         ResultSurface::Loading
+    } else if local_location {
+        ResultSurface::Empty
     } else {
-        ResultSurface::StateBand
+        ResultSurface::Offline
     }
 }
 
@@ -297,42 +347,29 @@ impl CairnApp {
         // Once any rows exist the table wins even if the index is still catching up: the cached
         // results are usable, and the single "synchronizing" capsule describes their freshness.
         // A background refresh of an index that already shows rows must leave those rows in place.
-        let bin_loading = self.recycle_bin.is_open() && self.recycle_bin.is_loading();
-        let first_page_loading = (!self.recycle_bin.is_open()
-            && self.results.table.total_rows() == 0
-            && (self.query.is_searching
-                || (self.service.is_probing_service && self.service.is_service_connected)))
-            || (bin_loading && self.results.table.total_rows() == 0);
-        let index_loading = !self.recycle_bin.is_open()
-            && !self.has_query()
-            && self.service.status.is_any_loading()
-            && self.results.table.total_rows() == 0;
-        let is_loading = first_page_loading || index_loading;
-        // The bin is shell data, not index data: a stopped service must not replace it
-        // with the offline band, and an empty bin is its own state, not an offline one.
-        let local_location = self.recycle_bin.is_open() || self.service.is_service_connected;
-        let rows = if self.recycle_bin.error().is_some() {
-            // An unreadable bin is authoritative over any rows still in the table. The state band
-            // below owns the retry path; stale rows must never become actionable again.
-            None
-        } else if local_location && self.results.table.total_rows() > 0 {
-            Some(self.render_rows_band(tokens, visible, row_height, cx))
-        } else {
-            None
-        };
-        let has_content = rows.is_some();
-        let surface = result_surface(has_content, is_loading);
-        let state = if surface != ResultSurface::StateBand {
-            None
-        } else if local_location {
-            Some(self.render_empty_state(tokens, cx))
-        } else {
-            Some(self.render_service_offline_state(tokens, cx))
+        let surface = result_surface(ResultSurfaceInputs {
+            total_rows: self.results.table.total_rows(),
+            recycle_bin_open: self.recycle_bin.is_open(),
+            recycle_bin_loading: self.recycle_bin.is_loading(),
+            recycle_bin_error: self.recycle_bin.error().is_some(),
+            query_in_flight: self.query.is_searching,
+            index_catching_up: self.service.status.is_any_loading(),
+            service_connected: self.service.is_service_connected,
+            probing_service: self.service.is_probing_service,
+            has_query: self.has_query(),
+        });
+        let rows = (surface == ResultSurface::Rows)
+            .then(|| self.render_rows_band(tokens, visible, row_height, cx));
+        let state = match surface {
+            ResultSurface::Empty => Some(self.render_empty_state(tokens, cx)),
+            ResultSurface::Offline => Some(self.render_service_offline_state(tokens, cx)),
+            ResultSurface::Rows | ResultSurface::Loading => None,
         };
 
         // The header is outside this wrapper, so a refresh never blanks or
         // re-fades the column labels. The fade overlay dissolves over
         // MASK_DISSOLVE, with a cleanup timer scheduled at the entrance source.
+        let has_content = rows.is_some();
         let has_state = state.is_some();
         let rows = rows.map(|body| body.into_any_element());
         let state = state.map(|body| body.into_any_element());
@@ -1457,21 +1494,96 @@ mod tests {
 
     use super::{
         content_query_notice, result_row_icon, result_surface, rows_band_local_top, rows_to_paint,
-        ContentQueryNotice, ResultSurface,
+        ContentQueryNotice, ResultSurface, ResultSurfaceInputs,
     };
     use crate::shell::command_groups::GroupCommand;
     use crate::table::model::{SortColumn, SortColumnLabel};
     use cairn_protocol::status::ContentIndexState;
 
     #[test]
-    fn rows_beat_the_cover_and_a_stopped_service_beats_neither() {
+    fn the_cover_only_answers_a_request_that_is_actually_in_flight() {
         // The cover answers an in-flight request only. With nothing in flight and no rows the band
         // owns the region, because its recovery actions are the only way out of a stopped service
         // (SPEC SVC-04).
-        assert_eq!(result_surface(false, false), ResultSurface::StateBand);
-        assert_eq!(result_surface(false, true), ResultSurface::Loading);
-        assert_eq!(result_surface(true, true), ResultSurface::Rows);
-        assert_eq!(result_surface(true, false), ResultSurface::Rows);
+        assert_eq!(
+            result_surface(ResultSurfaceInputs::default()),
+            ResultSurface::Empty
+        );
+        assert_eq!(
+            result_surface(ResultSurfaceInputs {
+                query_in_flight: true,
+                ..Default::default()
+            }),
+            ResultSurface::Loading
+        );
+        assert_eq!(
+            result_surface(ResultSurfaceInputs {
+                index_catching_up: true,
+                ..Default::default()
+            }),
+            ResultSurface::Loading,
+            "an index still being built is a request in flight"
+        );
+        assert_eq!(
+            result_surface(ResultSurfaceInputs {
+                probing_service: true,
+                ..Default::default()
+            }),
+            ResultSurface::Loading
+        );
+        assert_eq!(
+            result_surface(ResultSurfaceInputs {
+                recycle_bin_open: true,
+                recycle_bin_loading: true,
+                ..Default::default()
+            }),
+            ResultSurface::Loading
+        );
+    }
+
+    #[test]
+    fn rows_outrank_every_cover() {
+        assert_eq!(
+            result_surface(ResultSurfaceInputs {
+                total_rows: 3,
+                query_in_flight: true,
+                ..Default::default()
+            }),
+            ResultSurface::Rows
+        );
+    }
+
+    #[test]
+    fn a_stopped_service_keeps_the_offline_band() {
+        assert_eq!(
+            result_surface(ResultSurfaceInputs {
+                service_connected: false,
+                ..Default::default()
+            }),
+            ResultSurface::Offline
+        );
+        assert_eq!(
+            result_surface(ResultSurfaceInputs {
+                total_rows: 3,
+                service_connected: false,
+                ..Default::default()
+            }),
+            ResultSurface::Offline,
+            "stale rows do not become actionable again without a service"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_bin_hands_the_band_its_error_state() {
+        assert_eq!(
+            result_surface(ResultSurfaceInputs {
+                total_rows: 5,
+                recycle_bin_open: true,
+                recycle_bin_error: true,
+                ..Default::default()
+            }),
+            ResultSurface::Empty
+        );
     }
     use gpui_kit::assets::IconName as AssetIconName;
 

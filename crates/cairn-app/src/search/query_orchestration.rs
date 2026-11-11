@@ -194,6 +194,18 @@ fn rows_error_requires_refresh(code: u32) -> bool {
     code == cairn_protocol::message::ERROR_CODE_SESSION_EXPIRED
 }
 
+/// Whether the active session can accept a page request. Wheel, keyboard and post-frame paging
+/// all consult this one predicate, so no scroll source asks for a page the service cannot answer.
+fn rows_page_ready(
+    service_connected: bool,
+    searching: bool,
+    probing: bool,
+    fetching_more: bool,
+    has_session: bool,
+) -> bool {
+    service_connected && !searching && !probing && !fetching_more && has_session
+}
+
 /// A slow query is not a missing service. Only failures that close the channel or prevent the
 /// connection from being established should move the window into its offline recovery band.
 fn query_error_marks_service_down(error: &cairn_client::client::ClientError) -> bool {
@@ -237,10 +249,13 @@ impl CairnApp {
             self.fill_recycle_bin_page(row_height, cx);
             return;
         }
-        if self.query.is_searching
-            || self.query.is_fetching_more
-            || self.query.active_session_id.is_none()
-        {
+        if !rows_page_ready(
+            self.service.is_service_connected,
+            self.query.is_searching,
+            self.service.is_probing_service,
+            self.query.is_fetching_more,
+            self.query.active_session_id.is_some(),
+        ) {
             return;
         }
         // Read the scroll owner now instead of the value the previous frame published: a wheel event
@@ -270,16 +285,17 @@ impl CairnApp {
         if self.recycle_bin.is_open() {
             return self.needs_recycle_bin_page(visible);
         }
-        self.service.is_service_connected
-            && !self.query.is_searching
-            && !self.service.is_probing_service
-            && !self.query.is_fetching_more
-            && self.query.active_session_id.is_some()
-            && self
-                .results
-                .table
-                .page_request(visible, layout::RESULT_PAGE_SIZE)
-                .is_some()
+        rows_page_ready(
+            self.service.is_service_connected,
+            self.query.is_searching,
+            self.service.is_probing_service,
+            self.query.is_fetching_more,
+            self.query.active_session_id.is_some(),
+        ) && self
+            .results
+            .table
+            .page_request(visible, layout::RESULT_PAGE_SIZE)
+            .is_some()
     }
 
     pub fn trigger_search(&mut self, cx: &mut Context<Self>) {
@@ -676,6 +692,22 @@ mod tests {
         );
         assert!(!page_response_is_current(7, 8, 11, Some(11)));
         assert!(!page_response_is_current(7, 7, 11, None));
+    }
+
+    #[test]
+    fn a_page_needs_a_connected_idle_session() {
+        assert!(rows_page_ready(true, false, false, false, true));
+        assert!(
+            !rows_page_ready(false, false, false, false, true),
+            "a stopped service cannot answer a page"
+        );
+        assert!(
+            !rows_page_ready(true, false, true, false, true),
+            "probing owns the connection until it finishes"
+        );
+        assert!(!rows_page_ready(true, true, false, false, true));
+        assert!(!rows_page_ready(true, false, false, true, true));
+        assert!(!rows_page_ready(true, false, false, false, false));
     }
 
     #[test]
