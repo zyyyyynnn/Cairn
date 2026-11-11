@@ -390,7 +390,7 @@ mod tests {
             query_id: 1,
             raw_query: "rs".to_string(),
             defaults: Default::default(),
-            sort_by_name: "name".to_string(),
+            sort_column: cairn_core::sort::SortColumn::Name,
             sort_asc: true,
             first_page_limit: 50,
         }

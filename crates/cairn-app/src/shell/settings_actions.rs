@@ -11,7 +11,7 @@ use crate::search::filters::FilterCategory;
 use crate::shell::commands::{
     CycleFilterCategory, ToggleCaseSensitive, ToggleMatchPath, ToggleRegex, ToggleWholeWord,
 };
-use crate::shell::menu_actions::{sort_column_key, ToggleFlag};
+use crate::shell::menu_actions::ToggleFlag;
 use crate::shell::settings::THEME_SYSTEM;
 use crate::shell::theme;
 use crate::table::model::{ColumnBoundary, ColumnWidths, SortColumn};
@@ -31,7 +31,7 @@ impl CairnApp {
 
     pub fn toggle_table_sort(&mut self, col: SortColumn, cx: &mut Context<Self>) {
         self.results.table.toggle_sort(col);
-        self.settings.columns.sort_column = sort_column_key(col).to_string();
+        self.settings.columns.sort_column = col.key().to_string();
         self.settings.columns.sort_asc = self.results.table.sort_asc;
         self.save_settings();
         if self.recycle_bin.is_open() {

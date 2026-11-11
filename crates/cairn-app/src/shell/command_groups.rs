@@ -24,7 +24,7 @@ use crate::shell::commands::{
 use crate::shell::settings::{
     LANGUAGE_EN_US, LANGUAGE_SYSTEM, LANGUAGE_ZH_CN, THEME_DARK, THEME_LIGHT, THEME_SYSTEM,
 };
-use crate::table::model::SortColumn;
+use crate::table::model::{SortColumn, SortColumnLabel};
 use gpui_kit::gpui::Action;
 
 /// One top-level menu in the title bar. One popup is open at a time, the way a desktop menu bar
@@ -240,7 +240,7 @@ impl GroupCommand {
             GroupCommand::ToggleWholeWord => "toggle_whole_word_label",
             GroupCommand::ToggleMatchPath => "toggle_match_path_label",
             GroupCommand::ToggleRegex => "toggle_regex_label",
-            GroupCommand::SortBy(column) => SortColumn::label_key(column),
+            GroupCommand::SortBy(column) => column.label_key(),
             GroupCommand::ReverseOrder => "sort_reverse",
             GroupCommand::SetTheme(mode) => theme_label_key(mode),
             GroupCommand::SetZoom(preset) => preset.label_key(),

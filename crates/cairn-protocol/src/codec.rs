@@ -137,7 +137,7 @@ pub fn try_decode_frame<T: DeserializeOwned>(buf: &[u8]) -> Result<Option<(usize
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::message::ClientRequest;
+    use crate::message::{ClientRequest, SortColumn};
 
     #[test]
     fn test_encode_decode_roundtrip() {
@@ -183,7 +183,7 @@ mod tests {
             query_id: 7,
             raw_query: "报告 季度".to_string(),
             defaults,
-            sort_by_name: "name".to_string(),
+            sort_column: SortColumn::Name,
             sort_asc: false,
             first_page_limit: 50,
         };
@@ -199,14 +199,14 @@ mod tests {
                 query_id,
                 raw_query,
                 defaults: received,
-                sort_by_name,
+                sort_column,
                 sort_asc,
                 first_page_limit,
             } => {
                 assert_eq!(query_id, 7);
                 assert_eq!(raw_query, "报告 季度");
                 assert_eq!(received, defaults, "toggles must survive the frame");
-                assert_eq!(sort_by_name, "name");
+                assert_eq!(sort_column, SortColumn::Name);
                 assert!(!sort_asc);
                 assert_eq!(first_page_limit, 50);
             }
@@ -221,7 +221,7 @@ mod tests {
             query_id: 7,
             raw_query: "报告 季度".to_string(),
             defaults: flipped,
-            sort_by_name: "name".to_string(),
+            sort_column: SortColumn::Name,
             sort_asc: false,
             first_page_limit: 50,
         };

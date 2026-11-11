@@ -7,7 +7,6 @@
 use crate::app::{layout, CairnApp, HighlightSpan};
 use crate::service::ipc_tasks::get_tokio_runtime;
 use crate::service::service_issue::ServiceIssue;
-use crate::shell::menu_actions::sort_column_key;
 use gpui_kit::gpui::{AsyncApp, Context, Pixels, Point};
 use std::ops::Range;
 
@@ -378,7 +377,7 @@ impl CairnApp {
             q = format!("{}: {q}", drive.to_ascii_uppercase());
         }
 
-        let sort_by = sort_column_key(self.results.table.sort_column).to_string();
+        let sort_column = self.results.table.sort_column;
         let sort_asc = self.results.table.sort_asc;
         let page_size = layout::RESULT_PAGE_SIZE;
 
@@ -390,7 +389,7 @@ impl CairnApp {
                 let res = match cairn_client::client::CairnClient::connect().await {
                     Ok(mut client) => {
                         client
-                            .query(qid, &q, query_defaults, &sort_by, sort_asc, page_size)
+                            .query(qid, &q, query_defaults, sort_column, sort_asc, page_size)
                             .await
                     }
                     Err(e) => Err(e),

@@ -6,9 +6,10 @@
 
 use cairn_protocol::codec::{encode_frame, try_decode_frame, CodecError};
 use cairn_protocol::message::{
-    ClientRequest, Envelope, QueryDefaults, ResponsePayload, ERROR_CODE_ADMIN_ONLY_QUERY,
-    ERROR_CODE_HANDSHAKE_REQUIRED, ERROR_CODE_PROTOCOL_VERSION_MISMATCH, ERROR_CODE_UNAUTHORIZED,
-    PIPE_NAME, PRODUCT_VERSION, WIRE_GUARD,
+    ClientRequest, Envelope, QueryDefaults, ResponsePayload, SortColumn,
+    ERROR_CODE_ADMIN_ONLY_QUERY, ERROR_CODE_HANDSHAKE_REQUIRED,
+    ERROR_CODE_PROTOCOL_VERSION_MISMATCH, ERROR_CODE_UNAUTHORIZED, PIPE_NAME, PRODUCT_VERSION,
+    WIRE_GUARD,
 };
 use std::time::Duration;
 use thiserror::Error;
@@ -221,7 +222,7 @@ impl CairnClient {
         query_id: u64,
         raw_query: &str,
         defaults: QueryDefaults,
-        sort_by: &str,
+        sort_column: SortColumn,
         sort_asc: bool,
         first_page_limit: usize,
     ) -> Result<Envelope<ResponsePayload>, ClientError> {
@@ -229,7 +230,7 @@ impl CairnClient {
             query_id,
             raw_query: raw_query.to_string(),
             defaults,
-            sort_by_name: sort_by.to_string(),
+            sort_column,
             sort_asc,
             first_page_limit,
         })
@@ -510,8 +511,11 @@ mod tests {
             ..Default::default()
         };
         let raw = "报告 季度";
-        let task =
-            tokio::spawn(async move { client.query(4, raw, defaults, "name", true, 10).await });
+        let task = tokio::spawn(async move {
+            client
+                .query(4, raw, defaults, SortColumn::Name, true, 10)
+                .await
+        });
 
         server.connect().await.expect("stub connect");
         let mut buf = [0u8; 4096];
@@ -524,7 +528,7 @@ mod tests {
             ClientRequest::Query {
                 raw_query,
                 defaults: received,
-                sort_by_name,
+                sort_column,
                 first_page_limit,
                 ..
             } => {
@@ -534,7 +538,7 @@ mod tests {
                     "toggles must not be spliced into the text"
                 );
                 assert_eq!(received, defaults);
-                assert_eq!(sort_by_name, "name");
+                assert_eq!(sort_column, SortColumn::Name);
                 assert_eq!(first_page_limit, 10);
             }
             other => panic!("Expected a Query request, got {other:?}"),

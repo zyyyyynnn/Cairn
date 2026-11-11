@@ -13,7 +13,7 @@ use crate::shell::file_icon::file_kind_icon;
 use crate::shell::menu_rules::IndexMenuState;
 use crate::shell::state_view::{icon_action, render_state_band};
 use crate::shell::theme::{self, ShellTokens};
-use crate::table::model::{format_timestamp, ColumnBoundary, SortColumn};
+use crate::table::model::{format_timestamp, ColumnBoundary, SortColumn, SortColumnLabel};
 use crate::view::announce_shortcut;
 use cairn_core::format_size_bytes;
 use cairn_core::treemap::FileKind;
@@ -1460,7 +1460,7 @@ mod tests {
         ContentQueryNotice, ResultSurface,
     };
     use crate::shell::command_groups::GroupCommand;
-    use crate::table::model::SortColumn;
+    use crate::table::model::{SortColumn, SortColumnLabel};
     use cairn_protocol::status::ContentIndexState;
 
     #[test]

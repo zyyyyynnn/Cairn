@@ -17,7 +17,7 @@ use crate::shell::os::{
 };
 use crate::shell::reveal::{reveal_targets, MAX_REVEAL_TARGETS};
 use crate::shell::status_bar::format_count;
-use crate::table::model::{format_timestamp, SortColumn, SELECT_ALL_LIMIT};
+use crate::table::model::{format_timestamp, SELECT_ALL_LIMIT};
 use crate::view;
 use cairn_core::format_size_bytes;
 use cairn_protocol::status::ContentIndexState;
@@ -56,28 +56,6 @@ pub fn copy_lines(lines: &[String]) {
         return;
     }
     let _ = set_clipboard_text(&lines.join("\r\n"));
-}
-
-pub fn sort_column_key(col: SortColumn) -> &'static str {
-    match col {
-        SortColumn::Name => "name",
-        SortColumn::Path => "path",
-        SortColumn::Size => "size",
-        SortColumn::DateModified => "modified",
-        SortColumn::DateCreated => "created",
-        SortColumn::Extension => "ext",
-    }
-}
-
-pub fn sort_column_from_key(key: &str) -> SortColumn {
-    match key.to_ascii_lowercase().as_str() {
-        "path" => SortColumn::Path,
-        "size" => SortColumn::Size,
-        "modified" | "datemodified" => SortColumn::DateModified,
-        "created" | "datecreated" => SortColumn::DateCreated,
-        "ext" | "extension" => SortColumn::Extension,
-        _ => SortColumn::Name,
-    }
 }
 
 /// Builds the rows of one menu. A submenu's own popup is created here because its items carry the
