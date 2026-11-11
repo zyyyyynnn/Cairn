@@ -122,18 +122,6 @@ impl CairnApp {
         } else {
             self.collect_selected_paths()
         };
-        self.confirm_delete_paths(paths, window, cx);
-    }
-
-    /// Asks before deleting paths. The shell confirmation is suppressed for
-    /// this routine action so the question uses Cairn's own dialog; the shell
-    /// still owns progress and error UI.
-    pub fn confirm_delete_paths(
-        &mut self,
-        paths: Vec<String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
         self.open_delete_confirmation(paths, window, cx);
     }
 
@@ -218,7 +206,10 @@ impl CairnApp {
         );
     }
 
-    fn open_delete_confirmation(
+    /// Asks before deleting paths. The shell confirmation is suppressed for
+    /// this routine action so the question uses Cairn's own dialog; the shell
+    /// still owns progress and error UI.
+    pub(crate) fn open_delete_confirmation(
         &mut self,
         paths: Vec<String>,
         window: &mut Window,
