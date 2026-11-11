@@ -66,6 +66,58 @@ fn matched_content_frns(engine: &MultiVolumeEngine, query: &str) -> Vec<u64> {
     frns
 }
 
+/// An engine whose content index holds one document for a FRN that two hardlink rows share,
+/// plus one unrelated document. The tests below cross the public `execute_search_multi` seam.
+fn engine_with_hardlinked_content() -> (MultiVolumeEngine, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("index dir");
+    let config = ServiceConfig {
+        content_index_enabled: true,
+        ..Default::default()
+    };
+    let engine = MultiVolumeEngine::with_index_dir_drives_and_config(dir.path(), vec![], config);
+    let writer =
+        cairn_content::ContentIndex::open_or_create(&engine.content_dir).expect("content index");
+    for (frn, path, body) in [
+        (201, r"C:\docs\link-a.txt", "alpha needle"),
+        (202, r"C:\docs\plain.txt", "beta filler"),
+    ] {
+        writer
+            .index_document(2, frn, 16, 1, path, body)
+            .expect("index document");
+    }
+    writer.finish().expect("finish content index");
+    assert!(engine.get_or_create_content_searcher().is_some());
+    engine.mark_content_index_ready_for_test();
+
+    let mut volume = VolumeIndex::new('C');
+    volume.ingest_items(vec![
+        index_item(1, 0, "C:", true),
+        index_item(9, 1, "docs", true),
+        index_item(201, 9, "link-a.txt", false),
+        index_item(201, 9, "link-b.txt", false),
+        index_item(202, 9, "plain.txt", false),
+    ]);
+    engine.add_volume(volume);
+    (engine, dir)
+}
+
+/// A content hit belongs to the FRN, and every hardlink row of that FRN is a record of its own:
+/// negation must exclude all of them, disjunction must return all of them.
+#[test]
+fn hardlink_rows_share_the_content_hit_of_their_frn() {
+    let (engine, _dir) = engine_with_hardlinked_content();
+    assert_eq!(
+        matched_content_frns(&engine, "!content:needle"),
+        vec![1, 9, 202],
+        "both hardlink rows carry the needle hit, so the negation must exclude both"
+    );
+    assert_eq!(
+        matched_content_frns(&engine, "content:alpha|content:beta"),
+        vec![201, 201, 202],
+        "the disjunction must return both hardlink rows of the hit FRN"
+    );
+}
+
 #[test]
 fn a_negated_content_term_excludes_its_hits_from_the_result_set() {
     let (engine, _dir) = engine_with_indexed_content();

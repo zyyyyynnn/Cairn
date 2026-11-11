@@ -5,6 +5,7 @@
 //! Metadata and content search: query evaluation, exclusion filtering, result
 //! ordering and snippets.
 
+use super::volume_index::BitSet;
 use super::{MultiVolumeEngine, VolumeIndex};
 use cairn_content::CONTENT_RESULT_TOP_K;
 use cairn_core::engine::CancellationToken;
@@ -204,7 +205,7 @@ impl MultiVolumeEngine {
                     .extract_positive_content_queries()
                     .into_iter()
                     .collect();
-                let mut hits_by_drive: HashMap<char, Vec<HashSet<u64>>> = HashMap::new();
+                let mut hits_by_drive: HashMap<char, Vec<Vec<u64>>> = HashMap::new();
                 let mut snippets_by_key: HashMap<(char, u64), String> = HashMap::new();
                 for (term_slot, term) in content_queries.iter().enumerate() {
                     if cancel.is_cancelled() {
@@ -243,9 +244,9 @@ impl MultiVolumeEngine {
                             };
                             hits_by_drive
                                 .entry(drive_letter)
-                                .or_insert_with(|| vec![HashSet::new(); content_queries.len()])
+                                .or_insert_with(|| vec![Vec::new(); content_queries.len()])
                                 [term_slot]
-                                .insert(hit.frn);
+                                .push(hit.frn);
                             snippets_by_key.insert((drive_letter, hit.frn), hit.snippet.clone());
                         }
                     } else {
@@ -265,9 +266,9 @@ impl MultiVolumeEngine {
                             };
                             hits_by_drive
                                 .entry(drive_letter)
-                                .or_insert_with(|| vec![HashSet::new(); content_queries.len()])
+                                .or_insert_with(|| vec![Vec::new(); content_queries.len()])
                                 [term_slot]
-                                .insert(frn);
+                                .push(frn);
                         }
                     }
                 }
@@ -287,11 +288,34 @@ impl MultiVolumeEngine {
                     if !vol.status.state().is_synced() && vol.records.is_empty() {
                         continue;
                     }
-                    let matcher = |term: &str, frn: u64| {
+                    // One record-index bitmap per content term. A hit FRN sets every record it
+                    // maps to, so each hardlink row of a hit file carries the hit. The FRN lists
+                    // are consumed volume by volume and term by term, so the two representations
+                    // never peak together. A volume without hits keeps an empty list: negation
+                    // still evaluates every record, and the resolver answers false for all terms.
+                    let sets: Vec<BitSet> = hits_by_drive
+                        .remove(&vol.drive_letter)
+                        .map(|frns_by_term| {
+                            frns_by_term
+                                .into_iter()
+                                .map(|frns| {
+                                    let mut bits = BitSet::with_capacity(vol.records.len());
+                                    for frn in frns {
+                                        if let Some(indices) = vol.frn_to_idx.get(&frn) {
+                                            for &idx in indices {
+                                                bits.insert(idx as usize);
+                                            }
+                                        }
+                                    }
+                                    bits
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let matcher = |term: &str, idx: u32| {
                         term_index.get(term).is_some_and(|&index| {
-                            hits_by_drive
-                                .get(&vol.drive_letter)
-                                .is_some_and(|sets| sets[index].contains(&frn))
+                            sets.get(index)
+                                .is_some_and(|bits| bits.contains(idx as usize))
                         })
                     };
                     let matches = cairn_core::engine::execute_query_with_content(

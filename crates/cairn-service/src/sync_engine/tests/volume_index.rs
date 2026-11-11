@@ -769,6 +769,34 @@ fn matched_bytes_are_counted_once_at_the_highest_matched_point() {
 }
 
 #[test]
+fn bitset_contains_reports_membership_within_its_capacity() {
+    let empty = BitSet::with_capacity(0);
+    assert!(!empty.contains(0), "an empty set holds no member");
+
+    let mut bs = BitSet::with_capacity(128);
+    for bit in [0, 63, 64, 127] {
+        assert!(
+            !bs.contains(bit),
+            "bit {bit} is not a member before insertion"
+        );
+    }
+
+    for bit in [0, 63, 64, 127] {
+        bs.insert(bit);
+    }
+    for bit in [0, 63, 64, 127] {
+        assert!(bs.contains(bit), "bit {bit} is a member after insertion");
+    }
+    for bit in [1, 62, 65, 126] {
+        assert!(!bs.contains(bit), "bit {bit} was never inserted");
+    }
+
+    // Beyond the capacity there is no member, and the lookup must not panic.
+    assert!(!bs.contains(128));
+    assert!(!bs.contains(usize::MAX));
+}
+
+#[test]
 fn bitset_operations_and_boundaries() {
     let mut bs = BitSet::with_capacity(128);
     assert_eq!(bs.words.len(), 2);
