@@ -45,6 +45,22 @@ cargo run -p xtask -- package
 - 代码签名（REL-02）尚未完成前，不得把未签名产物描述为已签名发布。
 - 版本取自 workspace `Cargo.toml`，升级码由 `cairn-setup` 持有、由 `xtask` 注入打包产物；发布前运行完整测试、`cargo fmt --all --check`、clippy `-D warnings`、`cargo doc`、`check-i18n`、`check-docs`、`check-size` 与 `cargo deny check`。
 
+## 6. 版本与兼容性
+
+- 产品版本只在发布提交中提升；`main` 在两次发布之间保持最近一次发布的版本。版本号不得回退，发布有缺陷时以新的补丁版本继续前进。
+- 命名管道负载由 postcard 位置编码固定，`WIRE_GUARD` 由产品主次版本推导。`crates/cairn-protocol/src/codec.rs` 的 wire 布局测试钉住查询帧字节：重构必须保持这些字节不变，类型化字段通过 serde 编码为发布时的取值形态（例如排序枚举编码为原有 key 字符串）。
+- 只有发布提交可以改变负载布局：提升 minor 并同步更新 wire 布局测试，新旧版本在帧头与握手阶段互相拒绝。补丁版本不得改变负载布局。
+- 各存储格式独立演进，由读取方校验：
+
+| 格式 | 版本标记 | 变化时 |
+| --- | --- | --- |
+| 文件名索引快照 | `INDEX_MAGIC` + `INDEX_VERSION`（cairn-core） | 格式变化时 `INDEX_VERSION` +1，旧文件按不兼容处理 |
+| 内容回填标记 | `CONTENT_BACKFILL_SCHEMA`（cairn-service） | 结构变化时 +1，旧标记丢弃并重建 |
+| 安装器 payload | `CAIRNMSI` 魔数，无版本 | xtask 与 setup 同一构建产物，不跨版本读取 |
+| 设置文件 | 无版本，serde 默认值演进 | 只做向后兼容的字段增补 |
+
+- MSI `ProductVersion` 只接受数字三段式；升级码固定、产品码每构建生成。预发布标签不得直接进入 MSI。
+
 ## 代码位置
 
 - `xtask/src/package.rs`：WiX MSI、GPUI Setup 封装与 checksum 生成。

@@ -9,9 +9,9 @@ use crate::engine::CancellationToken;
 use crate::model::FileRecord;
 use crate::path_cache::DirectoryPathCache;
 use rayon::prelude::*;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum SortColumn {
     #[default]
     Name,
@@ -65,6 +65,28 @@ impl FromStr for SortColumn {
             "ext" | "extension" => Ok(SortColumn::Extension),
             _ => Err(UnknownSortColumn(value.to_string())),
         }
+    }
+}
+
+/// The wire spelling is the released one: a positional postcard field must keep the same shape
+/// when the Rust type is narrowed, so the enum travels as its key string and an unknown value
+/// fails the frame instead of silently becoming the default.
+impl Serialize for SortColumn {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.key())
+    }
+}
+
+impl<'de> Deserialize<'de> for SortColumn {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        value.parse().map_err(serde::de::Error::custom)
     }
 }
 
