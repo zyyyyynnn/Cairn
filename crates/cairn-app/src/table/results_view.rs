@@ -19,6 +19,7 @@ use cairn_core::format_size_bytes;
 use cairn_core::treemap::FileKind;
 use cairn_protocol::message::FileRowData;
 use cairn_protocol::status::ContentIndexState;
+use fluent_bundle::FluentArgs;
 use gpui_kit::assets::IconName as AssetIconName;
 use gpui_kit::base::Disableable as _;
 use gpui_kit::component::menu::ContextMenuExt;
@@ -556,6 +557,24 @@ impl CairnApp {
             };
             let message = self.i18n.get_text(message_key);
             return render_state_band(tokens, control, message, icon, None);
+        }
+
+        // A refused query never reached the content index, so its own refusal owns the band;
+        // retrying the same text would be refused again, hence no recovery action.
+        if let Some(rejection) = self.query.rejection {
+            let mut args = FluentArgs::new();
+            args.set("limit", cairn_core::syntax::MAX_CONTENT_TERMS as i64);
+            let message = self.i18n.get_text_with_args(rejection.message_key(), &args);
+            return render_state_band(
+                tokens,
+                control,
+                message,
+                Icon::new(IconName::CircleAlert)
+                    .size_8()
+                    .text_color(tokens.danger)
+                    .into_any_element(),
+                None,
+            );
         }
 
         let has_query = self.has_query();

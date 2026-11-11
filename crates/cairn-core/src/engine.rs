@@ -42,10 +42,10 @@ impl CancellationToken {
     }
 }
 
-/// Resolves whether a content term's full-text hits include one record. The in-memory engine has
-/// no content index of its own, so the caller that owns it supplies the membership test; the term
-/// string is the content query text.
-pub type ContentHitResolver<'a> = &'a (dyn Fn(&str, u64) -> bool + Sync);
+/// Resolves whether a content term's full-text hits include one record, keyed by the record's
+/// index in the evaluated table. The in-memory engine has no content index of its own, so the
+/// caller that owns it supplies the membership test; the term string is the content query text.
+pub type ContentHitResolver<'a> = &'a (dyn Fn(&str, u32) -> bool + Sync);
 
 /// Evaluates a `QueryExpr` against indexed file records in parallel, preserving the specified record order if given.
 pub fn execute_query_ordered(
@@ -593,7 +593,7 @@ fn evaluate_term(
     // content matching, only the caller's hit resolver can answer it; without one the term must
     // never falsely match all files.
     if let Some(ref content_query) = term.content_query {
-        return content_hit.is_some_and(|hit| hit(content_query, rec.frn));
+        return content_hit.is_some_and(|hit| hit(content_query, idx));
     }
 
     // 8. Text match
@@ -1205,9 +1205,9 @@ mod tests {
         let path_cache = DirectoryPathCache::new();
         let cancel = CancellationToken::new();
 
-        // Only frn 101 carries the content hit for `needle`; the resolver stands in for the
-        // service's Tantivy hit sets.
-        let content_hits = |term: &str, frn: u64| term == "needle" && frn == 101;
+        // Only record 0 carries the content hit for `needle`; the resolver stands in for the
+        // service's per-record hit membership.
+        let content_hits = |term: &str, idx| term == "needle" && idx == 0;
 
         let query = parse_query("!content:needle");
         let matched = execute_query_with_content(

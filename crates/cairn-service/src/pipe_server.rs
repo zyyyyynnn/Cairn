@@ -17,11 +17,12 @@ use crate::session::{RowsError, SessionManager};
 use crate::sync_engine::MultiVolumeEngine;
 use cairn_core::engine::CancellationToken;
 use cairn_core::sort::SortColumn;
+use cairn_core::syntax::{parse_query_with, MAX_CONTENT_TERMS};
 use cairn_protocol::codec::{encode_frame_into, peek_frame_header, try_decode_frame};
 use cairn_protocol::message::{
     ClientRequest, Envelope, ResponsePayload, ERROR_CODE_HANDSHAKE_REQUIRED,
-    ERROR_CODE_PROTOCOL_VERSION_MISMATCH, ERROR_CODE_SESSION_EXPIRED, MAX_TREE_DEPTH, PIPE_NAME,
-    PRODUCT_VERSION, WIRE_GUARD,
+    ERROR_CODE_PROTOCOL_VERSION_MISMATCH, ERROR_CODE_QUERY_TOO_COMPLEX, ERROR_CODE_SESSION_EXPIRED,
+    MAX_TREE_DEPTH, PIPE_NAME, PRODUCT_VERSION, WIRE_GUARD,
 };
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -360,6 +361,18 @@ fn process_request(
                 _ => SortColumn::Name,
             };
 
+            // Request validation, not evaluation: the engine stays a pure evaluator, and a query
+            // above the content-term limit is refused before any hit set is built. The check
+            // precedes begin_query, which cancels every other in-flight query.
+            let content_terms = parse_query_with(&raw_query, &defaults).content_term_count();
+            if content_terms > MAX_CONTENT_TERMS {
+                return ResponsePayload::Error {
+                    code: ERROR_CODE_QUERY_TOO_COMPLEX,
+                    message: format!(
+                        "query carries {content_terms} content terms; the limit is {MAX_CONTENT_TERMS}"
+                    ),
+                };
+            }
             let query_cancel = sessions.begin_query(query_id, cancel);
             let (matched_items, total_matches, highlight_terms, snippets, total_bytes) = engine
                 .execute_search_multi(&raw_query, &defaults, sort_col, sort_asc, &query_cancel);
@@ -917,6 +930,60 @@ mod tests {
                 other => panic!("unexpected response: {other:?}"),
             }
         }
+    }
+
+    fn content_query_request(terms: usize) -> ClientRequest {
+        let raw_query = (0..terms)
+            .map(|i| format!("content:t{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        ClientRequest::Query {
+            query_id: 1,
+            raw_query,
+            defaults: Default::default(),
+            sort_by_name: "name".to_string(),
+            sort_asc: true,
+            first_page_limit: 10,
+        }
+    }
+
+    /// The content-term limit is request validation: a query above it is refused before the
+    /// engine evaluates anything, and a query at it is answered normally. The refusal must not
+    /// touch the active-query registry, whose new query would cancel every other in-flight one.
+    #[test]
+    fn a_query_above_the_content_term_limit_is_rejected_before_evaluation() {
+        use cairn_core::syntax::MAX_CONTENT_TERMS;
+        use cairn_protocol::message::ERROR_CODE_QUERY_TOO_COMPLEX;
+
+        let harness = Harness::new(ServiceConfig::default());
+        let in_flight = harness.sessions.begin_query(41, &CancellationToken::new());
+        let (code, message) = denial(harness.handle(
+            content_query_request(MAX_CONTENT_TERMS + 1),
+            CallerAuthorization::Administrator,
+        ));
+        assert_eq!(code, ERROR_CODE_QUERY_TOO_COMPLEX);
+        assert!(
+            message.contains(&MAX_CONTENT_TERMS.to_string()),
+            "{message}"
+        );
+        assert!(
+            !in_flight.is_cancelled(),
+            "a refused request must not cancel another connection's query"
+        );
+        harness.sessions.finish_query(41);
+
+        // No content index is ready in this harness, so the query at the limit answers an empty
+        // result set instead of a rejection.
+        assert!(matches!(
+            harness.handle(
+                content_query_request(MAX_CONTENT_TERMS),
+                CallerAuthorization::Administrator,
+            ),
+            ResponsePayload::QueryResult {
+                total_matches: 0,
+                ..
+            }
+        ));
     }
 
     #[test]

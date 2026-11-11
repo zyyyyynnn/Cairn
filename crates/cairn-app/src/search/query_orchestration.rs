@@ -147,6 +147,32 @@ pub fn query_has_content(text: &str) -> bool {
         .is_empty()
 }
 
+/// A query the service refused to evaluate. The refusal belongs to the query itself, so the
+/// results band states it instead of a content-index state the query never reached.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QueryRejection {
+    TooManyContentTerms,
+}
+
+impl QueryRejection {
+    /// The rejection a service error code names, if any.
+    pub fn from_error_code(code: u32) -> Option<Self> {
+        match code {
+            cairn_protocol::message::ERROR_CODE_QUERY_TOO_COMPLEX => {
+                Some(Self::TooManyContentTerms)
+            }
+            _ => None,
+        }
+    }
+
+    /// The Fluent message that states this rejection.
+    pub fn message_key(self) -> &'static str {
+        match self {
+            Self::TooManyContentTerms => "query_too_complex_title",
+        }
+    }
+}
+
 /// Whether a page response still belongs to the query and session that requested it.
 ///
 /// A new query can arrive while a page is in flight. Rows from the superseded session describe a
@@ -262,6 +288,9 @@ impl CairnApp {
             && self.results.table.total_rows() == 0
             && self.service.status.is_any_loading()
         {
+            // An empty query is never refused, so a refusal of the cleared text must not
+            // outlive it and block the all-files view once the index settles.
+            self.query.rejection = None;
             self.start_status_refresh(cx);
             cx.notify();
             return;
@@ -276,7 +305,11 @@ impl CairnApp {
     /// Skipped while a query is already in flight; that answer is newer than the request would be.
     /// A hidden table (Treemap or Recycle Bin) is never refreshed in the background.
     pub fn refresh_results(&mut self, cx: &mut Context<Self>) {
-        if self.query.is_searching || self.recycle_bin.is_open() || self.drive_view.is_some() {
+        if self.query.is_searching
+            || self.recycle_bin.is_open()
+            || self.drive_view.is_some()
+            || self.query.rejection.is_some()
+        {
             return;
         }
         self.run_query(cx, false);
@@ -295,6 +328,7 @@ impl CairnApp {
         }
         self.query.query_id += 1;
         let qid = self.query.query_id;
+        self.query.rejection = None;
 
         if clear_rows {
             // A new result set starts at its first row. The view republishes the scroll handle's
@@ -376,35 +410,48 @@ impl CairnApp {
                             this.service.service_issue = None;
                             this.service.status.update_volumes(envelope.volumes);
                             this.start_status_refresh(cx);
-                            if let cairn_protocol::message::ResponsePayload::QueryResult {
-                                session_id,
-                                total_matches,
-                                total_bytes,
-                                first_page,
-                                ..
-                            } = envelope.payload
-                            {
-                                this.query.active_session_id = Some(session_id);
-                                if clear_rows {
-                                    this.results.table.set_rows(first_page, total_matches);
-                                } else {
-                                    this.results.table.refresh_rows(first_page, total_matches);
+                            match envelope.payload {
+                                cairn_protocol::message::ResponsePayload::QueryResult {
+                                    session_id,
+                                    total_matches,
+                                    total_bytes,
+                                    first_page,
+                                    ..
+                                } => {
+                                    this.query.rejection = None;
+                                    this.query.active_session_id = Some(session_id);
+                                    if clear_rows {
+                                        this.results.table.set_rows(first_page, total_matches);
+                                    } else {
+                                        this.results.table.refresh_rows(first_page, total_matches);
+                                    }
+                                    crate::shell::perf::mark(&format!(
+                                        "query applied id={qid} total={total_matches}"
+                                    ));
+                                    // The entrance starts with the first visible content, not when the
+                                    // request left the input handler. An empty answer reveals the state
+                                    // band through the same entrance.
+                                    this.note_table_content(cx);
+                                    if total_matches == 0 {
+                                        this.note_table_empty(cx);
+                                    }
+                                    // The band shows the exact total only after the result set has
+                                    // settled; there is no animated or partial number.
+                                    this.service
+                                        .status
+                                        .set_objects_summary(total_matches, total_bytes);
                                 }
-                                crate::shell::perf::mark(&format!(
-                                    "query applied id={qid} total={total_matches}"
-                                ));
-                                // The entrance starts with the first visible content, not when the
-                                // request left the input handler. An empty answer reveals the state
-                                // band through the same entrance.
-                                this.note_table_content(cx);
-                                if total_matches == 0 {
-                                    this.note_table_empty(cx);
+                                cairn_protocol::message::ResponsePayload::Error {
+                                    code, ..
+                                } => {
+                                    this.query.rejection = QueryRejection::from_error_code(code);
+                                    if this.query.rejection.is_some() {
+                                        // The refusal band is content too; it enters through the
+                                        // same reveal as an empty answer.
+                                        this.note_table_empty(cx);
+                                    }
                                 }
-                                // The band shows the exact total only after the result set has
-                                // settled; there is no animated or partial number.
-                                this.service
-                                    .status
-                                    .set_objects_summary(total_matches, total_bytes);
+                                _ => {}
                             }
                         }
                         Err(e) => {
@@ -629,6 +676,24 @@ mod tests {
         assert!(query_error_marks_service_down(
             &cairn_client::client::ClientError::ConnectionClosed
         ));
+    }
+
+    #[test]
+    fn only_the_complexity_code_names_a_query_rejection() {
+        assert_eq!(
+            QueryRejection::from_error_code(cairn_protocol::message::ERROR_CODE_QUERY_TOO_COMPLEX),
+            Some(QueryRejection::TooManyContentTerms)
+        );
+        assert_eq!(
+            QueryRejection::from_error_code(cairn_protocol::message::ERROR_CODE_SESSION_EXPIRED),
+            None,
+            "a session failure is not a refusal of the query itself"
+        );
+        assert_eq!(QueryRejection::from_error_code(0), None);
+        assert_eq!(
+            QueryRejection::TooManyContentTerms.message_key(),
+            "query_too_complex_title"
+        );
     }
 
     #[test]

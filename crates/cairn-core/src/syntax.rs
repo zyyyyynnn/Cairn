@@ -19,6 +19,11 @@ use serde::{Deserialize, Serialize};
 /// nothing like any other unusable item instead of failing the whole query.
 const MAX_CONTENT_TERM_BYTES: usize = 4096;
 
+/// The most content terms one query may carry. Boolean evaluation resolves a complete hit set
+/// per term and probes every occurrence per record, so the count bounds the query's memory and
+/// scan cost; a query above it is refused whole at the request boundary.
+pub const MAX_CONTENT_TERMS: usize = 16;
+
 /// Query-wide defaults: what a search item means when the item itself does not say.
 ///
 /// The UI match toggles (case, whole word, path, regex, content) and the hidden/system
@@ -149,6 +154,19 @@ impl QueryExpr {
         }
     }
 
+    /// Number of content-term occurrences in the expression. Duplicates and negated terms count
+    /// like any other occurrence: every occurrence adds per-record evaluation work, so the
+    /// request limit applies to this count.
+    pub fn content_term_count(&self) -> usize {
+        match self {
+            QueryExpr::Term(t) => usize::from(t.content_query.is_some()),
+            QueryExpr::And(subs) | QueryExpr::Or(subs) => {
+                subs.iter().map(Self::content_term_count).sum()
+            }
+            QueryExpr::Not(inner) => inner.content_term_count(),
+        }
+    }
+
     /// Extracts all full-text content search queries defined by `content:` terms (CNT-06).
     pub fn extract_content_queries(&self) -> Vec<String> {
         let mut out = Vec::new();
@@ -209,6 +227,35 @@ impl QueryExpr {
             }
             QueryExpr::Not(inner) => inner.collect_positive_content_queries(!positive, out),
         }
+    }
+
+    /// The terms of a disjunction that one merged content search can answer: an `Or` of two or
+    /// more terms, each carrying no constraint besides its content query. Any other shape keeps
+    /// the record-by-record evaluator.
+    pub fn pure_content_disjunction(&self) -> Option<Vec<String>> {
+        let QueryExpr::Or(subs) = self else {
+            return None;
+        };
+        if subs.len() < 2 {
+            return None;
+        }
+        let mut terms = Vec::with_capacity(subs.len());
+        for sub in subs {
+            let QueryExpr::Term(term) = sub else {
+                return None;
+            };
+            // Stripping a content-only term leaves no constraint at all; a term that keeps any
+            // metadata constraint, or carries none to strip, is not content-only.
+            if sub.strip_content_queries().is_some() {
+                return None;
+            }
+            let content = term.content_query.as_deref()?.trim();
+            if content.is_empty() {
+                return None;
+            }
+            terms.push(content.to_string());
+        }
+        Some(terms)
     }
 
     /// Strips out `content:` constraints from this expression to evaluate MFT metadata/path filters.
@@ -915,6 +962,78 @@ mod tests {
         let q_angle = parse_query("content:<abc 123>");
         assert_eq!(q_angle.extract_content_queries(), vec!["abc 123"]);
         assert!(q_angle.strip_content_queries().is_none());
+    }
+
+    /// The request boundary rejects a query by its number of content terms, so the count covers
+    /// every occurrence: a duplicate, a negated term and a term inside a nested group each cost
+    /// one hit set of their own.
+    #[test]
+    fn content_term_count_counts_every_occurrence() {
+        let terms = |n: usize| {
+            (0..n)
+                .map(|i| format!("content:t{i}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        assert_eq!(parse_query(&terms(16)).content_term_count(), 16);
+        assert_eq!(parse_query(&terms(17)).content_term_count(), 17);
+        assert_eq!(
+            parse_query("content:a|<content:b content:c>").content_term_count(),
+            3
+        );
+        assert_eq!(parse_query("!content:a content:a").content_term_count(), 2);
+        assert_eq!(
+            parse_query("ext:md size:>1mb report").content_term_count(),
+            0
+        );
+        assert_eq!(parse_query("").content_term_count(), 0);
+
+        let content = QueryDefaults {
+            content: true,
+            ..Default::default()
+        };
+        assert_eq!(parse_query_with("a b", &content).content_term_count(), 2);
+    }
+
+    /// A disjunction of positive content-only terms answers to one merged search, so the shape
+    /// must be exact: every leaf a Term whose only constraint is its content query. Metadata,
+    /// negation and nested conjunctions keep the record-by-record evaluator.
+    #[test]
+    fn pure_content_disjunction_accepts_only_content_only_or_shapes() {
+        assert_eq!(
+            parse_query("content:a|content:b").pure_content_disjunction(),
+            Some(vec!["a".to_string(), "b".to_string()])
+        );
+        assert_eq!(
+            parse_query("content:a|content:b|content:c").pure_content_disjunction(),
+            Some(vec!["a".to_string(), "b".to_string(), "c".to_string()])
+        );
+        let content = QueryDefaults {
+            content: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_query_with("a|b", &content).pure_content_disjunction(),
+            Some(vec!["a".to_string(), "b".to_string()])
+        );
+
+        for query in [
+            "content:a",
+            "content:a content:b",
+            "content:a|ext:md",
+            "content:a|!content:b",
+            "content:a|<content:b content:c>",
+            "ext:md content:a|content:b",
+            "content:a|content:",
+            "content:a|report",
+            "",
+        ] {
+            assert_eq!(
+                parse_query(query).pure_content_disjunction(),
+                None,
+                "{query:?} is not a pure content disjunction"
+            );
+        }
     }
 
     /// SPEC QRY-04: `<` `<=` `=` `>` `>=` `!=` are comparison operators of function values.
