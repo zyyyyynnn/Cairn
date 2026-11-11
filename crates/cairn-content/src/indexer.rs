@@ -20,10 +20,11 @@ use tantivy::{
 };
 use thiserror::Error;
 
-/// The scored result bound for content queries. Positive conjunctions answer within it; the slow
-/// boolean shapes use it only to decide whether a scored search is complete enough for snippets.
-/// The slow-path completeness decision is not exercised by the test suite (it needs more matching
-/// documents than the bound); the count-based branch is the only untested arm.
+/// The scored result bound for content queries. Positive conjunctions answer within it; the
+/// merged disjunction and the slow boolean shapes use it only to decide whether a scored search
+/// is complete enough for snippets. The slow-path completeness decision is not exercised by the
+/// test suite (it needs more matching documents than the bound); the count-based branch is the
+/// only untested arm.
 pub const CONTENT_RESULT_TOP_K: usize = 50_000;
 
 #[derive(Error, Debug)]
@@ -170,6 +171,26 @@ impl ContentSearcher {
         Ok(searcher.search(query.as_ref(), &collector)?)
     }
 
+    /// Every `(volume_id, frn)` any of the terms matches, as one disjunction. A pure content
+    /// disjunction needs the union once, not one complete hit set per term.
+    pub fn search_all_frns_union(
+        &self,
+        terms: &[String],
+    ) -> Result<Vec<(u64, u64)>, ContentIndexError> {
+        self.reader.reload()?;
+        let searcher = self.reader.searcher();
+        if searcher.num_docs() == 0 {
+            return Ok(Vec::new());
+        }
+        let query = self.union_query(terms)?;
+        let schema = self.index.schema();
+        let collector = FrnSetCollector {
+            volume_field: schema.get_field_name(self.f_volume_id).to_string(),
+            frn_field: schema.get_field_name(self.f_frn).to_string(),
+        };
+        Ok(searcher.search(&query, &collector)?)
+    }
+
     /// Queries the full-text content index.
     pub fn search(
         &self,
@@ -199,12 +220,43 @@ impl ContentSearcher {
         self.collect_hits(&searcher, &query, &terms.join(" "), limit)
     }
 
+    /// Scored top-k over the disjunction of the terms, for the snippets of a merged search.
+    pub fn search_union(
+        &self,
+        terms: &[String],
+        limit: usize,
+    ) -> Result<Vec<ContentHit>, ContentIndexError> {
+        self.reader.reload()?;
+        let searcher = self.reader.searcher();
+        let query = self.union_query(terms)?;
+        self.collect_hits(&searcher, &query, &terms.join(" "), limit)
+    }
+
     /// Number of documents the query matches, without scoring or stored reads.
     pub fn count_hits(&self, query_str: &str) -> Result<usize, ContentIndexError> {
         self.reader.reload()?;
         let searcher = self.reader.searcher();
         let query = self.parsed_query(query_str)?;
         Ok(searcher.search(query.as_ref(), &Count)?)
+    }
+
+    /// Number of documents any of the terms matches. It decides whether a scored union search
+    /// is complete enough to supply snippets for every hit.
+    pub fn count_hits_union(&self, terms: &[String]) -> Result<usize, ContentIndexError> {
+        self.reader.reload()?;
+        let searcher = self.reader.searcher();
+        let query = self.union_query(terms)?;
+        Ok(searcher.search(&query, &Count)?)
+    }
+
+    /// One Should clause per parsed term. Parsing each term on its own keeps a term's boolean
+    /// syntax from regrouping its siblings, which a joined string would allow.
+    fn union_query(&self, terms: &[String]) -> Result<BooleanQuery, ContentIndexError> {
+        let mut clauses = Vec::with_capacity(terms.len());
+        for term in terms {
+            clauses.push((Occur::Should, self.parsed_query(term)?));
+        }
+        Ok(BooleanQuery::new(clauses))
     }
 
     fn parsed_query(
@@ -666,6 +718,88 @@ mod tests {
             vec![(0, 1), (0, 2), (0, 3)],
             "the FAST fields must attribute every hit to its own volume and FRN"
         );
+    }
+
+    #[test]
+    fn search_all_frns_union_equals_the_union_of_per_term_hit_sets() {
+        let temp = tempdir().unwrap();
+        let index = ContentIndex::open_or_create(temp.path()).expect("open failed");
+        for (frn, body) in [
+            (1u64, "alpha"),
+            (2, "beta"),
+            (3, "alpha beta"),
+            (4, "gamma"),
+        ] {
+            index
+                .index_document(0, frn, 16, 1, &format!("C:\\docs\\{frn}.txt"), body)
+                .expect("index doc failed");
+        }
+
+        let terms = vec!["alpha".to_string(), "beta".to_string()];
+        let mut union = index
+            .searcher
+            .search_all_frns_union(&terms)
+            .expect("union hit set");
+        union.sort_unstable();
+        union.dedup();
+
+        let mut per_term: Vec<(u64, u64)> = Vec::new();
+        for term in &terms {
+            per_term.extend(index.searcher.search_all_frns(term).expect("per-term set"));
+        }
+        per_term.sort_unstable();
+        per_term.dedup();
+
+        assert_eq!(
+            union, per_term,
+            "the merged search must hit exactly the union"
+        );
+        assert_eq!(union, vec![(0, 1), (0, 2), (0, 3)]);
+    }
+
+    #[test]
+    fn search_union_scores_the_disjunction_and_counts_it() {
+        let temp = tempdir().unwrap();
+        let index = ContentIndex::open_or_create(temp.path()).expect("open failed");
+        for (frn, body) in [
+            (1u64, "alpha"),
+            (2, "beta"),
+            (3, "alpha beta"),
+            (4, "gamma"),
+        ] {
+            index
+                .index_document(0, frn, 16, 1, &format!("C:\\docs\\{frn}.txt"), body)
+                .expect("index doc failed");
+        }
+
+        let terms = vec!["alpha".to_string(), "beta".to_string()];
+        assert_eq!(
+            index
+                .searcher
+                .count_hits_union(&terms)
+                .expect("union count"),
+            3,
+            "the count covers every document any term matches"
+        );
+
+        let hits = index
+            .searcher
+            .search_union(&terms, 10)
+            .expect("scored union");
+        let mut frns: Vec<u64> = hits.iter().map(|hit| hit.frn).collect();
+        frns.sort_unstable();
+        assert_eq!(frns, vec![1, 2, 3]);
+        assert!(
+            hits.iter().all(|hit| !hit.snippet.is_empty()),
+            "every scored union hit carries a snippet"
+        );
+
+        // The top-k bound applies to the merged search as it does to a single term.
+        let top = index
+            .searcher
+            .search_union(&terms, 1)
+            .expect("bounded union");
+        assert_eq!(top.len(), 1);
     }
 
     #[test]

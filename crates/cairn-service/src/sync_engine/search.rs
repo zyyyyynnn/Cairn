@@ -91,12 +91,119 @@ impl MultiVolumeEngine {
                 return (all_results, 0, highlight_terms, snippets, 0);
             };
 
-            // A conjunction of positive terms — content and metadata alike — is one Tantivy
-            // query with one clause per content term plus the compiled metadata filter; any Not
-            // or Or needs record-by-record boolean evaluation instead of flattening the
-            // expression.
-            if is_positive_conjunction(&query_expr) {
-                // The scored top-k bound is historical: truncation shortens the reply before the
+            // A disjunction of content-only terms is one merged Tantivy search: the union hit
+            // set answers every branch at once, instead of one complete hit set per term.
+            if let Some(terms) = query_expr.pure_content_disjunction() {
+                let union_hits = match searcher.search_all_frns_union(&terms) {
+                    Ok(hits) => hits,
+                    Err(err) => {
+                        tracing::warn!("content union search for {terms:?} failed: {err}");
+                        return (Vec::new(), 0, highlight_terms, snippets, 0);
+                    }
+                };
+                if cancel.is_cancelled() || union_hits.is_empty() {
+                    return (all_results, 0, highlight_terms, snippets, 0);
+                }
+
+                let mut frns_by_drive: HashMap<char, Vec<u64>> = HashMap::new();
+                for (volume_id, frn) in union_hits {
+                    let Some(drive_letter) = u16::try_from(volume_id)
+                        .ok()
+                        .and_then(FileRecord::drive_from_volume_id)
+                    else {
+                        continue;
+                    };
+                    frns_by_drive.entry(drive_letter).or_default().push(frn);
+                }
+
+                // Snippets are display-only: a scored union search supplies them while it is
+                // complete; a very common disjunction keeps just its hit set.
+                let mut snippets_by_key: HashMap<(char, u64), String> = HashMap::new();
+                let union_count = match searcher.count_hits_union(&terms) {
+                    Ok(count) => count,
+                    Err(err) => {
+                        tracing::warn!("content union count for {terms:?} failed: {err}");
+                        return (Vec::new(), 0, highlight_terms, snippets, 0);
+                    }
+                };
+                if union_count < CONTENT_RESULT_TOP_K {
+                    let hits = match searcher.search_union(&terms, CONTENT_RESULT_TOP_K) {
+                        Ok(hits) => hits,
+                        Err(err) => {
+                            tracing::warn!("content union search for {terms:?} failed: {err}");
+                            return (Vec::new(), 0, highlight_terms, snippets, 0);
+                        }
+                    };
+                    for hit in &hits {
+                        let Some(drive_letter) = u16::try_from(hit.volume_id)
+                            .ok()
+                            .and_then(FileRecord::drive_from_volume_id)
+                        else {
+                            continue;
+                        };
+                        snippets_by_key.insert((drive_letter, hit.frn), hit.snippet.clone());
+                    }
+                }
+
+                lock = self.volumes.read().unwrap();
+                let exclusion_masks = path_exclusion_masks(&lock, &excluded_paths);
+                for vol in lock.values() {
+                    if cancel.is_cancelled() {
+                        return (Vec::new(), 0, highlight_terms, snippets, 0);
+                    }
+                    if excluded_drives
+                        .iter()
+                        .any(|&ex| ex.eq_ignore_ascii_case(&vol.drive_letter))
+                    {
+                        continue;
+                    }
+                    if !vol.status.state().is_synced() && vol.records.is_empty() {
+                        continue;
+                    }
+                    // One union bitmap per volume; a hit FRN marks every hardlink row it maps
+                    // to. The FRN list is consumed as the bitmap is built.
+                    let mut union_bits = BitSet::with_capacity(vol.records.len());
+                    if let Some(frns) = frns_by_drive.remove(&vol.drive_letter) {
+                        for frn in frns {
+                            if let Some(indices) = vol.frn_to_idx.get(&frn) {
+                                for &idx in indices {
+                                    union_bits.insert(idx as usize);
+                                }
+                            }
+                        }
+                    }
+                    let mut matches = Vec::new();
+                    for (idx, rec) in vol.records.iter().enumerate() {
+                        if (idx & 0x3FFF) == 0 && cancel.is_cancelled() {
+                            return (Vec::new(), 0, highlight_terms, snippets, 0);
+                        }
+                        if !rec.is_tombstone() && union_bits.contains(idx) {
+                            matches.push(idx as u32);
+                        }
+                    }
+                    let Some(vol_matches) = collect_volume_matches(
+                        vol,
+                        matches,
+                        &exclusion_masks,
+                        &excluded_paths,
+                        cancel,
+                        &mut all_results,
+                    ) else {
+                        return (Vec::new(), 0, highlight_terms, snippets, 0);
+                    };
+                    for &idx in &vol_matches {
+                        let frn = vol.records[idx as usize].frn;
+                        if let Some(snippet) = snippets_by_key.get(&(vol.drive_letter, frn)) {
+                            snippets.insert((vol.drive_letter, frn), snippet.clone());
+                        }
+                    }
+                    total_bytes =
+                        total_bytes.saturating_add(vol.calculate_matched_bytes(&vol_matches));
+                }
+            } else if is_positive_conjunction(&query_expr) {
+                // A conjunction of positive terms — content and metadata alike — is one Tantivy
+                // query with one clause per content term plus the compiled metadata filter. Its
+                // scored top-k bound is historical: truncation shortens the reply before the
                 // metadata filter runs, so a conjunction over a very common word can show fewer
                 // rows than its true match set.
                 let content_hits =

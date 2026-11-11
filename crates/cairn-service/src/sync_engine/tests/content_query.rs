@@ -166,6 +166,15 @@ fn a_content_or_content_branch_returns_the_union() {
 }
 
 #[test]
+fn a_three_term_content_disjunction_returns_the_merged_union() {
+    let (engine, _dir) = engine_with_indexed_content();
+    assert_eq!(
+        matched_content_frns(&engine, "content:needle|content:quarterly|content:filler"),
+        vec![101, 102, 103, 104]
+    );
+}
+
+#[test]
 fn a_negated_content_term_inside_a_metadata_conjunction_subtracts_hits() {
     let (engine, _dir) = engine_with_indexed_content();
     assert_eq!(

@@ -229,6 +229,35 @@ impl QueryExpr {
         }
     }
 
+    /// The terms of a disjunction that one merged content search can answer: an `Or` of two or
+    /// more terms, each carrying no constraint besides its content query. Any other shape keeps
+    /// the record-by-record evaluator.
+    pub fn pure_content_disjunction(&self) -> Option<Vec<String>> {
+        let QueryExpr::Or(subs) = self else {
+            return None;
+        };
+        if subs.len() < 2 {
+            return None;
+        }
+        let mut terms = Vec::with_capacity(subs.len());
+        for sub in subs {
+            let QueryExpr::Term(term) = sub else {
+                return None;
+            };
+            // Stripping a content-only term leaves no constraint at all; a term that keeps any
+            // metadata constraint, or carries none to strip, is not content-only.
+            if sub.strip_content_queries().is_some() {
+                return None;
+            }
+            let content = term.content_query.as_deref()?.trim();
+            if content.is_empty() {
+                return None;
+            }
+            terms.push(content.to_string());
+        }
+        Some(terms)
+    }
+
     /// Strips out `content:` constraints from this expression to evaluate MFT metadata/path filters.
     /// Returns `None` if the expression only contained content search constraints.
     pub fn strip_content_queries(&self) -> Option<QueryExpr> {
@@ -964,6 +993,47 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(parse_query_with("a b", &content).content_term_count(), 2);
+    }
+
+    /// A disjunction of positive content-only terms answers to one merged search, so the shape
+    /// must be exact: every leaf a Term whose only constraint is its content query. Metadata,
+    /// negation and nested conjunctions keep the record-by-record evaluator.
+    #[test]
+    fn pure_content_disjunction_accepts_only_content_only_or_shapes() {
+        assert_eq!(
+            parse_query("content:a|content:b").pure_content_disjunction(),
+            Some(vec!["a".to_string(), "b".to_string()])
+        );
+        assert_eq!(
+            parse_query("content:a|content:b|content:c").pure_content_disjunction(),
+            Some(vec!["a".to_string(), "b".to_string(), "c".to_string()])
+        );
+        let content = QueryDefaults {
+            content: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_query_with("a|b", &content).pure_content_disjunction(),
+            Some(vec!["a".to_string(), "b".to_string()])
+        );
+
+        for query in [
+            "content:a",
+            "content:a content:b",
+            "content:a|ext:md",
+            "content:a|!content:b",
+            "content:a|<content:b content:c>",
+            "ext:md content:a|content:b",
+            "content:a|content:",
+            "content:a|report",
+            "",
+        ] {
+            assert_eq!(
+                parse_query(query).pure_content_disjunction(),
+                None,
+                "{query:?} is not a pure content disjunction"
+            );
+        }
     }
 
     /// SPEC QRY-04: `<` `<=` `=` `>` `>=` `!=` are comparison operators of function values.
