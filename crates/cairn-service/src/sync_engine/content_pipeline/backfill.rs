@@ -12,6 +12,7 @@ use std::path::Path;
 use std::sync::atomic::Ordering;
 
 use crate::config::ServiceConfig;
+use crate::exclusion::{ExclusionPath, ExclusionRules};
 use crate::sync_engine::{MultiVolumeEngine, VolumeIndex};
 
 /// Files handed to one worker process. A worker restart is cheap; a batch small enough to finish
@@ -20,16 +21,43 @@ const CONTENT_BATCH_SIZE: usize = 500;
 /// Records inspected per lock acquisition while collecting a batch.
 const CONTENT_SCAN_CHUNK: usize = 2_000;
 
+/// Configuration and parsed exclusion rules shared by one content batch. A full backfill and one
+/// incremental drain each build it once, so a rule string is parsed per operation instead of per
+/// record. An empty or non-matching rule set short-circuits before a path is prepared.
+pub(super) struct ContentRules<'a> {
+    cfg: &'a ServiceConfig,
+    excluded: ExclusionRules,
+    content_excluded: ExclusionRules,
+}
+
+impl<'a> ContentRules<'a> {
+    pub(super) fn new(cfg: &'a ServiceConfig) -> Self {
+        Self {
+            cfg,
+            excluded: ExclusionRules::parse(&cfg.excluded_paths),
+            content_excluded: ExclusionRules::parse(&cfg.content_excluded_paths),
+        }
+    }
+
+    fn excludes(&self, path: &str) -> bool {
+        if self.excluded.is_empty() && self.content_excluded.is_empty() {
+            return false;
+        }
+        let path = ExclusionPath::new(path);
+        self.excluded.excludes(&path) || self.content_excluded.excludes(&path)
+    }
+}
+
 impl MultiVolumeEngine {
     /// Number of eligible records, used for the backfill denominator. Uses the same task builder
     /// as the scan so path exclusions cannot make the progress total disagree with the work.
-    fn count_eligible(&self, cfg: &ServiceConfig) -> u64 {
+    fn count_eligible(&self, rules: &ContentRules) -> u64 {
         let volumes = self.volumes.read().unwrap();
         volumes
             .values()
             .map(|volume| {
                 (0..volume.records.len())
-                    .filter(|&index| self.content_task(volume, index, cfg).is_some())
+                    .filter(|&index| self.content_task(volume, index, rules).is_some())
                     .count() as u64
             })
             .sum()
@@ -76,17 +104,14 @@ impl MultiVolumeEngine {
         &self,
         volume: &VolumeIndex,
         index: usize,
-        cfg: &ServiceConfig,
+        rules: &ContentRules,
     ) -> Option<ContentIndexTask> {
-        if !Self::content_eligible(volume, index, cfg) {
+        if !Self::content_eligible(volume, index, rules.cfg) {
             return None;
         }
         let rec = &volume.records[index];
         let path = Self::record_path(volume, index);
-        if self.is_self_data_path(&path)
-            || crate::exclusion::is_path_excluded(&path, &cfg.excluded_paths)
-            || crate::exclusion::is_path_excluded(&path, &cfg.content_excluded_paths)
-        {
+        if self.is_self_data_path(&path) || rules.excludes(&path) {
             return None;
         }
         Some(ContentIndexTask {
@@ -104,7 +129,7 @@ impl MultiVolumeEngine {
         &self,
         drive: char,
         start: usize,
-        cfg: &ServiceConfig,
+        rules: &ContentRules,
     ) -> (Vec<ContentIndexTask>, usize) {
         let volumes = self.volumes.read().unwrap();
         let Some(volume) = volumes.get(&drive) else {
@@ -114,7 +139,7 @@ impl MultiVolumeEngine {
         let mut tasks = Vec::new();
         let mut cursor = start;
         while cursor < end && tasks.len() < CONTENT_BATCH_SIZE {
-            if let Some(task) = self.content_task(volume, cursor, cfg) {
+            if let Some(task) = self.content_task(volume, cursor, rules) {
                 tasks.push(task);
             }
             cursor += 1;
@@ -127,7 +152,7 @@ impl MultiVolumeEngine {
     pub(super) fn changed_content_tasks(
         &self,
         changes: &HashMap<char, HashSet<u64>>,
-        cfg: &ServiceConfig,
+        rules: &ContentRules,
     ) -> (Vec<ContentIndexTask>, Vec<(u64, u64)>) {
         let volumes = self.volumes.read().unwrap();
         let mut tasks = Vec::new();
@@ -148,7 +173,7 @@ impl MultiVolumeEngine {
                     if self.is_self_data_path(&Self::record_path(volume, index)) {
                         continue;
                     }
-                    match self.content_task(volume, index, cfg) {
+                    match self.content_task(volume, index, rules) {
                         Some(task) => tasks.push(task),
                         None => {
                             deletions.insert((volume.content_volume_id(), *frn));
@@ -172,7 +197,7 @@ impl MultiVolumeEngine {
     pub(super) fn resolve_content_deletions(
         &self,
         pending: HashSet<(u64, u64)>,
-        cfg: &ServiceConfig,
+        rules: &ContentRules,
     ) -> Vec<(u64, u64)> {
         let volumes = self.volumes.read().unwrap();
         let mut out: Vec<(u64, u64)> = pending
@@ -196,7 +221,7 @@ impl MultiVolumeEngine {
                 !volume.frn_to_idx.get(frn).is_some_and(|indices| {
                     indices
                         .iter()
-                        .any(|&index| self.content_task(volume, index as usize, cfg).is_some())
+                        .any(|&index| self.content_task(volume, index as usize, rules).is_some())
                 })
             })
             .collect();
@@ -362,10 +387,11 @@ impl MultiVolumeEngine {
             return;
         }
 
-        let (tasks, ineligible) = self.changed_content_tasks(&changes_by_drive, &cfg);
+        let rules = ContentRules::new(&cfg);
+        let (tasks, ineligible) = self.changed_content_tasks(&changes_by_drive, &rules);
         let mut pending = pending_deletions;
         pending.extend(ineligible);
-        let deletions = self.resolve_content_deletions(pending, &cfg);
+        let deletions = self.resolve_content_deletions(pending, &rules);
         if tasks.is_empty() && deletions.is_empty() {
             return;
         }
@@ -388,7 +414,8 @@ impl MultiVolumeEngine {
             return;
         }
 
-        let total = self.count_eligible(&cfg);
+        let rules = ContentRules::new(&cfg);
+        let total = self.count_eligible(&rules);
         self.set_content_progress(0, total);
 
         let drives: Vec<char> = self.volumes.read().unwrap().keys().copied().collect();
@@ -402,7 +429,7 @@ impl MultiVolumeEngine {
                     self.set_content_state(ContentIndexState::Disabled);
                     return;
                 }
-                let (tasks, next) = self.next_content_batch(drive, start, &cfg);
+                let (tasks, next) = self.next_content_batch(drive, start, &rules);
                 if tasks.is_empty() {
                     if next <= start {
                         break;

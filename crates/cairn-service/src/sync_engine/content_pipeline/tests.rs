@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+use super::backfill::ContentRules;
 use super::status::unix_now;
 use super::worker_process::worker_exit_is_transient;
 use super::*;
@@ -113,19 +114,23 @@ fn service_data_files_are_never_content_tasks() {
     for (i, frn) in frns.iter().take(5).enumerate() {
         assert!(
             engine
-                .content_task(&volume, index_of(&volume, *frn), &cfg)
+                .content_task(&volume, index_of(&volume, *frn), &ContentRules::new(&cfg))
                 .is_none(),
             "the service's own data (case {i}) must never reach the content worker"
         );
     }
     let user_task = engine
-        .content_task(&volume, index_of(&volume, frns[5]), &cfg)
+        .content_task(
+            &volume,
+            index_of(&volume, frns[5]),
+            &ContentRules::new(&cfg),
+        )
         .expect("a user file outside the data root stays eligible");
     assert_eq!(user_task.path, r"C:\Users\Public\notes.json");
 
     engine.add_volume(volume);
     let changes = HashMap::from([('C', frns.iter().copied().collect::<HashSet<_>>())]);
-    let (tasks, deletions) = engine.changed_content_tasks(&changes, &cfg);
+    let (tasks, deletions) = engine.changed_content_tasks(&changes, &ContentRules::new(&cfg));
     assert_eq!(tasks.len(), 1, "only the user file is an incremental task");
     assert_eq!(tasks[0].path, r"C:\Users\Public\notes.json");
     assert!(
@@ -156,7 +161,11 @@ fn a_sibling_of_the_service_data_root_is_not_excluded() {
     };
 
     let task = engine
-        .content_task(&volume, index_of(&volume, frns[0]), &engine.get_config())
+        .content_task(
+            &volume,
+            index_of(&volume, frns[0]),
+            &ContentRules::new(&engine.get_config()),
+        )
         .expect("a directory whose name merely starts with Cairn is user content");
     assert_eq!(task.path, r"C:\ProgramData\Cairn2\notes.json");
 }
@@ -183,20 +192,28 @@ fn reparse_point_records_are_never_content_tasks() {
 
     assert!(
         engine
-            .content_task(&volume, index_of(&volume, frns[0]), &cfg)
+            .content_task(
+                &volume,
+                index_of(&volume, frns[0]),
+                &ContentRules::new(&cfg)
+            )
             .is_none(),
         "a reparse point must not be opened through the worker"
     );
     assert!(
         engine
-            .content_task(&volume, index_of(&volume, frns[1]), &cfg)
+            .content_task(
+                &volume,
+                index_of(&volume, frns[1]),
+                &ContentRules::new(&cfg)
+            )
             .is_some(),
         "a regular file beside the reparse point stays eligible"
     );
 
     engine.add_volume(volume);
     let changes = HashMap::from([('C', frns.iter().copied().collect::<HashSet<_>>())]);
-    let (tasks, _) = engine.changed_content_tasks(&changes, &cfg);
+    let (tasks, _) = engine.changed_content_tasks(&changes, &ContentRules::new(&cfg));
     assert_eq!(tasks.len(), 1);
     assert_eq!(tasks[0].path, r"C:\Users\Public\real.txt");
 }
@@ -240,7 +257,8 @@ fn a_created_reparse_point_never_becomes_a_content_task() {
     let engine = MultiVolumeEngine::with_index_dir_and_drives(index_dir.path(), vec![]);
     engine.add_volume(volume);
     let changes = HashMap::from([('C', HashSet::from([900u64]))]);
-    let (tasks, deletions) = engine.changed_content_tasks(&changes, &engine.get_config());
+    let (tasks, deletions) =
+        engine.changed_content_tasks(&changes, &ContentRules::new(&engine.get_config()));
     assert!(
         tasks.is_empty(),
         "a created reparse point must not reach the content worker"
@@ -274,14 +292,14 @@ fn content_exclusions_skip_system_dependency_and_cache_trees() {
     };
 
     let keep = engine
-        .content_task(&volume, record_index(frns[0]), &cfg)
+        .content_task(&volume, record_index(frns[0]), &ContentRules::new(&cfg))
         .expect("a user document must stay eligible");
     assert!(keep.path.contains("Documents"));
 
     for (position, frn) in frns.iter().enumerate().skip(1) {
         assert!(
             engine
-                .content_task(&volume, record_index(*frn), &cfg)
+                .content_task(&volume, record_index(*frn), &ContentRules::new(&cfg))
                 .is_none(),
             "content task {position} is under an excluded tree"
         );
@@ -321,7 +339,8 @@ fn a_basic_info_change_to_a_reparse_point_queues_a_deletion() {
     let engine = MultiVolumeEngine::with_index_dir_and_drives(index_dir.path(), vec![]);
     engine.add_volume(volume);
     let changes = HashMap::from([('C', HashSet::from([frn]))]);
-    let (tasks, deletions) = engine.changed_content_tasks(&changes, &engine.get_config());
+    let (tasks, deletions) =
+        engine.changed_content_tasks(&changes, &ContentRules::new(&engine.get_config()));
     assert!(
         tasks.is_empty(),
         "a record that became a reparse point must not be re-extracted"
@@ -384,7 +403,7 @@ fn compaction_keeps_pending_work_replayed_before_startup() {
     engine.add_volume(volume);
 
     let changes = engine.drain_pending_data_changes();
-    let (tasks, ineligible) = engine.changed_content_tasks(&changes, &cfg);
+    let (tasks, ineligible) = engine.changed_content_tasks(&changes, &ContentRules::new(&cfg));
     assert_eq!(
         tasks.len(),
         1,
@@ -394,7 +413,7 @@ fn compaction_keeps_pending_work_replayed_before_startup() {
 
     let mut pending = engine.drain_pending_content_deletions();
     pending.extend(ineligible);
-    let deletions = engine.resolve_content_deletions(pending, &cfg);
+    let deletions = engine.resolve_content_deletions(pending, &ContentRules::new(&cfg));
     assert_eq!(
         deletions,
         vec![(2, gone)],
@@ -610,13 +629,13 @@ fn excluded_paths_are_not_sent_to_the_content_worker() {
 
     assert!(
         engine
-            .content_task(&volume, index_of(keep_frn), &cfg)
+            .content_task(&volume, index_of(keep_frn), &ContentRules::new(&cfg))
             .is_some(),
         "an eligible file outside the rules must be indexed"
     );
     assert!(
         engine
-            .content_task(&volume, index_of(secret_frn), &cfg)
+            .content_task(&volume, index_of(secret_frn), &ContentRules::new(&cfg))
             .is_none(),
         "a file under an excluded path must never reach the content worker"
     );

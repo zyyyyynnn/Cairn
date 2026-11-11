@@ -130,17 +130,19 @@ fn the_exclusion_mask_matches_the_full_path_reference() {
         "System Volume Information".to_string(),
         "node_modules".to_string(),
     ];
-
-    let mask = vol
-        .excluded_record_mask(&rules)
+    let parsed = crate::exclusion::ExclusionRules::parse(&rules);
+    let segments = parsed
+        .single_segments()
         .expect("bare segment rules must use the memoized mask");
+
+    let mask = vol.excluded_record_mask(&segments);
     for (idx, excluded) in mask.iter().enumerate() {
         let path = vol
             .path_cache
             .get_full_path(&vol.records, &vol.arena, 'C', idx as u32);
         assert_eq!(
             *excluded,
-            crate::exclusion::is_path_excluded(&path, &rules),
+            parsed.excludes(&crate::exclusion::ExclusionPath::new(&path)),
             "mask disagrees with the reference for {path}"
         );
     }
@@ -234,21 +236,42 @@ fn the_query_total_bytes_sum_matched_files_without_double_counting_directories()
     assert_eq!(bytes, 0, "directory contributes zero bytes");
 }
 
+/// A rule the per-record mask cannot express is still answered by the same exclusion view, which
+/// reads the record's full path with the once-parsed rule set.
 #[test]
 fn unsupported_exclusion_rule_forms_keep_the_reference_fallback() {
     let mut vol = VolumeIndex::new('C');
-    vol.ingest_items(vec![index_item(1, 0, "C:", true)]);
-    for rule in ["*.tmp", "target\\debug", r"C:\Users"] {
+    vol.ingest_items(vec![
+        index_item(1, 0, "", true),
+        index_item(2, 1, "proj", true),
+        index_item(3, 2, "a.tmp", false),
+        index_item(4, 2, "a.txt", false),
+        index_item(5, 2, "target", true),
+        index_item(6, 5, "debug", true),
+        index_item(7, 6, "out.txt", false),
+        index_item(8, 1, "Users", true),
+        index_item(9, 8, "alice.txt", false),
+    ]);
+    let volumes = std::collections::HashMap::from([('C', vol)]);
+    let volume = &volumes[&'C'];
+    let index_of = |frn: u64| record_index(volume, frn);
+
+    for (rule, excluded_frn, kept_frn) in [
+        ("*.tmp", 3, 4),
+        (r"target\debug", 7, 4),
+        (r"C:\Users", 9, 4),
+    ] {
+        let exclusions =
+            crate::sync_engine::path_exclusions::PathExclusions::new(&volumes, &[rule.to_string()]);
         assert!(
-            vol.excluded_record_mask(&[rule.to_string()]).is_none(),
-            "{rule} must fall back to the full-path reference"
+            exclusions.excludes(volume, index_of(excluded_frn)),
+            "{rule} must exclude its path through the full-path fallback"
+        );
+        assert!(
+            !exclusions.excludes(volume, index_of(kept_frn)),
+            "{rule} must not exclude an unrelated path"
         );
     }
-    assert_eq!(
-        vol.excluded_record_mask(&[]),
-        Some(vec![false]),
-        "no rules means nothing is excluded"
-    );
 }
 
 #[test]

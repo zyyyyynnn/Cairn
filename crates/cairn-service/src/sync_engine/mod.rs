@@ -21,6 +21,7 @@ use crate::persistence;
 mod config_apply;
 pub mod content_pipeline;
 pub mod journal_reconciliation;
+mod path_exclusions;
 pub mod post_scan;
 pub mod presorted;
 mod search;

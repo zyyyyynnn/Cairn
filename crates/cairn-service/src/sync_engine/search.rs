@@ -5,6 +5,7 @@
 //! Metadata and content search: query evaluation, exclusion filtering, result
 //! ordering and snippets.
 
+use super::path_exclusions::PathExclusions;
 use super::volume_index::BitSet;
 use super::{MultiVolumeEngine, VolumeIndex};
 use cairn_content::CONTENT_RESULT_TOP_K;
@@ -151,7 +152,7 @@ impl MultiVolumeEngine {
                 }
 
                 lock = self.volumes.read().unwrap();
-                let exclusion_masks = path_exclusion_masks(&lock, &excluded_paths);
+                let exclusions = PathExclusions::new(&lock, &excluded_paths);
                 for vol in lock.values() {
                     if cancel.is_cancelled() {
                         return (Vec::new(), 0, highlight_terms, snippets, 0);
@@ -182,14 +183,9 @@ impl MultiVolumeEngine {
                             matches.push(idx as u32);
                         }
                     }
-                    let Some(vol_matches) = collect_volume_matches(
-                        vol,
-                        matches,
-                        &exclusion_masks,
-                        &excluded_paths,
-                        cancel,
-                        &mut all_results,
-                    ) else {
+                    let Some(vol_matches) =
+                        collect_volume_matches(vol, matches, &exclusions, cancel, &mut all_results)
+                    else {
                         return (Vec::new(), 0, highlight_terms, snippets, 0);
                     };
                     for &idx in &vol_matches {
@@ -229,7 +225,7 @@ impl MultiVolumeEngine {
 
                 // Acquire read lock with minimal critical section to convert and merge results
                 lock = self.volumes.read().unwrap();
-                let exclusion_masks = path_exclusion_masks(&lock, &excluded_paths);
+                let exclusions = PathExclusions::new(&lock, &excluded_paths);
                 let mut tantivy_vol_matches: HashMap<char, Vec<u32>> = HashMap::new();
 
                 for hit in &content_hits {
@@ -275,7 +271,7 @@ impl MultiVolumeEngine {
                                 continue;
                             }
                         }
-                        if is_record_excluded(vol, idx, &exclusion_masks, &excluded_paths) {
+                        if exclusions.excludes(vol, idx) {
                             continue;
                         }
                         all_results.push(SearchResultItem {
@@ -382,7 +378,7 @@ impl MultiVolumeEngine {
                 }
 
                 lock = self.volumes.read().unwrap();
-                let exclusion_masks = path_exclusion_masks(&lock, &excluded_paths);
+                let exclusions = PathExclusions::new(&lock, &excluded_paths);
                 for vol in lock.values() {
                     if cancel.is_cancelled() {
                         return (Vec::new(), 0, highlight_terms, snippets, 0);
@@ -425,14 +421,9 @@ impl MultiVolumeEngine {
                         &matcher,
                         cancel,
                     );
-                    let Some(vol_matches) = collect_volume_matches(
-                        vol,
-                        matches,
-                        &exclusion_masks,
-                        &excluded_paths,
-                        cancel,
-                        &mut all_results,
-                    ) else {
+                    let Some(vol_matches) =
+                        collect_volume_matches(vol, matches, &exclusions, cancel, &mut all_results)
+                    else {
                         return (Vec::new(), 0, highlight_terms, snippets, 0);
                     };
                     for &idx in &vol_matches {
@@ -452,7 +443,7 @@ impl MultiVolumeEngine {
             // segment rules (a broad query could match most of the table). Compute the same
             // verdict once per volume and use it as an O(1) lookup; unsupported rule forms keep
             // the reference behavior.
-            let exclusion_masks = path_exclusion_masks(&lock, &excluded_paths);
+            let exclusions = PathExclusions::new(&lock, &excluded_paths);
             let active_vols: Vec<_> = lock
                 .values()
                 .filter(|v| {
@@ -484,14 +475,9 @@ impl MultiVolumeEngine {
                     presorted_col,
                     cancel,
                 );
-                let Some(vol_matches) = collect_volume_matches(
-                    vol,
-                    matches,
-                    &exclusion_masks,
-                    &excluded_paths,
-                    cancel,
-                    &mut all_results,
-                ) else {
+                let Some(vol_matches) =
+                    collect_volume_matches(vol, matches, &exclusions, cancel, &mut all_results)
+                else {
                     return (Vec::new(), 0, highlight_terms, snippets, 0);
                 };
                 total_bytes = total_bytes.saturating_add(vol.calculate_matched_bytes(&vol_matches));
@@ -622,13 +608,12 @@ impl MultiVolumeEngine {
     }
 }
 
-/// Filters `matches` against `exclusion_masks` / `excluded_paths` and appends non-excluded
-/// [`SearchResultItem`]s into `all_results`. Returns `None` if `cancel` triggers mid-loop.
+/// Filters `matches` against `exclusions` and appends non-excluded [`SearchResultItem`]s into
+/// `all_results`. Returns `None` if `cancel` triggers mid-loop.
 fn collect_volume_matches(
     vol: &VolumeIndex,
     matches: Vec<u32>,
-    exclusion_masks: &Option<HashMap<char, Vec<bool>>>,
-    excluded_paths: &[String],
+    exclusions: &PathExclusions,
     cancel: &CancellationToken,
     all_results: &mut Vec<SearchResultItem>,
 ) -> Option<Vec<u32>> {
@@ -638,7 +623,7 @@ fn collect_volume_matches(
         if (i & 0xFFF) == 0 && cancel.is_cancelled() {
             return None;
         }
-        if is_record_excluded(vol, idx, exclusion_masks, excluded_paths) {
+        if exclusions.excludes(vol, idx) {
             continue;
         }
         vol_matches.push(idx);
@@ -649,46 +634,6 @@ fn collect_volume_matches(
         });
     }
     Some(vol_matches)
-}
-
-fn is_record_excluded(
-    vol: &VolumeIndex,
-    idx: u32,
-    exclusion_masks: &Option<HashMap<char, Vec<bool>>>,
-    excluded_paths: &[String],
-) -> bool {
-    if exclusion_masks.as_ref().is_some_and(|masks| {
-        masks
-            .get(&vol.drive_letter)
-            .is_some_and(|mask| mask.get(idx as usize).copied().unwrap_or(false))
-    }) {
-        return true;
-    }
-    if exclusion_masks.is_none() && !excluded_paths.is_empty() {
-        let full_path =
-            vol.path_cache
-                .get_full_path(&vol.records, &vol.arena, vol.drive_letter, idx);
-        if crate::exclusion::is_path_excluded(&full_path, excluded_paths) {
-            return true;
-        }
-    }
-    false
-}
-
-/// One exclusion verdict per record, shared by every query path. `None` means the rules use a
-/// form the mask cannot express, so callers must check each path.
-fn path_exclusion_masks(
-    volumes: &HashMap<char, VolumeIndex>,
-    excluded_paths: &[String],
-) -> Option<HashMap<char, Vec<bool>>> {
-    if excluded_paths.is_empty() {
-        return None;
-    }
-    let mut masks = HashMap::new();
-    for (drive, volume) in volumes {
-        masks.insert(*drive, volume.excluded_record_mask(excluded_paths)?);
-    }
-    Some(masks)
 }
 
 /// A query whose whole shape is a conjunction of positive terms can be answered by one joined
