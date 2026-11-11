@@ -27,7 +27,8 @@ pub enum ServiceIssue {
 }
 
 impl ServiceIssue {
-    /// Every issue the result band can report.
+    /// Every issue the result band can report, for the coverage checks that walk the vocabulary.
+    #[cfg(test)]
     pub const ALL: &[ServiceIssue] = &[
         ServiceIssue::NotRunning,
         ServiceIssue::NotInstalled,
