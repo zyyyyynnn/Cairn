@@ -694,13 +694,7 @@ impl CairnApp {
             .service_issue
             .unwrap_or(ServiceIssue::NotRunning);
         let control = accessibility::control(issue.accessibility_key());
-        let message_key = match issue {
-            ServiceIssue::NotRunning => "service_not_running_title",
-            ServiceIssue::NotInstalled => "service_not_installed_title",
-            ServiceIssue::ProtocolIncompatible => "service_incompatible_title",
-            ServiceIssue::Unauthorized => "service_unauthorized_title",
-        };
-        let message = self.i18n.get_text(message_key);
+        let message = self.i18n.get_text(issue.message_key());
         let retry = accessibility::control("service-retry-button");
         let retry_label = accessibility::name(retry, &self.i18n);
         let start = accessibility::control("service-start-button");

@@ -27,6 +27,14 @@ pub enum ServiceIssue {
 }
 
 impl ServiceIssue {
+    /// Every issue the result band can report.
+    pub const ALL: &[ServiceIssue] = &[
+        ServiceIssue::NotRunning,
+        ServiceIssue::NotInstalled,
+        ServiceIssue::ProtocolIncompatible,
+        ServiceIssue::Unauthorized,
+    ];
+
     pub fn from_client_error(error: &cairn_client::client::ClientError) -> Self {
         if error.is_protocol_incompatible() {
             ServiceIssue::ProtocolIncompatible
@@ -45,6 +53,17 @@ impl ServiceIssue {
             ServiceIssue::NotInstalled => "service-issue-not-installed",
             ServiceIssue::ProtocolIncompatible => "service-issue-incompatible",
             ServiceIssue::Unauthorized => "service-issue-unauthorized",
+        }
+    }
+
+    /// The message the result band states for this issue: the condition and the recovery the
+    /// person can take outside the app.
+    pub const fn message_key(self) -> &'static str {
+        match self {
+            ServiceIssue::NotRunning => "service_not_running_title",
+            ServiceIssue::NotInstalled => "service_not_installed_title",
+            ServiceIssue::ProtocolIncompatible => "service_incompatible_title",
+            ServiceIssue::Unauthorized => "service_unauthorized_title",
         }
     }
 }
@@ -129,16 +148,41 @@ mod tests {
     }
 
     #[test]
+    fn each_issue_names_its_own_message() {
+        let keys: Vec<&str> = ServiceIssue::ALL
+            .iter()
+            .map(|issue| issue.message_key())
+            .collect();
+        assert!(
+            keys.iter().all(|key| !key.is_empty()),
+            "an issue without a message key would render the raw id"
+        );
+        let mut unique = keys.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), keys.len(), "two issues share one message");
+    }
+
+    /// The result band reads its sentence from the registry entry the issue names, so the two
+    /// mappings cannot drift apart.
+    #[test]
+    fn each_issue_speaks_the_message_its_registry_entry_registers() {
+        for issue in ServiceIssue::ALL {
+            let entry = crate::shell::accessibility::control(issue.accessibility_key());
+            assert_eq!(
+                entry.messages,
+                [issue.message_key()].as_slice(),
+                "{issue:?} does not speak its registered sentence"
+            );
+        }
+    }
+
+    #[test]
     fn each_issue_names_its_own_announcement() {
-        let keys: Vec<&str> = [
-            ServiceIssue::NotRunning,
-            ServiceIssue::NotInstalled,
-            ServiceIssue::ProtocolIncompatible,
-            ServiceIssue::Unauthorized,
-        ]
-        .iter()
-        .map(|issue| issue.accessibility_key())
-        .collect();
+        let keys: Vec<&str> = ServiceIssue::ALL
+            .iter()
+            .map(|issue| issue.accessibility_key())
+            .collect();
         let mut unique = keys.clone();
         unique.sort_unstable();
         unique.dedup();
