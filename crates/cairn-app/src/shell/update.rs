@@ -692,7 +692,9 @@ fn show_busy_dialog(window: &mut Window, cx: &mut App, title: String, body: Stri
 
 #[cfg(test)]
 mod tests {
-    use super::{is_newer, normalize_version, parse_checksum, safe_version, GitHubRelease};
+    use super::{
+        check_latest, is_newer, normalize_version, parse_checksum, safe_version, GitHubRelease,
+    };
     use crate::shell::i18n::I18nManager;
     use fluent_bundle::FluentArgs;
 
@@ -748,5 +750,14 @@ mod tests {
         let release: GitHubRelease = serde_json::from_str(body).expect("valid release");
         assert_eq!(release.tag_name, "v0.2.0");
         assert_eq!(release.assets.len(), 2);
+    }
+
+    /// Network check for HTTP/TLS dependency changes: the real release API must answer through
+    /// the installed crypto provider.
+    #[tokio::test]
+    #[ignore = "requires network access to the GitHub releases API"]
+    async fn the_update_check_reaches_the_release_api() {
+        let release = check_latest().await.expect("the release API answers");
+        assert!(release.is_some(), "the repository publishes releases");
     }
 }

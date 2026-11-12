@@ -21,6 +21,7 @@
 cargo run -p xtask -- package
 ```
 
+- 构建机需要 CMake 与 NASM：`aws-lc-rs` 的 Windows 汇编后端由二者编译；CI 的 Windows 作业安装 NASM，CMake 由镜像提供。
 - 默认输出目录：`dist/`。
 - `xtask` 生成 `cairn.wxs`，调用 WiX v5 构建 MSI，把 MSI 追加到 GPUI `CairnSetup.exe`，并写出 `SHA256SUMS.txt`；任一步失败都必须保留上一次成功产物。
 - 真实 WiX 构建测试需要 WiX 5、`mt.exe` 与 release 二进制，默认标记为 ignored；其余打包测试覆盖旧产物保留、校验和与失败路径。
