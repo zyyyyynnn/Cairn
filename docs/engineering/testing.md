@@ -13,6 +13,8 @@
 
 一个行为只在一层测一次，放在最接近用户的那一层；下层不重复上层已经断言过的结果。
 
+`cairn-app` 的公开入口在 `src` 内以真实 `CairnApp` 上下文覆盖：汇总块清单的进入、后退与退出（`open_block_listing` / `go_back` / `escape_query`），就地重命名的提交与取消（`rename_selected` / `commit_rename` / `cancel_rename`），以及取消后的状态刷新不再发起查询（`refresh_results`）。
+
 ## 价值判定
 
 测试断言聚焦于外部可观察的结果与关键边界：

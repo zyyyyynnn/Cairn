@@ -122,7 +122,7 @@ flowchart TD
 | **子串高速扫描** | `memchr`（`memmem`） | 利用 SIMD 向量化加速子串匹配 |
 | **序列化与配置** | `postcard`（IPC） / `toml`（配置） | 高密度零拷贝二进制通信与易读配置文件格式 |
 | **文本编码自动识别** | `chardetng` + `encoding_rs` | 准确识别 GBK、UTF-16、BOM 等中文编码 |
-| **系统托盘** | `tray-icon` | Windows 系统原生托盘菜单；全局热键尚未接入 |
+| **系统托盘** | `tray-icon` | Windows 系统原生托盘菜单；全局热键 `Ctrl+Alt+Space` 由 `global-hotkey` 注册，组合被占用时启动提示一次，托盘入口保持可用 |
 | **界面国际化 (i18n)** | `fluent-bundle` | 现代化多语言文案管理与参数化插值 |
 | **日志与链路追踪** | `tracing` + `tracing-subscriber` | 结构化异步日志输出与性能诊断 |
 | **测试框架** | `cargo test` + `proptest` | 单元测试与属性随机测试 |
