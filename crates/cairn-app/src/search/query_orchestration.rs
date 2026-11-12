@@ -286,6 +286,13 @@ impl CairnApp {
     /// post-frame ensure, so every scroll source — pointer drag, wheel, keyboard, first page — is
     /// covered without fetching from `render` itself.
     pub fn needs_visible_rows_page(&self, visible: Range<usize>) -> bool {
+        if self.block_listing.is_some() {
+            return self
+                .results
+                .table
+                .page_request(visible, layout::RESULT_PAGE_SIZE)
+                .is_some();
+        }
         if self.recycle_bin.is_open() {
             return self.needs_recycle_bin_page(visible);
         }

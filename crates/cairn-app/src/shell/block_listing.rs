@@ -9,8 +9,9 @@
 //! actions, with no second canvas layer.
 
 use crate::app::{layout, CairnApp};
+use cairn_core::sort::SortColumn;
 use cairn_protocol::message::FileRowData;
-use gpui_kit::gpui::{px, Context, Pixels, Point, Window};
+use gpui_kit::gpui::{Context, Pixels, Point, Window};
 
 /// One summary block's members: the unfiltered listing and the filtered rows
 /// the table renders.
@@ -54,6 +55,20 @@ impl BlockListing {
 
     pub(crate) fn total_bytes(&self) -> u64 {
         self.total_bytes
+    }
+
+    /// Reorders the listing to the table's current sort.
+    pub(crate) fn sort(&mut self, column: SortColumn, ascending: bool) {
+        sort_rows(&mut self.all, column, ascending);
+        sort_rows(&mut self.rows, column, ascending);
+    }
+
+    /// Drops the given full paths from the listing after a successful delete.
+    pub(crate) fn remove_paths(&mut self, paths: &[String]) {
+        self.all.retain(|row| {
+            let full = join_listing_path(&self.directory, &row.name);
+            !paths.iter().any(|path| path.eq_ignore_ascii_case(&full))
+        });
     }
 
     /// Rebuilds the visible rows from the unfiltered listing and the current
@@ -112,43 +127,62 @@ impl CairnApp {
             );
             (parent, node.aggregate_count, rows)
         };
-        self.record_nav_state();
+        // A late answer to an earlier query must not replace the listing rows.
+        self.query.query_id += 1;
+        self.query.is_searching = false;
+        self.query.is_fetching_more = false;
         self.leave_drive_view();
+        self.record_nav_state();
         self.block_listing = Some(BlockListing::new(parent, count, rows));
         self.query.search_input.set_text("");
-        self.install_block_listing_rows(true, cx);
+        self.install_block_listing_rows(cx);
         self.query.search_focus.focus(window, cx);
         cx.notify();
     }
 
-    /// Installs the first page of the current listing.
-    pub(crate) fn install_block_listing_rows(
-        &mut self,
-        reset_scroll: bool,
-        cx: &mut Context<Self>,
-    ) {
+    /// Installs the first page of the current listing, from the top.
+    pub(crate) fn install_block_listing_rows(&mut self, cx: &mut Context<Self>) {
         let Some(listing) = self.block_listing.as_ref() else {
             return;
         };
         let total = listing.total();
         let first_len = total.min(layout::RESULT_PAGE_SIZE);
         let rows = listing.rows()[..first_len].to_vec();
-        let saved_scroll = self.results.table.scroll_top;
         self.results.table.set_rows(rows, total);
         self.note_table_content(cx);
         if total == 0 {
             self.note_table_empty(cx);
         }
-        if reset_scroll {
-            self.results.rows_scroll.set_offset(Point::default());
-            self.results.table.scroll_top = 0.0;
-        } else {
-            self.results.table.scroll_top = saved_scroll;
-            self.results
-                .rows_scroll
-                .set_offset(Point::new(px(0.0), -px(saved_scroll)));
-        }
+        self.results.rows_scroll.set_offset(Point::default());
+        self.results.table.scroll_top = 0.0;
         cx.notify();
+    }
+
+    /// Reorders the listing to the table's current sort and restarts at its top.
+    pub(crate) fn sort_block_listing(&mut self, cx: &mut Context<Self>) {
+        let (column, ascending) = (self.results.table.sort_column, self.results.table.sort_asc);
+        let Some(listing) = self.block_listing.as_mut() else {
+            return;
+        };
+        listing.sort(column, ascending);
+        self.install_block_listing_rows(cx);
+    }
+
+    /// Drops rows the shell has deleted from the listing and re-applies the
+    /// current search text.
+    pub(crate) fn remove_block_listing_paths(
+        &mut self,
+        paths: &[String],
+        cx: &mut Context<Self>,
+    ) {
+        let needle = self.query.search_input.text.trim().to_string();
+        let case_sensitive = self.query.case_sensitive;
+        let Some(listing) = self.block_listing.as_mut() else {
+            return;
+        };
+        listing.remove_paths(paths);
+        listing.apply_filter(&needle, case_sensitive);
+        self.install_block_listing_rows(cx);
     }
 
     /// Installs the page the viewport needs from the in-memory listing, with no
@@ -184,7 +218,7 @@ impl CairnApp {
         if let Some(listing) = self.block_listing.as_mut() {
             listing.apply_filter(&needle, case_sensitive);
         }
-        self.install_block_listing_rows(true, cx);
+        self.install_block_listing_rows(cx);
     }
 
     /// Leaves the listing; called by every location entry point.
@@ -205,7 +239,7 @@ pub(crate) fn block_listing_rows(
         .map(|child| FileRowData {
             frn: 0,
             name: child.name.clone(),
-            path: join_listing_path(parent, &child.name),
+            path: parent.to_string(),
             size: child.size,
             modified_ts: child.modified_ts,
             created_ts: 0,
@@ -225,6 +259,42 @@ fn join_listing_path(parent: &str, name: &str) -> String {
         format!("{parent}\\{name}")
     }
 }
+
+fn sort_rows(rows: &mut [FileRowData], column: SortColumn, ascending: bool) {
+    match column {
+        SortColumn::Name => rows.sort_by(|a, b| {
+            cairn_core::sort::natural_cmp(&a.name, &b.name)
+                .then_with(|| cairn_core::sort::natural_cmp(&a.path, &b.path))
+        }),
+        SortColumn::Path => rows.sort_by(|a, b| {
+            cairn_core::sort::natural_cmp(&a.path, &b.path)
+                .then_with(|| cairn_core::sort::natural_cmp(&a.name, &b.name))
+        }),
+        SortColumn::Size => rows.sort_by(|a, b| a.size.cmp(&b.size).then_with(|| {
+            cairn_core::sort::natural_cmp(&a.name, &b.name)
+        })),
+        SortColumn::DateModified => rows.sort_by(|a, b| {
+            a.modified_ts.cmp(&b.modified_ts).then_with(|| {
+                cairn_core::sort::natural_cmp(&a.name, &b.name)
+            })
+        }),
+        SortColumn::DateCreated => rows.sort_by(|a, b| {
+            a.created_ts.cmp(&b.created_ts).then_with(|| {
+                cairn_core::sort::natural_cmp(&a.name, &b.name)
+            })
+        }),
+        SortColumn::Extension => rows.sort_by(|a, b| {
+            let ext = |row: &FileRowData| row.name.rsplit_once('.').map_or(String::new(), |(_, e)| e.to_lowercase());
+            ext(a).cmp(&ext(b)).then_with(|| {
+                cairn_core::sort::natural_cmp(&a.name, &b.name)
+            })
+        }),
+    }
+    if !ascending {
+        rows.reverse();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,14 +314,14 @@ mod tests {
         let children = vec![child("Windows", 300, true), child("boot.ini", 100, false)];
         let rows = block_listing_rows(r"C:\", &[0, 1], &children);
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].path, r"C:\Windows");
+        assert_eq!(rows[0].path, r"C:\");
         assert_eq!(rows[0].size, 300);
         assert!(rows[0].is_dir);
-        assert_eq!(rows[1].path, r"C:\boot.ini");
+        assert_eq!(rows[1].path, r"C:\");
         assert_eq!(rows[1].modified_ts, 7);
 
         let rows = block_listing_rows(r"C:\Program Files", &[1], &children);
-        assert_eq!(rows[0].path, r"C:\Program Files\boot.ini");
+        assert_eq!(rows[0].path, r"C:\Program Files");
     }
 
     #[test]

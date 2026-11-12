@@ -38,6 +38,9 @@ impl CairnApp {
             // The bin is an in-memory listing, so its order is applied here instead
             // of asking the service for a new page sorted by the same column.
             self.sort_recycle_bin(cx);
+        } else if self.block_listing.is_some() {
+            // A summary block listing is in memory too: sort it locally.
+            self.sort_block_listing(cx);
         } else {
             self.trigger_search(cx);
         }
