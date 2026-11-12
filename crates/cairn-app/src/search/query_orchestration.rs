@@ -249,6 +249,10 @@ impl CairnApp {
             self.fill_recycle_bin_page(row_height, cx);
             return;
         }
+        if self.block_listing.is_some() {
+            self.fill_block_listing_page(row_height, cx);
+            return;
+        }
         if !rows_page_ready(
             self.service.is_service_connected,
             self.query.is_searching,
@@ -343,6 +347,12 @@ impl CairnApp {
             self.query.query_id += 1;
             self.query.is_searching = false;
             self.filter_recycle_bin(cx);
+            return;
+        }
+        if self.block_listing.is_some() {
+            self.query.query_id += 1;
+            self.query.is_searching = false;
+            self.filter_block_listing(cx);
             return;
         }
         self.query.query_id += 1;

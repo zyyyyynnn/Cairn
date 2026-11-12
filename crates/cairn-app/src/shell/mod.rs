@@ -9,6 +9,7 @@
 
 pub(crate) mod accessibility;
 pub(crate) mod bin_commands;
+pub(crate) mod block_listing;
 pub(crate) mod command_groups;
 pub(crate) mod commands;
 pub(crate) mod dialogs;

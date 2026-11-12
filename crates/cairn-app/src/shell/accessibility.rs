@@ -719,15 +719,6 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         named_by: "",
         requirement: "DSV-08",
     },
-    KeyControl {
-        key: "treemap-legend",
-        element: "treemap-legend",
-        indexed: true,
-        role: Role::CheckBox,
-        messages: EMPTY,
-        named_by: "legend_accessible_label",
-        requirement: "DSV-07",
-    },
 ];
 
 /// Registry entry for `key`. An unknown key is a programming error, and the tests in this module walk

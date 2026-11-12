@@ -96,12 +96,6 @@ pub mod layout {
     /// physical step, so a menu row the application draws itself has to match it rather than take
     /// the 28px data-row step, which would leave two menu row heights in one product.
     pub const MENU_ROW_HEIGHT: Pixels = gpui_kit::gpui::px(26.0);
-    /// The Treemap category legend is a compact status item: a text_sm label button inside
-    /// a 20px hit row. Its 2px horizontal inset is an optical exception and stays
-    /// off the 4px ladder.
-    pub const LEGEND_ROW: f32 = 5.0 * STEP;
-    pub const LEGEND_INSET: f32 = 0.5 * STEP;
-
     // ---- column lanes, in 4px steps ------------------------------------------------
     // The heading row and every result row read the same three widths, so a column is one definition.
     /// Narrowest name lane: below this a filename stops being the thing the row is for.
@@ -394,6 +388,8 @@ pub struct CairnApp {
     /// its selection and its error band together, so any query or drive switch releases the whole
     /// location instead of leaving half of it behind.
     pub(crate) recycle_bin: crate::shell::recycle_bin::RecycleBinView,
+    /// The summary block whose members the table currently lists.
+    pub(crate) block_listing: Option<crate::shell::block_listing::BlockListing>,
     /// True while a delete-to-bin task is running outside the bin.
     pub(crate) delete_in_flight: bool,
     /// The app-owned transient status surface. One at a time; errors persist.
@@ -548,6 +544,7 @@ impl CairnApp {
             treemap_path_menu_focus: None,
             treemap_path_menu_dismiss: None,
             recycle_bin: crate::shell::recycle_bin::RecycleBinView::closed(),
+            block_listing: None,
             delete_in_flight: false,
             toast: None,
             toast_serial: 0,
@@ -871,8 +868,8 @@ mod tests {
             BASE_FONT_PX, 14.0,
             "the compact type scale anchors the 4px step at 100% zoom"
         );
-        // LEGEND_INSET is excluded: its 2px optical correction is intentional. The ratio tokens
-        // are not distances. Everything that lays out the shell must be a whole 4px step.
+        // Ratio tokens are not distances. Everything that lays out the shell must be a
+        // whole 4px step.
         let distances = [
             layout::STEP,
             layout::SPACE_4,
@@ -887,7 +884,6 @@ mod tests {
             layout::SEARCH_BAND_HEIGHT,
             layout::HEADER_HEIGHT,
             layout::STATUS_HEIGHT,
-            layout::LEGEND_ROW,
             layout::NAME_MIN_COLUMN,
             layout::PATH_MIN_COLUMN,
             layout::SIZE_COLUMN,

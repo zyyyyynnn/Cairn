@@ -10,28 +10,13 @@ use crate::shell::accessibility::{self, ControlElement};
 use crate::shell::status_bar::format_count;
 use crate::shell::theme::{self, ShellTokens};
 use cairn_core::format_size_bytes;
-use cairn_core::treemap::TreemapCategory;
 use fluent_bundle::FluentArgs;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::Disableable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::status_bar::StatusBar;
-use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{h_flex, Sizable as _};
 use gpui_kit::gpui::*;
-
-fn treemap_category_key(category: TreemapCategory) -> &'static str {
-    match category {
-        TreemapCategory::System => "treemap_category_system",
-        TreemapCategory::Programs => "treemap_category_programs",
-        TreemapCategory::Documents => "treemap_category_documents",
-        TreemapCategory::Image => "treemap_category_image",
-        TreemapCategory::Video => "treemap_category_video",
-        TreemapCategory::Audio => "treemap_category_audio",
-        TreemapCategory::Archive => "treemap_category_archive",
-        TreemapCategory::Other => "treemap_category_other",
-    }
-}
 
 /// The band marks a loading state only while the current view has nothing to show.
 ///
@@ -50,7 +35,7 @@ impl CairnApp {
     pub(crate) fn render_status_line(
         &self,
         tokens: &ShellTokens,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> ControlElement {
         let bar = accessibility::control("status-bar");
@@ -96,6 +81,28 @@ impl CairnApp {
                         .into_any_element(),
                 );
             }
+        } else if let Some(listing) = self.block_listing.as_ref() {
+            let count_text = {
+                let mut args = FluentArgs::new();
+                args.set("count", listing.total() as i64);
+                args.set("count_text", format_count(listing.total()));
+                if listing.total_bytes() == 0 {
+                    self.i18n.get_text_with_args("status_objects_count", &args)
+                } else {
+                    args.set("size", format_size_bytes(listing.total_bytes()));
+                    self.i18n
+                        .get_text_with_args("status_objects_summary", &args)
+                }
+            };
+            summary_aria = Some(count_text.clone());
+            summary = Some(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .font_features(theme::tabular_figures())
+                    .child(count_text)
+                    .into_any_element(),
+            );
         } else if self.drive_view.is_some() {
             view_name = "treemap";
             if let Some(ref st) = self.treemap_state {
@@ -338,7 +345,7 @@ impl CairnApp {
             );
         }
 
-        let mut status_bar = StatusBar::new()
+        let status_bar = StatusBar::new()
             .h(rems(layout::STATUS_HEIGHT))
             .flex_shrink_0()
             .px(rems(layout::CONTENT_INSET))
@@ -349,13 +356,8 @@ impl CairnApp {
             .text_sm()
             .bg(tokens.status_bar)
             .text_color(tokens.muted_foreground)
-            // The summary can carry a full path; let it ellipsize before it
-            // pushes the category legend out of the bar.
+            // The summary can carry a full path; let it ellipsize in the bar.
             .left(left);
-        let right = self.render_treemap_legend(tokens, window, cx);
-        if let Some(right) = right {
-            status_bar = status_bar.right(right);
-        }
 
         accessibility::element(bar)
             .aria_label(aria_summary)
@@ -368,127 +370,6 @@ impl CairnApp {
                 cx.listener(|this, _, _, cx| this.dismiss_result_selection_on_chrome_press(cx)),
             )
             .child(status_bar)
-    }
-
-    /// A compact labeled legend doubles as the category filter: clicking an
-    /// entry dims that category in place, preserving tile geometry and selection.
-    fn render_treemap_legend(
-        &self,
-        tokens: &ShellTokens,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let state = self.treemap_state.as_ref()?;
-        let mut row = h_flex()
-            .flex_shrink_0()
-            .items_center()
-            .gap(rems(layout::SPACE_8));
-        let legend_control = accessibility::control("treemap-legend");
-        for category in TreemapCategory::ALL {
-            let visible = state.category_visible(category);
-            let label = SharedString::from(self.i18n.get_text(treemap_category_key(category)));
-            let tooltip = {
-                let mut args = FluentArgs::new();
-                args.set("category", label.to_string());
-                SharedString::from(self.i18n.get_text_with_args(
-                    if visible {
-                        "treemap_filter_hide"
-                    } else {
-                        "treemap_filter_show"
-                    },
-                    &args,
-                ))
-            };
-            let legend_accessible_label = tooltip.clone();
-            let cat_ix = category as usize;
-            let focus = window
-                .use_keyed_state(("treemap-legend", cat_ix), cx, |_, cx| {
-                    cx.focus_handle().tab_stop(true)
-                })
-                .read(cx)
-                .clone();
-            let click_focus = focus.clone();
-
-            row = row.child(
-                accessibility::element_at(legend_control, cat_ix)
-                    .flex()
-                    .flex_row()
-                    .tab_stop(true)
-                    .track_focus(&focus)
-                    .aria_label(legend_accessible_label)
-                    .aria_toggled(if visible {
-                        gpui_kit::gpui::accesskit::Toggled::True
-                    } else {
-                        gpui_kit::gpui::accesskit::Toggled::False
-                    })
-                    .flex_shrink_0()
-                    .items_center()
-                    .gap(rems(layout::SPACE_4))
-                    .h(rems(layout::LEGEND_ROW))
-                    .px(rems(layout::LEGEND_INSET))
-                    .rounded(tokens.radius)
-                    // Reserve the ring's geometry so a keyboard focus never moves the legend,
-                    // and paint it only for keyboard focus: a mouse click may focus the row for
-                    // activation, but it must not draw a control frame.
-                    .border_1()
-                    .border_color(tokens.border.opacity(0.0))
-                    .focus_visible(move |style| style.border_color(tokens.ring))
-                    .text_sm()
-                    .text_color(tokens.muted_foreground)
-                    .hover(move |this| this.bg(tokens.row_hover).text_color(tokens.foreground))
-                    .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, window, cx| {
-                            click_focus.focus(window, cx);
-                            if let Some(state) = this.treemap_state.as_mut() {
-                                state.toggle_category(category);
-                            }
-                            cx.stop_propagation();
-                            cx.notify();
-                        }),
-                    )
-                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
-                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                            if let Some(state) = this.treemap_state.as_mut() {
-                                state.toggle_category(category);
-                            }
-                            cx.stop_propagation();
-                            cx.notify();
-                        }
-                    }))
-                    // The legend row displays category names and toggle states; inactive categories dim their labels.
-                    .child(
-                        div()
-                            .whitespace_nowrap()
-                            .text_color(if visible {
-                                tokens.foreground
-                            } else {
-                                tokens.muted_foreground
-                            })
-                            .child(label),
-                    ),
-            );
-        }
-        // The reset is permanent at the end of the legend, whether or not a category is
-        // currently hidden: the legend's trailing control must not appear and disappear with
-        // the filter state.
-        let reset = self.i18n.get_text("treemap_filter_all");
-        row = row.child(
-            Button::new("treemap-filter-reset")
-                .ghost()
-                .xsmall()
-                .icon(IconName::ListFilter)
-                .tooltip(reset.clone())
-                .accessibility_label(reset)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    if let Some(state) = this.treemap_state.as_mut() {
-                        state.show_all_categories();
-                    }
-                    cx.notify();
-                })),
-        );
-        Some(row.into_any_element())
     }
 
     /// Refreshes whichever data surface the status band is describing. The loading/refresh

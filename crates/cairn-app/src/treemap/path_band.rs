@@ -418,25 +418,8 @@ impl CairnApp {
                 ))
                 .into_any_element()
         } else {
-            // A virtual layer sits under the directory that owns the block, not under the canvas's
-            // own current directory: the crumbs keep every real level and the layer takes the last
-            // position as the current step.
-            let virtual_label = self
-                .treemap_state
-                .as_ref()
-                .and_then(|state| state.virtual_layer.as_ref())
-                .map(|layer| (layer.parent_path.clone(), layer.label.clone()));
-            let crumbs_root = virtual_label
-                .as_ref()
-                .map_or_else(|| current_dir.clone(), |(parent, _)| parent.clone());
-            let segments = path_segments(&crumbs_root);
-            // With a layer open no real segment is the current one: they all stay navigable, and
-            // the layer itself is the level the canvas is showing.
-            let last = if virtual_label.is_some() {
-                usize::MAX
-            } else {
-                segments.len().saturating_sub(1)
-            };
+            let segments = path_segments(&current_dir);
+            let last = segments.len().saturating_sub(1);
             let menu_for = self.treemap_path_menu_for.clone();
             let menu = self.treemap_path_menu.clone();
             // The product's focus frame belongs to the keyboard. A pointer click
@@ -684,20 +667,6 @@ impl CairnApp {
                         ))
                     });
                 breadcrumb = breadcrumb.child(segment).child(arrow);
-            }
-            // The layer is a view-only level: it takes the last crumb position but is not a path,
-            // so it renders as the current label with no menu, focus or editing of its own.
-            if let Some((_, label)) = virtual_label {
-                // The segment before it already ends with its own arrow, which is the separator
-                // every crumb uses; a second one would read as another level.
-                breadcrumb = breadcrumb.child(
-                    div()
-                        .max_w(rems(PATH_SEGMENT_MAX_WIDTH))
-                        .truncate()
-                        .flex_shrink_0()
-                        .text_color(tokens.foreground)
-                        .child(label),
-                );
             }
             breadcrumb.into_any_element()
         };

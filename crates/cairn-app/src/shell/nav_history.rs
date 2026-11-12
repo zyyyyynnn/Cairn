@@ -226,6 +226,7 @@ impl CairnApp {
         // A visualization entry owns the surface, so its table query is restored without running a
         // search whose rows nobody can see.
         if !is_visualization {
+            self.clear_block_listing();
             self.trigger_search(cx);
         }
         cx.notify();

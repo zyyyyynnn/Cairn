@@ -72,6 +72,7 @@ impl CairnApp {
         // listing fades in instead of replacing the table text in place.
         // `leave_drive_view` opens the session for the view it just emptied.
         self.leave_drive_view();
+        self.clear_block_listing();
         self.close_group();
         // Keep the query the person left behind in the current history entry
         // before the bin replaces the search box with a location.

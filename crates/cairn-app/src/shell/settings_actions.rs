@@ -158,6 +158,7 @@ impl CairnApp {
         // it alive behind the table, and starts a fresh table entrance.
         // `leave_drive_view` opens the session for the view it just emptied.
         self.leave_drive_view();
+        self.clear_block_listing();
         // The bin's current nav entry already holds the query that preceded it;
         // reading the search box here would overwrite it with the cleared label.
         let leaving_bin = self.recycle_bin.is_open();
