@@ -25,6 +25,7 @@ pub(crate) struct ResultSurfaceInputs {
     pub(crate) recycle_bin_open: bool,
     pub(crate) recycle_bin_loading: bool,
     pub(crate) recycle_bin_error: bool,
+    pub(crate) block_listing_open: bool,
     pub(crate) query_in_flight: bool,
     pub(crate) index_catching_up: bool,
     pub(crate) service_connected: bool,
@@ -39,6 +40,7 @@ impl Default for ResultSurfaceInputs {
             recycle_bin_open: false,
             recycle_bin_loading: false,
             recycle_bin_error: false,
+            block_listing_open: false,
             query_in_flight: false,
             index_catching_up: false,
             service_connected: true,
@@ -53,17 +55,19 @@ impl Default for ResultSurfaceInputs {
 /// the empty band instead of the offline one.
 pub(crate) fn result_surface(inputs: ResultSurfaceInputs) -> ResultSurface {
     let bin_loading = inputs.recycle_bin_open && inputs.recycle_bin_loading;
-    let first_page_loading = (!inputs.recycle_bin_open
+    // A block listing holds in-memory members too: no index request belongs to
+    // it, so a query in flight or an index catch-up must not cover its rows.
+    let local_listing = inputs.recycle_bin_open || inputs.block_listing_open;
+    let first_page_loading = (!local_listing
         && inputs.total_rows == 0
         && (inputs.query_in_flight || (inputs.probing_service && inputs.service_connected)))
         || (bin_loading && inputs.total_rows == 0);
-    let index_loading = !inputs.recycle_bin_open
-        && !inputs.has_query
-        && inputs.index_catching_up
-        && inputs.total_rows == 0;
-    // The bin is shell data, not index data: a stopped service must not replace it
-    // with the offline band, and an empty bin is its own state, not an offline one.
-    let local_location = inputs.recycle_bin_open || inputs.service_connected;
+    let index_loading =
+        !local_listing && !inputs.has_query && inputs.index_catching_up && inputs.total_rows == 0;
+    // The bin and a block listing are shell/tree data, not index data: a stopped service
+    // must not replace them with the offline band, and an empty location is its own state,
+    // not an offline one.
+    let local_location = local_listing || inputs.service_connected;
     // An unreadable bin is authoritative over any rows still in the table. The state band owns the
     // retry path; stale rows must never become actionable again.
     let has_content = !inputs.recycle_bin_error && local_location && inputs.total_rows > 0;
@@ -134,6 +138,45 @@ mod tests {
                 ..Default::default()
             }),
             ResultSurface::Rows
+        );
+    }
+
+    #[test]
+    fn a_block_listing_is_a_local_location() {
+        assert_eq!(
+            result_surface(ResultSurfaceInputs {
+                block_listing_open: true,
+                ..Default::default()
+            }),
+            ResultSurface::Empty
+        );
+        assert_eq!(
+            result_surface(ResultSurfaceInputs {
+                block_listing_open: true,
+                service_connected: false,
+                ..Default::default()
+            }),
+            ResultSurface::Empty,
+            "in-memory rows do not need the index service"
+        );
+        assert_eq!(
+            result_surface(ResultSurfaceInputs {
+                block_listing_open: true,
+                total_rows: 2,
+                service_connected: false,
+                probing_service: true,
+                ..Default::default()
+            }),
+            ResultSurface::Rows
+        );
+        assert_eq!(
+            result_surface(ResultSurfaceInputs {
+                block_listing_open: true,
+                index_catching_up: true,
+                ..Default::default()
+            }),
+            ResultSurface::Empty,
+            "an index catch-up is not this location's request"
         );
     }
 

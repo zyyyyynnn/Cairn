@@ -58,10 +58,11 @@ pub struct NestedTreemapOptions {
     /// Layout-side padding around children in directory containers. Sibling
     /// gutters are applied to the painted rect by the view, so this stays 0.
     pub padding: f32,
-    /// The canvas-size budget for native children per directory. A root
-    /// directory whose tile stays readable is always kept, and a tail of fewer
-    /// than two members merges back, so the count is a guide rather than a
-    /// hard cap; the smallest remaining tail folds into summary blocks.
+    /// Upper bound of the per-directory budget for native children; the budget
+    /// itself scales with the canvas area. Readable root directories are always
+    /// kept and a nested tail of fewer than two members merges back, so this is
+    /// a guide rather than a hard cap; the smallest remaining tail folds into
+    /// summary blocks.
     pub max_children: usize,
     /// A child below this predicted pixel area joins the aggregate tail.
     pub min_tile_area: f32,
@@ -278,7 +279,7 @@ struct TailGroup {
     size: u64,
 }
 
-/// Folds the tail by category, so the canvas can never show one block that mixes several.
+/// Groups the tail by category so each block's tone and label describe its members.
 fn tail_category_groups(nodes: &[TreemapTreeNode], tail: &[usize]) -> Vec<TailGroup> {
     let mut groups: Vec<TailGroup> = Vec::new();
     for &index in tail {
@@ -1586,8 +1587,85 @@ mod tests {
         assert_eq!(laid_bytes, total, "the body keeps every byte");
     }
 
-    /// Every child is either a painted tile or a member of one summary block,
-    /// at any body size: folding must never list a member twice.
+    /// A single-category tail on a small body collapses into one block that
+    /// still lists every member.
+    #[test]
+    fn a_single_category_small_body_keeps_its_block() {
+        let nodes = vec![
+            TreemapTreeNode::new_file(0, "dominant.bin".to_string(), 1777, 0),
+            TreemapTreeNode::new_file(1, "small.bin".to_string(), 28, 0),
+            TreemapTreeNode::new_file(2, "zero-a.bin".to_string(), 0, 0),
+            TreemapTreeNode::new_file(3, "zero-b.bin".to_string(), 0, 0),
+        ];
+        let total: u64 = nodes.iter().map(|node| node.size).sum();
+        let options = NestedTreemapOptions::from_detail_level(5);
+        let layout = layout_nested_treemap(
+            &nodes,
+            r"C:\Small",
+            TreemapRect::new(0.0, 0.0, 96.0, 60.0),
+            &options,
+            0,
+        );
+        let mut shown: Vec<&str> = Vec::new();
+        let mut laid_bytes = 0u64;
+        for node in &layout {
+            laid_bytes += node.item.size;
+            if node.aggregate_count > 0 {
+                shown.extend(
+                    node.aggregate_member_indices
+                        .iter()
+                        .map(|&index| nodes[index as usize].name.as_str()),
+                );
+            } else {
+                shown.push(node.item.name.as_str());
+            }
+        }
+        for node in &nodes {
+            assert!(
+                shown.contains(&node.name.as_str()),
+                "{} vanished",
+                node.name
+            );
+        }
+        assert_eq!(laid_bytes, total, "the body keeps every byte");
+    }
+
+    /// A directory body too flat to hold a readable child keeps its compact
+    /// leaf instead of painting a strip through its children.
+    #[test]
+    fn a_flat_directory_body_stays_a_compact_leaf() {
+        let mut flat = TreemapTreeNode::new_dir(1, "Flat".to_string(), 0);
+        flat.children.push(TreemapTreeNode::new_file(
+            2,
+            "dominant.jpg".to_string(),
+            1_000_000,
+            0,
+        ));
+        for index in 0..40u64 {
+            flat.children.push(TreemapTreeNode::new_file(
+                index + 3,
+                format!("photo{index:02}.jpg"),
+                1_000,
+                0,
+            ));
+        }
+        flat.compute_aggregated_sizes();
+        let options = NestedTreemapOptions::from_detail_level(5);
+        let laid = layout_child(
+            &flat,
+            r"C:\",
+            TreemapRect::new(0.0, 0.0, 480.0, 150.0),
+            &options,
+            0,
+        );
+        assert!(
+            laid.children.is_empty(),
+            "a body that cannot tile its children stays a compact leaf"
+        );
+        assert!(laid.header_rect.is_none());
+    }
+
+    /// No child is painted or folded twice at any body size.
     #[test]
     fn tail_members_are_listed_once_at_every_body_size() {
         let mut nodes = Vec::new();

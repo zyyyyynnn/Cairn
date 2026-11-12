@@ -395,6 +395,12 @@ impl CairnApp {
             self.clear_query_and_scope(window, cx);
             return;
         }
+        // A block listing is a location: with nothing to clear, Escape returns
+        // to the Treemap that owns the block instead of hiding the window.
+        if self.block_listing.is_some() {
+            self.go_back(window, cx);
+            return;
+        }
         // Nothing in scope means the user is done with this window: hide it to the tray.
         crate::app::hide_main_window();
     }
@@ -1252,6 +1258,46 @@ mod visibility_tests {
     use super::*;
     use crate::shell::block_listing::BlockListing;
     use core::prelude::rust_2021::test;
+
+    #[test]
+    fn escape_returns_from_a_block_listing_to_its_folder() {
+        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
+            gpui_kit::init(cx);
+            let _ = gpui_kit::open_window(
+                gpui_kit::gpui::WindowOptions::default(),
+                cx,
+                |window, cx| {
+                    let app = cx.new(|cx| CairnApp::new(window, cx));
+
+                    app.update(cx, |this, cx| {
+                        this.open_drive_visualization('C', window, cx);
+                        // The hand-off leaves the canvas for the listing, which
+                        // owns neither a drive scope nor a file-type filter.
+                        this.leave_drive_view();
+                        this.block_listing =
+                            Some(BlockListing::new(r"C:\Windows".to_string(), 2, Vec::new()));
+                        this.query.scope_drive = None;
+                        this.query.active_filter = FilterCategory::All;
+
+                        // The first Escape clears the in-place filter and keeps
+                        // the location.
+                        this.query.search_input.set_text("amd64");
+                        this.escape_query(&EscapeQuery, window, cx);
+                        assert!(this.block_listing.is_some());
+                        assert!(this.query.search_input.text.is_empty());
+
+                        // With nothing left to clear it returns to the folder.
+                        this.escape_query(&EscapeQuery, window, cx);
+                        assert!(this.block_listing.is_none());
+                        assert_eq!(this.drive_view, Some('C'));
+                    });
+
+                    cx.quit();
+                    app
+                },
+            );
+        });
+    }
 
     #[test]
     fn search_flag_rows_hide_while_a_block_listing_is_open() {

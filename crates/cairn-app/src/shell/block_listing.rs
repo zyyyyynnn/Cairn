@@ -227,7 +227,7 @@ impl CairnApp {
         self.install_block_listing_rows(cx);
     }
 
-    /// Leaves the listing; called by every location entry point.
+    /// Leaves the listing.
     pub(crate) fn clear_block_listing(&mut self) {
         self.block_listing = None;
     }

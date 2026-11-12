@@ -280,6 +280,7 @@ impl CairnApp {
             recycle_bin_open: self.recycle_bin.is_open(),
             recycle_bin_loading: self.recycle_bin.is_loading(),
             recycle_bin_error: self.recycle_bin.error().is_some(),
+            block_listing_open: self.block_listing.is_some(),
             query_in_flight: self.query.is_searching,
             index_catching_up: self.service.status.is_any_loading(),
             service_connected: self.service.is_service_connected,
@@ -515,6 +516,31 @@ impl CairnApp {
                 (
                     "recycle_bin_no_matches_title",
                     Icon::new(IconName::Search)
+                        .size_8()
+                        .text_color(tokens.muted_foreground)
+                        .into_any_element(),
+                )
+            };
+            let message = self.i18n.get_text(message_key);
+            return render_state_band(tokens, control, message, icon, None);
+        }
+
+        if self.block_listing.is_some() {
+            // The rows are this location's members: an empty table is either a
+            // filter with no match or a block whose members are gone, never an
+            // empty index.
+            let (message_key, icon) = if self.query.search_input.text.trim().is_empty() {
+                (
+                    "treemap_block_empty_title",
+                    Icon::new(AssetIconName::Folder)
+                        .size_8()
+                        .text_color(tokens.muted_foreground)
+                        .into_any_element(),
+                )
+            } else {
+                (
+                    "treemap_block_no_matches_title",
+                    Icon::new(AssetIconName::Search)
                         .size_8()
                         .text_color(tokens.muted_foreground)
                         .into_any_element(),

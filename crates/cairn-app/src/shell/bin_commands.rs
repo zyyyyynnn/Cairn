@@ -72,11 +72,15 @@ impl CairnApp {
         // listing fades in instead of replacing the table text in place.
         // `leave_drive_view` opens the session for the view it just emptied.
         self.leave_drive_view();
-        self.clear_block_listing();
+        // A block listing's filter is a location-local search, not the query
+        // this entry describes; taking it before the update keeps that text.
+        let leaving_listing = self.block_listing.take().is_some();
         self.close_group();
         // Keep the query the person left behind in the current history entry
         // before the bin replaces the search box with a location.
-        self.update_current_nav_state_text();
+        if !leaving_listing {
+            self.update_current_nav_state_text();
+        }
         // Invalidate any in-flight query: its answer belongs to the table and
         // must not replace the listing that is about to be shown.
         self.query.query_id += 1;
@@ -569,7 +573,11 @@ impl CairnApp {
 #[cfg(test)]
 mod bin_command_tests {
     use super::{reconcile_bin_items, reconcile_empty_bin};
+    use crate::app::CairnApp;
+    use crate::shell::block_listing::BlockListing;
     use crate::shell::os::{BinOperationError, RecycleBinItem};
+    use core::prelude::rust_2021::test;
+    use gpui_kit::gpui::AppContext as _;
 
     fn item(name: &str) -> RecycleBinItem {
         RecycleBinItem {
@@ -609,5 +617,35 @@ mod bin_command_tests {
         );
         assert!(reconcile_empty_bin(Ok(()), &listing).is_err());
         assert_eq!(reconcile_empty_bin(Ok(()), &Ok(Vec::new())), Ok(()));
+    }
+
+    #[test]
+    fn entering_the_bin_keeps_the_query_behind_a_block_listing() {
+        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
+            gpui_kit::init(cx);
+            let _ = gpui_kit::open_window(
+                gpui_kit::gpui::WindowOptions::default(),
+                cx,
+                |window, cx| {
+                    let app = cx.new(|cx| CairnApp::new(window, cx));
+
+                    app.update(cx, |this, cx| {
+                        this.query.search_input.set_text("kept query");
+                        this.record_nav_state();
+                        let entry = this.nav_history_index;
+                        this.block_listing =
+                            Some(BlockListing::new(r"C:\Windows".to_string(), 2, Vec::new()));
+                        this.query.search_input.set_text("amd64");
+                        this.open_recycle_bin(window, cx);
+                        assert!(this.block_listing.is_none());
+                        assert_eq!(this.nav_history[entry].text, "kept query");
+                        assert!(this.query.search_input.text.is_empty());
+                    });
+
+                    cx.quit();
+                    app
+                },
+            );
+        });
     }
 }

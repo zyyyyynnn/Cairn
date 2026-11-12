@@ -296,6 +296,7 @@ impl CairnApp {
             // count/size summary of whatever the rows currently are.
             let mut args = FluentArgs::new();
             args.set("dir", listing.directory().to_string());
+            args.set("count", listing.count() as i64);
             args.set("count_text", format_count(listing.count()));
             self.i18n
                 .get_text_with_args("treemap_block_filter_placeholder", &args)

@@ -98,6 +98,7 @@ impl CairnApp {
             // gets the owning directory and the block the rows came from.
             let mut scope_args = FluentArgs::new();
             scope_args.set("dir", listing.directory().to_string());
+            scope_args.set("count", listing.count() as i64);
             scope_args.set("count_text", format_count(listing.count()));
             let scope = self
                 .i18n
