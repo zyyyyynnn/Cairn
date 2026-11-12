@@ -9,11 +9,9 @@ use crate::app::CairnApp;
 use crate::search::filters::FilterCategory;
 use crate::service::ipc_tasks::get_tokio_runtime;
 use crate::shell::os::open_file;
-use crate::shell::status_bar::format_count;
 use crate::treemap::state::{tree_unavailable_from_code, TreemapUnavailable, TreemapViewState};
 use cairn_core::treemap::same_directory;
 use cairn_protocol::message::{ResponsePayload, MAX_TREE_DEPTH};
-use fluent_bundle::FluentArgs;
 use gpui_kit::gpui::*;
 use std::path::PathBuf;
 
@@ -92,6 +90,7 @@ impl CairnApp {
     /// when the service cannot answer, the canvas reports the directory as
     /// unavailable rather than scanning the disk itself.
     pub fn start_treemap_scan(&mut self, scan_path: PathBuf, cx: &mut Context<Self>) {
+        self.clear_block_listing();
         self.clear_treemap_path_menu();
         let Some(ref mut state) = self.treemap_state else {
             return;
@@ -235,8 +234,9 @@ impl CairnApp {
         cx.notify();
     }
 
-    /// Opens the canvas selection the way a double click does: a summary block becomes a
-    /// view-only layer, a directory drills down, a file opens in its associated application.
+    /// Opens the canvas selection the way a double click does: a summary block lists
+    /// its members in the table, a directory drills down, a file opens in its
+    /// associated application.
     pub fn treemap_open_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(node) = self
             .treemap_state
@@ -246,14 +246,7 @@ impl CairnApp {
             return;
         };
         if node.is_aggregate() {
-            let mut args = FluentArgs::new();
-            args.set("count", node.aggregate_count as i64);
-            args.set("count_text", format_count(node.aggregate_count));
-            let label = self.i18n.get_text_with_args("treemap_aggregate", &args);
-            if let Some(st) = self.treemap_state.as_mut() {
-                st.open_block(&node.path, label);
-            }
-            cx.notify();
+            self.open_block_listing(&node.path, window, cx);
         } else if node.item.is_dir {
             self.treemap_drill_down(&node.path, window, cx);
         } else {
@@ -271,6 +264,7 @@ impl CairnApp {
         // Leaving the visualization releases the partial tree instead of keeping
         // it alive behind the table, and starts a fresh table entrance.
         self.leave_drive_view();
+        self.clear_block_listing();
         self.query.active_filter = FilterCategory::All;
         self.query.search_input.set_text(&Self::parent_query(path));
         self.record_nav_state();

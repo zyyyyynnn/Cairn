@@ -8,9 +8,8 @@ use crate::treemap::navigation::TreemapNavigation;
 use crate::treemap::paint::painted_gutter_device;
 use crate::treemap::zoom::TreemapZoom;
 use cairn_core::treemap::{
-    aggregate_parent_path, is_drive_root, layout_nested_treemap, path_is_within, relative_segments,
-    same_directory, NestedTreemapLayoutNode, NestedTreemapOptions, TreemapCategory, TreemapRect,
-    TreemapTreeNode,
+    is_drive_root, layout_nested_treemap, path_is_within, relative_segments, same_directory,
+    NestedTreemapLayoutNode, NestedTreemapOptions, TreemapRect, TreemapTreeNode,
 };
 use cairn_protocol::message::{
     TreeEntryData, ERROR_CODE_TREE_NOT_DIRECTORY, ERROR_CODE_TREE_NOT_INDEXED,
@@ -66,15 +65,6 @@ pub(crate) fn tree_unavailable_from_code(code: u32) -> TreemapUnavailable {
     }
 }
 
-/// One summary block opened as the canvas root: the folded items of one category in one real
-/// directory. It exists only in the view, so it has no filesystem path of its own.
-#[derive(Clone, Debug)]
-pub(super) struct VirtualLayer {
-    pub(super) parent_path: String,
-    pub(super) members: Vec<u32>,
-    pub(super) label: String,
-}
-
 /// State for the drive disk space Treemap visualization.
 pub struct TreemapViewState {
     drive: char,
@@ -92,10 +82,6 @@ pub struct TreemapViewState {
     cached_dir_trees: HashMap<String, Arc<TreemapTreeNode>>,
     /// Calculated rectangular layout nodes (hierarchical nested)
     pub(super) layout_nodes: Vec<NestedTreemapLayoutNode>,
-    /// The summary block opened as a canvas layer, if any.
-    pub(super) virtual_layer: Option<VirtualLayer>,
-    /// The layer Back left, so Forward can enter it again.
-    forward_layer: Option<VirtualLayer>,
     /// A context menu is open: hover tooltips stay hidden while the menu is active so a
     /// tooltip cannot cover the menu.
     pub(super) suppress_tooltip: bool,
@@ -106,7 +92,6 @@ pub struct TreemapViewState {
     pub(super) selected_path: Option<String>,
     /// Which categories stay at full strength. Filtered categories are dimmed
     /// in place so the spatial layout and selection path never move.
-    pub(super) category_filter: [bool; TreemapCategory::COUNT],
     /// Total aggregated size of all items currently displayed in the view
     current_dir_total_size: u64,
     /// Total number of items under the current Treemap root, at every depth.
@@ -166,11 +151,8 @@ impl TreemapViewState {
             cached_dir_trees: HashMap::new(),
             layout_nodes: Vec::new(),
             detail_level: 5,
-            virtual_layer: None,
-            forward_layer: None,
             suppress_tooltip: false,
             selected_path: None,
-            category_filter: [true; TreemapCategory::COUNT],
             current_dir_total_size: 0,
             current_dir_total_items: 0,
             focus: Some(focus.tab_stop(true)),
@@ -214,11 +196,8 @@ impl TreemapViewState {
             cached_dir_trees: HashMap::new(),
             layout_nodes: Vec::new(),
             detail_level: 5,
-            virtual_layer: None,
-            forward_layer: None,
             suppress_tooltip: false,
             selected_path: None,
-            category_filter: [true; TreemapCategory::COUNT],
             current_dir_total_size: 0,
             current_dir_total_items: 0,
             focus: None,
@@ -253,17 +232,15 @@ impl TreemapViewState {
     }
 
     pub fn can_go_back(&self) -> bool {
-        // A block layer is one step of the drill history: back leaves it for the real directory.
-        self.virtual_layer.is_some() || self.navigation.can_go_back()
+        self.navigation.can_go_back()
     }
 
     pub fn can_go_forward(&self) -> bool {
-        // Forward re-enters the layer Back just left; inside a layer there is nothing ahead.
-        self.forward_layer.is_some() || self.navigation.can_go_forward()
+        self.navigation.can_go_forward()
     }
 
     pub fn can_go_up(&self) -> bool {
-        self.virtual_layer.is_some() || self.navigation.can_go_up()
+        self.navigation.can_go_up()
     }
 
     pub fn clear_selection(&mut self) -> bool {
@@ -279,7 +256,6 @@ impl TreemapViewState {
         self.reset_scan_state();
         self.selected_path = None;
         self.suppress_tooltip = false;
-        self.discard_virtual_layer();
 
         let current_dir = self.navigation.current_dir().to_string();
 
@@ -419,26 +395,7 @@ impl TreemapViewState {
         // The tree carries names only, so the layout materializes tile paths
         // from the directory the view is rooted at.
         let parent = self.navigation.current_dir().to_string();
-        if let Some(layer) = self.virtual_layer.as_ref() {
-            let members: Vec<TreemapTreeNode> = {
-                let children = self.children_at(&layer.parent_path);
-                layer
-                    .members
-                    .iter()
-                    .filter_map(|&index| children.get(index as usize))
-                    .map(|node| {
-                        let mut shallow = node.clone();
-                        shallow.children.clear();
-                        shallow
-                    })
-                    .collect()
-            };
-            let mut layer_options = options;
-            layer_options.max_children = members.len();
-            layer_options.allow_aggregates = false;
-            self.layout_nodes =
-                layout_nested_treemap(&members, &layer.parent_path, bounds, &layer_options, 0);
-        } else if let Some(ref tree) = self.root_tree {
+        if let Some(ref tree) = self.root_tree {
             self.layout_nodes = layout_nested_treemap(&tree.children, &parent, bounds, &options, 0);
         } else {
             self.layout_nodes.clear();
@@ -474,17 +431,12 @@ impl TreemapViewState {
 
     /// Drills down into the specified subdirectory path.
     pub(super) fn drill_down(&mut self, target_path: &str) -> Option<PathBuf> {
-        self.discard_virtual_layer();
         self.navigation.enter(target_path);
         self.load_current_dir()
     }
 
     /// Drills up to the parent directory as a history step.
     pub(super) fn drill_up(&mut self) -> Option<PathBuf> {
-        if self.leave_virtual_layer_into_history() {
-            return None;
-        }
-        self.forward_layer = None;
         if !self.navigation.up() {
             return None;
         }
@@ -493,10 +445,6 @@ impl TreemapViewState {
 
     /// Returns to the directory most recently left by a drill or [`Self::drill_up`].
     pub(super) fn drill_back(&mut self) -> Option<PathBuf> {
-        if self.leave_virtual_layer_into_history() {
-            return None;
-        }
-        self.forward_layer = None;
         if !self.navigation.back() {
             return None;
         }
@@ -506,67 +454,19 @@ impl TreemapViewState {
     /// Returns to the directory most recently left by Back, keeping older
     /// departures for the Forward after it.
     pub(super) fn drill_forward(&mut self) -> Option<PathBuf> {
-        if self.virtual_layer.is_some() {
-            // Nothing lies ahead of a block layer; Forward must not close it.
-            return None;
-        }
-        if let Some(layer) = self.forward_layer.take() {
-            self.enter_virtual_layer(layer);
-            return None;
-        }
         if !self.navigation.forward() {
             return None;
         }
         self.load_current_dir()
     }
 
-    /// Opens one summary block as the canvas root.
-    pub(super) fn enter_virtual_layer(&mut self, layer: VirtualLayer) {
-        self.selected_path = None;
-        self.zoom.reset_view();
-        self.virtual_layer = Some(layer);
-        // A new peek starts a new branch: the layer Back left is no longer ahead.
-        self.forward_layer = None;
-        self.recompute_layout();
-    }
-
-    /// Opens the summary block at `path` as a canvas layer, the step double-click and Enter take.
-    /// `label` is the localized summary text the layer carries. A path that names no block in the
-    /// current layout changes nothing.
-    pub(super) fn open_block(&mut self, path: &str, label: String) {
-        let Some(node) = find_node_by_path(&self.layout_nodes, path) else {
-            return;
-        };
-        let Some(parent_path) = aggregate_parent_path(&node.path) else {
-            return;
-        };
-        let layer = VirtualLayer {
-            parent_path: parent_path.to_string(),
-            members: node.aggregate_member_indices.clone(),
-            label,
-        };
-        self.enter_virtual_layer(layer);
-    }
-
-    /// Leaves the layer as one history step, keeping it for Forward.
-    fn leave_virtual_layer_into_history(&mut self) -> bool {
-        if let Some(layer) = self.virtual_layer.take() {
-            self.forward_layer = Some(layer);
-            self.recompute_layout();
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Drops the layer without a history step, for navigation that rebuilds the view anyway.
-    fn discard_virtual_layer(&mut self) {
-        self.virtual_layer = None;
-        self.forward_layer = None;
+    /// The laid-out node with this path, for the summary-block hand-off.
+    pub(crate) fn layout_node(&self, path: &str) -> Option<&NestedTreemapLayoutNode> {
+        find_node_by_path(&self.layout_nodes, path)
     }
 
     /// The children of `parent_path` in the tree the canvas is showing.
-    pub(super) fn children_at(&self, parent_path: &str) -> &[TreemapTreeNode] {
+    pub(crate) fn children_at(&self, parent_path: &str) -> &[TreemapTreeNode] {
         let Some(tree) = self.root_tree.as_deref() else {
             return &[];
         };
@@ -597,19 +497,6 @@ impl TreemapViewState {
     pub fn selected_real_path(&self) -> Option<&str> {
         let node = self.selected_node()?;
         (!node.is_aggregate()).then_some(node.path.as_str())
-    }
-
-    pub fn category_visible(&self, category: TreemapCategory) -> bool {
-        self.category_filter[category as usize]
-    }
-
-    pub fn toggle_category(&mut self, category: TreemapCategory) {
-        let slot = &mut self.category_filter[category as usize];
-        *slot = !*slot;
-    }
-
-    pub fn show_all_categories(&mut self) {
-        self.category_filter = [true; TreemapCategory::COUNT];
     }
 
     /// Total aggregated byte size of the current Treemap root.
@@ -684,17 +571,6 @@ impl TreemapViewState {
         let Some(count) = removed_count else {
             return;
         };
-
-        if let Some(ref layer) = self.virtual_layer {
-            if path_is_within(target_path, &layer.parent_path) {
-                self.discard_virtual_layer();
-            }
-        }
-        if let Some(ref layer) = self.forward_layer {
-            if path_is_within(target_path, &layer.parent_path) {
-                self.forward_layer = None;
-            }
-        }
 
         self.cached_dir_trees.clear();
 
@@ -838,7 +714,7 @@ mod tests {
     use core::prelude::rust_2021::test;
 
     use super::*;
-    use cairn_core::treemap::TreemapItem;
+    use cairn_core::treemap::{TreemapCategory, TreemapItem};
 
     fn layout_node(
         id: u64,
@@ -997,81 +873,6 @@ mod tests {
         root.compute_aggregated_sizes();
         assert_eq!(root.size, 0);
         assert_eq!(root.descendant_count(), 1); // Windows
-    }
-
-    /// A block layer is one step of the drill history: Back and Up leave it, Forward enters it
-    /// again, and Forward inside the layer does nothing instead of closing it.
-    #[test]
-    fn a_block_layer_is_one_step_of_the_drill_history() {
-        let mut state = TreemapViewState::new_for_test('C');
-        let layer = VirtualLayer {
-            parent_path: r"C:\Windows".into(),
-            members: Vec::new(),
-            label: "其余 1 项".into(),
-        };
-        state.enter_virtual_layer(layer);
-        assert!(state.virtual_layer.is_some());
-        assert!(state.can_go_back(), "back leaves the layer");
-        assert!(state.can_go_up(), "up leaves the layer");
-        assert!(!state.can_go_forward(), "nothing lies ahead inside a layer");
-        assert!(state.drill_forward().is_none());
-        assert!(
-            state.virtual_layer.is_some(),
-            "forward inside a layer must not close it"
-        );
-
-        assert!(state.drill_back().is_none());
-        assert!(state.virtual_layer.is_none());
-        assert!(
-            state.can_go_forward(),
-            "forward re-enters the layer it left"
-        );
-
-        assert!(state.drill_forward().is_none());
-        assert!(state.virtual_layer.is_some());
-    }
-
-    /// Opening a block enters its layer with the owning directory and the folded members,
-    /// clearing the selection so the layer starts unselected.
-    #[test]
-    fn opening_a_block_enters_its_virtual_layer() {
-        let mut state = TreemapViewState::new_for_test('C');
-        let mut block = layout_node(1, r"C:\Windows::<tail:document>", "block", vec![]);
-        block.aggregate_count = 2;
-        block.aggregate_member_indices = vec![3, 5];
-        state.layout_nodes.push(block);
-        state.selected_path = Some(r"C:\Windows::<tail:document>".into());
-
-        state.open_block(r"C:\Windows::<tail:document>", "其余 2 项".into());
-
-        let layer = state
-            .virtual_layer
-            .as_ref()
-            .expect("the block opens as a layer");
-        assert_eq!(layer.parent_path, r"C:\Windows");
-        assert_eq!(layer.members, vec![3, 5]);
-        assert_eq!(layer.label, "其余 2 项");
-        assert_eq!(state.selected_path, None);
-        assert!(state.can_go_back(), "back leaves the opened layer");
-    }
-
-    /// A real directory path or an identity missing from the layout names no block;
-    /// opening it leaves the canvas and its selection untouched.
-    #[test]
-    fn open_block_ignores_paths_that_name_no_block() {
-        let mut state = TreemapViewState::new_for_test('C');
-        state
-            .layout_nodes
-            .push(layout_node(1, r"C:\Windows", "Windows", vec![]));
-        state.selected_path = Some(r"C:\Windows".into());
-
-        state.open_block(r"C:\Windows", "label".into());
-        assert!(state.virtual_layer.is_none());
-        assert_eq!(state.selected_path.as_deref(), Some(r"C:\Windows"));
-
-        state.open_block(r"C:\Missing::<tail:document>", "label".into());
-        assert!(state.virtual_layer.is_none());
-        assert_eq!(state.selected_path.as_deref(), Some(r"C:\Windows"));
     }
 
     #[test]
@@ -1407,39 +1208,6 @@ mod tests {
     }
 
     #[test]
-    fn virtual_layer_disallows_secondary_folding_in_layout() {
-        let mut state = TreemapViewState::new_for_test('C');
-        let mut root = TreemapTreeNode::new_dir(1, "C:".into(), 0);
-        for i in 0..30 {
-            root.children.push(TreemapTreeNode::new_file(
-                i as u64 + 2,
-                format!("item_{i}.txt"),
-                100,
-                0,
-            ));
-        }
-        state.set_tree(root);
-
-        // Create a virtual layer containing all 30 items
-        let layer = VirtualLayer {
-            parent_path: r"C:\".to_string(),
-            members: (0..30).collect(),
-            label: "30 items".to_string(),
-        };
-        state.enter_virtual_layer(layer);
-
-        assert!(state.virtual_layer.is_some());
-        assert_eq!(state.layout_nodes.len(), 30);
-        assert!(
-            state
-                .layout_nodes
-                .iter()
-                .all(|node| node.aggregate_count == 0),
-            "virtual layers must not produce secondary aggregate blocks"
-        );
-    }
-
-    #[test]
     fn suppress_tooltip_resets_on_navigation() {
         let mut state = TreemapViewState::new_for_test('C');
         state.suppress_tooltip = true;
@@ -1471,47 +1239,5 @@ mod tests {
         assert_eq!(state.children_at(r"D:\Windows").len(), 0);
         assert_eq!(state.children_at(r"C:\Nonexistent").len(), 0);
         assert_eq!(state.children_at(r"C:\Windows_Old").len(), 0);
-    }
-
-    #[test]
-    fn item_removal_discards_active_virtual_layer() {
-        let mut state = TreemapViewState::new_for_test('C');
-        let mut root = TreemapTreeNode::new_dir(1, "C:".into(), 0);
-        let mut win = TreemapTreeNode::new_dir(2, "Windows".into(), 0);
-        for i in 0..10 {
-            win.children.push(TreemapTreeNode::new_file(
-                i as u64 + 10,
-                format!("win_{i}.txt"),
-                100,
-                0,
-            ));
-        }
-        root.children.push(win);
-        root.children
-            .push(TreemapTreeNode::new_file(3, "root_file.txt".into(), 50, 0));
-        state.set_tree(root);
-
-        let layer = VirtualLayer {
-            parent_path: r"C:\Windows".to_string(),
-            members: (0..10).collect(),
-            label: "10 items".to_string(),
-        };
-        state.enter_virtual_layer(layer);
-        assert!(state.virtual_layer.is_some());
-
-        // 1. Removing an item outside the virtual layer hierarchy preserves it
-        state.remove_item(r"C:\root_file.txt");
-        assert!(
-            state.virtual_layer.is_some(),
-            "remove_item outside virtual layer directory must preserve the active virtual layer"
-        );
-
-        // 2. Removing an item inside the virtual layer hierarchy cleanly discards it
-        state.remove_item(r"C:\Windows\win_0.txt");
-        assert!(
-            state.virtual_layer.is_none(),
-            "remove_item inside virtual layer hierarchy must discard active virtual layer"
-        );
-        assert!(state.forward_layer.is_none());
     }
 }

@@ -151,6 +151,19 @@ impl CairnApp {
     }
 
     pub fn go_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A summary block listing is not a query state: Back reopens the
+        // Treemap at the directory that owns the block.
+        if let Some(listing) = self.block_listing.take() {
+            let dir = listing.directory().to_string();
+            if let Some(drive) = dir.chars().next().map(|c| c.to_ascii_uppercase()) {
+                self.open_drive_at(drive, &dir, window, cx);
+                self.query.search_input.clear();
+                self.query.scope_drive = None;
+                self.query.active_filter = FilterCategory::All;
+                cx.notify();
+                return;
+            }
+        }
         if self.recycle_bin.is_open() {
             self.return_from_recycle_bin(window, cx);
             return;
@@ -226,6 +239,7 @@ impl CairnApp {
         // A visualization entry owns the surface, so its table query is restored without running a
         // search whose rows nobody can see.
         if !is_visualization {
+            self.clear_block_listing();
             self.trigger_search(cx);
         }
         cx.notify();

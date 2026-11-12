@@ -63,8 +63,6 @@ pub struct NestedTreemapOptions {
     pub max_children: usize,
     /// A child below this predicted pixel area joins the aggregate tail.
     pub min_tile_area: f32,
-    /// Whether to fold small tail children into aggregate blocks.
-    pub allow_aggregates: bool,
 }
 
 impl Default for NestedTreemapOptions {
@@ -92,7 +90,6 @@ impl NestedTreemapOptions {
             padding: 0.0,
             max_children,
             min_tile_area,
-            allow_aggregates: true,
         }
     }
 }
@@ -149,8 +146,9 @@ pub fn aggregate_parent_path(path: &str) -> Option<&str> {
 /// One entry of a directory's display plan, in squarify input order.
 #[derive(Clone, Debug)]
 enum DisplayEntry {
-    /// A real child, by index into the directory's children.
-    Node(usize),
+    /// A real child, by index into the directory's children, with the layout
+    /// weight it competes with (`size` unless a readable tile needs more).
+    Node { index: usize, weight: u64 },
     /// One category's folded tail: the members of that category the canvas did not keep as tiles.
     Aggregate {
         path: String,
@@ -158,6 +156,9 @@ enum DisplayEntry {
         size: u64,
         /// The category most of the folded bytes belong to; the block takes that tone.
         category: TreemapCategory,
+        /// Area weight the block competes with; raised above `size` when the
+        /// block would otherwise be painted as a strip.
+        weight: u64,
     },
 }
 
@@ -169,24 +170,20 @@ struct DisplayPlan {
 }
 
 impl DisplayPlan {
-    fn squarified(
-        nodes: &[TreemapTreeNode],
-        entries: Vec<DisplayEntry>,
-        bounds: TreemapRect,
-    ) -> Self {
-        let sizes: Vec<u64> = entries
+    fn squarified(entries: Vec<DisplayEntry>, bounds: TreemapRect) -> Self {
+        let weights: Vec<u64> = entries
             .iter()
             .map(|entry| match entry {
-                DisplayEntry::Node(index) => nodes[*index].size,
-                DisplayEntry::Aggregate { size, .. } => *size,
+                DisplayEntry::Node { weight, .. } => *weight,
+                DisplayEntry::Aggregate { weight, .. } => *weight,
             })
             .collect();
-        let cells = squarify(&sizes, bounds);
+        let cells = squarify(&weights, bounds);
         Self { entries, cells }
     }
 
     /// Splits the cells that break the tile bounds into real children to reflow into the tail and
-    /// the summary members to drop.
+    /// the folded members an offending summary block stands for.
     fn offenders(&self) -> (Vec<usize>, Vec<usize>) {
         let mut slivers = Vec::new();
         let mut dropped = Vec::new();
@@ -195,7 +192,7 @@ impl DisplayPlan {
                 continue;
             }
             match &self.entries[cell.index] {
-                DisplayEntry::Node(index) => slivers.push(*index),
+                DisplayEntry::Node { index, .. } => slivers.push(*index),
                 DisplayEntry::Aggregate { members, .. } => dropped.extend(members.iter().copied()),
             }
         }
@@ -219,9 +216,14 @@ fn display_entries(
     parent: &str,
     kept: &[usize],
     tail: &[usize],
+    aggregate_floor: u64,
+    collapse: bool,
 ) -> Vec<DisplayEntry> {
     let mut entries = Vec::with_capacity(kept.len() + 1);
-    entries.extend(kept.iter().map(|&index| DisplayEntry::Node(index)));
+    entries.extend(kept.iter().map(|&index| DisplayEntry::Node {
+        index,
+        weight: nodes[index].size,
+    }));
     if tail.is_empty() {
         return entries;
     }
@@ -237,12 +239,29 @@ fn display_entries(
     } else {
         parent.trim_end_matches(['\\', '/'])
     };
-    for group in tail_category_groups(nodes, tail) {
+    let groups = if collapse {
+        // A body too small for one cell per category keeps one summary of the
+        // whole tail; its tone follows the bytes it holds. Members are never
+        // deleted while the body can still carry a readable cell.
+        vec![TailGroup {
+            category: tail_category_groups(nodes, tail)
+                .into_iter()
+                .max_by(|a, b| a.size.cmp(&b.size))
+                .map(|group| group.category)
+                .unwrap_or(TreemapCategory::Other),
+            size: tail.iter().map(|&index| nodes[index].size).sum(),
+            members: tail.to_vec(),
+        }]
+    } else {
+        tail_category_groups(nodes, tail)
+    };
+    for group in groups {
         entries.push(DisplayEntry::Aggregate {
             path: aggregate_path(parent, group.category),
             members: group.members,
             size: group.size,
             category: group.category,
+            weight: group.size.max(aggregate_floor),
         });
     }
     entries
@@ -280,9 +299,11 @@ fn tail_category_groups(nodes: &[TreemapTreeNode], tail: &[usize]) -> Vec<TailGr
     groups
 }
 
-/// Plans a directory with more than one sized child: keeps the largest
-/// children that can carry a readable tile, folds the rest into summary
-/// groups, and reflows until no painted cell breaks the tile bounds.
+/// Plans a directory with more than one sized child. Areas are strictly
+/// proportional: a child keeps a native tile at its byte area when that area can
+/// carry the smallest readable cell, and folds into one summary block per
+/// category when it cannot (or when the arrangement would paint it as a strip).
+/// A summary block is the only cell allowed a readable floor.
 fn plan_with_tail(
     nodes: &[TreemapTreeNode],
     parent: &str,
@@ -299,21 +320,18 @@ fn plan_with_tail(
             .then_with(|| nodes[a].name.cmp(&nodes[b].name))
     });
 
-    // Root directories are navigation targets while they can carry a readable
-    // tile. A partial scan gives some of them a tiny placeholder size, and a
-    // 4x350 column is not a navigation target; it is an unclickable strip.
-    // Every item, root or not, goes through the same sliver reflow and can
-    // reappear once its bytes grow.
     let area = bounds.area();
+    let keep_area = options
+        .min_tile_area
+        .max(TREEMAP_MIN_TILE_WIDTH * TREEMAP_MIN_TILE_HEIGHT);
     let max_children = ((area / 2400.0) as usize).clamp(4, options.max_children.max(4));
     let mut kept = Vec::new();
     let mut tail = Vec::new();
     for (rank, &index) in order.iter().enumerate() {
         let predicted_area = area * (nodes[index].size as f32 / total_size as f32);
-        let keep_for_navigation =
-            depth == 0 && nodes[index].is_dir && predicted_area >= options.min_tile_area;
+        let keep_for_navigation = depth == 0 && nodes[index].is_dir && predicted_area >= keep_area;
         if keep_for_navigation
-            || (kept.len() < max_children && (rank == 0 || predicted_area >= options.min_tile_area))
+            || (kept.len() < max_children && (rank == 0 || predicted_area >= keep_area))
         {
             kept.push(index);
         } else {
@@ -324,40 +342,84 @@ fn plan_with_tail(
         kept.append(&mut tail);
     }
 
-    let mut plan =
-        DisplayPlan::squarified(nodes, display_entries(nodes, parent, &kept, &tail), bounds);
-    loop {
+    let mut aggregate_floor: u64 = 0;
+    let mut collapse = false;
+    let assemble = |kept: &[usize], tail: &[usize], aggregate_floor: u64, collapse: bool| {
+        DisplayPlan::squarified(
+            display_entries(nodes, parent, kept, tail, aggregate_floor, collapse),
+            bounds,
+        )
+    };
+    let mut plan = assemble(&kept, &tail, aggregate_floor, collapse);
+    for _ in 0..64 {
         let (slivers, dropped) = plan.offenders();
         if slivers.is_empty() && dropped.is_empty() {
             break;
         }
-
-        // Summary groups that cannot meet the aspect bound are removed
-        // instead of leaving a thin color strip. Their bytes stay in the
-        // directory header, and the surviving tiles fill the area. Remove
-        // them even when every painted item was a summary; otherwise the
-        // same offending layout is rebuilt forever.
-        if !dropped.is_empty() {
-            tail.retain(|index| !dropped.contains(index));
-        }
         if !slivers.is_empty() {
+            // Areas stay proportional: a child that cannot carry a tile at its
+            // byte area folds into the summary instead of growing.
             kept.retain(|index| !slivers.contains(index));
             tail.extend(slivers.iter().copied());
+            if kept.is_empty() && tail.is_empty() {
+                plan = DisplayPlan::default();
+                break;
+            }
+            plan = assemble(&kept, &tail, aggregate_floor, collapse);
+            continue;
         }
-
-        if kept.is_empty() && tail.is_empty() {
-            plan = DisplayPlan::default();
-            break;
+        if !tail.is_empty() {
+            // Only a folded block breaks the bounds: it may take the minimum
+            // readable area (the one allowed deviation), never a byte share.
+            if aggregate_floor < total_size / 2 {
+                aggregate_floor = aggregate_floor
+                    .saturating_mul(2)
+                    .max((total_size / 200).max(1))
+                    .min(total_size / 2);
+            } else if !collapse {
+                // Per-category blocks cannot share a body this small: keep one
+                // summary of the whole tail instead of deleting its members.
+                collapse = true;
+            } else {
+                // Only a body that cannot carry any readable cell drops them.
+                tail.retain(|index| !dropped.contains(index));
+            }
+            if kept.is_empty() && tail.is_empty() {
+                plan = DisplayPlan::default();
+                break;
+            }
+            plan = assemble(&kept, &tail, aggregate_floor, collapse);
+            continue;
         }
-        plan = DisplayPlan::squarified(nodes, display_entries(nodes, parent, &kept, &tail), bounds);
+        break;
     }
 
-    // A container must never end up with an empty body. If repeated drops
+    // The loop has a hard budget; a pathological canvas may still carry an
+    // offending cell. Fold it away rather than painting a strip.
+    let (slivers, dropped) = plan.offenders();
+    if !slivers.is_empty() || !dropped.is_empty() {
+        kept.retain(|index| !slivers.contains(index));
+        tail.extend(slivers.iter().copied());
+        tail.retain(|index| !dropped.contains(index));
+        plan = if kept.is_empty() && tail.is_empty() {
+            DisplayPlan::default()
+        } else {
+            assemble(&kept, &tail, aggregate_floor, collapse)
+        };
+    }
+
+    // A container must never end up with an empty body. If repeated folds
     // removed every display item, fall back to its largest child so the area
     // is tiled and labeled instead of showing an empty pane.
     if plan.entries.is_empty() {
         if let Some(&largest) = order.first() {
-            plan = DisplayPlan::squarified(nodes, vec![DisplayEntry::Node(largest)], bounds);
+            plan = DisplayPlan::squarified(
+                vec![DisplayEntry::Node {
+                    index: largest,
+                    weight: nodes[largest].size,
+                }],
+                bounds,
+            );
         }
     }
     plan
@@ -466,12 +528,16 @@ pub fn layout_nested_treemap(
     }
 
     let total_size: u64 = nodes.iter().map(|node| node.size).sum();
-    let plan = if nodes.len() > 1 && total_size > 0 && options.allow_aggregates {
+    let plan = if nodes.len() > 1 && total_size > 0 {
         plan_with_tail(nodes, parent, bounds, options, depth, total_size)
     } else {
         DisplayPlan::squarified(
-            nodes,
-            (0..nodes.len()).map(DisplayEntry::Node).collect(),
+            (0..nodes.len())
+                .map(|index| DisplayEntry::Node {
+                    index,
+                    weight: nodes[index].size,
+                })
+                .collect(),
             bounds,
         )
     };
@@ -479,7 +545,7 @@ pub fn layout_nested_treemap(
     plan.cells
         .iter()
         .map(|cell| match &plan.entries[cell.index] {
-            DisplayEntry::Node(index) => {
+            DisplayEntry::Node { index, .. } => {
                 layout_child(&nodes[*index], parent, cell.rect, options, depth)
             }
             DisplayEntry::Aggregate {
@@ -487,6 +553,7 @@ pub fn layout_nested_treemap(
                 members,
                 size,
                 category,
+                ..
             } => NestedTreemapLayoutNode {
                 aggregate_count: members.len(),
                 aggregate_member_indices: members.iter().map(|&index| index as u32).collect(),
@@ -861,10 +928,20 @@ mod tests {
         }
         assert_eq!(
             layout.len(),
-            4,
-            "tiny root files must not survive as a leftover strip"
+            5,
+            "tiny root files keep one readable summary block"
         );
-        assert!(layout.iter().all(|node| node.aggregate_count == 0));
+        let block = layout
+            .iter()
+            .find(|node| node.aggregate_count > 0)
+            .expect("the tiny files need their summary block");
+        assert_eq!(block.aggregate_count, 20);
+        assert!(
+            tile_fits(block.rect),
+            "the summary block must not be a leftover strip: {:.1}x{:.1}",
+            block.rect.width,
+            block.rect.height
+        );
     }
 
     #[test]
@@ -961,6 +1038,289 @@ mod tests {
         let layout = layout_nested_treemap(&children, "C:\\", bounds, &options, 1);
         assert_eq!(layout.len(), children.len());
         assert!(layout.iter().all(|node| node.aggregate_count == 0));
+    }
+
+    /// A dominant child must not delete its folded siblings: the summary block
+    /// stays a readable cell, and every folded byte stays inside the layout.
+    #[test]
+    fn a_dominant_child_keeps_the_folded_tail_visible() {
+        let mut children = Vec::new();
+        let mut dominant = TreemapTreeNode::new_dir(1, "dominant".to_string(), 0);
+        dominant.size = 1_000_000_000;
+        children.push(dominant);
+        for index in 0..2u64 {
+            let mut node = TreemapTreeNode::new_dir(index + 2, format!("small{index}"), 0);
+            node.size = 1_000_000;
+            children.push(node);
+        }
+        let total: u64 = children.iter().map(|node| node.size).sum();
+        let bounds = TreemapRect::new(0.0, 0.0, 1072.0, 666.0);
+        let options = NestedTreemapOptions::from_detail_level(5);
+
+        let layout = layout_nested_treemap(&children, r"C:\Workspace", bounds, &options, 0);
+        let block = layout
+            .iter()
+            .find(|node| node.aggregate_count > 0)
+            .unwrap_or_else(|| {
+                panic!(
+                    "the folded siblings lost their summary block: {:?}",
+                    layout
+                        .iter()
+                        .map(|node| (node.item.name.clone(), node.item.size))
+                        .collect::<Vec<_>>()
+                )
+            });
+        assert_eq!(block.aggregate_count, 2);
+        assert!(
+            tile_fits(block.rect),
+            "the summary block must be a readable cell, got {:.1}x{:.1}",
+            block.rect.width,
+            block.rect.height
+        );
+        assert_eq!(
+            layout.iter().map(|node| node.item.size).sum::<u64>(),
+            total,
+            "every folded byte stays inside the layout"
+        );
+    }
+
+    /// Areas stay proportional: a child that cannot carry a tile at its byte
+    /// area folds into the summary block, and every member stays reachable
+    /// (as a native tile or as a folded member).
+    #[test]
+    fn small_members_keep_their_byte_area_as_tiles_or_fold() {
+        let members: [(&str, u64); 3] = [
+            ("Pickora", 102_263_329),
+            ("学术论文写作", 5_661_068),
+            ("Resume", 415_461),
+        ];
+        let nodes: Vec<TreemapTreeNode> = members
+            .iter()
+            .map(|(name, size)| {
+                let mut node = TreemapTreeNode::new_dir(0, (*name).to_string(), 0);
+                node.size = *size;
+                node
+            })
+            .collect();
+        let mut options = NestedTreemapOptions::from_detail_level(5);
+        options.max_children = nodes.len();
+        let bounds = TreemapRect::new(0.0, 0.0, 1060.0, 683.0);
+
+        let layout = layout_nested_treemap(&nodes, r"C:\Workspace", bounds, &options, 0);
+        let mut visible: Vec<&str> = Vec::new();
+        for node in &layout {
+            assert!(
+                tile_fits(node.rect),
+                "{:?} painted a {:.1}x{:.1} cell",
+                node.item.name,
+                node.rect.width,
+                node.rect.height
+            );
+            if node.aggregate_count > 0 {
+                visible.extend(
+                    node.aggregate_member_indices
+                        .iter()
+                        .map(|&index| nodes[index as usize].name.as_str()),
+                );
+            } else {
+                visible.push(node.item.name.as_str());
+            }
+        }
+        for (name, _) in members {
+            assert!(visible.contains(&name), "{name} is not reachable");
+        }
+        assert_eq!(
+            layout.iter().map(|node| node.item.size).sum::<u64>(),
+            nodes.iter().map(|node| node.size).sum::<u64>()
+        );
+    }
+
+    /// A layer with one dominant member and a long tail of tiny ones folds the
+    /// tail instead of tiling thousands of fragments.
+    #[test]
+    fn a_wide_layer_folds_its_long_tail() {
+        let mut nodes = Vec::new();
+        let mut dominant = TreemapTreeNode::new_dir(1, "WindowsApps".to_string(), 0);
+        dominant.size = 13_890_000_000;
+        nodes.push(dominant);
+        for index in 0..35u64 {
+            nodes.push(TreemapTreeNode::new_file(
+                index + 2,
+                format!("item{index:02}.bin"),
+                1_000 + index * 37,
+                0,
+            ));
+        }
+        let mut options = NestedTreemapOptions::from_detail_level(5);
+        options.max_children = nodes.len();
+        let bounds = TreemapRect::new(0.0, 0.0, 1060.0, 683.0);
+
+        let layout = layout_nested_treemap(&nodes, r"C:\Program Files", bounds, &options, 0);
+        let block = layout
+            .iter()
+            .find(|node| node.aggregate_count > 0)
+            .expect("the long tail folds into a block");
+        assert_eq!(block.aggregate_count, 35);
+        assert_eq!(layout.len(), 2);
+        for node in &layout {
+            assert!(
+                tile_fits(node.rect),
+                "{:?} painted a {:.1}x{:.1} fragment",
+                node.item.name,
+                node.rect.width,
+                node.rect.height
+            );
+        }
+    }
+
+    /// A tail that holds almost every byte folds into one block at its byte
+    /// share; no cell may be painted as a strip.
+    #[test]
+    fn a_tail_that_dominates_folds_without_painting_strips() {
+        let mut nodes = Vec::new();
+        let mut largest = TreemapTreeNode::new_file(1, "largest.bin".to_string(), 1_000_000, 0);
+        largest.size = 1_000_000;
+        nodes.push(largest);
+        for index in 0..5_000u64 {
+            nodes.push(TreemapTreeNode::new_file(
+                index + 2,
+                format!("tiny{index:04}.bin"),
+                10_000,
+                0,
+            ));
+        }
+        let mut options = NestedTreemapOptions::from_detail_level(5);
+        options.max_children = nodes.len();
+        let bounds = TreemapRect::new(0.0, 0.0, 1060.0, 683.0);
+
+        let layout = layout_nested_treemap(&nodes, r"C:\Program Files", bounds, &options, 0);
+        for node in &layout {
+            assert!(
+                tile_fits(node.rect),
+                "{:?} painted a {:.1}x{:.1} cell",
+                node.item.name,
+                node.rect.width,
+                node.rect.height
+            );
+        }
+        assert_eq!(
+            layout.iter().map(|node| node.item.size).sum::<u64>(),
+            nodes.iter().map(|node| node.size).sum::<u64>()
+        );
+    }
+
+    /// A body too small for one cell per category keeps one summary of the
+    /// whole tail: members are not deleted while the body can carry a cell.
+    #[test]
+    fn a_tiny_body_keeps_its_tail_reachable() {
+        let mut nodes = Vec::new();
+        let mut largest = TreemapTreeNode::new_file(1, "largest.bin".to_string(), 900_000, 0);
+        largest.size = 900_000;
+        nodes.push(largest);
+        for index in 0..5u64 {
+            let name = if index % 2 == 0 {
+                format!("doc{index}.txt")
+            } else {
+                format!("bin{index}.bin")
+            };
+            nodes.push(TreemapTreeNode::new_file(index + 2, name, 244_000, 0));
+        }
+        let total: u64 = nodes.iter().map(|node| node.size).sum();
+        let options = NestedTreemapOptions::from_detail_level(5);
+
+        let layout = layout_nested_treemap(
+            &nodes,
+            r"C:\Tiny",
+            TreemapRect::new(0.0, 0.0, 90.0, 50.0),
+            &options,
+            0,
+        );
+        for node in &layout {
+            assert!(
+                tile_fits(node.rect),
+                "{:?} painted a {:.1}x{:.1} cell",
+                node.item.name,
+                node.rect.width,
+                node.rect.height
+            );
+        }
+        let mut shown: Vec<&str> = Vec::new();
+        for node in &layout {
+            if node.aggregate_count > 0 {
+                shown.extend(
+                    node.aggregate_member_indices
+                        .iter()
+                        .map(|&index| nodes[index as usize].name.as_str()),
+                );
+            } else {
+                shown.push(node.item.name.as_str());
+            }
+        }
+        for node in &nodes {
+            assert!(
+                shown.contains(&node.name.as_str()),
+                "{} vanished",
+                node.name
+            );
+        }
+        assert_eq!(
+            layout.iter().map(|node| node.item.size).sum::<u64>(),
+            total,
+            "the body keeps every byte"
+        );
+    }
+
+    /// The live C:\Workspace shape: a workspace that dwarfs its siblings must
+    /// still leave every sibling reachable as a tile or a folded member.
+    #[test]
+    fn a_real_dominant_directory_keeps_every_child() {
+        let children: [(&str, u64); 7] = [
+            ("Cairn", 9_174_015_100),
+            ("Prelude", 865_172_818),
+            ("graduation-thesis", 513_088_502),
+            ("portfolio", 505_888_511),
+            ("Pickora", 102_263_329),
+            ("学术论文写作", 5_661_068),
+            ("Resume", 415_461),
+        ];
+        let nodes: Vec<TreemapTreeNode> = children
+            .iter()
+            .map(|(name, size)| {
+                let mut node = TreemapTreeNode::new_dir(0, (*name).to_string(), 0);
+                node.size = *size;
+                node
+            })
+            .collect();
+        let total: u64 = children.iter().map(|(_, size)| size).sum();
+        let bounds = TreemapRect::new(0.0, 0.0, 1072.0, 666.0);
+        let options = NestedTreemapOptions::from_detail_level(5);
+
+        let layout = layout_nested_treemap(&nodes, r"C:\Workspace", bounds, &options, 0);
+        let mut visible: Vec<&str> = Vec::new();
+        for node in &layout {
+            assert!(
+                tile_fits(node.rect),
+                "{:?} painted a {:.1}x{:.1} cell",
+                node.item.name,
+                node.rect.width,
+                node.rect.height
+            );
+            if node.aggregate_count > 0 {
+                visible.extend(
+                    node.aggregate_member_indices
+                        .iter()
+                        .map(|&index| nodes[index as usize].name.as_str()),
+                );
+            } else {
+                visible.push(node.item.name.as_str());
+            }
+        }
+        let mut visible_sorted = visible.clone();
+        visible_sorted.sort_unstable();
+        let mut expected: Vec<&str> = children.iter().map(|(name, _)| *name).collect();
+        expected.sort_unstable();
+        assert_eq!(visible_sorted, expected, "every workspace stays reachable");
+        assert_eq!(layout.iter().map(|node| node.item.size).sum::<u64>(), total);
     }
 
     #[test]
@@ -1141,42 +1501,18 @@ mod tests {
     }
 
     #[test]
-    fn disallowing_secondary_folding_generates_no_aggregates() {
-        let mut children = Vec::new();
-        for index in 0..30 {
-            children.push(TreemapTreeNode::new_file(
-                index as u64 + 1,
-                format!("file_{index}.dat"),
-                100,
-                0,
-            ));
-        }
-        let bounds = TreemapRect::new(0.0, 0.0, 800.0, 600.0);
-        let mut options = NestedTreemapOptions::from_detail_level(3);
-        options.max_children = children.len();
-        options.allow_aggregates = false;
-
-        let layout = layout_nested_treemap(&children, r"C:\Folder", bounds, &options, 0);
-        assert_eq!(layout.len(), children.len());
-        assert!(
-            layout.iter().all(|node| node.aggregate_count == 0),
-            "no aggregate blocks should be generated when allow_aggregates is false"
-        );
-    }
-
-    #[test]
     fn forward_slash_and_drive_root_produce_clean_aggregate_paths() {
         let nodes = vec![
             TreemapTreeNode::new_file(1, "a.txt".to_string(), 10, 0),
             TreemapTreeNode::new_file(2, "b.txt".to_string(), 10, 0),
         ];
-        let entries_forward_drive = display_entries(&nodes, "C:/", &[0], &[1]);
+        let entries_forward_drive = display_entries(&nodes, "C:/", &[0], &[1], 0, false);
         let DisplayEntry::Aggregate { path, .. } = &entries_forward_drive[1] else {
             panic!("expected aggregate entry");
         };
         assert_eq!(path, "C:\\::<tail:documents>");
 
-        let entries_forward_dir = display_entries(&nodes, "C:/Users/Alice/", &[0], &[1]);
+        let entries_forward_dir = display_entries(&nodes, "C:/Users/Alice/", &[0], &[1], 0, false);
         let DisplayEntry::Aggregate { path, .. } = &entries_forward_dir[1] else {
             panic!("expected aggregate entry");
         };

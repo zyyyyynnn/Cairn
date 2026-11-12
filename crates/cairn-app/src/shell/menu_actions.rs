@@ -315,6 +315,7 @@ impl CairnApp {
             self.clear_bin_filter(window, cx);
             return;
         }
+        self.clear_block_listing();
         self.update_current_nav_state_text();
         self.query.search_input.clear();
         self.query.scope_drive = None;

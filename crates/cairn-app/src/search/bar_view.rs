@@ -6,8 +6,10 @@
 
 use crate::app::{layout, CairnApp};
 use crate::shell::accessibility::{self, ControlElement};
+use crate::shell::status_bar::format_count;
 use crate::shell::theme::{self, ShellTokens};
 use crate::view::announce_shortcut;
+use fluent_bundle::FluentArgs;
 use gpui_kit::assets::IconName as AssetIconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{h_flex, Icon, IconName, Sizable as _};
@@ -72,7 +74,7 @@ impl CairnApp {
         let show_clear = !self.query.search_input.text.is_empty();
         announce_shortcut(accessibility::element(control), control)
             .aria_label(accessible_name)
-            .aria_placeholder(self.i18n.get_text(self.placeholder_key()))
+            .aria_placeholder(self.placeholder_text())
             .track_focus(&focus_handle)
             .relative()
             .flex_1()
@@ -195,7 +197,7 @@ impl CairnApp {
         if self.query.search_input.text.is_empty() {
             let placeholder = div()
                 .text_color(tokens.muted_foreground)
-                .child(self.i18n.get_text(self.placeholder_key()));
+                .child(self.placeholder_text());
             return div()
                 .relative()
                 .flex()
@@ -288,11 +290,19 @@ impl CairnApp {
 
     /// Normal queries match names and paths; body search is the explicit `content:` term, so the
     /// placeholder does not promise content results for text that never asked for them.
-    pub(crate) fn placeholder_key(&self) -> &'static str {
-        if self.recycle_bin.is_open() {
-            "recycle_bin_filter_placeholder"
+    pub(crate) fn placeholder_text(&self) -> String {
+        if let Some(listing) = self.block_listing.as_ref() {
+            // The path scope lives in the box; the status bar stays the plain
+            // count/size summary of whatever the rows currently are.
+            let mut args = FluentArgs::new();
+            args.set("dir", listing.directory().to_string());
+            args.set("count_text", format_count(listing.count()));
+            self.i18n
+                .get_text_with_args("treemap_block_filter_placeholder", &args)
+        } else if self.recycle_bin.is_open() {
+            self.i18n.get_text("recycle_bin_filter_placeholder")
         } else {
-            "search_placeholder"
+            self.i18n.get_text("search_placeholder")
         }
     }
 

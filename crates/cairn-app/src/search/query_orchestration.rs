@@ -249,6 +249,10 @@ impl CairnApp {
             self.fill_recycle_bin_page(row_height, cx);
             return;
         }
+        if self.block_listing.is_some() {
+            self.fill_block_listing_page(row_height, cx);
+            return;
+        }
         if !rows_page_ready(
             self.service.is_service_connected,
             self.query.is_searching,
@@ -282,6 +286,13 @@ impl CairnApp {
     /// post-frame ensure, so every scroll source — pointer drag, wheel, keyboard, first page — is
     /// covered without fetching from `render` itself.
     pub fn needs_visible_rows_page(&self, visible: Range<usize>) -> bool {
+        if self.block_listing.is_some() {
+            return self
+                .results
+                .table
+                .page_request(visible, layout::RESULT_PAGE_SIZE)
+                .is_some();
+        }
         if self.recycle_bin.is_open() {
             return self.needs_recycle_bin_page(visible);
         }
@@ -324,6 +335,11 @@ impl CairnApp {
     /// Skipped while a query is already in flight; that answer is newer than the request would be.
     /// A hidden table (Treemap or Recycle Bin) is never refreshed in the background.
     pub fn refresh_results(&mut self, cx: &mut Context<Self>) {
+        // A block listing owns the table rows; a status refresh must not
+        // replace them with a filtered first page.
+        if self.block_listing.is_some() {
+            return;
+        }
         if self.query.is_searching
             || self.recycle_bin.is_open()
             || self.drive_view.is_some()
@@ -343,6 +359,12 @@ impl CairnApp {
             self.query.query_id += 1;
             self.query.is_searching = false;
             self.filter_recycle_bin(cx);
+            return;
+        }
+        if self.block_listing.is_some() {
+            self.query.query_id += 1;
+            self.query.is_searching = false;
+            self.filter_block_listing(cx);
             return;
         }
         self.query.query_id += 1;

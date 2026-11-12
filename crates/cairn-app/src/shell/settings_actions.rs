@@ -38,6 +38,9 @@ impl CairnApp {
             // The bin is an in-memory listing, so its order is applied here instead
             // of asking the service for a new page sorted by the same column.
             self.sort_recycle_bin(cx);
+        } else if self.block_listing.is_some() {
+            // A summary block listing is in memory too: sort it locally.
+            self.sort_block_listing(cx);
         } else {
             self.trigger_search(cx);
         }
@@ -91,6 +94,8 @@ impl CairnApp {
         self.save_settings();
         if self.recycle_bin.is_open() {
             self.sort_recycle_bin(cx);
+        } else if self.block_listing.is_some() {
+            self.sort_block_listing(cx);
         } else {
             self.trigger_search(cx);
         }
@@ -158,6 +163,7 @@ impl CairnApp {
         // it alive behind the table, and starts a fresh table entrance.
         // `leave_drive_view` opens the session for the view it just emptied.
         self.leave_drive_view();
+        self.clear_block_listing();
         // The bin's current nav entry already holds the query that preceded it;
         // reading the search box here would overwrite it with the cleared label.
         let leaving_bin = self.recycle_bin.is_open();

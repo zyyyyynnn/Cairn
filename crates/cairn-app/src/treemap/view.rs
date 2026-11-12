@@ -22,10 +22,7 @@ use crate::treemap::state::TreemapUnavailable;
 use crate::treemap::zoom::TreemapViewport;
 use crate::view::announce_shortcut;
 use cairn_core::format_size_bytes;
-use cairn_core::treemap::{
-    aggregate_parent_path, path_is_within, FileKind, NestedTreemapLayoutNode, TreemapCategory,
-    TreemapRect,
-};
+use cairn_core::treemap::{path_is_within, FileKind, NestedTreemapLayoutNode, TreemapRect};
 use fluent_bundle::FluentArgs;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::StyledExt;
@@ -165,7 +162,6 @@ impl CairnApp {
         let render_cx = TreemapRenderContext {
             palette: TreemapPalette::for_mode(is_dark),
             selected_path: state.selected_path.as_deref(),
-            category_filter: state.category_filter,
             view: &view,
             i18n: &self.i18n,
             window,
@@ -513,7 +509,6 @@ struct TreemapRenderContext<'a> {
     /// the shell tokens never carry a category color.
     palette: TreemapPalette,
     selected_path: Option<&'a str>,
-    category_filter: [bool; TreemapCategory::COUNT],
     view: &'a Entity<CairnApp>,
     i18n: &'a Rc<crate::shell::i18n::I18nManager>,
     /// Text is shaped at render time so labels are shown only when their real
@@ -714,16 +709,12 @@ fn render_nested_node(
     );
 
     let category = node.item.category;
-    // Filtered categories dim in place; the layout and selection path never
-    // move. A selected node stays at full strength so it remains findable.
-    let filtered = !rcx.category_filter[category as usize] && !is_selected;
     // Selecting a container focuses its whole subtree: the container's own header and every
     // descendant stay at full tone, and only what lies outside dims.
     let in_selected = rcx
         .selected_path
         .is_some_and(|selected| path_is_within(&node.path, selected));
-    let unfocused = rcx.selection_active && !in_selected;
-    let dimmed = filtered || unfocused;
+    let dimmed = rcx.selection_active && !in_selected;
     // Every directory uses its resolved category color; a directory whose content carries no
     // signal keeps the Other tint.
     let base_header = rcx.palette.directory_header(category);
@@ -757,7 +748,6 @@ fn render_nested_node(
         args.set("count", node.aggregate_count as i64);
         args.set("count_text", format_count(node.aggregate_count));
         let label = rcx.i18n.get_text_with_args("treemap_aggregate", &args);
-        let aggregate_label_text = label.clone();
         let tooltip = SharedString::from(format!(
             "{label}
 {size_str}"
@@ -774,7 +764,6 @@ fn render_nested_node(
         let aggregate_view = rcx.view.clone();
         let aggregate_path = full_path.clone();
         let block_bg = header_bg;
-        let menu_parent = aggregate_parent_path(&full_path).map(str::to_string);
         let block = div()
             .id(element_id("treemap-aggregate", &node.path))
             .rounded(px(TREEMAP_RADIUS))
@@ -797,15 +786,18 @@ fn render_nested_node(
             })
             .on_mouse_down(MouseButton::Left, move |event, window, cx| {
                 aggregate_view.update(cx, |this, cx| {
-                    if let Some(ref mut st) = this.treemap_state {
+                    let open = if let Some(ref mut st) = this.treemap_state {
                         st.selected_path = Some(aggregate_path.clone());
                         st.suppress_tooltip = false;
                         st.request_focus(window, cx);
-                        // A block is a container: the same double click that enters a directory
-                        // opens its folded items as a canvas layer.
-                        if event.click_count == 2 {
-                            st.open_block(&aggregate_path, aggregate_label_text.clone());
-                        }
+                        event.click_count == 2
+                    } else {
+                        false
+                    };
+                    // A summary block's details belong in the table: the double
+                    // click lists exactly its members.
+                    if open {
+                        this.open_block_listing(&aggregate_path, window, cx);
                     }
                     cx.notify();
                     cx.stop_propagation();
@@ -815,7 +807,7 @@ fn render_nested_node(
             with_block_fill_interaction(block, block_bg, rcx.palette.is_dark(), is_selected)
                 .context_menu(build_block_context_menu(
                     rcx.view.clone(),
-                    menu_parent,
+                    full_path.clone(),
                     rcx.i18n,
                 ));
         elements.push(place_treemap_node(block.child(content), paint));

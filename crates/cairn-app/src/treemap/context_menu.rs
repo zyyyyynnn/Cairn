@@ -12,10 +12,10 @@ use gpui_kit::gpui::*;
 use std::path::Path;
 use std::rc::Rc;
 
-/// The menu a summary block can honour: it lists its owning directory in the table.
+/// The menu a summary block can honour: it lists exactly its members in the table.
 pub(super) fn build_block_context_menu(
     view: Entity<CairnApp>,
-    parent_path: Option<String>,
+    block_path: String,
     i18n: &Rc<crate::shell::i18n::I18nManager>,
 ) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
     let i18n = i18n.clone();
@@ -41,15 +41,13 @@ pub(super) fn build_block_context_menu(
         })
         .detach();
         let table_view = view.clone();
-        let table_parent = parent_path.clone();
+        let table_block = block_path.clone();
         menu.item(PopupMenuItem::new(i18n.get_text("view_in_table")).on_click(
             move |_, window, cx| {
-                if let Some(ref dir) = table_parent {
-                    let dir = dir.clone();
-                    table_view.update(cx, |this, cx| {
-                        this.switch_to_table_with_path(&dir, window, cx);
-                    });
-                }
+                let block = table_block.clone();
+                table_view.update(cx, |this, cx| {
+                    this.open_block_listing(&block, window, cx);
+                });
             },
         ))
     }
