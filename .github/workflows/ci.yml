@@ -55,7 +55,8 @@ jobs:
     name: Code Quality & Static Analysis
     needs: changes
     runs-on: windows-latest
-    timeout-minutes: 20
+    # The build after a dev-profile change recompiles every dependency; later runs reuse main's cache.
+    timeout-minutes: 40
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
