@@ -81,12 +81,13 @@ thiserror = "2.0"
 tempfile = "3.27"
 winresource = "0.1.34"
 
-# GPUI repaints dominate frame time, and unoptimized dependencies drop the debug
-# window to a few frames per second on the results table.
-[profile.dev]
+# The local GUI build (README) needs optimized dependencies: unoptimized GPUI
+# repaints the table at a few frames per second. CI keeps the plain dev profile.
+[profile.dev-ui]
+inherits = "dev"
 opt-level = 1
 
-[profile.dev.package."*"]
+[profile.dev-ui.package."*"]
 opt-level = 3
 
 [profile.release]
