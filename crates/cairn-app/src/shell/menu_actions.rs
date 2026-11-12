@@ -158,7 +158,8 @@ impl CairnApp {
         cx: &mut Context<Self>,
     ) {
         // Arrow keys are the table's keyboard path; moving through rows is what makes the focus
-        // ring meaningful, and a pointer press must not suppress keyboard navigation.
+        // ring meaningful, and a pointer press must not suppress keyboard navigation. Focus
+        // follows the selection so F2 and the row actions act on the chosen row.
         self.results.keyboard_navigation = true;
         let before = self.results.table.focused_idx;
         if forwards {
@@ -195,6 +196,7 @@ impl CairnApp {
         }
         let extend = window.modifiers().shift;
         self.move_selection(false, extend, layout::row_height(window), cx);
+        self.focus_table_after_arrow(window, cx);
     }
 
     pub fn select_next_row(
@@ -208,6 +210,15 @@ impl CairnApp {
         }
         let extend = window.modifiers().shift;
         self.move_selection(true, extend, layout::row_height(window), cx);
+        self.focus_table_after_arrow(window, cx);
+    }
+
+    /// Arrow-key selection moves the keyboard into the table, where F2 and the
+    /// row commands live; the search box keeps its text.
+    fn focus_table_after_arrow(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.results.table.focused_idx.is_some() {
+            self.results.results_focus.focus(window, cx);
+        }
     }
 
     pub fn scroll_table(&mut self, request: TableScroll, cx: &mut Context<Self>) {
@@ -398,8 +409,9 @@ impl CairnApp {
         // A scope the sidebar set is part of the query: clearing only the text would leave the
         // window searching a drive or a file type the person just tried to dismiss.
         // A running search is the innermost state the query itself owns: the first Escape stops
-        // it and keeps the text and rows; the next Escape clears the query.
-        if self.query.is_searching {
+        // it and keeps the text and rows; the next Escape clears the query. The implicit
+        // all-files view has no text to return to, so Escape never leaves it stopped.
+        if self.query.is_searching && self.has_query() {
             self.cancel_in_flight_query(cx);
             return;
         }

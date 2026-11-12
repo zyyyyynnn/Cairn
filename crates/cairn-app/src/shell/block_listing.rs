@@ -122,6 +122,7 @@ impl CairnApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.discard_rename_on_location_change(cx);
         let (parent, count, rows) = {
             let Some(state) = self.treemap_state.as_ref() else {
                 return;

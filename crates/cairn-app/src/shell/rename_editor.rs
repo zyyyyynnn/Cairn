@@ -24,11 +24,6 @@ impl CairnApp {
         if self.rename.in_flight {
             return;
         }
-        let input = self.rename.input.clone();
-        if self.rename.draft.is_some() {
-            input.read(cx).focus_handle(cx).focus(window, cx);
-            return;
-        }
         let Some(ix) = self.rename_target_ix() else {
             return;
         };
@@ -37,6 +32,22 @@ impl CairnApp {
         };
         let path = join_row_path(&row.path, &row.name);
         let current = row.name.clone();
+        let input = self.rename.input.clone();
+        if self
+            .rename
+            .draft
+            .as_ref()
+            .is_some_and(|draft| draft.path == path)
+        {
+            // A second request on the same row returns to what was typed.
+            input.read(cx).focus_handle(cx).focus(window, cx);
+            return;
+        }
+        // A draft belongs to the row it was opened on; a request on another row
+        // replaces it instead of silently editing the old target.
+        if self.rename.draft.take().is_some() {
+            self.dismiss_rename_error_toast(cx);
+        }
         let draft = RenameDraft::begin(path, current.clone());
         let stem = draft.stem_range();
         input.update(cx, |input, cx| {
@@ -46,6 +57,14 @@ impl CairnApp {
         self.rename.draft = Some(draft);
         input.read(cx).focus_handle(cx).focus(window, cx);
         cx.notify();
+    }
+
+    /// Drops a draft when the table is left for another location; the editor
+    /// belongs to the row it was opened on.
+    pub(crate) fn discard_rename_on_location_change(&mut self, cx: &mut Context<Self>) {
+        if self.rename.draft.take().is_some() {
+            self.dismiss_rename_error_toast(cx);
+        }
     }
 
     /// Keeps the draft's text in step with the input and retires the previous rejection as soon as
@@ -167,6 +186,9 @@ impl CairnApp {
     fn rename_error_message(&self, error: &RenameError) -> String {
         match error {
             RenameError::InvalidChar(invalid) => {
+                if invalid.is_control() {
+                    return self.i18n.get_text("rename_error_control_char");
+                }
                 let mut args = FluentArgs::new();
                 args.set("char", invalid.to_string());
                 self.i18n
@@ -200,6 +222,10 @@ fn shell_failure_key(reason: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::shell_failure_key;
+    use crate::app::CairnApp;
+    use crate::shell::commands::{EscapeQuery, RenameSelected};
+    use core::prelude::rust_2021::test;
+    use gpui_kit::gpui::AppContext as _;
 
     #[test]
     fn a_shell_refusal_names_a_localized_remedy() {
@@ -225,5 +251,62 @@ mod tests {
         ] {
             assert_eq!(shell_failure_key(reason), key, "{reason}");
         }
+    }
+
+    fn row(name: &str) -> cairn_protocol::message::FileRowData {
+        cairn_protocol::message::FileRowData {
+            frn: 0,
+            name: name.to_string(),
+            path: r"C:\work".to_string(),
+            size: 1,
+            modified_ts: 0,
+            created_ts: 0,
+            is_dir: false,
+            flags: 0,
+            name_highlights: Vec::new(),
+            path_highlights: Vec::new(),
+            snippet: None,
+        }
+    }
+
+    #[test]
+    fn a_rename_request_owns_one_row_and_replaces_another_rows_draft() {
+        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
+            gpui_kit::init(cx);
+            let _ = gpui_kit::open_window(
+                gpui_kit::gpui::WindowOptions::default(),
+                cx,
+                |window, cx| {
+                    let app = cx.new(|cx| CairnApp::new(window, cx));
+
+                    app.update(cx, |this, cx| {
+                        this.results
+                            .table
+                            .set_rows(vec![row("a.txt"), row("b.txt")], 2);
+                        this.results.table.select_row(0, false);
+                        this.rename_selected(&RenameSelected, window, cx);
+                        assert_eq!(
+                            this.rename.draft.as_ref().map(|draft| draft.path.clone()),
+                            Some(r"C:\work\a.txt".to_string())
+                        );
+
+                        // A request on another row replaces the draft; the old
+                        // target is never renamed by a later Enter.
+                        this.results.table.select_row(1, false);
+                        this.rename_selected(&RenameSelected, window, cx);
+                        assert_eq!(
+                            this.rename.draft.as_ref().map(|draft| draft.path.clone()),
+                            Some(r"C:\work\b.txt".to_string())
+                        );
+
+                        this.escape_query(&EscapeQuery, window, cx);
+                        assert!(this.rename.draft.is_none());
+                    });
+
+                    cx.quit();
+                    app
+                },
+            );
+        });
     }
 }

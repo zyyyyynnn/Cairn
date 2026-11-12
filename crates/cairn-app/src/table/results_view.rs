@@ -944,6 +944,17 @@ impl CairnApp {
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                        // The editor owns presses on the row it renames: the input keeps its
+                        // focus, and a double-click must not open the file being renamed.
+                        if this
+                            .rename
+                            .draft
+                            .as_ref()
+                            .is_some_and(|draft| draft.path == full_path)
+                        {
+                            cx.stop_propagation();
+                            return;
+                        }
                         this.select_row_by_pointer(
                             ix,
                             event.modifiers.control,

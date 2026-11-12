@@ -11,7 +11,7 @@
 
 use crate::caller_auth::{authenticate_pipe_client, authorize, CallerAuthorization};
 use crate::security::SafeSecurityDescriptor;
-use crate::session::{RowsError, SessionManager};
+use crate::session::{QueryOwner, RowsError, SessionManager};
 use crate::sync_engine::MultiVolumeEngine;
 use cairn_core::engine::CancellationToken;
 use cairn_core::syntax::{parse_query_with, MAX_CONTENT_TERMS};
@@ -163,14 +163,18 @@ async fn handle_client(
     // cannot change it while the pipe instance is alive. The call is synchronous and performs no
     // await, so thread-bound impersonation cannot outlive it.
     #[cfg(windows)]
-    let caller =
+    let (caller, owner) =
         match authenticate_pipe_client(std::os::windows::io::AsRawHandle::as_raw_handle(&pipe)) {
             Ok(identity) => {
                 info!(
                     "pipe client pid {} ({}) authorized as {:?}",
                     identity.client_pid, identity.user_sid, identity.authorization
                 );
-                identity.authorization()
+                let owner = QueryOwner {
+                    client_pid: identity.client_pid,
+                    user_sid: identity.user_sid.clone(),
+                };
+                (identity.authorization(), owner)
             }
             Err(err) => {
                 // Unattributable connections are closed instead of being served: the pipe grants
@@ -181,7 +185,7 @@ async fn handle_client(
             }
         };
     #[cfg(not(windows))]
-    let caller = CallerAuthorization::Unauthenticated;
+    let (caller, owner) = (CallerAuthorization::Unauthenticated, QueryOwner::default());
 
     let mut read_buf = Vec::with_capacity(65536);
     let mut write_buf = Vec::with_capacity(4096);
@@ -243,7 +247,15 @@ async fn handle_client(
                         hello_done = true;
                     }
                     let admin_only_query = engine.admin_only_query();
-                    process_request(req, &engine, &sessions, caller, admin_only_query, &cancel)
+                    process_request(
+                        req,
+                        &engine,
+                        &sessions,
+                        caller,
+                        &owner,
+                        admin_only_query,
+                        &cancel,
+                    )
                 };
 
                 let omit_volumes = matches!(
@@ -315,6 +327,7 @@ fn process_request(
     engine: &MultiVolumeEngine,
     sessions: &SessionManager,
     caller: CallerAuthorization,
+    owner: &QueryOwner,
     admin_only_query: bool,
     cancel: &CancellationToken,
 ) -> ResponsePayload {
@@ -360,10 +373,10 @@ fn process_request(
                     ),
                 };
             }
-            let query_cancel = sessions.begin_query(query_id, cancel);
+            let query_cancel = sessions.begin_query(owner, query_id, cancel);
             let (matched_items, total_matches, highlight_terms, snippets, total_bytes) = engine
                 .execute_search_multi(&raw_query, &defaults, sort_column, sort_asc, &query_cancel);
-            sessions.finish_query(query_id);
+            sessions.finish_query(owner, query_id);
 
             let session_id =
                 sessions.create_session(raw_query, highlight_terms, matched_items, snippets);
@@ -423,7 +436,7 @@ fn process_request(
         }
         ClientRequest::Cancel { query_id } => {
             cancel.cancel();
-            sessions.cancel_query(query_id);
+            sessions.cancel_query(owner, query_id);
             ResponsePayload::CancelAck
         }
         ClientRequest::GetStatus => ResponsePayload::StatusAck,
@@ -585,6 +598,7 @@ mod tests {
                 &self.engine,
                 &self.sessions,
                 caller,
+                &QueryOwner::default(),
                 admin_only_query,
                 &self.cancel,
             )
@@ -782,7 +796,10 @@ mod tests {
     #[test]
     fn a_cancel_request_cancels_the_matching_in_flight_query() {
         let harness = Harness::new(ServiceConfig::default());
-        let token = harness.sessions.begin_query(7, &CancellationToken::new());
+        let token =
+            harness
+                .sessions
+                .begin_query(&QueryOwner::default(), 7, &CancellationToken::new());
         assert!(!token.is_cancelled());
 
         assert!(matches!(
@@ -986,7 +1003,10 @@ mod tests {
         use cairn_protocol::message::ERROR_CODE_QUERY_TOO_COMPLEX;
 
         let harness = Harness::new(ServiceConfig::default());
-        let in_flight = harness.sessions.begin_query(41, &CancellationToken::new());
+        let in_flight =
+            harness
+                .sessions
+                .begin_query(&QueryOwner::default(), 41, &CancellationToken::new());
         let (code, message) = denial(harness.handle(
             content_query_request(MAX_CONTENT_TERMS + 1),
             CallerAuthorization::Administrator,
@@ -1000,7 +1020,7 @@ mod tests {
             !in_flight.is_cancelled(),
             "a refused request must not cancel another connection's query"
         );
-        harness.sessions.finish_query(41);
+        harness.sessions.finish_query(&QueryOwner::default(), 41);
 
         // No content index is ready in this harness, so the query at the limit answers an empty
         // result set instead of a rejection.

@@ -321,6 +321,8 @@ impl CairnApp {
             // An empty query is never refused, so a refusal of the cleared text must not
             // outlive it and block the all-files view once the index settles.
             self.query.rejection = None;
+            // An explicit trigger is a new state: a stop belongs to the query it stopped.
+            self.query.cancelled = false;
             self.start_status_refresh(cx);
             cx.notify();
             return;
@@ -849,6 +851,38 @@ mod tests {
                         assert!(
                             this.query.is_searching,
                             "an explicit state resumes the query"
+                        );
+                    });
+
+                    cx.quit();
+                    app
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn cancelling_a_query_marks_it_stopped_and_moves_the_id() {
+        use gpui_kit::gpui::AppContext as _;
+        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
+            gpui_kit::init(cx);
+            let _ = gpui_kit::open_window(
+                gpui_kit::gpui::WindowOptions::default(),
+                cx,
+                |window, cx| {
+                    let app = cx.new(|cx| CairnApp::new(window, cx));
+
+                    app.update(cx, |this, cx| {
+                        this.query.search_input.set_text("report");
+                        this.query.is_searching = true;
+                        let before = this.query.query_id;
+                        this.cancel_in_flight_query(cx);
+                        assert!(!this.query.is_searching);
+                        assert!(this.query.cancelled);
+                        assert_eq!(
+                            this.query.query_id,
+                            before + 1,
+                            "the late answer belongs to a superseded id"
                         );
                     });
 

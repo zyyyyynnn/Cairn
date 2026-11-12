@@ -35,9 +35,20 @@ pub struct QuerySession {
     pub last_accessed_at: Instant,
 }
 
+/// The client a query belongs to. Query ids are client-local counters, so the
+/// owner is part of the registry key: a stale id from one client cannot reach
+/// another client's query.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct QueryOwner {
+    /// Process id reported by the pipe provider, never by the client.
+    pub client_pid: u32,
+    /// The token user SID the process runs as.
+    pub user_sid: String,
+}
+
 pub struct SessionManager {
     sessions: RwLock<HashMap<u64, QuerySession>>,
-    active_queries: RwLock<HashMap<u64, CancellationToken>>,
+    active_queries: RwLock<HashMap<(QueryOwner, u64), CancellationToken>>,
     next_session_id: AtomicU64,
     max_sessions: usize,
 }
@@ -58,31 +69,45 @@ impl SessionManager {
         }
     }
 
-    /// Registers an in-flight query and preemptively cancels any earlier in-flight queries so
-    /// rapid typing over short-lived pipe connections immediately aborts superseded searches.
-    pub fn begin_query(&self, query_id: u64, conn_cancel: &CancellationToken) -> CancellationToken {
+    /// Registers an in-flight query and preemptively cancels that client's earlier in-flight queries,
+    /// so rapid typing over short-lived pipe connections immediately aborts superseded searches.
+    /// Another client's query is never touched.
+    pub fn begin_query(
+        &self,
+        owner: &QueryOwner,
+        query_id: u64,
+        conn_cancel: &CancellationToken,
+    ) -> CancellationToken {
         let token = CancellationToken::new();
         if conn_cancel.is_cancelled() {
             token.cancel();
         }
         let mut active = self.active_queries.write().unwrap();
-        for prev in active.values() {
-            prev.cancel();
-        }
-        active.insert(query_id, token.clone());
+        active.retain(|(prev_owner, _), prev| {
+            if prev_owner == owner {
+                prev.cancel();
+                false
+            } else {
+                true
+            }
+        });
+        active.insert((owner.clone(), query_id), token.clone());
         token
     }
 
     /// Removes a completed query from the active-query registry.
-    pub fn finish_query(&self, query_id: u64) {
-        self.active_queries.write().unwrap().remove(&query_id);
+    pub fn finish_query(&self, owner: &QueryOwner, query_id: u64) {
+        self.active_queries
+            .write()
+            .unwrap()
+            .remove(&(owner.clone(), query_id));
     }
 
-    /// Cancels an in-flight query by `query_id`. An unknown id is a no-op: ids come from client
-    /// counters, so a stale id must never cancel another connection's query.
-    pub fn cancel_query(&self, query_id: u64) {
+    /// Cancels one client's in-flight query by `query_id`. An unknown id is a no-op: ids are
+    /// client-local, so a stale id must never cancel another client's query.
+    pub fn cancel_query(&self, owner: &QueryOwner, query_id: u64) {
         let active = self.active_queries.read().unwrap();
-        if let Some(token) = active.get(&query_id) {
+        if let Some(token) = active.get(&(owner.clone(), query_id)) {
             token.cancel();
         }
     }
@@ -322,34 +347,67 @@ mod tests {
     fn begin_query_cancels_superseded_queries_and_cancel_query_signals_active_token() {
         let sessions = SessionManager::default();
         let conn = CancellationToken::new();
+        let owner = QueryOwner::default();
 
-        let q1 = sessions.begin_query(1, &conn);
+        let q1 = sessions.begin_query(&owner, 1, &conn);
         assert!(!q1.is_cancelled());
 
         // Starting query 2 preemptively cancels query 1.
-        let q2 = sessions.begin_query(2, &conn);
+        let q2 = sessions.begin_query(&owner, 2, &conn);
         assert!(q1.is_cancelled());
         assert!(!q2.is_cancelled());
 
-        // Cross-connection Cancel(2) cancels query 2.
-        sessions.cancel_query(2);
+        // Cancel(2) from the same client cancels query 2.
+        sessions.cancel_query(&owner, 2);
         assert!(q2.is_cancelled());
-        sessions.finish_query(2);
+        sessions.finish_query(&owner, 2);
     }
 
     #[test]
     fn a_stale_query_id_cancels_nothing() {
         let sessions = SessionManager::default();
         let conn = CancellationToken::new();
-        let q = sessions.begin_query(11, &conn);
+        let owner = QueryOwner::default();
+        let q = sessions.begin_query(&owner, 11, &conn);
 
-        sessions.cancel_query(10);
+        sessions.cancel_query(&owner, 10);
         assert!(
             !q.is_cancelled(),
-            "an id this connection never used must not cancel its query"
+            "an id this client never used must not cancel its query"
         );
 
-        sessions.cancel_query(11);
+        sessions.cancel_query(&owner, 11);
         assert!(q.is_cancelled());
+    }
+
+    #[test]
+    fn another_clients_identical_id_is_a_different_query() {
+        let sessions = SessionManager::default();
+        let conn = CancellationToken::new();
+        let first = QueryOwner {
+            client_pid: 100,
+            user_sid: "S-1-5-21-1".to_string(),
+        };
+        let second = QueryOwner {
+            client_pid: 200,
+            user_sid: "S-1-5-21-2".to_string(),
+        };
+
+        let first_query = sessions.begin_query(&first, 1, &conn);
+        let second_query = sessions.begin_query(&second, 1, &conn);
+        assert!(
+            !first_query.is_cancelled(),
+            "another client's query must not supersede this one"
+        );
+        assert!(!second_query.is_cancelled());
+
+        sessions.cancel_query(&first, 1);
+        assert!(first_query.is_cancelled());
+        assert!(
+            !second_query.is_cancelled(),
+            "the same id under another owner is a different query"
+        );
+        sessions.finish_query(&first, 1);
+        assert!(!second_query.is_cancelled());
     }
 }

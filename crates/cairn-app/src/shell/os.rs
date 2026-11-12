@@ -1042,14 +1042,11 @@ pub fn rename_path(path: &std::path::Path, new_name: &str) -> Result<(), RenameE
     #[cfg(windows)]
     {
         let _com = ComApartment::enter();
-        let source_name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default();
-        // A case-only rename addresses the same file, and asking the filesystem whether the
-        // differently-cased path exists would be true by definition. The shell would otherwise
-        // silently accept the collision, so the typed outcome is decided here.
-        if !new_name.eq_ignore_ascii_case(source_name) && path.with_file_name(new_name).exists() {
+        let target = path.with_file_name(new_name);
+        // Windows compares names case-insensitively beyond ASCII, so a target that resolves to
+        // the same file is a case-only rename. A different existing item is the typed conflict;
+        // the shell would otherwise silently accept the collision.
+        if target.exists() && !same_file(path, &target) {
             return Err(RenameError::TargetExists);
         }
         let path_text = path.to_string_lossy();
@@ -1221,6 +1218,15 @@ fn to_wide_path(path: &str) -> Vec<u16> {
         p = format!(r"\\?\{}", p);
     }
     p.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// Whether two paths resolve to one file. The canonical path carries the on-disk casing, so a
+/// case-only rename (including non-ASCII names) is not mistaken for a conflict.
+fn same_file(first: &std::path::Path, second: &std::path::Path) -> bool {
+    match (std::fs::canonicalize(first), std::fs::canonicalize(second)) {
+        (Ok(first), Ok(second)) => first == second,
+        _ => false,
+    }
 }
 
 /// Null-terminated UTF-16 for the shell's display-name parser. The parser
@@ -1489,16 +1495,31 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn a_case_only_rename_keeps_the_file_at_the_same_path() {
+    fn a_case_only_rename_keeps_the_file_and_changes_its_displayed_name() {
         let temp = tempfile::tempdir().expect("create the probe directory");
-        let old = temp.path().join("notes.txt");
+        let old = temp.path().join("café.txt");
         std::fs::write(&old, b"cairn").expect("create the probe file");
 
-        rename_path(&old, "NOTES.txt").expect("case-only rename");
+        rename_path(&old, "CAFÉ.txt").expect("a non-ASCII case-only rename");
 
         assert_eq!(
-            std::fs::read(&old).expect("the file stays in place"),
+            std::fs::read(temp.path().join("CAFÉ.txt")).expect("read the file"),
             b"cairn"
+        );
+        let names: Vec<String> = std::fs::read_dir(temp.path())
+            .expect("list the probe directory")
+            .map(|entry| {
+                entry
+                    .expect("a directory entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec!["CAFÉ.txt".to_string()],
+            "the disk keeps the requested casing"
         );
     }
 }

@@ -19,6 +19,7 @@ fn default_hotkey() -> HotKey {
 
 /// Registers the default chord and listens for it on a dedicated thread. The error is returned
 /// when another application already owns the chord; the caller keeps the window usable without it.
+#[cfg_attr(test, allow(dead_code))]
 pub(crate) fn register() -> Result<GlobalHotkey, String> {
     let manager = GlobalHotKeyManager::new().map_err(|err| format!("hotkey manager: {err}"))?;
     let hotkey = default_hotkey();

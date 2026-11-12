@@ -279,6 +279,7 @@ impl CairnApp {
     /// version, so the current binary itself decides whether the install reached its target.
     /// Shows the result of an update this process interrupted, when one is pending. Returns whether
     /// the toast slot is now taken, so a later startup notice does not overwrite it.
+    #[cfg_attr(test, allow(dead_code))]
     pub(crate) fn consume_update_notice(&mut self, cx: &mut Context<Self>) -> bool {
         let path = pending_version_path();
         let Ok(target) = std::fs::read_to_string(&path) else {

@@ -79,6 +79,7 @@ pub(crate) fn activate_existing_cairn_window() -> bool {
 
 /// The global hotkey's window action: a foreground window goes to the tray, anything else is
 /// brought back and focused.
+#[cfg_attr(test, allow(dead_code))]
 pub(crate) fn toggle_main_window() {
     use windows::Win32::UI::WindowsAndMessaging::{
         GetForegroundWindow, IsWindowVisible, ShowWindow, SW_HIDE,

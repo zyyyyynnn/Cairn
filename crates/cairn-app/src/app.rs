@@ -502,11 +502,15 @@ impl CairnApp {
             },
         );
 
-        #[cfg(windows)]
+        #[cfg(all(windows, not(test)))]
         let hotkey = crate::shell::hotkey::register()
             .map_err(|err| tracing::warn!("global hotkey unavailable: {err}"))
             .ok();
-        #[cfg(windows)]
+        // Unit tests never register a real system-wide chord or read the real
+        // update marker; both are process-level side effects, not view state.
+        #[cfg(all(windows, test))]
+        let hotkey: Option<crate::shell::hotkey::GlobalHotkey> = None;
+        #[cfg(all(windows, not(test)))]
         let hotkey_unavailable = hotkey.is_none();
 
         let mut app = Self {
@@ -619,14 +623,17 @@ impl CairnApp {
                     cx.notify();
                 }
             }));
-        let notice_shown = app.consume_update_notice(cx);
-        #[cfg(windows)]
-        if hotkey_unavailable && !notice_shown {
-            // One toast slot: an update result outranks a shortcut notice, and
-            // the registration failure is already logged.
-            let title = app.i18n.get_text("hotkey_unavailable_title");
-            let message = app.i18n.get_text("hotkey_unavailable_message");
-            app.show_info_toast(title, message, cx);
+        #[cfg(not(test))]
+        {
+            let notice_shown = app.consume_update_notice(cx);
+            #[cfg(windows)]
+            if hotkey_unavailable && !notice_shown {
+                // One toast slot: an update result outranks a shortcut notice, and
+                // the registration failure is already logged.
+                let title = app.i18n.get_text("hotkey_unavailable_title");
+                let message = app.i18n.get_text("hotkey_unavailable_message");
+                app.show_info_toast(title, message, cx);
+            }
         }
         app.check_service_connection(cx);
         app
