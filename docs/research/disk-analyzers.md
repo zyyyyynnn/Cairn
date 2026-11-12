@@ -8,7 +8,7 @@
 
 1. **五款产品的视图全部是"扫描会话快照"**：SpaceSniffer 以会话内文件系统事件闪烁同步，WinDirStat 2.x 的 File Watcher 监视限于会话内，WizTree 存在监控条目但机制未公开，TreeSize Free 与 RidNacs 未见实时监控说明。没有一款以常驻服务 + USN 增量为底座（§1–§5 逐品证据）。
 2. **MFT 直读已是半数基线**：WizTree 整盘默认直读 MFT，WinDirStat 2.5.0 起作为可选项，TreeSize Free 4.2 起管理员模式启用；SpaceSniffer 与 RidNacs 均无公开证据。除 WizTree 的对比宣称（46×/4×/2×）外，所有性能口径均为定性表述。
-3. **过滤语言深度分化明显**：WizTree File Search Filter 已演进为"运算符 + allocated 大小 + 正则 + 相对时间"的完整过滤语言；SpaceSniffer 是 `;` 组合的轻量过滤 + 四色标签；WinDirStat 多条件 + 正则。"查询语言直驱 Treemap 视图"仍无人闭环，是 DSV-05 演进方向的直接证据。
+3. **过滤语言深度分化明显**：WizTree File Search Filter 已演进为"运算符 + allocated 大小 + 正则 + 相对时间"的完整过滤语言；SpaceSniffer 是 `;` 组合的轻量过滤 + 四色标签；WinDirStat 多条件 + 正则。"查询语言直驱 Treemap 视图"仍无人闭环，是 Treemap 过滤演进方向的直接证据。
 4. **发布节奏**：WinDirStat 2.x 自 2026-06 起转入月度发布（2.6.2→2.9.3 五个月五个稳定版）；WizTree 维持数月一更并扩展至 macOS（WizTreeMac）与 Windows ARM。
 
 ---
@@ -47,8 +47,8 @@
 
 ### 1.5 对 Cairn 的可借鉴点
 
-1. **过滤语法的 `|` 取反与 `;` 组合**：把 `size:`/`ext:`/`dm:` 映射为 Treemap 覆盖层（P2 演进候选）时，"`|` 前缀排除 + 分号串联"是与 Cairn 逻辑组合语义（QRY-02 的 `!`/与）最易对齐的轻量参照；被过滤元素淡出不重排，与 DSV-05 现行机制同型（[官网首页](http://www.uderzo.it/main_products/space_sniffer/index.html)）。
-2. **"multiple views, single scan"**：一次扫描、多过滤视图的视图模型可作为 DSV-05 之后的演进参照，但需评估与 DSV-07 双态隔离的冲突（[features 页](http://www.uderzo.it/main_products/space_sniffer/features.html)）。
+1. **过滤语法的 `|` 取反与 `;` 组合**：把 `size:`/`ext:`/`dm:` 映射为 Treemap 覆盖层（P2 演进候选）时，"`|` 前缀排除 + 分号串联"是与 Cairn 逻辑组合语义（QRY-02 的 `!`/与）最易对齐的轻量参照；被过滤元素淡出不重排，与 Treemap 选中态淡化机制同型（[官网首页](http://www.uderzo.it/main_products/space_sniffer/index.html)）。
+2. **"multiple views, single scan"**：一次扫描、多过滤视图的视图模型可作为 Treemap 过滤之后的演进参照，但需评估与 DSV-07 双态隔离的冲突（[features 页](http://www.uderzo.it/main_products/space_sniffer/features.html)）。
 3. **闪烁提示变更元素**：以极低成本表达"这里刚变了"，不重排、不重建布局；treemap.md §3.3 现行口径是"区块没有动效"，该做法仅作为未来活树方案的候选参考。
 
 ---
@@ -163,7 +163,7 @@
 
 ### 3.6 对 Cairn 的可借鉴点
 
-1. **相对时间过滤语法**：`>NOW-5`、`>TODAY-5m` 与 Cairn `dm:` 相对时长（QRY-04）同构互为参照；若 DSV-05 演进为查询直驱过滤层，这套"分钟/小时/天粒度 + 区间组合"是现成的语法测试集（[版本历史](https://diskanalyzer.com/download)）。
+1. **相对时间过滤语法**：`>NOW-5`、`>TODAY-5m` 与 Cairn `dm:` 相对时长（QRY-04）同构互为参照；若 Treemap 演进为查询直驱过滤层，这套"分钟/小时/天粒度 + 区间组合"是现成的语法测试集（[版本历史](https://diskanalyzer.com/download)）。
 2. **Include/Exclude 的"扫描中 vs 扫描后"分离**（4.18）：扫描中只应用 Exclude、Include 一律扫描后应用——与 DSV-05"过滤不重排、只淡化"的视图语义一致，值得固化为 Cairn 过滤层的时序约束。
 3. **命令行 MFT dump 与 CSV 往返**：原始 MFT 记录可导出、扫描快照可导入复现，是 IDX-10 离线索引构建与 SM-5 零差异回归的现成产品范式。
 
