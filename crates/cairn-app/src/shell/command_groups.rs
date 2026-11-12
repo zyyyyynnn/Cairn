@@ -17,9 +17,9 @@
 
 use crate::shell::commands::{
     CopyFileNames, CopyFullPaths, CutQueryText, DeleteSelected, EscapeQuery, OpenSelected,
-    PasteQueryText, RedoQueryText, RestoreAll, RestoreSelected, RevealSelectedLocation, SelectAll,
-    ShowProperties, ToggleCaseSensitive, ToggleMatchPath, ToggleRegex, ToggleWholeWord,
-    UndoQueryText,
+    PasteQueryText, RedoQueryText, RenameSelected, RestoreAll, RestoreSelected,
+    RevealSelectedLocation, SelectAll, ShowProperties, ToggleCaseSensitive, ToggleMatchPath,
+    ToggleRegex, ToggleWholeWord, UndoQueryText,
 };
 use crate::shell::settings::{
     LANGUAGE_EN_US, LANGUAGE_SYSTEM, LANGUAGE_ZH_CN, THEME_DARK, THEME_LIGHT, THEME_SYSTEM,
@@ -146,6 +146,7 @@ impl ZoomPreset {
 pub enum GroupCommand {
     // ---- the selected result (文件) -------------------------------------------------
     OpenSelected,
+    RenameSelected,
     RestoreSelected,
     RestoreAll,
     RevealLocation,
@@ -222,6 +223,7 @@ impl GroupCommand {
     pub fn label_key(self) -> &'static str {
         match self {
             GroupCommand::OpenSelected => "ctx_open",
+            GroupCommand::RenameSelected => "ctx_rename",
             GroupCommand::RestoreSelected => "ctx_restore",
             GroupCommand::RestoreAll => "ctx_restore_all",
             GroupCommand::RevealLocation => "ctx_open_path",
@@ -287,6 +289,7 @@ impl GroupCommand {
     pub fn action(self) -> Option<Box<dyn Action>> {
         match self {
             GroupCommand::OpenSelected => Some(Box::new(OpenSelected)),
+            GroupCommand::RenameSelected => Some(Box::new(RenameSelected)),
             GroupCommand::RestoreSelected => Some(Box::new(RestoreSelected)),
             GroupCommand::RestoreAll => Some(Box::new(RestoreAll)),
             GroupCommand::RevealLocation => Some(Box::new(RevealSelectedLocation)),
@@ -383,6 +386,7 @@ pub static DEFAULT_GROUPS: &[MenuGroupSpec] = &[
         sections: &[
             &[
                 GroupCommand::OpenSelected,
+                GroupCommand::RenameSelected,
                 GroupCommand::RestoreSelected,
                 GroupCommand::RestoreAll,
                 GroupCommand::RevealLocation,
@@ -538,6 +542,22 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Rename is a read-modify command on one row, so it sits with the other row commands in the
+    /// File menu rather than in the destructive section.
+    #[test]
+    fn the_file_menu_offers_rename_beside_the_row_commands() {
+        let file = group_spec(MenuGroup::File);
+        let row_section = file
+            .sections
+            .first()
+            .expect("the File menu has a row section");
+        assert!(row_section.contains(&GroupCommand::RenameSelected));
+        assert!(
+            !file.sections[1].contains(&GroupCommand::RenameSelected),
+            "rename is not a destructive command"
+        );
     }
 
     /// The Help menu keeps the update entry and About in one group, update first.

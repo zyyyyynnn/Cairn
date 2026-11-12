@@ -28,14 +28,15 @@ use windows::Win32::UI::Shell::PropertiesSystem::PSGetPropertyKeyFromName;
 #[cfg(windows)]
 use windows::Win32::UI::Shell::{
     BHID_EnumItems, FOLDERID_RecycleBinFolder, FileOperation, IEnumShellItems, IFileOperation,
-    IShellItem, IShellItem2, SHCreateItemFromIDList, SHEmptyRecycleBinW, SHGetKnownFolderIDList,
-    SHParseDisplayName, ShellExecuteExW, FOFX_RECYCLEONDELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION,
-    FOF_WANTNUKEWARNING, SEE_MASK_INVOKEIDLIST, SHELLEXECUTEINFOW, SIGDN_FILESYSPATH,
-    SIGDN_NORMALDISPLAY,
+    IShellItem, IShellItem2, SHCreateItemFromIDList, SHCreateItemFromParsingName,
+    SHEmptyRecycleBinW, SHGetKnownFolderIDList, SHParseDisplayName, ShellExecuteExW,
+    FOFX_RECYCLEONDELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_WANTNUKEWARNING,
+    SEE_MASK_INVOKEIDLIST, SHELLEXECUTEINFOW, SIGDN_FILESYSPATH, SIGDN_NORMALDISPLAY,
 };
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SW_SHOWNORMAL};
 
+use crate::shell::rename::RenameError;
 #[cfg(windows)]
 use crate::win32::{win32_code_from_hresult, WIN32_ERROR_USER_CANCELLED};
 
@@ -1033,6 +1034,94 @@ pub fn delete_to_recycle_bin(paths: &[String], owner: isize) -> Result<(), BinOp
     }
 }
 
+/// Renames one filesystem path through `IFileOperation::RenameItem`, the shell's own pipeline, so
+/// the write runs with Explorer's undo and error semantics without going through the index service.
+/// The name rules are enforced by [`crate::shell::rename`] before this is called; the conflict
+/// check below keeps an existing neighbour a typed outcome instead of a native prompt.
+pub fn rename_path(path: &std::path::Path, new_name: &str) -> Result<(), RenameError> {
+    #[cfg(windows)]
+    {
+        let _com = ComApartment::enter();
+        let source_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        // A case-only rename addresses the same file, and asking the filesystem whether the
+        // differently-cased path exists would be true by definition.
+        if !new_name.eq_ignore_ascii_case(source_name) && path.with_file_name(new_name).exists() {
+            return Err(RenameError::TargetExists);
+        }
+
+        let path_text = path.to_string_lossy();
+        let wide_path = to_wide_shell_path(&path_text);
+        // SAFETY: the path is null-terminated for the call, and the shell item owns its identity.
+        let item: IShellItem =
+            unsafe { SHCreateItemFromParsingName(PCWSTR(wide_path.as_ptr()), None) }.map_err(
+                |err| RenameError::Shell {
+                    message: format!("parse {}: {err}", path.display()),
+                },
+            )?;
+
+        // SAFETY: in-proc COM activation of the shell file-operation handler, released with the
+        // interface.
+        let operation: IFileOperation = unsafe {
+            CoCreateInstance(&FileOperation, None, CLSCTX_ALL)
+        }
+        .map_err(|err| RenameError::Shell {
+            message: format!("CoCreateInstance(FileOperation): {err}"),
+        })?;
+        // SAFETY: plain flags assignment on the freshly created handler. The editor has already
+        // validated the name, so the shell must not add a confirmation of its own.
+        unsafe { operation.SetOperationFlags(FOF_ALLOWUNDO | FOF_NOCONFIRMATION) }.map_err(
+            |err| RenameError::Shell {
+                message: format!("SetOperationFlags: {err}"),
+            },
+        )?;
+
+        let wide_name = to_wide_shell_path(new_name);
+        // SAFETY: both the source item and the null-terminated target name outlive the call; the
+        // rename is queued on this handler.
+        unsafe { operation.RenameItem(&item, PCWSTR(wide_name.as_ptr()), None) }.map_err(
+            |err| RenameError::Shell {
+                message: format!("RenameItem({}): {err}", path.display()),
+            },
+        )?;
+        // SAFETY: batched rename executes the operation queued above.
+        match unsafe { operation.PerformOperations() } {
+            Ok(()) => {}
+            Err(err) => {
+                if hresult_is_cancelled(err.code()) {
+                    return Err(RenameError::Cancelled);
+                }
+                if rename_conflicts(err.code()) {
+                    return Err(RenameError::TargetExists);
+                }
+                return Err(RenameError::Shell {
+                    message: format!("PerformOperations({}): {err}", path.display()),
+                });
+            }
+        }
+        if operation_was_aborted(&operation) {
+            return Err(RenameError::Cancelled);
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (path, new_name);
+        Ok(())
+    }
+}
+
+/// The shell reports a rename onto an existing name as one of its "already exists" results.
+#[cfg(windows)]
+fn rename_conflicts(code: windows::core::HRESULT) -> bool {
+    const RENAMEFILE_EXISTS: i32 = 0x8027_0028u32 as i32;
+    const ERROR_ALREADY_EXISTS: i32 = 0x8007_00B7u32 as i32;
+    matches!(code.0, RENAMEFILE_EXISTS | ERROR_ALREADY_EXISTS)
+        || matches!(code.0 as u32, 0x8027_0029..=0x8027_002C)
+}
+
 /// Copies text to the Windows system clipboard.
 pub fn set_clipboard_text(text: &str) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(windows)]
@@ -1368,6 +1457,55 @@ mod tests {
         assert!(
             !listing.iter().any(|entry| entry.fs_path == item.fs_path),
             "the restored item must leave the bin"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_rename_writes_the_new_name_and_removes_the_old_one() {
+        let temp = tempfile::tempdir().expect("create the probe directory");
+        let old = temp.path().join("before.txt");
+        std::fs::write(&old, b"cairn").expect("create the probe file");
+
+        rename_path(&old, "after.txt").expect("rename the probe");
+
+        assert!(!old.exists(), "the old name must be gone");
+        let new = temp.path().join("after.txt");
+        assert_eq!(
+            std::fs::read(&new).expect("the probe exists under its new name"),
+            b"cairn"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn renaming_onto_an_existing_name_reports_a_conflict_and_keeps_both_files() {
+        let temp = tempfile::tempdir().expect("create the probe directory");
+        let source = temp.path().join("source.txt");
+        let target = temp.path().join("target.txt");
+        std::fs::write(&source, b"source").expect("create the source");
+        std::fs::write(&target, b"target").expect("create the target");
+
+        assert_eq!(
+            rename_path(&source, "target.txt"),
+            Err(RenameError::TargetExists)
+        );
+        assert_eq!(std::fs::read(&source).expect("source survives"), b"source");
+        assert_eq!(std::fs::read(&target).expect("target survives"), b"target");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_case_only_rename_keeps_the_file_at_the_same_path() {
+        let temp = tempfile::tempdir().expect("create the probe directory");
+        let old = temp.path().join("notes.txt");
+        std::fs::write(&old, b"cairn").expect("create the probe file");
+
+        rename_path(&old, "NOTES.txt").expect("case-only rename");
+
+        assert_eq!(
+            std::fs::read(&old).expect("the file stays in place"),
+            b"cairn"
         );
     }
 }

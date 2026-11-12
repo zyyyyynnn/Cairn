@@ -349,6 +349,15 @@ pub(crate) struct TreemapPathField {
     pub _subscription: Subscription,
 }
 
+/// The in-place rename editor: the selected row swaps its name cell for this input while a draft
+/// is present. A shell write owns the draft until it answers, so a second Enter cannot duplicate it.
+pub(crate) struct RenameEditor {
+    pub input: Entity<InputState>,
+    pub draft: Option<crate::shell::rename::RenameDraft>,
+    pub in_flight: bool,
+    pub _subscription: Subscription,
+}
+
 pub struct CairnApp {
     pub i18n: Rc<I18nManager>,
     pub query: QueryDomain,
@@ -380,6 +389,8 @@ pub struct CairnApp {
     pub drive_view: Option<char>,
     pub treemap_state: Option<crate::treemap::state::TreemapViewState>,
     pub(crate) treemap_path: TreemapPathField,
+    /// The in-place rename editor for the single selected result row.
+    pub(crate) rename: RenameEditor,
     /// The path switch menu anchored to one breadcrumb segment.
     pub(crate) treemap_path_menu: Option<Entity<PopupMenu>>,
     pub(crate) treemap_path_menu_for: Option<String>,
@@ -472,6 +483,18 @@ impl CairnApp {
                 InputEvent::Focus => {}
             },
         );
+        let rename_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder(i18n.get_text("rename_label")));
+        let rename_subscription = cx.subscribe_in(
+            &rename_input,
+            window,
+            |this, _, event: &InputEvent, window, cx| match event {
+                InputEvent::PressEnter { .. } => this.commit_rename(window, cx),
+                InputEvent::Blur => this.cancel_rename(false, window, cx),
+                InputEvent::Change => this.rename_text_changed(cx),
+                InputEvent::Focus => {}
+            },
+        );
 
         let mut app = Self {
             i18n,
@@ -542,6 +565,12 @@ impl CairnApp {
                 editing: false,
                 error: false,
                 _subscription: treemap_path_subscription,
+            },
+            rename: RenameEditor {
+                input: rename_input,
+                draft: None,
+                in_flight: false,
+                _subscription: rename_subscription,
             },
             treemap_path_menu: None,
             treemap_path_menu_for: None,

@@ -23,6 +23,8 @@ pub(crate) mod os;
 pub(crate) mod perf;
 pub(crate) mod query_edit;
 pub(crate) mod recycle_bin;
+pub(crate) mod rename;
+pub(crate) mod rename_editor;
 pub(crate) mod reveal;
 pub(crate) mod settings;
 pub(crate) mod settings_actions;

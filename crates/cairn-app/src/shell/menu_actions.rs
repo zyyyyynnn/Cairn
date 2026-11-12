@@ -334,6 +334,12 @@ impl CairnApp {
     }
 
     pub fn escape_query(&mut self, _: &EscapeQuery, window: &mut Window, cx: &mut Context<Self>) {
+        // The in-place rename editor is the innermost editing surface while it is open; Escape
+        // closes it and leaves the query alone.
+        if self.rename.draft.is_some() {
+            self.cancel_rename(true, window, cx);
+            return;
+        }
         // The address field is the innermost editing surface while it is open.
         if self.treemap_path.editing {
             self.cancel_treemap_path_edit(window, cx);
@@ -505,7 +511,11 @@ impl CairnApp {
                 this.open_group = None;
                 this.group_menu_dismiss = None;
                 this.group_menu = None;
-                this.query.search_focus.focus(window, cx);
+                // A rename opened from the File menu owns the keyboard now; handing focus back
+                // to the search box would cancel the editor through its blur.
+                if this.rename.draft.is_none() {
+                    this.query.search_focus.focus(window, cx);
+                }
                 cx.notify();
             },
         );
@@ -683,6 +693,9 @@ impl CairnApp {
             GroupCommand::RestoreSelected
             | GroupCommand::RestoreAll
             | GroupCommand::EmptyRecycleBin => !self.recycle_bin.is_open(),
+            // A bin payload is identified by the shell's own listing, not by a live filesystem
+            // name, so there is nothing to rename there.
+            GroupCommand::RenameSelected => self.recycle_bin.is_open(),
             GroupCommand::RevealLocation | GroupCommand::ShowProperties => {
                 self.recycle_bin.is_open()
             }
@@ -727,6 +740,9 @@ impl CairnApp {
             GroupCommand::OpenSelected
             | GroupCommand::RevealLocation
             | GroupCommand::ShowProperties => self.target_row_ix().is_none(),
+            GroupCommand::RenameSelected => {
+                self.rename.in_flight || self.rename_target_ix().is_none()
+            }
             GroupCommand::DeleteSelected | GroupCommand::RestoreSelected => {
                 if self.recycle_bin.is_open() {
                     self.recycle_bin.is_loading()
@@ -852,6 +868,7 @@ impl CairnApp {
             | GroupCommand::PasteQueryText
             | GroupCommand::ShowProperties
             | GroupCommand::DeleteSelected
+            | GroupCommand::RenameSelected
             | GroupCommand::RestoreSelected
             | GroupCommand::RestoreAll
             | GroupCommand::SelectAll
@@ -989,6 +1006,15 @@ impl CairnApp {
     pub fn target_row_ix(&self) -> Option<usize> {
         let ix = self.results.table.target_row()?;
         self.results.table.is_loaded(ix).then_some(ix)
+    }
+
+    /// The one row an in-place rename may edit. The bin and the Treemap are locations with their
+    /// own surfaces, and a row outside the fetched window has no name to load into the editor.
+    pub fn rename_target_ix(&self) -> Option<usize> {
+        if self.recycle_bin.is_open() || self.drive_view.is_some() {
+            return None;
+        }
+        self.results.table.sole_selected_row()
     }
 
     pub fn target_full_path(&self) -> Option<String> {

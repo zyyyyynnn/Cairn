@@ -92,6 +92,9 @@ actions!(
         /// Move the selection to the Recycle Bin through the native file pipeline (Delete). The
         /// result context menu offers the same command.
         DeleteSelected,
+        /// Rename the single selected result in place (F2). The result context menu offers the
+        /// same command.
+        RenameSelected,
         /// Put the selected Recycle Bin items back in their original locations. Only meaningful
         /// while the Recycle Bin view is open; the file and row menus offer it there.
         RestoreSelected,
@@ -209,6 +212,8 @@ pub fn key_bindings() -> Vec<KeyBindingEntry> {
         // uses the same key for forward-deleting text, and a window-wide
         // binding would swallow that edit.
         bind("delete", DeleteSelected, RESULTS_CONTEXT),
+        // Rename edits the row the table has focused, so it is the table's key too.
+        bind("f2", RenameSelected, RESULTS_CONTEXT),
         // A focused caption button is still inside the window key context, so `enter` there would
         // out-rank nothing and open the selected row. Consume the activation keys in the control's own
         // context; the button's click handler runs on key-up, like every native button.
@@ -247,6 +252,7 @@ pub fn results_region_bindings() -> Vec<(&'static str, &'static str)> {
         ("right", ScrollTableRight::name_for_type()),
         ("home", ScrollTableStart::name_for_type()),
         ("end", ScrollTableEnd::name_for_type()),
+        ("f2", RenameSelected::name_for_type()),
     ]
 }
 

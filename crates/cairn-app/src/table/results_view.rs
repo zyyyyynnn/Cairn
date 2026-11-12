@@ -23,6 +23,7 @@ use cairn_protocol::status::ContentIndexState;
 use fluent_bundle::FluentArgs;
 use gpui_kit::assets::IconName as AssetIconName;
 use gpui_kit::base::Disableable as _;
+use gpui_kit::component::input::Input;
 use gpui_kit::component::menu::ContextMenuExt;
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_kit::component::tooltip::Tooltip;
@@ -211,6 +212,7 @@ where
 /// 删除 opens its own section: it is destructive, where 打开/复制 are reads and 属性 is a look-up.
 const RESULT_COMMANDS: &[GroupCommand] = &[
     GroupCommand::OpenSelected,
+    GroupCommand::RenameSelected,
     GroupCommand::RevealLocation,
     GroupCommand::CopyPaths,
     GroupCommand::CopyNames,
@@ -976,6 +978,7 @@ impl CairnApp {
         } else {
             RESULT_COMMANDS
         };
+        let rename_available = self.rename_target_ix().is_some();
         // The commands the row owns, in the order the context menu lists them. Every one of them is
         // also on the keyboard or in the command bar, so the menu is a shortcut and not the only door.
         row_el
@@ -994,12 +997,15 @@ impl CairnApp {
                     {
                         menu = menu.separator();
                     }
-                    menu = menu.menu(
-                        i18n.get_text(command.label_key_in(in_bin)),
-                        command
-                            .action()
-                            .expect("a result command is an Action the root already handles"),
-                    );
+                    let label = i18n.get_text(command.label_key_in(in_bin));
+                    let action = command
+                        .action()
+                        .expect("a result command is an Action the root already handles");
+                    menu = if *command == GroupCommand::RenameSelected {
+                        menu.menu_with_disabled(label, action, !rename_available)
+                    } else {
+                        menu.menu(label, action)
+                    };
                 }
                 menu
             })
@@ -1010,6 +1016,9 @@ impl CairnApp {
     /// put the ellipsis where the lane actually ends. The full name is available on hover, so a
     /// clipped value is never the only copy. The element id is the row's full path, which stays the
     /// same while the row is visible and is unique even when names repeat across folders.
+    ///
+    /// The row being renamed swaps this run for the in-place input, so the editor occupies the name
+    /// lane itself instead of floating over the table.
     fn render_name_cell(
         &self,
         row: &FileRowData,
@@ -1017,6 +1026,11 @@ impl CairnApp {
         tokens: &ShellTokens,
         is_selected: bool,
     ) -> Stateful<Div> {
+        let renaming = self
+            .rename
+            .draft
+            .as_ref()
+            .is_some_and(|draft| draft.path == full_path);
         let tooltip = SharedString::from(row.name.as_str());
         let extension = if self.recycle_bin.is_open() {
             self.recycle_bin
@@ -1036,45 +1050,74 @@ impl CairnApp {
             .clone()
             .filter(|snippet| !snippet.trim().is_empty());
 
-        div()
+        let cell = div()
             .id(element_id("result-name", full_path))
-            .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
             .lane_grow(self.results.column_widths.name)
             .min_w(rems(layout::NAME_MIN_COLUMN))
             .pl(rems(layout::CONTENT_INSET - layout::SPACE_4))
             .pr(rems(layout::INNER_SPACING))
             .flex()
             .items_center()
-            .gap(rems(layout::INNER_SPACING))
-            .child(
-                Icon::new(result_row_icon(&row.name, extension, row.is_dir))
-                    .small()
-                    // The glyph already distinguishes the file kind. Selection is the only thing
-                    // that should raise the icon, together with the row's text.
-                    .text_color(if is_selected {
-                        tokens.foreground
-                    } else {
-                        tokens.muted_foreground
-                    }),
+            .gap(rems(layout::INNER_SPACING));
+        let cell = if renaming {
+            cell
+        } else {
+            cell.tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+        };
+        let cell = cell.child(
+            Icon::new(result_row_icon(&row.name, extension, row.is_dir))
+                .small()
+                // The glyph already distinguishes the file kind. Selection is the only thing
+                // that should raise the icon, together with the row's text.
+                .text_color(if is_selected {
+                    tokens.foreground
+                } else {
+                    tokens.muted_foreground
+                }),
+        );
+        let cell = if renaming {
+            let control = accessibility::control("rename-input");
+            cell.child(
+                Input::new(&self.rename.input)
+                    .id(control.element)
+                    .xsmall()
+                    .appearance(false)
+                    .bordered(false)
+                    .focus_bordered(false)
+                    // The editor occupies the name lane at the row's own body step, so the text
+                    // does not jump when the row swaps its label for the input.
+                    .text_size(rems(1.0))
+                    .line_height(phi())
+                    .p(rems(0.0))
+                    .h_full()
+                    .flex_1()
+                    .min_w_0()
+                    .aria_label(accessibility::component_name(control, &self.i18n)),
             )
-            .child(result_text(&row.name, &row.name_highlights, tokens))
+        } else {
+            cell.child(result_text(&row.name, &row.name_highlights, tokens))
+        };
+        cell
             // A content hit and a filename hit otherwise look identical. The badge names the
             // reason the row matched; the snippet is available on hover without adding a second
-            // line or changing the virtual row height.
-            .when_some(content_match, |this, snippet| {
-                let tip = SharedString::from(snippet);
-                this.child(
-                    div()
-                        .id(element_id("result-content-match", full_path))
-                        .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
-                        .flex_shrink_0()
-                        .px(rems(layout::SPACE_4))
-                        .rounded(tokens.radius)
-                        .bg(tokens.muted)
-                        .text_sm()
-                        .text_color(tokens.muted_foreground)
-                        .child(self.i18n.get_text("result_content_match")),
-                )
+            // line or changing the virtual row height. Editing hides it so the name lane belongs
+            // to the input alone.
+            .when(!renaming, |this| {
+                this.when_some(content_match, |this, snippet| {
+                    let tip = SharedString::from(snippet);
+                    this.child(
+                        div()
+                            .id(element_id("result-content-match", full_path))
+                            .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                            .flex_shrink_0()
+                            .px(rems(layout::SPACE_4))
+                            .rounded(tokens.radius)
+                            .bg(tokens.muted)
+                            .text_sm()
+                            .text_color(tokens.muted_foreground)
+                            .child(self.i18n.get_text("result_content_match")),
+                    )
+                })
             })
     }
 
@@ -1467,7 +1510,7 @@ mod tests {
 
     use super::{
         content_query_notice, result_row_icon, rows_band_local_top, rows_to_paint,
-        ContentQueryNotice,
+        ContentQueryNotice, BIN_COMMANDS, RESULT_COMMANDS,
     };
     use crate::shell::command_groups::GroupCommand;
     use crate::table::model::{SortColumn, SortColumnLabel};
@@ -1526,6 +1569,18 @@ mod tests {
             result_row_icon("CMakeLists.txt", "txt", false),
             AssetIconName::FileCode,
             "a name the taxonomy already knows outranks its ordinary suffix"
+        );
+    }
+
+    #[test]
+    fn the_result_menu_offers_in_place_rename_but_the_bin_does_not() {
+        assert!(
+            RESULT_COMMANDS.contains(&GroupCommand::RenameSelected),
+            "the live result row offers rename"
+        );
+        assert!(
+            !BIN_COMMANDS.contains(&GroupCommand::RenameSelected),
+            "a bin payload has no live name to rename"
         );
     }
 
