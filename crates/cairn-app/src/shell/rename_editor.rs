@@ -59,11 +59,25 @@ impl CairnApp {
         cx.notify();
     }
 
-    /// Drops a draft when the table is left for another location; the editor
-    /// belongs to the row it was opened on.
-    pub(crate) fn discard_rename_on_location_change(&mut self, cx: &mut Context<Self>) {
+    /// Drops the draft; the editor is a transient surface, not a location.
+    pub(crate) fn discard_rename(&mut self, cx: &mut Context<Self>) {
         if self.rename.draft.take().is_some() {
             self.dismiss_rename_error_toast(cx);
+        }
+    }
+
+    /// Drops the draft when the selection no longer sits on its row, so Enter,
+    /// Escape and the row commands act on the visible selection.
+    pub(crate) fn discard_rename_off_row(&mut self, cx: &mut Context<Self>) {
+        let Some(draft_path) = self.rename.draft.as_ref().map(|draft| draft.path.clone()) else {
+            return;
+        };
+        let selected = self
+            .rename_target_ix()
+            .and_then(|ix| self.results.table.row(ix))
+            .map(|row| join_row_path(&row.path, &row.name));
+        if selected.as_deref() != Some(draft_path.as_str()) {
+            self.discard_rename(cx);
         }
     }
 
@@ -131,7 +145,9 @@ impl CairnApp {
                 match outcome {
                     Ok(Ok(())) => {
                         let editor_open = this.rename.draft.take().is_some();
-                        this.results.table.rename_row(&old_path, &new_name);
+                        if !this.recycle_bin.is_open() {
+                            this.results.table.rename_row(&old_path, &new_name);
+                        }
                         if let Some(listing) = this.block_listing.as_mut() {
                             listing.rename_path(&old_path, &new_name);
                         }
@@ -300,6 +316,19 @@ mod tests {
                         );
 
                         this.escape_query(&EscapeQuery, window, cx);
+                        assert!(this.rename.draft.is_none());
+
+                        // Arrow selection moves to another row and closes the
+                        // editor instead of leaving an orphan that eats Escape.
+                        this.results.table.select_row(1, false);
+                        this.rename_selected(&RenameSelected, window, cx);
+                        assert!(this.rename.draft.is_some());
+                        this.move_selection(
+                            false,
+                            false,
+                            crate::app::layout::row_height(window),
+                            cx,
+                        );
                         assert!(this.rename.draft.is_none());
                     });
 

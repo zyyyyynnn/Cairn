@@ -974,7 +974,7 @@ impl CairnApp {
                 .on_mouse_down(
                     MouseButton::Right,
                     cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                        this.focus_row_for_context(ix);
+                        this.focus_row_for_context(ix, cx);
                         cx.notify();
                     }),
                 );

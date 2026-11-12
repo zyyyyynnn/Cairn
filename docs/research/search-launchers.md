@@ -73,7 +73,7 @@
 
 ### 1.8 对 Cairn 的可借鉴点
 
-1. **Quick Switch 的"第三入口"形态**（对照 UI-08）：Listary 的入口链是 全局热键唤起 → 搜索窗口 → **在其他应用的保存/打开对话框内把路径直接送进去**（Ctrl+G）。Cairn 的 UI-08 目前只有托盘入口，全局热键尚未接线；对话框跳转是被长期验证的独特入口，可列入 P2 评估（实现面涉及对 Win32 公共对话框的窗口自动化，风险需单独评估）。
+1. **Quick Switch 的"第三入口"形态**（对照 UI-08）：Listary 的入口链是 全局热键唤起 → 搜索窗口 → **在其他应用的保存/打开对话框内把路径直接送进去**（Ctrl+G）。Cairn 的 UI-08 已由托盘与全局热键 `Ctrl+Alt+Space` 覆盖；对话框跳转是被长期验证的独特入口，可列入 P2 评估（实现面涉及对 Win32 公共对话框的窗口自动化，风险需单独评估）。
 2. **索引新鲜度可验证 + 非实时路径显式降级**（对照 IDX-07、SM-5）：Listary 用 "Last updated" 时间戳让用户亲眼验证实时监控是否生效，并对不可靠路径显式提供定时扫描/Never 档位——与 SPEC 零静默过期原则同向，可作为 Cairn 卷状态（Synced/SnapshotMode）旁展示"最后追赶到 USN 锚点时间"的交互参照。
 3. **拼音与轻量语法的用户基础**（对照 QRY-04、P2 `py:`）：Listary 6.0.11.35 起支持全拼/模糊全拼，V7 引入 `ext:`/`size:`/`date:today` 轻量语法；Cairn 的 QRY-04（运算符、区间、相对时长、`mtd/ytd/qtd`）强于三者，拼音首字母搜索有直接用户证据，且 Cairn 免费全量提供（Listary 把 Advanced search syntaxes 列为 Pro 独占）。
 
@@ -183,7 +183,7 @@ MIT，随 PowerToys 免费开源（[GitHub](https://github.com/microsoft/PowerTo
 
 ### 3.8 对 Cairn 的可借鉴点
 
-1. **快慢两段渐进呈现**（对照 QRY-01、QRY-06、CNT-06）：先 `CONTAINS` 快查上屏、`LIKE` 全量后到，配合 IPlugin/IDelayedExecutionPlugin 的 100ms 分级，是"首屏不等全量"的成熟范式；Cairn 的文件名查询是单引擎快路径；`content:` 的 `!` / `|` 组合走逐记录布尔慢路径，单查询至多 16 个内容词，纯析取为一次联合检索。正则与内容查询可采用"先出可用结果、全量后到"的交互模式；GUI 查询取消尚未接线，CNT-06 回填未就绪反馈同理。
+1. **快慢两段渐进呈现**（对照 QRY-01、QRY-06、CNT-06）：先 `CONTAINS` 快查上屏、`LIKE` 全量后到，配合 IPlugin/IDelayedExecutionPlugin 的 100ms 分级，是"首屏不等全量"的成熟范式；Cairn 的文件名查询是单引擎快路径；`content:` 的 `!` / `|` 组合走逐记录布尔慢路径，单查询至多 16 个内容词，纯析取为一次联合检索。正则与内容查询可采用"先出可用结果、全量后到"的交互模式；GUI 已能停止当前查询并丢弃迟到的回答，CNT-06 回填未就绪反馈可沿用同一停止语义。
 2. **输入平滑与习惯加权**（对照 QRY-05）：Input smoothing 与 Selected item weight（选中结果更快上升）+ `!!` 历史插件，与 Listary "smart order according to your habits" 互相印证"按使用习惯调权"是启动器类公认需求；可作 Cairn QRY-05 预排序索引之上的 P2 排序演进候选。
 3. **v2 重写的结构信号**（对照 SPEC §1.1、§2.3）：微软把启动器迁往新 UI 栈（Windows App SDK、Native AOT）并另立 Command Palette，旧 Run 仅维护——小窗启动器的 UI 栈迁移成本高。Cairn 走"完整窗口 + 高密度表格 + Treemap"（UI-01、DSV-07）与三者小窗形态结构性不同，无需跟进小窗，UI-08 热键唤起保留即可。
 

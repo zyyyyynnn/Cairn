@@ -72,16 +72,8 @@ impl SessionManager {
     /// Registers an in-flight query and preemptively cancels that client's earlier in-flight queries,
     /// so rapid typing over short-lived pipe connections immediately aborts superseded searches.
     /// Another client's query is never touched.
-    pub fn begin_query(
-        &self,
-        owner: &QueryOwner,
-        query_id: u64,
-        conn_cancel: &CancellationToken,
-    ) -> CancellationToken {
+    pub fn begin_query(&self, owner: &QueryOwner, query_id: u64) -> CancellationToken {
         let token = CancellationToken::new();
-        if conn_cancel.is_cancelled() {
-            token.cancel();
-        }
         let mut active = self.active_queries.write().unwrap();
         active.retain(|(prev_owner, _), prev| {
             if prev_owner == owner {
@@ -346,14 +338,13 @@ mod tests {
     #[test]
     fn begin_query_cancels_superseded_queries_and_cancel_query_signals_active_token() {
         let sessions = SessionManager::default();
-        let conn = CancellationToken::new();
         let owner = QueryOwner::default();
 
-        let q1 = sessions.begin_query(&owner, 1, &conn);
+        let q1 = sessions.begin_query(&owner, 1);
         assert!(!q1.is_cancelled());
 
         // Starting query 2 preemptively cancels query 1.
-        let q2 = sessions.begin_query(&owner, 2, &conn);
+        let q2 = sessions.begin_query(&owner, 2);
         assert!(q1.is_cancelled());
         assert!(!q2.is_cancelled());
 
@@ -366,9 +357,8 @@ mod tests {
     #[test]
     fn a_stale_query_id_cancels_nothing() {
         let sessions = SessionManager::default();
-        let conn = CancellationToken::new();
         let owner = QueryOwner::default();
-        let q = sessions.begin_query(&owner, 11, &conn);
+        let q = sessions.begin_query(&owner, 11);
 
         sessions.cancel_query(&owner, 10);
         assert!(
@@ -383,7 +373,6 @@ mod tests {
     #[test]
     fn another_clients_identical_id_is_a_different_query() {
         let sessions = SessionManager::default();
-        let conn = CancellationToken::new();
         let first = QueryOwner {
             client_pid: 100,
             user_sid: "S-1-5-21-1".to_string(),
@@ -393,8 +382,8 @@ mod tests {
             user_sid: "S-1-5-21-2".to_string(),
         };
 
-        let first_query = sessions.begin_query(&first, 1, &conn);
-        let second_query = sessions.begin_query(&second, 1, &conn);
+        let first_query = sessions.begin_query(&first, 1);
+        let second_query = sessions.begin_query(&second, 1);
         assert!(
             !first_query.is_cancelled(),
             "another client's query must not supersede this one"

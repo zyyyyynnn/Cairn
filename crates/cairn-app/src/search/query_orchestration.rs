@@ -310,6 +310,8 @@ impl CairnApp {
     }
 
     pub fn trigger_search(&mut self, cx: &mut Context<Self>) {
+        // An explicit search leaves the row the rename editor was opened on.
+        self.discard_rename(cx);
         // The all-files view can only be final once the index has settled. Querying a growing
         // index would publish a partial total that climbs in steps as batches land, and each query
         // is a full index scan; the status poll asks for the one result set of the completed index

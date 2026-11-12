@@ -13,7 +13,6 @@ use crate::caller_auth::{authenticate_pipe_client, authorize, CallerAuthorizatio
 use crate::security::SafeSecurityDescriptor;
 use crate::session::{QueryOwner, RowsError, SessionManager};
 use crate::sync_engine::MultiVolumeEngine;
-use cairn_core::engine::CancellationToken;
 use cairn_core::syntax::{parse_query_with, MAX_CONTENT_TERMS};
 use cairn_protocol::codec::{encode_frame_into, peek_frame_header, try_decode_frame};
 use cairn_protocol::message::{
@@ -190,7 +189,6 @@ async fn handle_client(
     let mut read_buf = Vec::with_capacity(65536);
     let mut write_buf = Vec::with_capacity(4096);
     let mut temp_buf = [0u8; 8192];
-    let mut cancel = CancellationToken::new();
     let mut hello_done = false;
 
     loop {
@@ -232,10 +230,6 @@ async fn handle_client(
                     read_buf.shrink_to(65536);
                 }
 
-                if matches!(req, ClientRequest::Query { .. }) {
-                    cancel = CancellationToken::new();
-                }
-
                 let resp_payload = if !hello_done && !matches!(req, ClientRequest::Hello { .. }) {
                     // Version negotiation is explicit (SVC-03): nothing is served before it.
                     ResponsePayload::Error {
@@ -247,15 +241,7 @@ async fn handle_client(
                         hello_done = true;
                     }
                     let admin_only_query = engine.admin_only_query();
-                    process_request(
-                        req,
-                        &engine,
-                        &sessions,
-                        caller,
-                        &owner,
-                        admin_only_query,
-                        &cancel,
-                    )
+                    process_request(req, &engine, &sessions, caller, &owner, admin_only_query)
                 };
 
                 let omit_volumes = matches!(
@@ -329,7 +315,6 @@ fn process_request(
     caller: CallerAuthorization,
     owner: &QueryOwner,
     admin_only_query: bool,
-    cancel: &CancellationToken,
 ) -> ResponsePayload {
     if let Err((code, message)) = authorize(&req, caller, admin_only_query) {
         warn!("denied {code} from {caller:?}: {message}");
@@ -373,7 +358,7 @@ fn process_request(
                     ),
                 };
             }
-            let query_cancel = sessions.begin_query(owner, query_id, cancel);
+            let query_cancel = sessions.begin_query(owner, query_id);
             let (matched_items, total_matches, highlight_terms, snippets, total_bytes) = engine
                 .execute_search_multi(&raw_query, &defaults, sort_column, sort_asc, &query_cancel);
             sessions.finish_query(owner, query_id);
@@ -435,7 +420,6 @@ fn process_request(
             }
         }
         ClientRequest::Cancel { query_id } => {
-            cancel.cancel();
             sessions.cancel_query(owner, query_id);
             ResponsePayload::CancelAck
         }
@@ -569,7 +553,6 @@ mod tests {
         _dirs: tempfile::TempDir,
         engine: MultiVolumeEngine,
         sessions: SessionManager,
-        cancel: CancellationToken,
     }
 
     impl Harness {
@@ -587,7 +570,6 @@ mod tests {
                 _dirs: dirs,
                 engine,
                 sessions: SessionManager::default(),
-                cancel: CancellationToken::new(),
             }
         }
 
@@ -600,7 +582,6 @@ mod tests {
                 caller,
                 &QueryOwner::default(),
                 admin_only_query,
-                &self.cancel,
             )
         }
     }
@@ -796,10 +777,7 @@ mod tests {
     #[test]
     fn a_cancel_request_cancels_the_matching_in_flight_query() {
         let harness = Harness::new(ServiceConfig::default());
-        let token =
-            harness
-                .sessions
-                .begin_query(&QueryOwner::default(), 7, &CancellationToken::new());
+        let token = harness.sessions.begin_query(&QueryOwner::default(), 7);
         assert!(!token.is_cancelled());
 
         assert!(matches!(
@@ -1003,10 +981,7 @@ mod tests {
         use cairn_protocol::message::ERROR_CODE_QUERY_TOO_COMPLEX;
 
         let harness = Harness::new(ServiceConfig::default());
-        let in_flight =
-            harness
-                .sessions
-                .begin_query(&QueryOwner::default(), 41, &CancellationToken::new());
+        let in_flight = harness.sessions.begin_query(&QueryOwner::default(), 41);
         let (code, message) = denial(harness.handle(
             content_query_request(MAX_CONTENT_TERMS + 1),
             CallerAuthorization::Administrator,

@@ -72,7 +72,7 @@ impl CairnApp {
         // listing fades in instead of replacing the table text in place.
         // `leave_drive_view` opens the session for the view it just emptied.
         self.leave_drive_view();
-        self.discard_rename_on_location_change(cx);
+        self.discard_rename(cx);
         // A block listing's filter is a location-local search, not the query
         // this entry describes; taking it before the update keeps that text.
         let leaving_listing = self.block_listing.take().is_some();
