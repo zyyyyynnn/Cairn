@@ -61,7 +61,7 @@ Cairn 将本地文件检索与磁盘空间占用分析收敛于同一桌面工�
 cargo run -p cairn-service -- --console
 
 # 启动桌面客户端
-cargo run -p cairn-app
+cargo run --profile dev-ui -p cairn-app
 
 # 命令行检索与状态查询
 cargo run -p cairn-cli -- --status
