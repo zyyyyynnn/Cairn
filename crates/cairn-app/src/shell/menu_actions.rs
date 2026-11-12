@@ -315,7 +315,14 @@ impl CairnApp {
             self.clear_bin_filter(window, cx);
             return;
         }
-        self.clear_block_listing();
+        if self.block_listing.is_some() {
+            // The box filters the listing in place; clearing it keeps the
+            // location, the same way the Recycle Bin's clear works.
+            self.query.search_input.clear();
+            self.filter_block_listing(cx);
+            self.query.search_focus.focus(window, cx);
+            return;
+        }
         self.update_current_nav_state_text();
         self.query.search_input.clear();
         self.query.scope_drive = None;
@@ -386,6 +393,12 @@ impl CairnApp {
         // window searching a drive or a file type the person just tried to dismiss.
         if self.has_query() {
             self.clear_query_and_scope(window, cx);
+            return;
+        }
+        // A block listing is a location: with nothing to clear, Escape returns
+        // to the Treemap that owns the block instead of hiding the window.
+        if self.block_listing.is_some() {
+            self.go_back(window, cx);
             return;
         }
         // Nothing in scope means the user is done with this window: hide it to the tray.
@@ -667,13 +680,16 @@ impl CairnApp {
             GroupCommand::RevealLocation | GroupCommand::ShowProperties => {
                 self.recycle_bin.is_open()
             }
-            // The bin filter is name/original-location substring matching. Whole
-            // word, path matching and regex have no effect there, so their rows
-            // are absent instead of staying checkable no-ops. Case sensitivity is
-            // honored by the filter and remains available.
+            // The bin filter and a block listing filter their rows in place by
+            // name/location substring. Whole word, path matching and regex have
+            // no effect there, so their rows are absent instead of staying
+            // checkable no-ops. Case sensitivity is honored by both filters and
+            // remains available.
             GroupCommand::ToggleWholeWord
             | GroupCommand::ToggleMatchPath
-            | GroupCommand::ToggleRegex => self.recycle_bin.is_open(),
+            | GroupCommand::ToggleRegex => {
+                self.recycle_bin.is_open() || self.block_listing.is_some()
+            }
 
             _ => false,
         }
@@ -736,7 +752,7 @@ impl CairnApp {
 
     /// Clearing a search needs something the person can see narrowing the view. The Treemap hides
     /// the query band and gives Escape to its selection, so the Edit row would act on hidden state.
-    /// A bin filter and the main query are the two visible cases.
+    /// A bin filter, a block listing filter and the main query are the visible cases.
     fn can_clear_query(&self) -> bool {
         if self.drive_view.is_some() {
             return false;
@@ -1234,5 +1250,83 @@ mod confirmation_tests {
                 assert_ne!(resolved, key, "{key} fell back to raw key in {locale}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod visibility_tests {
+    use super::*;
+    use crate::shell::block_listing::BlockListing;
+    use core::prelude::rust_2021::test;
+
+    #[test]
+    fn escape_returns_from_a_block_listing_to_its_folder() {
+        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
+            gpui_kit::init(cx);
+            let _ = gpui_kit::open_window(
+                gpui_kit::gpui::WindowOptions::default(),
+                cx,
+                |window, cx| {
+                    let app = cx.new(|cx| CairnApp::new(window, cx));
+
+                    app.update(cx, |this, cx| {
+                        this.open_drive_visualization('C', window, cx);
+                        // The hand-off leaves the canvas for the listing, which
+                        // owns neither a drive scope nor a file-type filter.
+                        this.leave_drive_view();
+                        this.block_listing =
+                            Some(BlockListing::new(r"C:\Windows".to_string(), 2, Vec::new()));
+                        this.query.scope_drive = None;
+                        this.query.active_filter = FilterCategory::All;
+
+                        // The first Escape clears the in-place filter and keeps
+                        // the location.
+                        this.query.search_input.set_text("amd64");
+                        this.escape_query(&EscapeQuery, window, cx);
+                        assert!(this.block_listing.is_some());
+                        assert!(this.query.search_input.text.is_empty());
+
+                        // With nothing left to clear it returns to the folder.
+                        this.escape_query(&EscapeQuery, window, cx);
+                        assert!(this.block_listing.is_none());
+                        assert_eq!(this.drive_view, Some('C'));
+                    });
+
+                    cx.quit();
+                    app
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn search_flag_rows_hide_while_a_block_listing_is_open() {
+        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
+            gpui_kit::init(cx);
+            let _ = gpui_kit::open_window(
+                gpui_kit::gpui::WindowOptions::default(),
+                cx,
+                |window, cx| {
+                    let app = cx.new(|cx| CairnApp::new(window, cx));
+
+                    app.update(cx, |this, _cx| {
+                        assert!(!this.command_is_hidden(GroupCommand::ToggleWholeWord));
+                        this.block_listing =
+                            Some(BlockListing::new(r"C:\Windows".to_string(), 2, Vec::new()));
+                        for command in [
+                            GroupCommand::ToggleWholeWord,
+                            GroupCommand::ToggleMatchPath,
+                            GroupCommand::ToggleRegex,
+                        ] {
+                            assert!(this.command_is_hidden(command));
+                        }
+                        assert!(!this.command_is_hidden(GroupCommand::ToggleCase));
+                    });
+
+                    cx.quit();
+                    app
+                },
+            );
+        });
     }
 }
