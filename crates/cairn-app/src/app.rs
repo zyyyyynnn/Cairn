@@ -391,6 +391,9 @@ pub struct CairnApp {
     pub(crate) treemap_path: TreemapPathField,
     /// The in-place rename editor for the single selected result row.
     pub(crate) rename: RenameEditor,
+    /// The global summon hotkey; the guard unregisters the chord when it drops.
+    #[cfg(windows)]
+    pub(crate) _hotkey: Option<crate::shell::hotkey::GlobalHotkey>,
     /// The path switch menu anchored to one breadcrumb segment.
     pub(crate) treemap_path_menu: Option<Entity<PopupMenu>>,
     pub(crate) treemap_path_menu_for: Option<String>,
@@ -496,6 +499,13 @@ impl CairnApp {
             },
         );
 
+        #[cfg(windows)]
+        let hotkey = crate::shell::hotkey::register()
+            .map_err(|err| tracing::warn!("global hotkey unavailable: {err}"))
+            .ok();
+        #[cfg(windows)]
+        let hotkey_unavailable = hotkey.is_none();
+
         let mut app = Self {
             i18n,
             query: QueryDomain {
@@ -572,6 +582,8 @@ impl CairnApp {
                 in_flight: false,
                 _subscription: rename_subscription,
             },
+            #[cfg(windows)]
+            _hotkey: hotkey,
             treemap_path_menu: None,
             treemap_path_menu_for: None,
             treemap_path_menu_focus: None,
@@ -605,6 +617,12 @@ impl CairnApp {
                 }
             }));
         app.consume_update_notice(cx);
+        #[cfg(windows)]
+        if hotkey_unavailable {
+            let title = app.i18n.get_text("hotkey_unavailable_title");
+            let message = app.i18n.get_text("hotkey_unavailable_message");
+            app.show_info_toast(title, message, cx);
+        }
         app.check_service_connection(cx);
         app
     }

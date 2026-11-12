@@ -31,12 +31,10 @@ fn labels(language: &str) -> [String; 2] {
 ///
 /// GPUI's window class is shared with other applications, so matching the class could focus an
 /// unrelated window.
-pub(crate) fn activate_existing_cairn_window() -> bool {
+fn find_main_window() -> Option<windows::Win32::Foundation::HWND> {
     use windows::core::BOOL;
     use windows::Win32::Foundation::{HWND, LPARAM};
-    use windows::Win32::UI::WindowsAndMessaging::{
-        BringWindowToTop, EnumWindows, GetWindowTextW, SetForegroundWindow, ShowWindow, SW_RESTORE,
-    };
+    use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, GetWindowTextW};
 
     struct EnumCtx {
         found: Option<HWND>,
@@ -60,16 +58,43 @@ pub(crate) fn activate_existing_cairn_window() -> bool {
     unsafe {
         let _ = EnumWindows(Some(enum_proc), LPARAM(&mut ctx as *mut _ as isize));
     }
+    ctx.found
+}
 
-    if let Some(hwnd) = ctx.found {
+pub(crate) fn activate_existing_cairn_window() -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        BringWindowToTop, SetForegroundWindow, ShowWindow, SW_RESTORE,
+    };
+
+    let Some(hwnd) = find_main_window() else {
+        return false;
+    };
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_RESTORE);
+        let _ = BringWindowToTop(hwnd);
+        let _ = SetForegroundWindow(hwnd);
+    }
+    true
+}
+
+/// The global hotkey's window action: a foreground window goes to the tray, anything else is
+/// brought back and focused.
+pub(crate) fn toggle_main_window() {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, IsWindowVisible, ShowWindow, SW_HIDE,
+    };
+
+    let Some(hwnd) = find_main_window() else {
+        return;
+    };
+    let visible = unsafe { IsWindowVisible(hwnd).as_bool() };
+    let foreground = unsafe { GetForegroundWindow() } == hwnd;
+    if visible && foreground {
         unsafe {
-            let _ = ShowWindow(hwnd, SW_RESTORE);
-            let _ = BringWindowToTop(hwnd);
-            let _ = SetForegroundWindow(hwnd);
+            let _ = ShowWindow(hwnd, SW_HIDE);
         }
-        true
     } else {
-        false
+        activate_existing_cairn_window();
     }
 }
 

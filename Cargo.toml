@@ -67,6 +67,7 @@ lopdf = { version = "0.47", default-features = false }
 # does not list them directly.
 gpui-kit = { version = "0.9.1", default-features = false, features = ["assets", "component"] }
 tray-icon = { version = "0.26.1", default-features = false }
+global-hotkey = "0.10"
 fluent-bundle = "0.16"
 unic-langid = "0.9"
 
