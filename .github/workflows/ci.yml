@@ -17,9 +17,11 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
 
 # Rust caches are keyed by lockfiles and the toolchain, so workflow-only edits
-# reuse the compiled release and debug artifacts.
+# reuse the compiled release and debug artifacts. Only main pushes write caches;
+# pull-request runs restore them and never pay the save cost.
 
 jobs:
   changes:
@@ -67,12 +69,16 @@ jobs:
           shared-key: windows-debug
           add-job-id-key: false
           cache-bin: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install NASM
         if: needs.changes.outputs.docs_only != 'true'
         shell: pwsh
         run: |
-          choco install nasm -y --no-progress
-          "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          $zip = Join-Path $env:RUNNER_TEMP 'nasm.zip'
+          Invoke-WebRequest -Uri 'https://www.nasm.us/pub/nasm/releasebuilds/3.02/win64/nasm-3.02-win64.zip' -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath (Join-Path $env:RUNNER_TEMP 'nasm') -Force
+          $nasm = Get-ChildItem -Path (Join-Path $env:RUNNER_TEMP 'nasm') -Filter nasm.exe -Recurse | Select-Object -First 1
+          Split-Path $nasm.FullName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - name: Clippy lint
         if: needs.changes.outputs.docs_only != 'true'
         run: cargo clippy --workspace --all-targets -- -D warnings
@@ -145,20 +151,39 @@ jobs:
           cache-bin: false
           save-if: false
       - name: Install NASM
+        if: matrix.name == 'Desktop'
         shell: pwsh
         run: |
-          choco install nasm -y --no-progress
-          "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          $zip = Join-Path $env:RUNNER_TEMP 'nasm.zip'
+          Invoke-WebRequest -Uri 'https://www.nasm.us/pub/nasm/releasebuilds/3.02/win64/nasm-3.02-win64.zip' -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath (Join-Path $env:RUNNER_TEMP 'nasm') -Force
+          $nasm = Get-ChildItem -Path (Join-Path $env:RUNNER_TEMP 'nasm') -Filter nasm.exe -Recurse | Select-Object -First 1
+          Split-Path $nasm.FullName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - name: Run tests
         run: ${{ matrix.command }}
+
+  backfill:
+    name: Test / Backfill
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-debug
+          add-job-id-key: false
+          cache-bin: false
+          save-if: false
+      - name: Build the content worker
+        run: cargo build -p cairn-worker
       - name: Content backfill end-to-end test
-        if: matrix.name == 'Service'
-        shell: pwsh
-        run: |
-          cargo build -p cairn-worker
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test -p cairn-service a_full_backfill_reaches_ready_and_indexes_existing_files -- --ignored
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        run: cargo test -p cairn-service a_full_backfill_reaches_ready_and_indexes_existing_files -- --ignored
 
   tooling:
     name: Test / Tooling
@@ -178,11 +203,6 @@ jobs:
           add-job-id-key: false
           cache-bin: false
           save-if: false
-      - name: Install NASM
-        shell: pwsh
-        run: |
-          choco install nasm -y --no-progress
-          "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - name: Run tests
         run: cargo test -p cairn-cli -p cairn-worker -p cairn-setup -p xtask
       - name: Locate installer test binary
@@ -202,7 +222,7 @@ jobs:
 
   test:
     name: Domain & System Test Suite
-    needs: [changes, test-layers, tooling]
+    needs: [changes, test-layers, tooling, backfill]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -213,7 +233,7 @@ jobs:
             echo "Documentation-only change; no test layer is required."
             exit 0
           fi
-          if [[ "${{ needs.test-layers.result }}" != "success" || "${{ needs.tooling.result }}" != "success" ]]; then
+          if [[ "${{ needs.test-layers.result }}" != "success" || "${{ needs.tooling.result }}" != "success" || "${{ needs.backfill.result }}" != "success" ]]; then
             echo "At least one test layer did not succeed."
             exit 1
           fi
@@ -236,12 +256,15 @@ jobs:
           add-job-id-key: false
           cache-bin: false
           cache-workspace-crates: true
-          save-if: "${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.actor != 'dependabot[bot]') }}"
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Install NASM
         shell: pwsh
         run: |
-          choco install nasm -y --no-progress
-          "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          $zip = Join-Path $env:RUNNER_TEMP 'nasm.zip'
+          Invoke-WebRequest -Uri 'https://www.nasm.us/pub/nasm/releasebuilds/3.02/win64/nasm-3.02-win64.zip' -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath (Join-Path $env:RUNNER_TEMP 'nasm') -Force
+          $nasm = Get-ChildItem -Path (Join-Path $env:RUNNER_TEMP 'nasm') -Filter nasm.exe -Recurse | Select-Object -First 1
+          Split-Path $nasm.FullName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - name: Build runtime binaries
         run: cargo build --release -p cairn-app -p cairn-service -p cairn-cli -p cairn-worker
       - name: Upload runtime binaries
@@ -274,12 +297,7 @@ jobs:
           add-job-id-key: false
           cache-bin: false
           cache-workspace-crates: true
-          save-if: "${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.actor != 'dependabot[bot]') }}"
-      - name: Install NASM
-        shell: pwsh
-        run: |
-          choco install nasm -y --no-progress
-          "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Build installer binaries
         run: cargo build --release -p cairn-setup-bin
       - name: Upload installer binaries
@@ -295,8 +313,8 @@ jobs:
 
   package:
     name: Installer Package
-    needs: [changes, deny, quality, release_runtime, release_installer, tooling]
-    if: always() && (needs.changes.outputs.docs_only == 'true' || (needs.deny.result == 'success' && needs.quality.result == 'success' && needs.release_runtime.result == 'success' && needs.release_installer.result == 'success' && needs.tooling.result == 'success'))
+    needs: [changes, release_runtime, release_installer, tooling]
+    if: always() && (needs.changes.outputs.docs_only == 'true' || (needs.release_runtime.result == 'success' && needs.release_installer.result == 'success' && needs.tooling.result == 'success'))
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
