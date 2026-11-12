@@ -287,7 +287,8 @@ impl CairnApp {
                 let category = *category;
                 let is_active = self.query.active_filter == category
                     && self.drive_view.is_none()
-                    && !self.recycle_bin.is_open();
+                    && !self.recycle_bin.is_open()
+                    && self.block_listing.is_none();
                 let control =
                     accessibility::control_at(&element_id("sidebar-location", category.key()));
                 let name = accessibility::name(control, &self.i18n);

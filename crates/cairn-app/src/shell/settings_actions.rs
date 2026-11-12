@@ -94,6 +94,8 @@ impl CairnApp {
         self.save_settings();
         if self.recycle_bin.is_open() {
             self.sort_recycle_bin(cx);
+        } else if self.block_listing.is_some() {
+            self.sort_block_listing(cx);
         } else {
             self.trigger_search(cx);
         }

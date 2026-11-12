@@ -460,12 +460,12 @@ impl TreemapViewState {
         self.load_current_dir()
     }
 
-    /// The children of `parent_path` in the tree the canvas is showing.
     /// The laid-out node with this path, for the summary-block hand-off.
     pub(crate) fn layout_node(&self, path: &str) -> Option<&NestedTreemapLayoutNode> {
         find_node_by_path(&self.layout_nodes, path)
     }
 
+    /// The children of `parent_path` in the tree the canvas is showing.
     pub(crate) fn children_at(&self, parent_path: &str) -> &[TreemapTreeNode] {
         let Some(tree) = self.root_tree.as_deref() else {
             return &[];
@@ -875,8 +875,6 @@ mod tests {
         assert_eq!(root.descendant_count(), 1); // Windows
     }
 
-    /// A block layer is one step of the drill history: Back and Up leave it, Forward enters it
-    /// again, and Forward inside the layer does nothing instead of closing it.
     #[test]
     fn remove_item_at_drive_root_updates_sizes_counts_and_cache() {
         let mut state = TreemapViewState::new_for_test('C');

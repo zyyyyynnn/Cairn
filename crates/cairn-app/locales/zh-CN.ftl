@@ -268,3 +268,4 @@ menu_content_search_usage_unknown = 占用：未知
 menu_content_search_never_updated = 最近更新：尚无记录
 empty_content_scope_line = 没有匹配的文件或文件夹；内容搜索会跳过系统与开发工具文件夹
 treemap_block_filter_placeholder = 在 { $dir } 的其余 { $count_text } 项中搜索
+treemap_block_scope = { $dir } 的其余 { $count_text } 项

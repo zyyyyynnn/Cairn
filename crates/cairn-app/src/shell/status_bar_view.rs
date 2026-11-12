@@ -94,7 +94,15 @@ impl CairnApp {
                         .get_text_with_args("status_objects_summary", &args)
                 }
             };
-            summary_aria = Some(count_text.clone());
+            // The visible line stays the plain count; assistive technology also
+            // gets the owning directory and the block the rows came from.
+            let mut scope_args = FluentArgs::new();
+            scope_args.set("dir", listing.directory().to_string());
+            scope_args.set("count_text", format_count(listing.count()));
+            let scope = self
+                .i18n
+                .get_text_with_args("treemap_block_scope", &scope_args);
+            summary_aria = Some(format!("{scope} {count_text}"));
             summary = Some(
                 div()
                     .min_w_0()

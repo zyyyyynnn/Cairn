@@ -234,8 +234,9 @@ impl CairnApp {
         cx.notify();
     }
 
-    /// Opens the canvas selection the way a double click does: a summary block becomes a
-    /// view-only layer, a directory drills down, a file opens in its associated application.
+    /// Opens the canvas selection the way a double click does: a summary block lists
+    /// its members in the table, a directory drills down, a file opens in its
+    /// associated application.
     pub fn treemap_open_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(node) = self
             .treemap_state

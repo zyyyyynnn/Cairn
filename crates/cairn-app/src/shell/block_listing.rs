@@ -69,6 +69,7 @@ impl BlockListing {
             let full = join_listing_path(&self.directory, &row.name);
             !paths.iter().any(|path| path.eq_ignore_ascii_case(&full))
         });
+        self.count = self.all.len();
     }
 
     /// Rebuilds the visible rows from the unfiltered listing and the current
@@ -132,8 +133,11 @@ impl CairnApp {
         self.query.is_searching = false;
         self.query.is_fetching_more = false;
         self.leave_drive_view();
-        self.record_nav_state();
-        self.block_listing = Some(BlockListing::new(parent, count, rows));
+        let mut listing = BlockListing::new(parent, count, rows);
+        // The header arrow persists across the hand-off, so the rows arrive in
+        // the order the table claims.
+        listing.sort(self.results.table.sort_column, self.results.table.sort_asc);
+        self.block_listing = Some(listing);
         self.query.search_input.set_text("");
         self.install_block_listing_rows(cx);
         self.query.search_focus.focus(window, cx);

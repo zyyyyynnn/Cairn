@@ -278,4 +278,5 @@ menu_content_search_updated = Last updated: { $time }
 menu_content_search_usage_unknown = Size: unknown
 menu_content_search_never_updated = Last updated: never
 empty_content_scope_line = No files or folders match; content search skips system and developer-tool folders
-treemap_block_filter_placeholder = Search the { $count_text } more in { $dir }
+treemap_block_filter_placeholder = Search { $count_text } items in { $dir }
+treemap_block_scope = { $count_text } items in { $dir }
