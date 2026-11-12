@@ -163,20 +163,8 @@ impl CairnApp {
             .as_ref()
             .map(|listing| listing.directory().to_string())
         {
-            let state = self.nav_history.get(self.nav_history_index).cloned();
-            let (text, scope, filter) = state
-                .map(|state| (state.text, state.drive, state.filter))
-                .unwrap_or_else(|| (String::new(), None, FilterCategory::All));
-            let drive = dir
-                .chars()
-                .next()
-                .map(|c| c.to_ascii_uppercase())
-                .unwrap_or('C');
-            self.open_drive_at(drive, &dir, window, cx);
-            self.query.search_input.set_text(&text);
-            self.query.scope_drive = scope;
-            self.query.active_filter = filter;
-            cx.notify();
+            let index = self.nav_history_index;
+            self.restore_nav_state_at(index, Some(&dir), window, cx);
             return;
         }
         if self.recycle_bin.is_open() {
@@ -241,12 +229,28 @@ impl CairnApp {
     }
 
     fn restore_nav_state(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.restore_nav_state_at(index, None, window, cx);
+    }
+
+    /// Restores one entry; `visualization_dir` reopens a visualization entry at
+    /// another directory while its query text, scope and filter still come from
+    /// the entry.
+    fn restore_nav_state_at(
+        &mut self,
+        index: usize,
+        visualization_dir: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(state) = self.nav_history.get(index).cloned() else {
             return;
         };
         let is_visualization = state.visualization.is_some();
         match state.visualization {
-            Some((drive, dir)) => self.open_drive_at(drive, &dir, window, cx),
+            Some((drive, recorded)) => {
+                let dir = visualization_dir.unwrap_or(recorded.as_str());
+                self.open_drive_at(drive, dir, window, cx);
+            }
             None => self.leave_drive_view(),
         }
         self.query.search_input.set_text(&state.text);
@@ -516,10 +520,14 @@ mod tests {
 
                     app.update(cx, |this, cx| {
                         this.query.search_input.set_text("before the block");
+                        this.query.active_filter = FilterCategory::Document;
                         this.open_drive_visualization('C', window, cx);
-                        // The hand-off empties the box for the block filter, and
-                        // the block can live below the canvas root.
+                        // The hand-off empties the box and resets the scope and
+                        // filter for the listing, and the block can live below
+                        // the canvas root.
                         this.query.search_input.set_text("amd64");
+                        this.query.scope_drive = None;
+                        this.query.active_filter = FilterCategory::All;
                         this.block_listing = Some(crate::shell::block_listing::BlockListing::new(
                             r"C:\Windows\System32".to_string(),
                             2,
@@ -533,6 +541,8 @@ mod tests {
                             Some(r"C:\Windows\System32")
                         );
                         assert_eq!(this.query.search_input.text, "before the block");
+                        assert_eq!(this.query.active_filter, FilterCategory::Document);
+                        assert_eq!(this.query.scope_drive, Some('C'));
                     });
 
                     cx.quit();
