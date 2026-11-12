@@ -9,6 +9,7 @@
 //! actions, with no second canvas layer.
 
 use crate::app::{layout, CairnApp};
+use crate::search::filters::FilterCategory;
 use cairn_core::sort::SortColumn;
 use cairn_protocol::message::FileRowData;
 use gpui_kit::gpui::{Context, Pixels, Point, Window};
@@ -133,6 +134,8 @@ impl CairnApp {
         self.query.is_searching = false;
         self.query.is_fetching_more = false;
         self.leave_drive_view();
+        self.query.scope_drive = None;
+        self.query.active_filter = FilterCategory::All;
         let mut listing = BlockListing::new(parent, count, rows);
         // The header arrow persists across the hand-off, so the rows arrive in
         // the order the table claims.

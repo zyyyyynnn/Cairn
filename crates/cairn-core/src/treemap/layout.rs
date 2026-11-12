@@ -58,8 +58,8 @@ pub struct NestedTreemapOptions {
     /// Layout-side padding around children in directory containers. Sibling
     /// gutters are applied to the painted rect by the view, so this stays 0.
     pub padding: f32,
-    /// Upper bound on individually displayed children per directory. The
-    /// smallest tail is folded into one aggregate block.
+    /// Upper bound on individually displayed children per directory; the
+    /// smallest tail folds into summary blocks.
     pub max_children: usize,
     /// A child below this predicted pixel area joins the aggregate tail.
     pub min_tile_area: f32,
@@ -146,8 +146,8 @@ pub fn aggregate_parent_path(path: &str) -> Option<&str> {
 /// One entry of a directory's display plan, in squarify input order.
 #[derive(Clone, Debug)]
 enum DisplayEntry {
-    /// A real child, by index into the directory's children, with the layout
-    /// weight it competes with (`size` unless a readable tile needs more).
+    /// A real child, by index into the directory's children, laid out at its
+    /// byte size; a child that cannot fit folds into the tail instead.
     Node { index: usize, weight: u64 },
     /// One category's folded tail: the members of that category the canvas did not keep as tiles.
     Aggregate {
@@ -209,8 +209,8 @@ fn tile_fits(rect: TreemapRect) -> bool {
 }
 
 /// Builds the display entries for the kept children plus one summary block per category present in
-/// the tail. A block always exists for its category: a small tail may not silently disappear into
-/// the directory's total, and no single block may swallow every child of the directory.
+/// the tail. A body too small for one cell per category keeps a single mixed summary instead, so a
+/// tail never disappears into the directory's total.
 fn display_entries(
     nodes: &[TreemapTreeNode],
     parent: &str,
@@ -400,12 +400,22 @@ fn plan_with_tail(
     if !slivers.is_empty() || !dropped.is_empty() {
         kept.retain(|index| !slivers.contains(index));
         tail.extend(slivers.iter().copied());
-        tail.retain(|index| !dropped.contains(index));
-        plan = if kept.is_empty() && tail.is_empty() {
-            DisplayPlan::default()
-        } else {
-            assemble(&kept, &tail, aggregate_floor, collapse)
-        };
+        if !collapse && !tail.is_empty() {
+            collapse = true;
+            plan = assemble(&kept, &tail, aggregate_floor, collapse);
+        }
+        let (slivers, dropped) = plan.offenders();
+        if !slivers.is_empty() || !dropped.is_empty() {
+            // Only a body that cannot carry any readable cell drops members.
+            kept.retain(|index| !slivers.contains(index));
+            tail.extend(slivers.iter().copied());
+            tail.retain(|index| !dropped.contains(index));
+            plan = if kept.is_empty() && tail.is_empty() {
+                DisplayPlan::default()
+            } else {
+                assemble(&kept, &tail, aggregate_floor, collapse)
+            };
+        }
     }
 
     // A container must never end up with an empty body. If repeated folds

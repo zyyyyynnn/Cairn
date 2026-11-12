@@ -29,6 +29,10 @@ impl CairnApp {
         if self.recycle_bin.is_open() {
             return true;
         }
+        // A block listing leaves for the Treemap that owns the block.
+        if self.block_listing.is_some() {
+            return true;
+        }
         // Inside the visualization, Back walks the drill path first and only then leaves the view:
         // the view is one history step, not a dead end at its own root.
         if self.drive_view.is_some() {

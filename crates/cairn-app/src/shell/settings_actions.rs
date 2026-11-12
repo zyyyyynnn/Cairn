@@ -151,6 +151,7 @@ impl CairnApp {
         if self.query.active_filter == category
             && self.drive_view.is_none()
             && !self.recycle_bin.is_open()
+            && self.block_listing.is_none()
         {
             // Re-selecting the active location refreshes it, matching the
             // recycle-bin and drive entries.

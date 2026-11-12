@@ -315,7 +315,14 @@ impl CairnApp {
             self.clear_bin_filter(window, cx);
             return;
         }
-        self.clear_block_listing();
+        if self.block_listing.is_some() {
+            // The box filters the listing in place; clearing it keeps the
+            // location, the same way the Recycle Bin's clear works.
+            self.query.search_input.clear();
+            self.filter_block_listing(cx);
+            self.query.search_focus.focus(window, cx);
+            return;
+        }
         self.update_current_nav_state_text();
         self.query.search_input.clear();
         self.query.scope_drive = None;
