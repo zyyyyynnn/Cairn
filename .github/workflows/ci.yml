@@ -68,7 +68,8 @@ jobs:
           shared-key: windows-debug
           add-job-id-key: false
           cache-bin: false
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-workspace-crates: true
+          save-if: true
       - name: Install NASM
         if: needs.changes.outputs.docs_only != 'true'
         shell: pwsh
@@ -148,7 +149,8 @@ jobs:
           shared-key: windows-debug
           add-job-id-key: false
           cache-bin: false
-          save-if: false
+          cache-workspace-crates: true
+          save-if: true
       - name: Install NASM
         if: matrix.name == 'Desktop'
         shell: pwsh
@@ -160,14 +162,30 @@ jobs:
           Split-Path $nasm.FullName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - name: Run tests
         run: ${{ matrix.command }}
+
+  backfill:
+    name: Test / Backfill
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-debug
+          add-job-id-key: false
+          cache-bin: false
+          cache-workspace-crates: true
+          save-if: true
+      - name: Build the content worker
+        run: cargo build -p cairn-worker
       - name: Content backfill end-to-end test
-        if: matrix.name == 'Service'
-        shell: pwsh
-        run: |
-          cargo build -p cairn-worker
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test -p cairn-service a_full_backfill_reaches_ready_and_indexes_existing_files -- --ignored
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        run: cargo test -p cairn-service a_full_backfill_reaches_ready_and_indexes_existing_files -- --ignored
 
   tooling:
     name: Test / Tooling
@@ -186,7 +204,8 @@ jobs:
           shared-key: windows-debug
           add-job-id-key: false
           cache-bin: false
-          save-if: false
+          cache-workspace-crates: true
+          save-if: true
       - name: Run tests
         run: cargo test -p cairn-cli -p cairn-worker -p cairn-setup -p xtask
       - name: Locate installer test binary
@@ -206,7 +225,7 @@ jobs:
 
   test:
     name: Domain & System Test Suite
-    needs: [changes, test-layers, tooling]
+    needs: [changes, test-layers, tooling, backfill]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -217,7 +236,7 @@ jobs:
             echo "Documentation-only change; no test layer is required."
             exit 0
           fi
-          if [[ "${{ needs.test-layers.result }}" != "success" || "${{ needs.tooling.result }}" != "success" ]]; then
+          if [[ "${{ needs.test-layers.result }}" != "success" || "${{ needs.tooling.result }}" != "success" || "${{ needs.backfill.result }}" != "success" ]]; then
             echo "At least one test layer did not succeed."
             exit 1
           fi
