@@ -81,6 +81,14 @@ thiserror = "2.0"
 tempfile = "3.27"
 winresource = "0.1.34"
 
+# GPUI repaints dominate frame time, and unoptimized dependencies drop the debug
+# window to a few frames per second on the results table.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
 [profile.release]
 opt-level = 3
 lto = "thin"
