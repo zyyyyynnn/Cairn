@@ -59,7 +59,7 @@ flowchart TD
 ```
 
 - **服务只读权限收敛**：`CairnService.exe` 以 `LocalSystem` 启动，仅持裸盘读取权限。其管道通信层完全不提供任何写磁盘、删文件或改文件名的接口。
-- **免提权文件写操作**：用户在 GUI 执行的删除到回收站、从回收站还原、永久删除与清空回收站，由 `Cairn.exe` 直接向系统 Shell COM 发起 `IFileOperation` / `SHEmptyRecycleBin`，自然承接操作系统的回收站安全策略、撤销列表与原生进度/错误 UI。日常删除与永久删除先经过项目统一确认框；清空回收站保留原生警告；`F2` 重命名尚未实现。
+- **免提权文件写操作**：用户在 GUI 执行的删除到回收站、从回收站还原、永久删除与清空回收站，以及结果表单行就地重命名，由 `Cairn.exe` 直接向系统 Shell COM 发起 `IFileOperation` / `SHEmptyRecycleBin`，自然承接操作系统的回收站安全策略、撤销列表与原生进度/错误 UI。日常删除与永久删除先经过项目统一确认框；清空回收站保留原生警告；重命名在名称单元格内编辑，失败保留编辑器并提示原因。
 
 ### 1.3 紧凑内存索引模型（≤ 125 Bytes/条）
 - **定长文件记录（`FileRecord`，紧凑对齐，48 字节）**：
@@ -122,7 +122,7 @@ flowchart TD
 | **子串高速扫描** | `memchr`（`memmem`） | 利用 SIMD 向量化加速子串匹配 |
 | **序列化与配置** | `postcard`（IPC） / `toml`（配置） | 高密度零拷贝二进制通信与易读配置文件格式 |
 | **文本编码自动识别** | `chardetng` + `encoding_rs` | 准确识别 GBK、UTF-16、BOM 等中文编码 |
-| **系统托盘** | `tray-icon` | Windows 系统原生托盘菜单；全局热键尚未接入 |
+| **系统托盘** | `tray-icon` | Windows 系统原生托盘菜单；全局热键 `Ctrl+Alt+Space` 由 `global-hotkey` 注册，组合被占用时启动提示一次，托盘入口保持可用 |
 | **界面国际化 (i18n)** | `fluent-bundle` | 现代化多语言文案管理与参数化插值 |
 | **日志与链路追踪** | `tracing` + `tracing-subscriber` | 结构化异步日志输出与性能诊断 |
 | **测试框架** | `cargo test` + `proptest` | 单元测试与属性随机测试 |

@@ -277,15 +277,18 @@ fn remove_pending_version() {
 impl CairnApp {
     /// Reports the outcome of the previous silent install. The marker keeps only the requested
     /// version, so the current binary itself decides whether the install reached its target.
-    pub(crate) fn consume_update_notice(&mut self, cx: &mut Context<Self>) {
+    /// Shows the result of an update this process interrupted, when one is pending. Returns whether
+    /// the toast slot is now taken, so a later startup notice does not overwrite it.
+    #[cfg_attr(test, allow(dead_code))]
+    pub(crate) fn consume_update_notice(&mut self, cx: &mut Context<Self>) -> bool {
         let path = pending_version_path();
         let Ok(target) = std::fs::read_to_string(&path) else {
-            return;
+            return false;
         };
         let _ = std::fs::remove_file(path);
         let target = normalize_version(&target);
         if target.is_empty() {
-            return;
+            return false;
         }
         if is_newer(&target, &current_version()) {
             let title = self.i18n.get_text("update_interrupted_title");
@@ -298,6 +301,7 @@ impl CairnApp {
             let body = self.i18n.get_text_with_args("update_success_body", &args);
             self.show_info_toast(title, body, cx);
         }
+        true
     }
 
     pub(crate) fn start_update_check(&mut self, window: &mut Window, cx: &mut Context<Self>) {

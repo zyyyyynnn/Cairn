@@ -158,7 +158,8 @@ impl CairnApp {
         cx: &mut Context<Self>,
     ) {
         // Arrow keys are the table's keyboard path; moving through rows is what makes the focus
-        // ring meaningful, and a pointer press must not suppress keyboard navigation.
+        // ring meaningful, and a pointer press must not suppress keyboard navigation. Focus
+        // follows the selection so F2 and the row actions act on the chosen row.
         self.results.keyboard_navigation = true;
         let before = self.results.table.focused_idx;
         if forwards {
@@ -181,6 +182,7 @@ impl CairnApp {
                 self.ensure_visible_rows_loaded(row_height, cx);
             }
         }
+        self.discard_rename_off_row(cx);
         cx.notify();
     }
 
@@ -195,6 +197,7 @@ impl CairnApp {
         }
         let extend = window.modifiers().shift;
         self.move_selection(false, extend, layout::row_height(window), cx);
+        self.focus_table_after_arrow(window, cx);
     }
 
     pub fn select_next_row(
@@ -208,6 +211,15 @@ impl CairnApp {
         }
         let extend = window.modifiers().shift;
         self.move_selection(true, extend, layout::row_height(window), cx);
+        self.focus_table_after_arrow(window, cx);
+    }
+
+    /// Arrow-key selection moves the keyboard into the table, where F2 and the
+    /// row commands live; the search box keeps its text.
+    fn focus_table_after_arrow(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.results.table.focused_idx.is_some() {
+            self.results.results_focus.focus(window, cx);
+        }
     }
 
     pub fn scroll_table(&mut self, request: TableScroll, cx: &mut Context<Self>) {
@@ -334,6 +346,12 @@ impl CairnApp {
     }
 
     pub fn escape_query(&mut self, _: &EscapeQuery, window: &mut Window, cx: &mut Context<Self>) {
+        // The in-place rename editor is the innermost editing surface while it is open; Escape
+        // closes it and leaves the query alone.
+        if self.rename.draft.is_some() {
+            self.cancel_rename(window, cx);
+            return;
+        }
         // The address field is the innermost editing surface while it is open.
         if self.treemap_path.editing {
             self.cancel_treemap_path_edit(window, cx);
@@ -391,6 +409,13 @@ impl CairnApp {
         // menu acted on stays selected in the table, which is the only state that outlives it.
         // A scope the sidebar set is part of the query: clearing only the text would leave the
         // window searching a drive or a file type the person just tried to dismiss.
+        // A running search is the innermost state the query itself owns: the first Escape stops
+        // it and keeps the text and rows; the next Escape clears the query. The implicit
+        // all-files view has no text to return to, so Escape never leaves it stopped.
+        if self.query.is_searching && self.has_query() {
+            self.cancel_in_flight_query(cx);
+            return;
+        }
         if self.has_query() {
             self.clear_query_and_scope(window, cx);
             return;
@@ -499,7 +524,11 @@ impl CairnApp {
                 this.open_group = None;
                 this.group_menu_dismiss = None;
                 this.group_menu = None;
-                this.query.search_focus.focus(window, cx);
+                // A rename opened from the File menu owns the keyboard now; handing focus back
+                // to the search box would cancel the editor through its blur.
+                if this.rename.draft.is_none() {
+                    this.query.search_focus.focus(window, cx);
+                }
                 cx.notify();
             },
         );
@@ -677,6 +706,9 @@ impl CairnApp {
             GroupCommand::RestoreSelected
             | GroupCommand::RestoreAll
             | GroupCommand::EmptyRecycleBin => !self.recycle_bin.is_open(),
+            // A bin payload is identified by the shell's own listing, not by a live filesystem
+            // name, so there is nothing to rename there.
+            GroupCommand::RenameSelected => self.recycle_bin.is_open(),
             GroupCommand::RevealLocation | GroupCommand::ShowProperties => {
                 self.recycle_bin.is_open()
             }
@@ -721,6 +753,9 @@ impl CairnApp {
             GroupCommand::OpenSelected
             | GroupCommand::RevealLocation
             | GroupCommand::ShowProperties => self.target_row_ix().is_none(),
+            GroupCommand::RenameSelected => {
+                self.rename.in_flight || self.rename_target_ix().is_none()
+            }
             GroupCommand::DeleteSelected | GroupCommand::RestoreSelected => {
                 if self.recycle_bin.is_open() {
                     self.recycle_bin.is_loading()
@@ -846,6 +881,7 @@ impl CairnApp {
             | GroupCommand::PasteQueryText
             | GroupCommand::ShowProperties
             | GroupCommand::DeleteSelected
+            | GroupCommand::RenameSelected
             | GroupCommand::RestoreSelected
             | GroupCommand::RestoreAll
             | GroupCommand::SelectAll
@@ -904,6 +940,21 @@ impl CairnApp {
     }
 
     pub fn open_selected(&mut self, _: &OpenSelected, window: &mut Window, cx: &mut Context<Self>) {
+        // The Open command is a read action: a focused rename editor submits
+        // through its own press event (this action returns), and an editor left
+        // without focus is dismissed instead of being written by Open.
+        if self.rename.draft.is_some() {
+            if self
+                .rename
+                .input
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window)
+            {
+                return;
+            }
+            self.discard_rename(cx);
+        }
         // Inside the Recycle Bin view Enter opens the deleted item straight
         // from the bin payload, exactly like opening it in Explorer.
         if self.recycle_bin.is_open() {
@@ -983,6 +1034,15 @@ impl CairnApp {
     pub fn target_row_ix(&self) -> Option<usize> {
         let ix = self.results.table.target_row()?;
         self.results.table.is_loaded(ix).then_some(ix)
+    }
+
+    /// The one row an in-place rename may edit. The bin and the Treemap are locations with their
+    /// own surfaces, and a row outside the fetched window has no name to load into the editor.
+    pub fn rename_target_ix(&self) -> Option<usize> {
+        if self.recycle_bin.is_open() || self.drive_view.is_some() {
+            return None;
+        }
+        self.results.table.sole_selected_row()
     }
 
     pub fn target_full_path(&self) -> Option<String> {
@@ -1073,10 +1133,12 @@ impl CairnApp {
         self.show_selected_properties(cx);
     }
 
-    pub fn focus_row_for_context(&mut self, ix: usize) {
+    pub fn focus_row_for_context(&mut self, ix: usize, cx: &mut Context<Self>) {
         if !self.results.table.selected_indices.contains(&ix) {
             self.results.table.select_row(ix, false);
         }
+        // The editor on another row closes; the menu describes this row.
+        self.discard_rename_off_row(cx);
     }
 
     pub fn select_row_by_pointer(
@@ -1104,6 +1166,7 @@ impl CairnApp {
         } else {
             self.results.table.select_row(ix, false);
         }
+        self.discard_rename_off_row(cx);
         if is_double_click {
             if self.recycle_bin.is_open() {
                 if let Some(item) = self.target_bin_item() {
@@ -1270,6 +1333,9 @@ mod visibility_tests {
                     let app = cx.new(|cx| CairnApp::new(window, cx));
 
                     app.update(cx, |this, cx| {
+                        // A startup notice (an unavailable hotkey, an update result) may own
+                        // the first Escape; it is not part of this behavior.
+                        this.dismiss_toast(cx);
                         this.open_drive_visualization('C', window, cx);
                         // The hand-off leaves the canvas for the listing, which
                         // owns neither a drive scope nor a file-type filter.
@@ -1290,6 +1356,82 @@ mod visibility_tests {
                         this.escape_query(&EscapeQuery, window, cx);
                         assert!(this.block_listing.is_none());
                         assert_eq!(this.drive_view, Some('C'));
+                    });
+
+                    cx.quit();
+                    app
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn escape_stops_only_a_narrowed_query() {
+        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
+            gpui_kit::init(cx);
+            let _ = gpui_kit::open_window(
+                gpui_kit::gpui::WindowOptions::default(),
+                cx,
+                |window, cx| {
+                    let app = cx.new(|cx| CairnApp::new(window, cx));
+
+                    app.update(cx, |this, cx| {
+                        this.query.search_input.set_text("report");
+                        this.query.is_searching = true;
+                        this.escape_query(&EscapeQuery, window, cx);
+                        assert!(!this.query.is_searching);
+                        assert!(this.query.cancelled);
+
+                        // The implicit all-files view is not a stoppable query: an
+                        // empty box never leaves a stopped band behind. Clearing
+                        // the text is an explicit trigger that clears the stop.
+                        this.query.search_input.clear();
+                        this.trigger_search(cx);
+                        assert!(!this.query.cancelled);
+                        this.query.is_searching = true;
+                        this.escape_query(&EscapeQuery, window, cx);
+                        assert!(this.query.is_searching);
+                        assert!(!this.query.cancelled);
+                    });
+
+                    cx.quit();
+                    app
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn arrow_selection_moves_the_keyboard_into_the_table() {
+        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
+            gpui_kit::init(cx);
+            let _ = gpui_kit::open_window(
+                gpui_kit::gpui::WindowOptions::default(),
+                cx,
+                |window, cx| {
+                    let app = cx.new(|cx| CairnApp::new(window, cx));
+
+                    app.update(cx, |this, cx| {
+                        this.results.table.set_rows(
+                            vec![cairn_protocol::message::FileRowData {
+                                frn: 0,
+                                name: "a.txt".to_string(),
+                                path: r"C:\work".to_string(),
+                                size: 1,
+                                modified_ts: 0,
+                                created_ts: 0,
+                                is_dir: false,
+                                flags: 0,
+                                name_highlights: Vec::new(),
+                                path_highlights: Vec::new(),
+                                snippet: None,
+                            }],
+                            1,
+                        );
+                        this.query.search_focus.focus(window, cx);
+                        this.select_next_row(&SelectNextRow, window, cx);
+                        assert_eq!(this.results.table.focused_idx, Some(0));
+                        assert!(this.results.results_focus.is_focused(window));
                     });
 
                     cx.quit();

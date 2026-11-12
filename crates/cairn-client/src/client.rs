@@ -237,6 +237,18 @@ impl CairnClient {
         .await
     }
 
+    /// Cancels an in-flight query by id.
+    ///
+    /// The request must travel on its own connection: the service answers each connection in
+    /// order, so a cancel queued behind the query it targets would not be read until that query
+    /// finished.
+    pub async fn cancel(
+        &mut self,
+        query_id: u64,
+    ) -> Result<Envelope<ResponsePayload>, ClientError> {
+        self.send_request(&ClientRequest::Cancel { query_id }).await
+    }
+
     /// Fetches subsequent page of results for an active query session.
     pub async fn get_rows(
         &mut self,
@@ -560,6 +572,35 @@ mod tests {
         task.await
             .expect("query task")
             .expect("query must succeed over the stub");
+    }
+
+    #[tokio::test]
+    #[cfg(windows)]
+    async fn cancel_sends_the_query_id() {
+        let (mut server, mut client) = stub_pipe_pair(r"\\.\pipe\cairn.client.stub.cancel").await;
+        let task = tokio::spawn(async move { client.cancel(9).await });
+
+        server.connect().await.expect("stub connect");
+        let mut buf = [0u8; 4096];
+        let read = server.read(&mut buf).await.expect("stub read");
+        let (_, request) = try_decode_frame::<ClientRequest>(&buf[..read])
+            .expect("stub decode")
+            .expect("complete frame");
+        match request {
+            ClientRequest::Cancel { query_id } => assert_eq!(query_id, 9),
+            other => panic!("Expected a Cancel request, got {other:?}"),
+        }
+
+        let frame = encode_frame(&Envelope {
+            volumes: Vec::new(),
+            payload: ResponsePayload::CancelAck,
+        })
+        .expect("encode stub answer");
+        server.write_all(&frame).await.expect("stub write");
+        server.flush().await.expect("stub flush");
+        task.await
+            .expect("cancel task")
+            .expect("cancel must succeed over the stub");
     }
 
     #[tokio::test]

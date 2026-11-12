@@ -532,6 +532,7 @@ impl Render for CairnApp {
                 cx.listener(|this, _: &commands::NavigateUp, window, cx| this.go_up(window, cx)),
             )
             .on_action(cx.listener(Self::delete_selected))
+            .on_action(cx.listener(Self::rename_selected))
             .on_action(cx.listener(Self::restore_selected))
             // Input modality for focus painting. Any key means the keyboard is driving, and any
             // pointer press means it is not; the result region draws its ring from this rather than

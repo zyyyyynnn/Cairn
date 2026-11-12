@@ -310,6 +310,8 @@ impl CairnApp {
     }
 
     pub fn trigger_search(&mut self, cx: &mut Context<Self>) {
+        // An explicit search leaves the row the rename editor was opened on.
+        self.discard_rename(cx);
         // The all-files view can only be final once the index has settled. Querying a growing
         // index would publish a partial total that climbs in steps as batches land, and each query
         // is a full index scan; the status poll asks for the one result set of the completed index
@@ -321,6 +323,8 @@ impl CairnApp {
             // An empty query is never refused, so a refusal of the cleared text must not
             // outlive it and block the all-files view once the index settles.
             self.query.rejection = None;
+            // An explicit trigger is a new state: a stop belongs to the query it stopped.
+            self.query.cancelled = false;
             self.start_status_refresh(cx);
             cx.notify();
             return;
@@ -334,13 +338,43 @@ impl CairnApp {
     /// interval, which is how a progressive index turns into a loading animation that never ends.
     /// Skipped while a query is already in flight; that answer is newer than the request would be.
     /// A hidden table (Treemap or Recycle Bin) is never refreshed in the background.
+    /// Cancels the in-flight query without changing the text or the rows already shown. The local
+    /// id moves first, so the answer the service is about to finish is dropped by the same guard
+    /// that ignores a superseded query.
+    pub fn cancel_in_flight_query(&mut self, cx: &mut Context<Self>) {
+        if !self.query.is_searching {
+            return;
+        }
+        let cancelled_id = self.query.query_id;
+        self.query.query_id += 1;
+        self.query.is_searching = false;
+        self.query.is_fetching_more = false;
+        self.query.cancelled = true;
+        // A stopped first page reveals the band through the same entrance an empty answer uses.
+        self.note_table_empty(cx);
+        get_tokio_runtime().spawn(async move {
+            match cairn_client::client::CairnClient::connect().await {
+                Ok(mut client) => {
+                    if let Err(err) = client.cancel(cancelled_id).await {
+                        tracing::warn!("cancel request for query {cancelled_id} failed: {err}");
+                    }
+                }
+                Err(err) => tracing::warn!("cancel connection failed: {err}"),
+            }
+        });
+        cx.notify();
+    }
+
     pub fn refresh_results(&mut self, cx: &mut Context<Self>) {
         // A block listing owns the table rows; a status refresh must not
         // replace them with a filtered first page.
         if self.block_listing.is_some() {
             return;
         }
+        // A cancelled query is a stop, not a pause: only explicit input asks
+        // for a new one.
         if self.query.is_searching
+            || self.query.cancelled
             || self.recycle_bin.is_open()
             || self.drive_view.is_some()
             || self.query.rejection.is_some()
@@ -370,6 +404,7 @@ impl CairnApp {
         self.query.query_id += 1;
         let qid = self.query.query_id;
         self.query.rejection = None;
+        self.query.cancelled = false;
 
         if clear_rows {
             // A new result set starts at its first row. The view republishes the scroll handle's
@@ -441,7 +476,9 @@ impl CairnApp {
 
             let res = rx.await;
             this.update(cx, |this: &mut CairnApp, cx| {
-                if this.query.query_id != qid {
+                // Cancelling moves the id forward, so the answer the service was finishing when
+                // it stopped is dropped like any superseded answer.
+                if qid != this.query.query_id {
                     return;
                 }
                 let res = match res {
@@ -471,12 +508,16 @@ impl CairnApp {
                                 ..
                             } => {
                                 this.query.rejection = None;
+                                this.query.cancelled = false;
                                 this.query.active_session_id = Some(session_id);
                                 if clear_rows {
                                     this.results.table.set_rows(first_page, total_matches);
                                 } else {
                                     this.results.table.refresh_rows(first_page, total_matches);
                                 }
+                                // A row the reloaded window no longer shows
+                                // cannot keep an inline editor.
+                                this.discard_rename_if_row_unloaded(cx);
                                 crate::shell::perf::mark(&format!(
                                     "query applied id={qid} total={total_matches}"
                                 ));
@@ -495,6 +536,7 @@ impl CairnApp {
                             }
                             cairn_protocol::message::ResponsePayload::Error { code, .. } => {
                                 this.query.rejection = QueryRejection::from_error_code(code);
+                                this.query.cancelled = false;
                                 if this.query.rejection.is_some() {
                                     // The refusal band is content too; it enters through the
                                     // same reveal as an empty answer.
@@ -786,5 +828,73 @@ mod tests {
             cairn_protocol::message::ERROR_CODE_UNAUTHORIZED
         ));
         assert!(!rows_error_requires_refresh(0));
+    }
+
+    #[test]
+    fn a_cancelled_query_is_not_revived_by_a_status_refresh() {
+        use gpui_kit::gpui::AppContext as _;
+        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
+            gpui_kit::init(cx);
+            let _ = gpui_kit::open_window(
+                gpui_kit::gpui::WindowOptions::default(),
+                cx,
+                |window, cx| {
+                    let app = cx.new(|cx| CairnApp::new(window, cx));
+
+                    app.update(cx, |this, cx| {
+                        this.query.cancelled = true;
+                        let id = this.query.query_id;
+                        this.refresh_results(cx);
+                        assert!(!this.query.is_searching);
+                        assert_eq!(
+                            this.query.query_id, id,
+                            "a status refresh must not issue a query behind a stop"
+                        );
+
+                        this.query.cancelled = false;
+                        this.refresh_results(cx);
+                        assert!(
+                            this.query.is_searching,
+                            "an explicit state resumes the query"
+                        );
+                    });
+
+                    cx.quit();
+                    app
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn cancelling_a_query_marks_it_stopped_and_moves_the_id() {
+        use gpui_kit::gpui::AppContext as _;
+        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
+            gpui_kit::init(cx);
+            let _ = gpui_kit::open_window(
+                gpui_kit::gpui::WindowOptions::default(),
+                cx,
+                |window, cx| {
+                    let app = cx.new(|cx| CairnApp::new(window, cx));
+
+                    app.update(cx, |this, cx| {
+                        this.query.search_input.set_text("report");
+                        this.query.is_searching = true;
+                        let before = this.query.query_id;
+                        this.cancel_in_flight_query(cx);
+                        assert!(!this.query.is_searching);
+                        assert!(this.query.cancelled);
+                        assert_eq!(
+                            this.query.query_id,
+                            before + 1,
+                            "the late answer belongs to a superseded id"
+                        );
+                    });
+
+                    cx.quit();
+                    app
+                },
+            );
+        });
     }
 }

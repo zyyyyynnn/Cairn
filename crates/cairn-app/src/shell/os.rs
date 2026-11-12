@@ -36,6 +36,7 @@ use windows::Win32::UI::Shell::{
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SW_SHOWNORMAL};
 
+use crate::shell::rename::RenameError;
 #[cfg(windows)]
 use crate::win32::{win32_code_from_hresult, WIN32_ERROR_USER_CANCELLED};
 
@@ -1033,6 +1034,85 @@ pub fn delete_to_recycle_bin(paths: &[String], owner: isize) -> Result<(), BinOp
     }
 }
 
+/// Renames one filesystem path through `IFileOperation::RenameItem`, the shell's own pipeline, so
+/// the write runs with Explorer's undo and error semantics without going through the index service.
+/// The name rules are enforced by [`crate::shell::rename`] before this is called; an existing
+/// neighbour is a typed outcome decided before the shell would silently accept the collision.
+pub fn rename_path(path: &std::path::Path, new_name: &str) -> Result<(), RenameError> {
+    #[cfg(windows)]
+    {
+        let _com = ComApartment::enter();
+        let target = path.with_file_name(new_name);
+        // Windows compares names case-insensitively beyond ASCII, so a target that resolves to
+        // the same file is a case-only rename. A different existing item is the typed conflict;
+        // the shell would otherwise silently accept the collision.
+        if target.exists() && !same_file(path, &target) {
+            return Err(RenameError::TargetExists);
+        }
+        let path_text = path.to_string_lossy();
+        let item =
+            shell_item_from_path(&path_text).map_err(|message| RenameError::Shell { message })?;
+
+        // SAFETY: in-proc COM activation of the shell file-operation handler, released with the
+        // interface.
+        let operation: IFileOperation = unsafe {
+            CoCreateInstance(&FileOperation, None, CLSCTX_ALL)
+        }
+        .map_err(|err| RenameError::Shell {
+            message: format!("CoCreateInstance(FileOperation): {err}"),
+        })?;
+        // SAFETY: plain flags assignment on the freshly created handler. The editor has already
+        // validated the name, so the shell must not add a confirmation of its own.
+        unsafe { operation.SetOperationFlags(FOF_ALLOWUNDO | FOF_NOCONFIRMATION) }.map_err(
+            |err| RenameError::Shell {
+                message: format!("SetOperationFlags: {err}"),
+            },
+        )?;
+
+        let wide_name = to_wide_shell_path(new_name);
+        // SAFETY: both the source item and the null-terminated target name outlive the call; the
+        // rename is queued on this handler.
+        unsafe { operation.RenameItem(&item, PCWSTR(wide_name.as_ptr()), None) }.map_err(
+            |err| RenameError::Shell {
+                message: format!("RenameItem({}): {err}", path.display()),
+            },
+        )?;
+        // SAFETY: batched rename executes the operation queued above.
+        match unsafe { operation.PerformOperations() } {
+            Ok(()) => {}
+            Err(err) => {
+                if hresult_is_cancelled(err.code()) {
+                    return Err(RenameError::Cancelled);
+                }
+                if rename_conflicts(err.code()) {
+                    return Err(RenameError::TargetExists);
+                }
+                return Err(RenameError::Shell {
+                    message: format!("PerformOperations({}): {err}", path.display()),
+                });
+            }
+        }
+        if operation_was_aborted(&operation) {
+            return Err(RenameError::Cancelled);
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (path, new_name);
+        Ok(())
+    }
+}
+
+/// The shell reports a rename onto an existing name as one of its "already exists" results.
+#[cfg(windows)]
+fn rename_conflicts(code: windows::core::HRESULT) -> bool {
+    const RENAMEFILE_EXISTS: i32 = 0x8027_0028u32 as i32;
+    const ERROR_ALREADY_EXISTS: i32 = 0x8007_00B7u32 as i32;
+    matches!(code.0, RENAMEFILE_EXISTS | ERROR_ALREADY_EXISTS)
+        || matches!(code.0 as u32, 0x8027_0029..=0x8027_002C)
+}
+
 /// Copies text to the Windows system clipboard.
 pub fn set_clipboard_text(text: &str) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(windows)]
@@ -1140,18 +1220,26 @@ fn to_wide_path(path: &str) -> Vec<u16> {
     p.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-/// Null-terminated UTF-16 for `SHCreateItemFromParsingName`. The shell parser
-/// rejects the `\\?\` prefix (`E_INVALIDARG`), so long-path callers must hand it
-/// the plain form; the shell's own long-path support then decides.
+/// Whether two paths resolve to one file. The canonical path carries the on-disk casing, so a
+/// case-only rename (including non-ASCII names) is not mistaken for a conflict.
+fn same_file(first: &std::path::Path, second: &std::path::Path) -> bool {
+    match (std::fs::canonicalize(first), std::fs::canonicalize(second)) {
+        (Ok(first), Ok(second)) => first == second,
+        _ => false,
+    }
+}
+
+/// Null-terminated UTF-16 for the shell's display-name parser. The parser
+/// rejects the `\\?\` prefix (`E_INVALIDARG`), so callers hand it the plain
+/// form; the shell's own long-path support then decides.
 #[cfg(windows)]
 fn to_wide_shell_path(path: &str) -> Vec<u16> {
     path.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-/// Builds a shell item through the display-name parser and its PIDL. This is
-/// the path form `SHCreateItemFromParsingName` cannot replace for long or CJK
-/// paths, and it keeps destination parsing independent of the recycle-bin
-/// namespace item.
+/// Builds a shell item through the display-name parser and its PIDL, the form
+/// that handles long and CJK paths; destination parsing stays independent of
+/// the recycle-bin namespace item.
 #[cfg(windows)]
 fn shell_item_from_path(path: &str) -> Result<IShellItem, String> {
     let wide = to_wide_shell_path(path);
@@ -1368,6 +1456,70 @@ mod tests {
         assert!(
             !listing.iter().any(|entry| entry.fs_path == item.fs_path),
             "the restored item must leave the bin"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_rename_writes_the_new_name_and_removes_the_old_one() {
+        let temp = tempfile::tempdir().expect("create the probe directory");
+        let old = temp.path().join("before.txt");
+        std::fs::write(&old, b"cairn").expect("create the probe file");
+
+        rename_path(&old, "after.txt").expect("rename the probe");
+
+        assert!(!old.exists(), "the old name must be gone");
+        let new = temp.path().join("after.txt");
+        assert_eq!(
+            std::fs::read(&new).expect("the probe exists under its new name"),
+            b"cairn"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn renaming_onto_an_existing_name_reports_a_conflict_and_keeps_both_files() {
+        let temp = tempfile::tempdir().expect("create the probe directory");
+        let source = temp.path().join("source.txt");
+        let target = temp.path().join("target.txt");
+        std::fs::write(&source, b"source").expect("create the source");
+        std::fs::write(&target, b"target").expect("create the target");
+
+        assert_eq!(
+            rename_path(&source, "target.txt"),
+            Err(RenameError::TargetExists)
+        );
+        assert_eq!(std::fs::read(&source).expect("source survives"), b"source");
+        assert_eq!(std::fs::read(&target).expect("target survives"), b"target");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_case_only_rename_keeps_the_file_and_changes_its_displayed_name() {
+        let temp = tempfile::tempdir().expect("create the probe directory");
+        let old = temp.path().join("café.txt");
+        std::fs::write(&old, b"cairn").expect("create the probe file");
+
+        rename_path(&old, "CAFÉ.txt").expect("a non-ASCII case-only rename");
+
+        assert_eq!(
+            std::fs::read(temp.path().join("CAFÉ.txt")).expect("read the file"),
+            b"cairn"
+        );
+        let names: Vec<String> = std::fs::read_dir(temp.path())
+            .expect("list the probe directory")
+            .map(|entry| {
+                entry
+                    .expect("a directory entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec!["CAFÉ.txt".to_string()],
+            "the disk keeps the requested casing"
         );
     }
 }

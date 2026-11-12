@@ -14,6 +14,8 @@ pub(crate) mod command_groups;
 pub(crate) mod commands;
 pub(crate) mod dialogs;
 pub(crate) mod file_icon;
+#[cfg(windows)]
+pub(crate) mod hotkey;
 pub(crate) mod i18n;
 pub(crate) mod menu_actions;
 pub(crate) mod menu_rules;
@@ -23,6 +25,8 @@ pub(crate) mod os;
 pub(crate) mod perf;
 pub(crate) mod query_edit;
 pub(crate) mod recycle_bin;
+pub(crate) mod rename;
+pub(crate) mod rename_editor;
 pub(crate) mod reveal;
 pub(crate) mod settings;
 pub(crate) mod settings_actions;

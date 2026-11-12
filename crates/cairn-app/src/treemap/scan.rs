@@ -46,6 +46,7 @@ impl CairnApp {
         cx: &mut Context<Self>,
     ) {
         let drive_upper = drive.to_ascii_uppercase();
+        self.discard_rename(cx);
         // A bin or block-listing filter is a location-local search, not a query
         // to carry into the drive view. Every drive entry lands here, so the
         // location is left here rather than at each caller.

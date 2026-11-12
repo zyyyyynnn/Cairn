@@ -276,6 +276,9 @@ pub struct QueryDomain {
     /// The service's refusal of the current query, if it answered with one. Cleared when a new
     /// query starts and when a result set arrives, so the band never outlives its query.
     pub rejection: Option<crate::search::query_orchestration::QueryRejection>,
+    /// The current query stopped before the service answered. The rows already shown stay; the
+    /// empty band states the stop instead of claiming a no-match.
+    pub cancelled: bool,
     pub is_fetching_more: bool,
     pub is_searching: bool,
     /// Byte offset where mouse text drag selection started, if a drag is in progress.
@@ -346,6 +349,15 @@ pub(crate) struct TreemapPathField {
     pub _subscription: Subscription,
 }
 
+/// The in-place rename editor: the selected row swaps its name cell for this input while a draft
+/// is present. A shell write owns the draft until it answers, so a second Enter cannot duplicate it.
+pub(crate) struct RenameEditor {
+    pub input: Entity<InputState>,
+    pub draft: Option<crate::shell::rename::RenameDraft>,
+    pub in_flight: bool,
+    pub _subscription: Subscription,
+}
+
 pub struct CairnApp {
     pub i18n: Rc<I18nManager>,
     pub query: QueryDomain,
@@ -377,6 +389,11 @@ pub struct CairnApp {
     pub drive_view: Option<char>,
     pub treemap_state: Option<crate::treemap::state::TreemapViewState>,
     pub(crate) treemap_path: TreemapPathField,
+    /// The in-place rename editor for the single selected result row.
+    pub(crate) rename: RenameEditor,
+    /// The global summon hotkey; the guard unregisters the chord when it drops.
+    #[cfg(windows)]
+    pub(crate) _hotkey: Option<crate::shell::hotkey::GlobalHotkey>,
     /// The path switch menu anchored to one breadcrumb segment.
     pub(crate) treemap_path_menu: Option<Entity<PopupMenu>>,
     pub(crate) treemap_path_menu_for: Option<String>,
@@ -469,6 +486,32 @@ impl CairnApp {
                 InputEvent::Focus => {}
             },
         );
+        let rename_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder(i18n.get_text("rename_label")));
+        let rename_subscription = cx.subscribe_in(
+            &rename_input,
+            window,
+            |this, _, event: &InputEvent, window, cx| match event {
+                InputEvent::PressEnter { .. } => this.commit_rename(window, cx),
+                // A blur only moves the keyboard; the draft stays so a press
+                // inside the editor never discards what was typed. Only Escape
+                // cancels the rename.
+                InputEvent::Blur => {}
+                InputEvent::Change => this.rename_text_changed(cx),
+                InputEvent::Focus => {}
+            },
+        );
+
+        #[cfg(all(windows, not(test)))]
+        let hotkey = crate::shell::hotkey::register()
+            .map_err(|err| tracing::warn!("global hotkey unavailable: {err}"))
+            .ok();
+        // Unit tests never register a real system-wide chord or read the real
+        // update marker; both are process-level side effects, not view state.
+        #[cfg(all(windows, test))]
+        let hotkey: Option<crate::shell::hotkey::GlobalHotkey> = None;
+        #[cfg(all(windows, not(test)))]
+        let hotkey_unavailable = hotkey.is_none();
 
         let mut app = Self {
             i18n,
@@ -485,6 +528,7 @@ impl CairnApp {
                 query_id: 0,
                 active_session_id: None,
                 rejection: None,
+                cancelled: false,
                 is_fetching_more: false,
                 is_searching: false,
                 text_selection_anchor: None,
@@ -539,6 +583,14 @@ impl CairnApp {
                 error: false,
                 _subscription: treemap_path_subscription,
             },
+            rename: RenameEditor {
+                input: rename_input,
+                draft: None,
+                in_flight: false,
+                _subscription: rename_subscription,
+            },
+            #[cfg(windows)]
+            _hotkey: hotkey,
             treemap_path_menu: None,
             treemap_path_menu_for: None,
             treemap_path_menu_focus: None,
@@ -571,7 +623,18 @@ impl CairnApp {
                     cx.notify();
                 }
             }));
-        app.consume_update_notice(cx);
+        #[cfg(not(test))]
+        {
+            let notice_shown = app.consume_update_notice(cx);
+            #[cfg(windows)]
+            if hotkey_unavailable && !notice_shown {
+                // One toast slot: an update result outranks a shortcut notice, and
+                // the registration failure is already logged.
+                let title = app.i18n.get_text("hotkey_unavailable_title");
+                let message = app.i18n.get_text("hotkey_unavailable_message");
+                app.show_info_toast(title, message, cx);
+            }
+        }
         app.check_service_connection(cx);
         app
     }
@@ -700,20 +763,13 @@ pub fn trim_working_set() {}
 /// Hides the main Cairn window to the system tray and aggressively trims the process working set.
 #[cfg(windows)]
 pub fn hide_main_window() {
-    use windows::core::PCWSTR;
-    use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, ShowWindow, SW_HIDE};
+    use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
 
-    let title: Vec<u16> = crate::WINDOW_TITLE
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
-    unsafe {
-        if let Ok(hwnd) = FindWindowW(None, PCWSTR(title.as_ptr())) {
-            if !hwnd.0.is_null() {
-                let _ = ShowWindow(hwnd, SW_HIDE);
-                trim_working_set();
-            }
+    if let Some(hwnd) = crate::shell::tray::find_main_window() {
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_HIDE);
         }
+        trim_working_set();
     }
 }
 

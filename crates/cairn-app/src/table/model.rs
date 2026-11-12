@@ -504,6 +504,29 @@ impl TableState {
         }
     }
 
+    /// Renames the loaded row whose full path is `old_path`, keeping its position, selection and
+    /// the table's order. The new-name highlights are cleared because they describe the old text;
+    /// the background refresh reconciles the row with the index afterwards.
+    pub fn rename_row(&mut self, old_path: &str, new_name: &str) -> bool {
+        let old = std::path::Path::new(old_path);
+        let (Some(parent), Some(name)) =
+            (old.parent(), old.file_name().and_then(|name| name.to_str()))
+        else {
+            return false;
+        };
+        let Some(row) = self
+            .rows
+            .iter_mut()
+            .find(|row| row.name == name && std::path::Path::new(&row.path) == parent)
+        else {
+            return false;
+        };
+        row.name.clear();
+        row.name.push_str(new_name);
+        row.name_highlights.clear();
+        true
+    }
+
     /// Full scrollable height of the band, driven by the server-reported match count.
     pub fn scroll_extent(&self, row_height: f32) -> f32 {
         self.total_rows as f32 * row_height
@@ -616,6 +639,17 @@ impl TableState {
         } else if !self.loaded_range().is_empty() {
             self.select_row(self.loaded_range().start, false);
         }
+    }
+
+    /// The row a single-row action such as rename may target: exactly one selected row, and that row
+    /// must be inside the fetched window so its name and path are known.
+    pub fn sole_selected_row(&self) -> Option<usize> {
+        let mut selected = self.selected_indices.iter();
+        let ix = *selected.next()?;
+        if selected.next().is_some() || !self.is_loaded(ix) {
+            return None;
+        }
+        Some(ix)
     }
 
     /// The row a keyboard command acts on: the focused row, else the lowest selected one.
@@ -1428,6 +1462,86 @@ mod tests {
         assert_eq!(table.loaded_range(), 0..0);
         assert_eq!(table.scroll_top, 0.0);
         assert!(table.selected_indices.is_empty());
+    }
+
+    #[test]
+    fn only_exactly_one_loaded_selection_can_be_renamed() {
+        let mut table = table(5, 100);
+        assert_eq!(table.sole_selected_row(), None);
+
+        table.select_row(2, false);
+        assert_eq!(table.sole_selected_row(), Some(2));
+
+        table.select_row(3, true);
+        assert_eq!(
+            table.sole_selected_row(),
+            None,
+            "a range selection has no single rename target"
+        );
+
+        let mut unloaded = TableState::default();
+        unloaded.selected_indices.insert(500);
+        assert_eq!(
+            unloaded.sole_selected_row(),
+            None,
+            "a row outside the fetched window has no name to edit"
+        );
+    }
+
+    #[test]
+    fn a_rename_updates_the_loaded_row_in_place() {
+        let mut table = TableState::default();
+        table.set_rows(
+            vec![
+                FileRowData {
+                    name: "first.txt".to_string(),
+                    path: r"C:\work".to_string(),
+                    name_highlights: vec![(0, 5)],
+                    ..Default::default()
+                },
+                FileRowData {
+                    name: "second.txt".to_string(),
+                    path: r"C:\work".to_string(),
+                    ..Default::default()
+                },
+            ],
+            2,
+        );
+        table.select_row(1, false);
+        let sort = (table.sort_column, table.sort_asc);
+
+        assert!(table.rename_row(r"C:\work\second.txt", "renamed.md"));
+
+        let row = table.row(1).expect("the row keeps its position");
+        assert_eq!(row.name, "renamed.md");
+        assert_eq!(row.path, r"C:\work", "a rename never moves the parent");
+        assert_eq!(
+            crate::app::join_row_path(&row.path, &row.name),
+            r"C:\work\renamed.md"
+        );
+        assert!(
+            row.name_highlights.is_empty(),
+            "the old highlight ranges no longer describe the new name"
+        );
+        assert_eq!(table.focused_idx, Some(1));
+        assert_eq!(table.selected_indices, std::collections::HashSet::from([1]));
+        assert_eq!(table.total_rows(), 2, "a rename keeps the result count");
+        assert_eq!(
+            (table.sort_column, table.sort_asc),
+            sort,
+            "a rename never reorders the table"
+        );
+        assert_eq!(
+            table.row(0).map(|row| row.name.as_str()),
+            Some("first.txt"),
+            "the neighbouring row is untouched"
+        );
+
+        assert!(!table.rename_row(r"C:\work\missing.txt", "other.md"));
+        assert_eq!(
+            table.row(1).map(|row| row.name.as_str()),
+            Some("renamed.md")
+        );
     }
 
     #[test]

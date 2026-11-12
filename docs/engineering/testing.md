@@ -13,6 +13,8 @@
 
 一个行为只在一层测一次，放在最接近用户的那一层；下层不重复上层已经断言过的结果。
 
+`cairn-app` 的公开入口在 `src` 内以真实 `CairnApp` 上下文覆盖：汇总块清单的进入、后退与退出（`open_block_listing` / `go_back` / `escape_query`），就地重命名的打开、替换与取消（`rename_selected` / `cancel_rename`），停止查询后的状态与 id（`cancel_in_flight_query`），以及取消后的状态刷新不再发起查询（`refresh_results`）。
+
 ## 价值判定
 
 测试断言聚焦于外部可观察的结果与关键边界：
@@ -38,6 +40,8 @@
 3. 恢复机器状态：停止的服务重新启动，临时进程退出，临时文件清理。
 
 需要管理员运行的开发入口：`CairnService.exe --console`（先停止已安装的 `CairnService`，验证结束后重新启动）。
+
+全局热键验证：启动应用后按 `Ctrl+Alt+Space`，前台窗口应隐藏，再次按下应从托盘恢复并聚焦；先用其他程序占用该组合后启动，应用应提示一次且托盘仍可打开窗口。
 
 服务配置的安全写入（`ServiceConfig::save_atomic_secure` 的受限 ACL）需要 `SeRestorePrivilege`：非提权运行时，`apply_config_toml` 只可能返回 `could not persist` 拒绝，测试接受该路径；成功路径在提权 PowerShell 中执行 `cargo test -p cairn-service admin_only_query` 并确认通过，确认 `service.toml` 的所有者与 DACL 已受限。
 

@@ -498,6 +498,7 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         messages: &[
             "empty_index_empty_title",
             "empty_no_matches",
+            "search_cancelled_title",
             "empty_content_scope_line",
             "empty_content_loading_title",
             "empty_content_unreadable_title",
@@ -509,7 +510,27 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
             "recycle_bin_no_matches_title",
         ],
         named_by: "",
-        requirement: "UI-01, DSV-08",
+        requirement: "UI-01, DSV-08, UI-05",
+    },
+    // The name cell of the row being renamed becomes this input; the row keeps its identity and
+    // the editor keeps the component's IME and text-selection behavior.
+    KeyControl {
+        key: "rename-input",
+        element: "rename-input",
+        indexed: false,
+        role: Role::TextInput,
+        messages: &[
+            "rename_label",
+            "rename_error_empty",
+            "rename_error_unchanged",
+            "rename_error_invalid_char",
+            "rename_error_trailing_dot_or_space",
+            "rename_error_reserved",
+            "rename_error_too_long",
+            "rename_error_target_exists",
+        ],
+        named_by: "",
+        requirement: "UI-05",
     },
     // A content query that cannot run offers one state-specific recovery: turn the feature on,
     // rebuild the index, or re-read the status. Only one label is live at a time.
@@ -1014,6 +1035,7 @@ mod tests {
             ("result-row", Role::ListItem),
             ("result-placeholder", Role::ListItem),
             ("result-state", Role::Status),
+            ("rename-input", Role::TextInput),
             ("content-search-action", Role::Button),
             ("status-bar", Role::Status),
             ("toast", Role::Alert),
