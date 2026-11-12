@@ -54,8 +54,8 @@ impl CairnApp {
     pub fn can_go_forward(&self) -> bool {
         // A location step has no forward meaning until it is left. Keeping the
         // toolbar Forward disabled prevents an action that would advance the
-        // query history while the bin stays on screen.
-        if self.recycle_bin.is_open() {
+        // query history while the bin or a block listing stays on screen.
+        if self.recycle_bin.is_open() || self.block_listing.is_some() {
             return false;
         }
         if self.drive_view.is_some() {
@@ -131,10 +131,10 @@ impl CairnApp {
     }
 
     pub fn update_current_nav_state_text(&mut self) {
-        // While the bin is open the search box is a location label, not the
-        // query that entry describes; writing it back would erase the text the
-        // person left before opening the bin.
-        if self.recycle_bin.is_open() {
+        // While the bin or a block listing is open the search box filters that
+        // location in place, not the query this entry describes; writing it
+        // back would erase the text the person left before entering.
+        if self.recycle_bin.is_open() || self.block_listing.is_some() {
             return;
         }
         if let Some(state) = self.nav_history.get_mut(self.nav_history_index) {
@@ -203,9 +203,10 @@ impl CairnApp {
     }
 
     pub fn go_forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.recycle_bin.is_open() {
-            // Forward is disabled in the bin; the guard keeps a stale key or
-            // programmatic dispatch from advancing history behind the location.
+        if self.recycle_bin.is_open() || self.block_listing.is_some() {
+            // Forward is disabled in the bin and a block listing; the guard
+            // keeps a stale key or programmatic dispatch from advancing history
+            // behind the location.
             return;
         }
         if self.drive_view.is_some() {
@@ -413,6 +414,75 @@ mod tests {
                         assert_eq!(
                             this.treemap_state.as_ref().map(|s| s.current_dir()),
                             Some(r"D:\Games")
+                        );
+                    });
+
+                    cx.quit();
+                    app
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn a_block_listing_disables_forward_until_it_is_left() {
+        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
+            gpui_kit::init(cx);
+            let _ = gpui_kit::open_window(
+                gpui_kit::gpui::WindowOptions::default(),
+                cx,
+                |window, cx| {
+                    let app = cx.new(|cx| CairnApp::new(window, cx));
+
+                    app.update(cx, |this, cx| {
+                        this.query.active_filter = FilterCategory::Document;
+                        this.record_nav_state();
+                        this.query.active_filter = FilterCategory::Picture;
+                        this.record_nav_state();
+                        this.go_back(window, cx);
+                        assert!(this.can_go_forward());
+                        let index = this.nav_history_index;
+
+                        this.block_listing = Some(crate::shell::block_listing::BlockListing::new(
+                            r"C:\Windows".to_string(),
+                            2,
+                            Vec::new(),
+                        ));
+                        assert!(!this.can_go_forward());
+                        this.go_forward(window, cx);
+                        assert_eq!(this.nav_history_index, index);
+                    });
+
+                    cx.quit();
+                    app
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn a_block_listing_filter_stays_out_of_the_query_history() {
+        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
+            gpui_kit::init(cx);
+            let _ = gpui_kit::open_window(
+                gpui_kit::gpui::WindowOptions::default(),
+                cx,
+                |window, cx| {
+                    let app = cx.new(|cx| CairnApp::new(window, cx));
+
+                    app.update(cx, |this, _cx| {
+                        this.query.search_input.set_text("before the block");
+                        this.record_nav_state();
+                        this.block_listing = Some(crate::shell::block_listing::BlockListing::new(
+                            r"C:\Windows".to_string(),
+                            2,
+                            Vec::new(),
+                        ));
+                        this.query.search_input.set_text("amd64");
+                        this.update_current_nav_state_text();
+                        assert_eq!(
+                            this.nav_history[this.nav_history_index].text,
+                            "before the block"
                         );
                     });
 

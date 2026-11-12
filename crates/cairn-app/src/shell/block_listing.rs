@@ -133,6 +133,9 @@ impl CairnApp {
         self.query.query_id += 1;
         self.query.is_searching = false;
         self.query.is_fetching_more = false;
+        // A refusal of the query that preceded the block does not describe
+        // these rows.
+        self.query.rejection = None;
         self.leave_drive_view();
         self.query.scope_drive = None;
         self.query.active_filter = FilterCategory::All;

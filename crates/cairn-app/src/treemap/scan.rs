@@ -46,8 +46,12 @@ impl CairnApp {
         cx: &mut Context<Self>,
     ) {
         let drive_upper = drive.to_ascii_uppercase();
-        if self.recycle_bin.leave() {
-            // A bin filter is a location-local search, not a query to carry into the drive view.
+        // A bin or block-listing filter is a location-local search, not a query
+        // to carry into the drive view. Every drive entry lands here, so the
+        // location is left here rather than at each caller.
+        let leaving_bin = self.recycle_bin.leave();
+        let leaving_listing = self.block_listing.take().is_some();
+        if leaving_bin || leaving_listing {
             self.query.search_input.clear();
         }
         self.clear_treemap_path_menu();
@@ -324,5 +328,34 @@ mod tests {
             state.scan_fade_epoch, state.reveal_generation,
             "the dissolve belongs to the generation it reveals"
         );
+    }
+
+    #[test]
+    fn entering_a_drive_leaves_the_block_listing_and_its_filter() {
+        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
+            gpui_kit::init(cx);
+            let _ = gpui_kit::open_window(
+                gpui_kit::gpui::WindowOptions::default(),
+                cx,
+                |window, cx| {
+                    let app = cx.new(|cx| CairnApp::new(window, cx));
+
+                    app.update(cx, |this, cx| {
+                        this.block_listing = Some(crate::shell::block_listing::BlockListing::new(
+                            r"C:\Windows".to_string(),
+                            2,
+                            Vec::new(),
+                        ));
+                        this.query.search_input.set_text("amd64");
+                        this.open_drive_at('D', r"D:\Games", window, cx);
+                        assert!(this.block_listing.is_none());
+                        assert!(this.query.search_input.text.is_empty());
+                    });
+
+                    cx.quit();
+                    app
+                },
+            );
+        });
     }
 }

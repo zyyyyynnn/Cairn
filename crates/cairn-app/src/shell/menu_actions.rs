@@ -674,13 +674,16 @@ impl CairnApp {
             GroupCommand::RevealLocation | GroupCommand::ShowProperties => {
                 self.recycle_bin.is_open()
             }
-            // The bin filter is name/original-location substring matching. Whole
-            // word, path matching and regex have no effect there, so their rows
-            // are absent instead of staying checkable no-ops. Case sensitivity is
-            // honored by the filter and remains available.
+            // The bin filter and a block listing filter their rows in place by
+            // name/location substring. Whole word, path matching and regex have
+            // no effect there, so their rows are absent instead of staying
+            // checkable no-ops. Case sensitivity is honored by both filters and
+            // remains available.
             GroupCommand::ToggleWholeWord
             | GroupCommand::ToggleMatchPath
-            | GroupCommand::ToggleRegex => self.recycle_bin.is_open(),
+            | GroupCommand::ToggleRegex => {
+                self.recycle_bin.is_open() || self.block_listing.is_some()
+            }
 
             _ => false,
         }
@@ -1241,5 +1244,43 @@ mod confirmation_tests {
                 assert_ne!(resolved, key, "{key} fell back to raw key in {locale}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod visibility_tests {
+    use super::*;
+    use crate::shell::block_listing::BlockListing;
+    use core::prelude::rust_2021::test;
+
+    #[test]
+    fn search_flag_rows_hide_while_a_block_listing_is_open() {
+        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
+            gpui_kit::init(cx);
+            let _ = gpui_kit::open_window(
+                gpui_kit::gpui::WindowOptions::default(),
+                cx,
+                |window, cx| {
+                    let app = cx.new(|cx| CairnApp::new(window, cx));
+
+                    app.update(cx, |this, _cx| {
+                        assert!(!this.command_is_hidden(GroupCommand::ToggleWholeWord));
+                        this.block_listing =
+                            Some(BlockListing::new(r"C:\Windows".to_string(), 2, Vec::new()));
+                        for command in [
+                            GroupCommand::ToggleWholeWord,
+                            GroupCommand::ToggleMatchPath,
+                            GroupCommand::ToggleRegex,
+                        ] {
+                            assert!(this.command_is_hidden(command));
+                        }
+                        assert!(!this.command_is_hidden(GroupCommand::ToggleCase));
+                    });
+
+                    cx.quit();
+                    app
+                },
+            );
+        });
     }
 }
