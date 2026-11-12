@@ -18,7 +18,7 @@
 
 ## 3. Cairn 差异化定位建议
 
-对照 [SPEC.md](../SPEC.md)（§1.1 产品定义、SM-1..5 北极星、DSV-01..07）与 [product/treemap.md](../product/treemap.md)（当前实现口径）：
+对照 [SPEC.md](../SPEC.md)（§1.1 产品定义、SM-1..5 北极星、现有 DSV 需求）与 [product/treemap.md](../product/treemap.md)（当前实现口径）：
 
 1. **把"服务的常驻性"变成 Treemap 的常驻性（最核心的结构性差异）**。服务端已有 USN 追赶（IDX-03、SM-4）与自底向上聚合（DSV-01，400 万 ≤ 100 ms），"打开即整盘 + 树随 USN 增量刷新"在架构上顺理成章。落地时遵守 IDX-07 的零静默过期原则：非 Synced 卷的 Treemap 需显式标注陈旧状态（SPEC §1.3 目标 2）。SpaceSniffer 的"闪烁提示变更元素"是低成本的表现层参考（[features 页](http://www.uderzo.it/main_products/space_sniffer/features.html)）。
 2. **搜索语法直驱 Treemap 过滤，作为 DSV 的演进方向而非当前承诺**。当前 treemap.md 明确"文件名/扩展名/尺寸文本过滤仍由经典搜索表格承担"，Treemap 状态栏已不承载类别筛选。竞品证据（WizTree File Search Filter、WinDirStat `Ctrl+F`、Everything 的即时 `size:` 查询）说明"查询语言 × 空间视图"是公认需求但无人完成闭环。建议保持 DSV-07 双态隔离不变，把 `size:` / `ext:` / `dm:` 映射为 Treemap 上的淡化/高亮覆盖层列入 P2 演进候选——布局不重排、只做视觉通道，与现有"类别筛选只原地淡化"的机制同型（treemap.md §3.3）。
