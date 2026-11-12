@@ -7,7 +7,7 @@
 
 use crate::app::{join_row_path, CairnApp};
 use crate::shell::commands::RenameSelected;
-use crate::shell::os::rename_path;
+use crate::shell::os::{rename_path, BinErrorKind};
 use crate::shell::rename::{RenameDraft, RenameError};
 use fluent_bundle::FluentArgs;
 use gpui_kit::gpui::*;
@@ -62,21 +62,14 @@ impl CairnApp {
         cx.notify();
     }
 
-    /// Closes the editor without writing. `restore_focus` hands the keyboard back to the table when
-    /// the person asked to cancel; a blur leaves focus wherever it moved.
-    pub(crate) fn cancel_rename(
-        &mut self,
-        restore_focus: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    /// Closes the editor without writing and hands the keyboard back to the
+    /// table. Escape is the only cancel; a blur keeps the draft.
+    pub(crate) fn cancel_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.rename.draft.take().is_none() {
             return;
         }
         self.dismiss_rename_error_toast(cx);
-        if restore_focus {
-            self.results.results_focus.focus(window, cx);
-        }
+        self.results.results_focus.focus(window, cx);
         cx.notify();
     }
 
@@ -120,9 +113,12 @@ impl CairnApp {
                     Ok(Ok(())) => {
                         let editor_open = this.rename.draft.take().is_some();
                         this.results.table.rename_row(&old_path, &new_name);
+                        if let Some(listing) = this.block_listing.as_mut() {
+                            listing.rename_path(&old_path, &new_name);
+                        }
                         this.dismiss_rename_error_toast(cx);
-                        // A blur already handed the keyboard somewhere else; only a submission
-                        // that was still being read takes the focus back to the table.
+                        // Escape during the write may have closed the editor; only a still-open
+                        // one returns the keyboard to the table.
                         if editor_open {
                             this.results.results_focus.focus(window, cx);
                         }
@@ -176,12 +172,58 @@ impl CairnApp {
                 self.i18n
                     .get_text_with_args("rename_error_invalid_char", &args)
             }
-            RenameError::Shell { message } => message.clone(),
+            RenameError::Shell { message } => {
+                // The raw diagnostic is for the log; the toast names a remedy.
+                tracing::warn!("rename failed: {message}");
+                self.i18n.get_text(shell_failure_key(message))
+            }
             RenameError::Cancelled => String::new(),
             rule => rule
                 .message_key()
                 .map(|key| self.i18n.get_text(key))
                 .unwrap_or_default(),
+        }
+    }
+}
+
+/// The localized remedy for a shell refusal; the raw reason stays in the log.
+fn shell_failure_key(reason: &str) -> &'static str {
+    match BinErrorKind::from_reason(reason) {
+        BinErrorKind::AccessDenied => "rename_error_access_denied",
+        BinErrorKind::ReadOnly => "rename_error_read_only",
+        BinErrorKind::PathTooLong | BinErrorKind::PathTooDeep => "rename_error_path_too_long",
+        BinErrorKind::Conflict => "rename_error_target_exists",
+        _ => "rename_error_shell",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shell_failure_key;
+
+    #[test]
+    fn a_shell_refusal_names_a_localized_remedy() {
+        for (reason, key) in [
+            (
+                "PerformOperations: 0x80270021",
+                "rename_error_access_denied",
+            ),
+            (
+                "CoCreateInstance(FileOperation): Access is denied. (0x80070005)",
+                "rename_error_access_denied",
+            ),
+            ("PerformOperations: 0x8027003f", "rename_error_read_only"),
+            (
+                "PerformOperations: 0x80270038",
+                "rename_error_path_too_long",
+            ),
+            (
+                "PerformOperations: 0x80270029",
+                "rename_error_target_exists",
+            ),
+            ("something unexpected", "rename_error_shell"),
+        ] {
+            assert_eq!(shell_failure_key(reason), key, "{reason}");
         }
     }
 }

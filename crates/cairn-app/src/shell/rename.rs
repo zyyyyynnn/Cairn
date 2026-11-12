@@ -41,13 +41,14 @@ pub enum RenameError {
     TargetExists,
     /// The native operation was dismissed before it wrote anything.
     Cancelled,
-    /// The shell refused the write. The diagnostic is kept for the toast and the log.
+    /// The shell refused the write. The diagnostic is kept for the log; the
+    /// toast names a localized remedy.
     Shell { message: String },
 }
 
 impl RenameError {
     /// The message that explains a rejected name. `None` for a dismissed operation (nothing to
-    /// explain) and for a shell diagnosis, which is shown as it was reported.
+    /// explain) and for a shell refusal, whose remedy is chosen from its classified reason.
     pub fn message_key(&self) -> Option<&'static str> {
         match self {
             Self::Empty => Some("rename_error_empty"),
@@ -342,7 +343,7 @@ mod tests {
             }
             .message_key(),
             None,
-            "the shell diagnostic itself is the message"
+            "a shell refusal is classified into its own remedy"
         );
     }
 

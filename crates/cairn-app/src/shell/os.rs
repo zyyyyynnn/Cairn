@@ -28,10 +28,10 @@ use windows::Win32::UI::Shell::PropertiesSystem::PSGetPropertyKeyFromName;
 #[cfg(windows)]
 use windows::Win32::UI::Shell::{
     BHID_EnumItems, FOLDERID_RecycleBinFolder, FileOperation, IEnumShellItems, IFileOperation,
-    IShellItem, IShellItem2, SHCreateItemFromIDList, SHCreateItemFromParsingName,
-    SHEmptyRecycleBinW, SHGetKnownFolderIDList, SHParseDisplayName, ShellExecuteExW,
-    FOFX_RECYCLEONDELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_WANTNUKEWARNING,
-    SEE_MASK_INVOKEIDLIST, SHELLEXECUTEINFOW, SIGDN_FILESYSPATH, SIGDN_NORMALDISPLAY,
+    IShellItem, IShellItem2, SHCreateItemFromIDList, SHEmptyRecycleBinW, SHGetKnownFolderIDList,
+    SHParseDisplayName, ShellExecuteExW, FOFX_RECYCLEONDELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION,
+    FOF_WANTNUKEWARNING, SEE_MASK_INVOKEIDLIST, SHELLEXECUTEINFOW, SIGDN_FILESYSPATH,
+    SIGDN_NORMALDISPLAY,
 };
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SW_SHOWNORMAL};
@@ -1036,8 +1036,8 @@ pub fn delete_to_recycle_bin(paths: &[String], owner: isize) -> Result<(), BinOp
 
 /// Renames one filesystem path through `IFileOperation::RenameItem`, the shell's own pipeline, so
 /// the write runs with Explorer's undo and error semantics without going through the index service.
-/// The name rules are enforced by [`crate::shell::rename`] before this is called; the conflict
-/// check below keeps an existing neighbour a typed outcome instead of a native prompt.
+/// The name rules are enforced by [`crate::shell::rename`] before this is called; an existing
+/// neighbour is a typed outcome decided before the shell would silently accept the collision.
 pub fn rename_path(path: &std::path::Path, new_name: &str) -> Result<(), RenameError> {
     #[cfg(windows)]
     {
@@ -1047,20 +1047,14 @@ pub fn rename_path(path: &std::path::Path, new_name: &str) -> Result<(), RenameE
             .and_then(|name| name.to_str())
             .unwrap_or_default();
         // A case-only rename addresses the same file, and asking the filesystem whether the
-        // differently-cased path exists would be true by definition.
+        // differently-cased path exists would be true by definition. The shell would otherwise
+        // silently accept the collision, so the typed outcome is decided here.
         if !new_name.eq_ignore_ascii_case(source_name) && path.with_file_name(new_name).exists() {
             return Err(RenameError::TargetExists);
         }
-
         let path_text = path.to_string_lossy();
-        let wide_path = to_wide_shell_path(&path_text);
-        // SAFETY: the path is null-terminated for the call, and the shell item owns its identity.
-        let item: IShellItem =
-            unsafe { SHCreateItemFromParsingName(PCWSTR(wide_path.as_ptr()), None) }.map_err(
-                |err| RenameError::Shell {
-                    message: format!("parse {}: {err}", path.display()),
-                },
-            )?;
+        let item =
+            shell_item_from_path(&path_text).map_err(|message| RenameError::Shell { message })?;
 
         // SAFETY: in-proc COM activation of the shell file-operation handler, released with the
         // interface.
@@ -1229,18 +1223,17 @@ fn to_wide_path(path: &str) -> Vec<u16> {
     p.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-/// Null-terminated UTF-16 for `SHCreateItemFromParsingName`. The shell parser
-/// rejects the `\\?\` prefix (`E_INVALIDARG`), so long-path callers must hand it
-/// the plain form; the shell's own long-path support then decides.
+/// Null-terminated UTF-16 for the shell's display-name parser. The parser
+/// rejects the `\\?\` prefix (`E_INVALIDARG`), so callers hand it the plain
+/// form; the shell's own long-path support then decides.
 #[cfg(windows)]
 fn to_wide_shell_path(path: &str) -> Vec<u16> {
     path.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-/// Builds a shell item through the display-name parser and its PIDL. This is
-/// the path form `SHCreateItemFromParsingName` cannot replace for long or CJK
-/// paths, and it keeps destination parsing independent of the recycle-bin
-/// namespace item.
+/// Builds a shell item through the display-name parser and its PIDL, the form
+/// that handles long and CJK paths; destination parsing stays independent of
+/// the recycle-bin namespace item.
 #[cfg(windows)]
 fn shell_item_from_path(path: &str) -> Result<IShellItem, String> {
     let wide = to_wide_shell_path(path);

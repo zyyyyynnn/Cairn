@@ -337,7 +337,7 @@ impl CairnApp {
         // The in-place rename editor is the innermost editing surface while it is open; Escape
         // closes it and leaves the query alone.
         if self.rename.draft.is_some() {
-            self.cancel_rename(true, window, cx);
+            self.cancel_rename(window, cx);
             return;
         }
         // The address field is the innermost editing surface while it is open.
@@ -927,6 +927,19 @@ impl CairnApp {
     }
 
     pub fn open_selected(&mut self, _: &OpenSelected, window: &mut Window, cx: &mut Context<Self>) {
+        // Enter inside the rename editor submits the name through the input's
+        // own event; the key also bubbles here, where it must not open the row
+        // underneath, including when validation rejected the name.
+        if self.rename.draft.is_some()
+            && self
+                .rename
+                .input
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window)
+        {
+            return;
+        }
         // Inside the Recycle Bin view Enter opens the deleted item straight
         // from the bin payload, exactly like opening it in Explorer.
         if self.recycle_bin.is_open() {
@@ -1302,6 +1315,9 @@ mod visibility_tests {
                     let app = cx.new(|cx| CairnApp::new(window, cx));
 
                     app.update(cx, |this, cx| {
+                        // A startup notice (an unavailable hotkey, an update result) may own
+                        // the first Escape; it is not part of this behavior.
+                        this.dismiss_toast(cx);
                         this.open_drive_visualization('C', window, cx);
                         // The hand-off leaves the canvas for the listing, which
                         // owns neither a drive scope nor a file-type filter.

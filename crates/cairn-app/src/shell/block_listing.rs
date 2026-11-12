@@ -73,6 +73,17 @@ impl BlockListing {
         self.count = self.all.len();
     }
 
+    /// Applies a successful rename to the rows a later filter, sort or page
+    /// reinstall reads from.
+    pub(crate) fn rename_path(&mut self, old_path: &str, new_name: &str) {
+        for row in self.all.iter_mut().chain(self.rows.iter_mut()) {
+            let full = join_listing_path(&self.directory, &row.name);
+            if full.eq_ignore_ascii_case(old_path) {
+                row.name = new_name.to_string();
+            }
+        }
+    }
+
     /// Rebuilds the visible rows from the unfiltered listing and the current
     /// search text, the same in-place filter the Recycle Bin uses.
     pub(crate) fn apply_filter(&mut self, needle: &str, case_sensitive: bool) {
@@ -133,9 +144,10 @@ impl CairnApp {
         self.query.query_id += 1;
         self.query.is_searching = false;
         self.query.is_fetching_more = false;
-        // A refusal of the query that preceded the block does not describe
-        // these rows.
+        // A refusal or stop of the query that preceded the block does not
+        // describe these rows.
         self.query.rejection = None;
+        self.query.cancelled = false;
         self.leave_drive_view();
         self.query.scope_drive = None;
         self.query.active_filter = FilterCategory::All;
@@ -358,5 +370,23 @@ mod tests {
         listing.apply_filter("", false);
         assert_eq!(listing.total(), 2);
         assert_eq!(listing.total_bytes(), 400);
+    }
+
+    #[test]
+    fn a_rename_reaches_the_rows_a_later_reinstall_uses() {
+        let children = vec![child("Windows", 300, true), child("boot.ini", 100, false)];
+        let rows = block_listing_rows(r"C:\", &[0, 1], &children);
+        let mut listing = BlockListing::new(r"C:\".to_string(), 2, rows);
+
+        listing.rename_path(r"C:\boot.ini", "loader.ini");
+        listing.apply_filter("loader", false);
+        assert_eq!(listing.total(), 1);
+        assert_eq!(listing.rows()[0].name, "loader.ini");
+
+        listing.apply_filter("", false);
+        assert!(
+            listing.rows().iter().all(|row| row.name != "boot.ini"),
+            "the old name must not come back through a reinstall"
+        );
     }
 }

@@ -86,6 +86,7 @@ impl CairnApp {
         self.query.query_id += 1;
         self.query.is_searching = false;
         self.query.is_fetching_more = false;
+        self.query.cancelled = false;
         self.query.active_session_id = None;
         // The bin is a location, not a search scope. The search box starts
         // empty and filters this listing in place; it must not run an index
@@ -636,10 +637,15 @@ mod bin_command_tests {
                         this.block_listing =
                             Some(BlockListing::new(r"C:\Windows".to_string(), 2, Vec::new()));
                         this.query.search_input.set_text("amd64");
+                        this.query.cancelled = true;
                         this.open_recycle_bin(window, cx);
                         assert!(this.block_listing.is_none());
                         assert_eq!(this.nav_history[entry].text, "kept query");
                         assert!(this.query.search_input.text.is_empty());
+                        assert!(
+                            !this.query.cancelled,
+                            "the bin is a new location, not the cancelled query"
+                        );
                     });
 
                     cx.quit();

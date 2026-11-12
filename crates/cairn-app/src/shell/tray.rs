@@ -27,11 +27,11 @@ fn labels(language: &str) -> [String; 2] {
     MENU_KEYS.map(|key| i18n.get_text(key))
 }
 
-/// Brings the running Cairn window to the front, matching it by the exact window title.
+/// Finds the running Cairn window by its exact window title.
 ///
 /// GPUI's window class is shared with other applications, so matching the class could focus an
 /// unrelated window.
-fn find_main_window() -> Option<windows::Win32::Foundation::HWND> {
+pub(crate) fn find_main_window() -> Option<windows::Win32::Foundation::HWND> {
     use windows::core::BOOL;
     use windows::Win32::Foundation::{HWND, LPARAM};
     use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, GetWindowTextW};

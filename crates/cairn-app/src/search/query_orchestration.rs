@@ -176,12 +176,6 @@ impl QueryRejection {
     }
 }
 
-/// Whether a query answer still belongs to the current query. Cancelling moves the id forward,
-/// so the answer the service was finishing when it stopped is dropped like any superseded answer.
-fn query_response_is_current(answer_id: u64, current_id: u64) -> bool {
-    answer_id == current_id
-}
-
 /// Whether a page response still belongs to the query and session that requested it.
 ///
 /// A new query can arrive while a page is in flight. Rows from the superseded session describe a
@@ -373,7 +367,10 @@ impl CairnApp {
         if self.block_listing.is_some() {
             return;
         }
+        // A cancelled query is a stop, not a pause: only explicit input asks
+        // for a new one.
         if self.query.is_searching
+            || self.query.cancelled
             || self.recycle_bin.is_open()
             || self.drive_view.is_some()
             || self.query.rejection.is_some()
@@ -475,7 +472,9 @@ impl CairnApp {
 
             let res = rx.await;
             this.update(cx, |this: &mut CairnApp, cx| {
-                if !query_response_is_current(qid, this.query.query_id) {
+                // Cancelling moves the id forward, so the answer the service was finishing when
+                // it stopped is dropped like any superseded answer.
+                if qid != this.query.query_id {
                     return;
                 }
                 let res = match res {
@@ -753,15 +752,6 @@ mod tests {
     }
 
     #[test]
-    fn a_cancelled_query_drops_its_late_answer() {
-        assert!(query_response_is_current(7, 7));
-        assert!(
-            !query_response_is_current(7, 8),
-            "the cancel moved the id forward"
-        );
-    }
-
-    #[test]
     fn a_page_needs_a_connected_idle_session() {
         assert!(rows_page_ready(true, false, false, false, true));
         assert!(
@@ -831,5 +821,41 @@ mod tests {
             cairn_protocol::message::ERROR_CODE_UNAUTHORIZED
         ));
         assert!(!rows_error_requires_refresh(0));
+    }
+
+    #[test]
+    fn a_cancelled_query_is_not_revived_by_a_status_refresh() {
+        use gpui_kit::gpui::AppContext as _;
+        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
+            gpui_kit::init(cx);
+            let _ = gpui_kit::open_window(
+                gpui_kit::gpui::WindowOptions::default(),
+                cx,
+                |window, cx| {
+                    let app = cx.new(|cx| CairnApp::new(window, cx));
+
+                    app.update(cx, |this, cx| {
+                        this.query.cancelled = true;
+                        let id = this.query.query_id;
+                        this.refresh_results(cx);
+                        assert!(!this.query.is_searching);
+                        assert_eq!(
+                            this.query.query_id, id,
+                            "a status refresh must not issue a query behind a stop"
+                        );
+
+                        this.query.cancelled = false;
+                        this.refresh_results(cx);
+                        assert!(
+                            this.query.is_searching,
+                            "an explicit state resumes the query"
+                        );
+                    });
+
+                    cx.quit();
+                    app
+                },
+            );
+        });
     }
 }

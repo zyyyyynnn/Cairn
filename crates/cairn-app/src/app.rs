@@ -493,7 +493,10 @@ impl CairnApp {
             window,
             |this, _, event: &InputEvent, window, cx| match event {
                 InputEvent::PressEnter { .. } => this.commit_rename(window, cx),
-                InputEvent::Blur => this.cancel_rename(false, window, cx),
+                // A blur only moves the keyboard; the draft stays so a press
+                // inside the editor never discards what was typed. Only Escape
+                // cancels the rename.
+                InputEvent::Blur => {}
                 InputEvent::Change => this.rename_text_changed(cx),
                 InputEvent::Focus => {}
             },
@@ -616,9 +619,11 @@ impl CairnApp {
                     cx.notify();
                 }
             }));
-        app.consume_update_notice(cx);
+        let notice_shown = app.consume_update_notice(cx);
         #[cfg(windows)]
-        if hotkey_unavailable {
+        if hotkey_unavailable && !notice_shown {
+            // One toast slot: an update result outranks a shortcut notice, and
+            // the registration failure is already logged.
             let title = app.i18n.get_text("hotkey_unavailable_title");
             let message = app.i18n.get_text("hotkey_unavailable_message");
             app.show_info_toast(title, message, cx);
@@ -751,20 +756,13 @@ pub fn trim_working_set() {}
 /// Hides the main Cairn window to the system tray and aggressively trims the process working set.
 #[cfg(windows)]
 pub fn hide_main_window() {
-    use windows::core::PCWSTR;
-    use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, ShowWindow, SW_HIDE};
+    use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
 
-    let title: Vec<u16> = crate::WINDOW_TITLE
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
-    unsafe {
-        if let Ok(hwnd) = FindWindowW(None, PCWSTR(title.as_ptr())) {
-            if !hwnd.0.is_null() {
-                let _ = ShowWindow(hwnd, SW_HIDE);
-                trim_working_set();
-            }
+    if let Some(hwnd) = crate::shell::tray::find_main_window() {
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_HIDE);
         }
+        trim_working_set();
     }
 }
 

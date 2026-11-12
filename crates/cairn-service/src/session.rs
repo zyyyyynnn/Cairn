@@ -78,15 +78,12 @@ impl SessionManager {
         self.active_queries.write().unwrap().remove(&query_id);
     }
 
-    /// Cancels an in-flight query by `query_id` (or all active queries if `query_id == 0` or not found).
+    /// Cancels an in-flight query by `query_id`. An unknown id is a no-op: ids come from client
+    /// counters, so a stale id must never cancel another connection's query.
     pub fn cancel_query(&self, query_id: u64) {
         let active = self.active_queries.read().unwrap();
         if let Some(token) = active.get(&query_id) {
             token.cancel();
-        } else {
-            for token in active.values() {
-                token.cancel();
-            }
         }
     }
 
@@ -338,5 +335,21 @@ mod tests {
         sessions.cancel_query(2);
         assert!(q2.is_cancelled());
         sessions.finish_query(2);
+    }
+
+    #[test]
+    fn a_stale_query_id_cancels_nothing() {
+        let sessions = SessionManager::default();
+        let conn = CancellationToken::new();
+        let q = sessions.begin_query(11, &conn);
+
+        sessions.cancel_query(10);
+        assert!(
+            !q.is_cancelled(),
+            "an id this connection never used must not cancel its query"
+        );
+
+        sessions.cancel_query(11);
+        assert!(q.is_cancelled());
     }
 }

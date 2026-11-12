@@ -981,14 +981,18 @@ impl CairnApp {
         } else {
             RESULT_COMMANDS
         };
-        let rename_available = self.rename_target_ix().is_some();
+        // The menu opens after the right-click selected this row, so its
+        // availability is read when it builds rather than from the selection
+        // that happened to exist during this render.
+        let app = cx.entity();
         // The commands the row owns, in the order the context menu lists them. Every one of them is
         // also on the keyboard or in the command bar, so the menu is a shortcut and not the only door.
         row_el
-            .context_menu(move |menu, window, _cx| {
+            .context_menu(move |menu, window, cx| {
                 // `PopupMenu::min_w` takes `Pixels`, not a `Length`, so the rem step is resolved against
                 // this window's base font — the same one every other region in the shell scales with.
                 let mut menu = menu.min_w(window.rem_size() * CONTEXT_MENU_MIN_WIDTH);
+                let rename_available = app.read(cx).rename_target_ix().is_some();
                 for (ix, command) in commands.iter().enumerate() {
                     // Destructive delete and the properties look-up each open a section;
                     // the bin omits properties, so only delete separates there.
