@@ -433,6 +433,8 @@ impl TreemapViewState {
                     })
                     .collect()
             };
+            // Every member of a layer stays an individually painted tile; small
+            // members get a readable cell instead of folding again.
             let mut layer_options = options;
             layer_options.max_children = members.len();
             layer_options.allow_aggregates = false;

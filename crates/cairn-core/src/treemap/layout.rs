@@ -177,14 +177,18 @@ impl DisplayPlan {
         entries: Vec<DisplayEntry>,
         bounds: TreemapRect,
     ) -> Self {
-        let sizes: Vec<u64> = entries
+        let weights: Vec<u64> = entries
             .iter()
             .map(|entry| match entry {
                 DisplayEntry::Node(index) => nodes[*index].size,
                 DisplayEntry::Aggregate { weight, .. } => *weight,
             })
             .collect();
-        let cells = squarify(&sizes, bounds);
+        Self::weighted(entries, weights, bounds)
+    }
+
+    fn weighted(entries: Vec<DisplayEntry>, weights: Vec<u64>, bounds: TreemapRect) -> Self {
+        let cells = squarify(&weights, bounds);
         Self { entries, cells }
     }
 
@@ -283,6 +287,37 @@ fn tail_category_groups(nodes: &[TreemapTreeNode], tail: &[usize]) -> Vec<TailGr
             .then_with(|| a.category.machine_key().cmp(b.category.machine_key()))
     });
     groups
+}
+
+/// Plans a layout whose members cannot fold into a block (a summary block's
+/// canvas layer). Every member must stay a readable tile, so a member that
+/// would be painted as a strip gets more weight until its cell fits; its label
+/// keeps the true size.
+fn plan_without_tail(nodes: &[TreemapTreeNode], bounds: TreemapRect) -> DisplayPlan {
+    let total: u64 = nodes.iter().map(|node| node.size).sum();
+    let mut weights: Vec<u64> = nodes.iter().map(|node| node.size).collect();
+    let entries = || (0..nodes.len()).map(DisplayEntry::Node).collect::<Vec<_>>();
+    let mut plan = DisplayPlan::weighted(entries(), weights.clone(), bounds);
+    for _ in 0..24 {
+        let (slivers, _) = plan.offenders();
+        if slivers.is_empty() {
+            break;
+        }
+        let floor = (total / 50).max(1);
+        let mut changed = false;
+        for index in slivers {
+            let next = weights[index].saturating_mul(2).max(floor).min(total);
+            if next > weights[index] {
+                weights[index] = next;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+        plan = DisplayPlan::weighted(entries(), weights.clone(), bounds);
+    }
+    plan
 }
 
 /// Plans a directory with more than one sized child: keeps the largest
@@ -492,6 +527,8 @@ pub fn layout_nested_treemap(
     let total_size: u64 = nodes.iter().map(|node| node.size).sum();
     let plan = if nodes.len() > 1 && total_size > 0 && options.allow_aggregates {
         plan_with_tail(nodes, parent, bounds, options, depth, total_size)
+    } else if nodes.len() > 1 && total_size > 0 {
+        plan_without_tail(nodes, bounds)
     } else {
         DisplayPlan::squarified(
             nodes,
@@ -1040,6 +1077,75 @@ mod tests {
             total,
             "every folded byte stays inside the layout"
         );
+    }
+
+    /// Opening a summary block lays out exactly the folded members; every member
+    /// must stay a readable tile instead of a strip.
+    #[test]
+    fn a_folded_layer_keeps_every_member_a_readable_tile() {
+        let members: [(&str, u64); 3] = [
+            ("Pickora", 102_263_329),
+            ("学术论文写作", 5_661_068),
+            ("Resume", 415_461),
+        ];
+        let nodes: Vec<TreemapTreeNode> = members
+            .iter()
+            .map(|(name, size)| {
+                let mut node = TreemapTreeNode::new_dir(0, (*name).to_string(), 0);
+                node.size = *size;
+                node
+            })
+            .collect();
+        let mut options = NestedTreemapOptions::from_detail_level(5);
+        options.max_children = nodes.len();
+        options.allow_aggregates = false;
+        let bounds = TreemapRect::new(0.0, 0.0, 1060.0, 683.0);
+
+        let layout = layout_nested_treemap(&nodes, r"C:\Workspace", bounds, &options, 0);
+        assert_eq!(layout.len(), 3);
+        for node in &layout {
+            assert!(
+                tile_fits(node.rect),
+                "{:?} painted a {:.1}x{:.1} tile",
+                node.item.name,
+                node.rect.width,
+                node.rect.height
+            );
+        }
+    }
+
+    /// A layer with one dominant member and a long tail of tiny ones must not
+    /// leave unreadable fragments in a canvas corner.
+    #[test]
+    fn a_wide_layer_never_paints_corner_fragments() {
+        let mut nodes = Vec::new();
+        let mut dominant = TreemapTreeNode::new_dir(1, "WindowsApps".to_string(), 0);
+        dominant.size = 13_890_000_000;
+        nodes.push(dominant);
+        for index in 0..35u64 {
+            nodes.push(TreemapTreeNode::new_file(
+                index + 2,
+                format!("item{index:02}.bin"),
+                1_000 + index * 37,
+                0,
+            ));
+        }
+        let mut options = NestedTreemapOptions::from_detail_level(5);
+        options.max_children = nodes.len();
+        options.allow_aggregates = false;
+        let bounds = TreemapRect::new(0.0, 0.0, 1060.0, 683.0);
+
+        let layout = layout_nested_treemap(&nodes, r"C:\Program Files", bounds, &options, 0);
+        assert_eq!(layout.len(), nodes.len());
+        for node in &layout {
+            assert!(
+                tile_fits(node.rect),
+                "{:?} painted a {:.1}x{:.1} fragment",
+                node.item.name,
+                node.rect.width,
+                node.rect.height
+            );
+        }
     }
 
     /// The live C:\Workspace shape: a workspace that dwarfs its siblings must
