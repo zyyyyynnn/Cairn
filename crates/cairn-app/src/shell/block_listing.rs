@@ -170,11 +170,7 @@ impl CairnApp {
 
     /// Drops rows the shell has deleted from the listing and re-applies the
     /// current search text.
-    pub(crate) fn remove_block_listing_paths(
-        &mut self,
-        paths: &[String],
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn remove_block_listing_paths(&mut self, paths: &[String], cx: &mut Context<Self>) {
         let needle = self.query.search_input.text.trim().to_string();
         let case_sensitive = self.query.case_sensitive;
         let Some(listing) = self.block_listing.as_mut() else {
@@ -270,24 +266,30 @@ fn sort_rows(rows: &mut [FileRowData], column: SortColumn, ascending: bool) {
             cairn_core::sort::natural_cmp(&a.path, &b.path)
                 .then_with(|| cairn_core::sort::natural_cmp(&a.name, &b.name))
         }),
-        SortColumn::Size => rows.sort_by(|a, b| a.size.cmp(&b.size).then_with(|| {
-            cairn_core::sort::natural_cmp(&a.name, &b.name)
-        })),
+        SortColumn::Size => rows.sort_by(|a, b| {
+            a.size
+                .cmp(&b.size)
+                .then_with(|| cairn_core::sort::natural_cmp(&a.name, &b.name))
+        }),
         SortColumn::DateModified => rows.sort_by(|a, b| {
-            a.modified_ts.cmp(&b.modified_ts).then_with(|| {
-                cairn_core::sort::natural_cmp(&a.name, &b.name)
-            })
+            a.modified_ts
+                .cmp(&b.modified_ts)
+                .then_with(|| cairn_core::sort::natural_cmp(&a.name, &b.name))
         }),
         SortColumn::DateCreated => rows.sort_by(|a, b| {
-            a.created_ts.cmp(&b.created_ts).then_with(|| {
-                cairn_core::sort::natural_cmp(&a.name, &b.name)
-            })
+            a.created_ts
+                .cmp(&b.created_ts)
+                .then_with(|| cairn_core::sort::natural_cmp(&a.name, &b.name))
         }),
         SortColumn::Extension => rows.sort_by(|a, b| {
-            let ext = |row: &FileRowData| row.name.rsplit_once('.').map_or(String::new(), |(_, e)| e.to_lowercase());
-            ext(a).cmp(&ext(b)).then_with(|| {
-                cairn_core::sort::natural_cmp(&a.name, &b.name)
-            })
+            let ext = |row: &FileRowData| {
+                row.name
+                    .rsplit_once('.')
+                    .map_or(String::new(), |(_, e)| e.to_lowercase())
+            };
+            ext(a)
+                .cmp(&ext(b))
+                .then_with(|| cairn_core::sort::natural_cmp(&a.name, &b.name))
         }),
     }
     if !ascending {
