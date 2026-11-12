@@ -217,6 +217,7 @@ fn display_entries(
     kept: &[usize],
     tail: &[usize],
     aggregate_floor: u64,
+    collapse: bool,
 ) -> Vec<DisplayEntry> {
     let mut entries = Vec::with_capacity(kept.len() + 1);
     entries.extend(kept.iter().map(|&index| DisplayEntry::Node {
@@ -238,7 +239,23 @@ fn display_entries(
     } else {
         parent.trim_end_matches(['\\', '/'])
     };
-    for group in tail_category_groups(nodes, tail) {
+    let groups = if collapse {
+        // A body too small for one cell per category keeps one summary of the
+        // whole tail; its tone follows the bytes it holds. Members are never
+        // deleted while the body can still carry a readable cell.
+        vec![TailGroup {
+            category: tail_category_groups(nodes, tail)
+                .into_iter()
+                .max_by(|a, b| a.size.cmp(&b.size))
+                .map(|group| group.category)
+                .unwrap_or(TreemapCategory::Other),
+            size: tail.iter().map(|&index| nodes[index].size).sum(),
+            members: tail.to_vec(),
+        }]
+    } else {
+        tail_category_groups(nodes, tail)
+    };
+    for group in groups {
         entries.push(DisplayEntry::Aggregate {
             path: aggregate_path(parent, group.category),
             members: group.members,
@@ -326,13 +343,14 @@ fn plan_with_tail(
     }
 
     let mut aggregate_floor: u64 = 0;
-    let assemble = |kept: &[usize], tail: &[usize], aggregate_floor: u64| {
+    let mut collapse = false;
+    let assemble = |kept: &[usize], tail: &[usize], aggregate_floor: u64, collapse: bool| {
         DisplayPlan::squarified(
-            display_entries(nodes, parent, kept, tail, aggregate_floor),
+            display_entries(nodes, parent, kept, tail, aggregate_floor, collapse),
             bounds,
         )
     };
-    let mut plan = assemble(&kept, &tail, aggregate_floor);
+    let mut plan = assemble(&kept, &tail, aggregate_floor, collapse);
     for _ in 0..64 {
         let (slivers, dropped) = plan.offenders();
         if slivers.is_empty() && dropped.is_empty() {
@@ -347,7 +365,7 @@ fn plan_with_tail(
                 plan = DisplayPlan::default();
                 break;
             }
-            plan = assemble(&kept, &tail, aggregate_floor);
+            plan = assemble(&kept, &tail, aggregate_floor, collapse);
             continue;
         }
         if !tail.is_empty() {
@@ -358,14 +376,19 @@ fn plan_with_tail(
                     .saturating_mul(2)
                     .max((total_size / 200).max(1))
                     .min(total_size / 2);
+            } else if !collapse {
+                // Per-category blocks cannot share a body this small: keep one
+                // summary of the whole tail instead of deleting its members.
+                collapse = true;
             } else {
+                // Only a body that cannot carry any readable cell drops them.
                 tail.retain(|index| !dropped.contains(index));
             }
             if kept.is_empty() && tail.is_empty() {
                 plan = DisplayPlan::default();
                 break;
             }
-            plan = assemble(&kept, &tail, aggregate_floor);
+            plan = assemble(&kept, &tail, aggregate_floor, collapse);
             continue;
         }
         break;
@@ -381,7 +404,7 @@ fn plan_with_tail(
         plan = if kept.is_empty() && tail.is_empty() {
             DisplayPlan::default()
         } else {
-            assemble(&kept, &tail, aggregate_floor)
+            assemble(&kept, &tail, aggregate_floor, collapse)
         };
     }
 
@@ -1186,6 +1209,67 @@ mod tests {
         );
     }
 
+    /// A body too small for one cell per category keeps one summary of the
+    /// whole tail: members are not deleted while the body can carry a cell.
+    #[test]
+    fn a_tiny_body_keeps_its_tail_reachable() {
+        let mut nodes = Vec::new();
+        let mut largest = TreemapTreeNode::new_file(1, "largest.bin".to_string(), 900_000, 0);
+        largest.size = 900_000;
+        nodes.push(largest);
+        for index in 0..5u64 {
+            let name = if index % 2 == 0 {
+                format!("doc{index}.txt")
+            } else {
+                format!("bin{index}.bin")
+            };
+            nodes.push(TreemapTreeNode::new_file(index + 2, name, 244_000, 0));
+        }
+        let total: u64 = nodes.iter().map(|node| node.size).sum();
+        let options = NestedTreemapOptions::from_detail_level(5);
+
+        let layout = layout_nested_treemap(
+            &nodes,
+            r"C:\Tiny",
+            TreemapRect::new(0.0, 0.0, 90.0, 50.0),
+            &options,
+            0,
+        );
+        for node in &layout {
+            assert!(
+                tile_fits(node.rect),
+                "{:?} painted a {:.1}x{:.1} cell",
+                node.item.name,
+                node.rect.width,
+                node.rect.height
+            );
+        }
+        let mut shown: Vec<&str> = Vec::new();
+        for node in &layout {
+            if node.aggregate_count > 0 {
+                shown.extend(
+                    node.aggregate_member_indices
+                        .iter()
+                        .map(|&index| nodes[index as usize].name.as_str()),
+                );
+            } else {
+                shown.push(node.item.name.as_str());
+            }
+        }
+        for node in &nodes {
+            assert!(
+                shown.contains(&node.name.as_str()),
+                "{} vanished",
+                node.name
+            );
+        }
+        assert_eq!(
+            layout.iter().map(|node| node.item.size).sum::<u64>(),
+            total,
+            "the body keeps every byte"
+        );
+    }
+
     /// The live C:\Workspace shape: a workspace that dwarfs its siblings must
     /// still leave every sibling reachable as a tile or a folded member.
     #[test]
@@ -1422,13 +1506,13 @@ mod tests {
             TreemapTreeNode::new_file(1, "a.txt".to_string(), 10, 0),
             TreemapTreeNode::new_file(2, "b.txt".to_string(), 10, 0),
         ];
-        let entries_forward_drive = display_entries(&nodes, "C:/", &[0], &[1], 0);
+        let entries_forward_drive = display_entries(&nodes, "C:/", &[0], &[1], 0, false);
         let DisplayEntry::Aggregate { path, .. } = &entries_forward_drive[1] else {
             panic!("expected aggregate entry");
         };
         assert_eq!(path, "C:\\::<tail:documents>");
 
-        let entries_forward_dir = display_entries(&nodes, "C:/Users/Alice/", &[0], &[1], 0);
+        let entries_forward_dir = display_entries(&nodes, "C:/Users/Alice/", &[0], &[1], 0, false);
         let DisplayEntry::Aggregate { path, .. } = &entries_forward_dir[1] else {
             panic!("expected aggregate entry");
         };

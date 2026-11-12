@@ -335,6 +335,11 @@ impl CairnApp {
     /// Skipped while a query is already in flight; that answer is newer than the request would be.
     /// A hidden table (Treemap or Recycle Bin) is never refreshed in the background.
     pub fn refresh_results(&mut self, cx: &mut Context<Self>) {
+        // A block listing owns the table rows; a status refresh must not
+        // replace them with a filtered first page.
+        if self.block_listing.is_some() {
+            return;
+        }
         if self.query.is_searching
             || self.recycle_bin.is_open()
             || self.drive_view.is_some()
