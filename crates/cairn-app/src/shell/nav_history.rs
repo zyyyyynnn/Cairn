@@ -156,11 +156,27 @@ impl CairnApp {
 
     pub fn go_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // A summary block listing is not a query state: Back rebuilds the
-        // Treemap at the directory that owns the block and restores the entry's
-        // own query text, the same way Back leaves the bin.
-        if self.block_listing.is_some() {
-            let index = self.nav_history_index;
-            self.restore_nav_state(index, window, cx);
+        // Treemap at the directory that owns the block, keeping the entry's own
+        // query text and filter.
+        if let Some(dir) = self
+            .block_listing
+            .as_ref()
+            .map(|listing| listing.directory().to_string())
+        {
+            let state = self.nav_history.get(self.nav_history_index).cloned();
+            let (text, scope, filter) = state
+                .map(|state| (state.text, state.drive, state.filter))
+                .unwrap_or_else(|| (String::new(), None, FilterCategory::All));
+            let drive = dir
+                .chars()
+                .next()
+                .map(|c| c.to_ascii_uppercase())
+                .unwrap_or('C');
+            self.open_drive_at(drive, &dir, window, cx);
+            self.query.search_input.set_text(&text);
+            self.query.scope_drive = scope;
+            self.query.active_filter = filter;
+            cx.notify();
             return;
         }
         if self.recycle_bin.is_open() {
@@ -501,16 +517,21 @@ mod tests {
                     app.update(cx, |this, cx| {
                         this.query.search_input.set_text("before the block");
                         this.open_drive_visualization('C', window, cx);
-                        // The hand-off empties the box for the block filter.
+                        // The hand-off empties the box for the block filter, and
+                        // the block can live below the canvas root.
                         this.query.search_input.set_text("amd64");
                         this.block_listing = Some(crate::shell::block_listing::BlockListing::new(
-                            r"C:\Windows".to_string(),
+                            r"C:\Windows\System32".to_string(),
                             2,
                             Vec::new(),
                         ));
                         this.go_back(window, cx);
                         assert!(this.block_listing.is_none());
                         assert_eq!(this.drive_view, Some('C'));
+                        assert_eq!(
+                            this.treemap_state.as_ref().map(|s| s.current_dir()),
+                            Some(r"C:\Windows\System32")
+                        );
                         assert_eq!(this.query.search_input.text, "before the block");
                     });
 

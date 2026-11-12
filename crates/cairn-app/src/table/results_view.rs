@@ -527,9 +527,13 @@ impl CairnApp {
 
         if self.block_listing.is_some() {
             // The rows are this location's members: an empty table is either a
-            // filter with no match or a block whose members are gone, never an
+            // block whose members are gone or a filter with no match, never an
             // empty index.
-            let (message_key, icon) = if self.query.search_input.text.trim().is_empty() {
+            let block_empty = self
+                .block_listing
+                .as_ref()
+                .is_some_and(|listing| listing.count() == 0);
+            let (message_key, icon) = if block_empty {
                 (
                     "treemap_block_empty_title",
                     Icon::new(AssetIconName::Folder)

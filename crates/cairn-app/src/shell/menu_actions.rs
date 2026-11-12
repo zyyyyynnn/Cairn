@@ -752,7 +752,7 @@ impl CairnApp {
 
     /// Clearing a search needs something the person can see narrowing the view. The Treemap hides
     /// the query band and gives Escape to its selection, so the Edit row would act on hidden state.
-    /// A bin filter and the main query are the two visible cases.
+    /// A bin filter, a block listing filter and the main query are the visible cases.
     fn can_clear_query(&self) -> bool {
         if self.drive_view.is_some() {
             return false;
