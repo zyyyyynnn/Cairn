@@ -515,6 +515,9 @@ impl CairnApp {
                                 } else {
                                     this.results.table.refresh_rows(first_page, total_matches);
                                 }
+                                // A row the reloaded window no longer shows
+                                // cannot keep an inline editor.
+                                this.discard_rename_if_row_unloaded(cx);
                                 crate::shell::perf::mark(&format!(
                                     "query applied id={qid} total={total_matches}"
                                 ));

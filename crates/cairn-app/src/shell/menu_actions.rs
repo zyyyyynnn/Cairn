@@ -940,9 +940,9 @@ impl CairnApp {
     }
 
     pub fn open_selected(&mut self, _: &OpenSelected, window: &mut Window, cx: &mut Context<Self>) {
-        // Enter belongs to the visible rename editor: the focused input commits
-        // through its own event and the key bubbles here; an editor left without
-        // focus after a blur commits here. Neither opens the row underneath.
+        // The Open command is a read action: a focused rename editor submits
+        // through its own press event (this action returns), and an editor left
+        // without focus is dismissed instead of being written by Open.
         if self.rename.draft.is_some() {
             if self
                 .rename
@@ -953,8 +953,7 @@ impl CairnApp {
             {
                 return;
             }
-            self.commit_rename(window, cx);
-            return;
+            self.discard_rename(cx);
         }
         // Inside the Recycle Bin view Enter opens the deleted item straight
         // from the bin payload, exactly like opening it in Explorer.

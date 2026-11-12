@@ -81,6 +81,23 @@ impl CairnApp {
         }
     }
 
+    /// Drops the draft when a reloaded window no longer contains its row; the
+    /// editor cannot stay open on a row the table no longer shows.
+    pub(crate) fn discard_rename_if_row_unloaded(&mut self, cx: &mut Context<Self>) {
+        let Some(draft_path) = self.rename.draft.as_ref().map(|draft| draft.path.clone()) else {
+            return;
+        };
+        let listed = self
+            .results
+            .table
+            .loaded_range()
+            .filter_map(|ix| self.results.table.row(ix))
+            .any(|row| join_row_path(&row.path, &row.name) == draft_path);
+        if !listed {
+            self.discard_rename(cx);
+        }
+    }
+
     /// Keeps the draft's text in step with the input and retires the previous rejection as soon as
     /// the person edits.
     pub(crate) fn rename_text_changed(&mut self, cx: &mut Context<Self>) {
@@ -239,7 +256,7 @@ fn shell_failure_key(reason: &str) -> &'static str {
 mod tests {
     use super::shell_failure_key;
     use crate::app::CairnApp;
-    use crate::shell::commands::{EscapeQuery, RenameSelected};
+    use crate::shell::commands::{EscapeQuery, OpenSelected, RenameSelected};
     use core::prelude::rust_2021::test;
     use gpui_kit::gpui::AppContext as _;
 
@@ -329,6 +346,16 @@ mod tests {
                             crate::app::layout::row_height(window),
                             cx,
                         );
+                        assert!(this.rename.draft.is_none());
+
+                        // Open is a read command: an editor left without focus
+                        // is dismissed, never submitted by it. The row list is
+                        // emptied so Open has no real file to launch.
+                        this.results.table.select_row(0, false);
+                        this.rename_selected(&RenameSelected, window, cx);
+                        this.results.table.set_rows(Vec::new(), 0);
+                        this.query.search_focus.focus(window, cx);
+                        this.open_selected(&OpenSelected, window, cx);
                         assert!(this.rename.draft.is_none());
                     });
 
