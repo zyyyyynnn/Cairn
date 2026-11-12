@@ -20,7 +20,8 @@ env:
   CARGO_INCREMENTAL: "0"
 
 # Rust caches are keyed by lockfiles and the toolchain, so workflow-only edits
-# reuse the compiled release and debug artifacts.
+# reuse the compiled release and debug artifacts. Only main pushes write caches;
+# pull-request runs restore them and never pay the save cost.
 
 jobs:
   changes:
@@ -68,8 +69,7 @@ jobs:
           shared-key: windows-debug
           add-job-id-key: false
           cache-bin: false
-          cache-workspace-crates: true
-          save-if: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install NASM
         if: needs.changes.outputs.docs_only != 'true'
         shell: pwsh
@@ -149,8 +149,7 @@ jobs:
           shared-key: windows-debug
           add-job-id-key: false
           cache-bin: false
-          cache-workspace-crates: true
-          save-if: true
+          save-if: false
       - name: Install NASM
         if: matrix.name == 'Desktop'
         shell: pwsh
@@ -180,8 +179,7 @@ jobs:
           shared-key: windows-debug
           add-job-id-key: false
           cache-bin: false
-          cache-workspace-crates: true
-          save-if: true
+          save-if: false
       - name: Build the content worker
         run: cargo build -p cairn-worker
       - name: Content backfill end-to-end test
@@ -204,8 +202,7 @@ jobs:
           shared-key: windows-debug
           add-job-id-key: false
           cache-bin: false
-          cache-workspace-crates: true
-          save-if: true
+          save-if: false
       - name: Run tests
         run: cargo test -p cairn-cli -p cairn-worker -p cairn-setup -p xtask
       - name: Locate installer test binary
