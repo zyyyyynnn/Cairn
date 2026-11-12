@@ -952,6 +952,9 @@ impl CairnApp {
                             layout::row_height(window),
                             cx,
                         );
+                        // A press on a row makes the table the keyboard surface, so F2 and the
+                        // navigation keys act on the row that was just chosen.
+                        this.results.results_focus.focus(window, cx);
                         // The rows band clears the selection on empty-space presses; a press on a
                         // row selects it and must not bubble back out as an outside click.
                         cx.stop_propagation();
@@ -1084,10 +1087,11 @@ impl CairnApp {
                     .appearance(false)
                     .bordered(false)
                     .focus_bordered(false)
-                    // The editor occupies the name lane at the row's own body step, so the text
-                    // does not jump when the row swaps its label for the input.
-                    .text_size(rems(1.0))
-                    .line_height(phi())
+                    // The result row renders `text_sm`, so the editor uses the same 0.875rem
+                    // step and line box; a body-size input would sit visibly larger than the
+                    // name it replaces.
+                    .text_size(rems(0.875))
+                    .line_height(rems(1.25))
                     .p(rems(0.0))
                     .h_full()
                     .flex_1()
