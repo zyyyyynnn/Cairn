@@ -176,6 +176,12 @@ impl QueryRejection {
     }
 }
 
+/// Whether a query answer still belongs to the current query. Cancelling moves the id forward,
+/// so the answer the service was finishing when it stopped is dropped like any superseded answer.
+fn query_response_is_current(answer_id: u64, current_id: u64) -> bool {
+    answer_id == current_id
+}
+
 /// Whether a page response still belongs to the query and session that requested it.
 ///
 /// A new query can arrive while a page is in flight. Rows from the superseded session describe a
@@ -334,6 +340,33 @@ impl CairnApp {
     /// interval, which is how a progressive index turns into a loading animation that never ends.
     /// Skipped while a query is already in flight; that answer is newer than the request would be.
     /// A hidden table (Treemap or Recycle Bin) is never refreshed in the background.
+    /// Cancels the in-flight query without changing the text or the rows already shown. The local
+    /// id moves first, so the answer the service is about to finish is dropped by the same guard
+    /// that ignores a superseded query.
+    pub fn cancel_in_flight_query(&mut self, cx: &mut Context<Self>) {
+        if !self.query.is_searching {
+            return;
+        }
+        let cancelled_id = self.query.query_id;
+        self.query.query_id += 1;
+        self.query.is_searching = false;
+        self.query.is_fetching_more = false;
+        self.query.cancelled = true;
+        // A stopped first page reveals the band through the same entrance an empty answer uses.
+        self.note_table_empty(cx);
+        get_tokio_runtime().spawn(async move {
+            match cairn_client::client::CairnClient::connect().await {
+                Ok(mut client) => {
+                    if let Err(err) = client.cancel(cancelled_id).await {
+                        tracing::warn!("cancel request for query {cancelled_id} failed: {err}");
+                    }
+                }
+                Err(err) => tracing::warn!("cancel connection failed: {err}"),
+            }
+        });
+        cx.notify();
+    }
+
     pub fn refresh_results(&mut self, cx: &mut Context<Self>) {
         // A block listing owns the table rows; a status refresh must not
         // replace them with a filtered first page.
@@ -370,6 +403,7 @@ impl CairnApp {
         self.query.query_id += 1;
         let qid = self.query.query_id;
         self.query.rejection = None;
+        self.query.cancelled = false;
 
         if clear_rows {
             // A new result set starts at its first row. The view republishes the scroll handle's
@@ -441,7 +475,7 @@ impl CairnApp {
 
             let res = rx.await;
             this.update(cx, |this: &mut CairnApp, cx| {
-                if this.query.query_id != qid {
+                if !query_response_is_current(qid, this.query.query_id) {
                     return;
                 }
                 let res = match res {
@@ -471,6 +505,7 @@ impl CairnApp {
                                 ..
                             } => {
                                 this.query.rejection = None;
+                                this.query.cancelled = false;
                                 this.query.active_session_id = Some(session_id);
                                 if clear_rows {
                                     this.results.table.set_rows(first_page, total_matches);
@@ -495,6 +530,7 @@ impl CairnApp {
                             }
                             cairn_protocol::message::ResponsePayload::Error { code, .. } => {
                                 this.query.rejection = QueryRejection::from_error_code(code);
+                                this.query.cancelled = false;
                                 if this.query.rejection.is_some() {
                                     // The refusal band is content too; it enters through the
                                     // same reveal as an empty answer.
@@ -714,6 +750,15 @@ mod tests {
         );
         assert!(!page_response_is_current(7, 8, 11, Some(11)));
         assert!(!page_response_is_current(7, 7, 11, None));
+    }
+
+    #[test]
+    fn a_cancelled_query_drops_its_late_answer() {
+        assert!(query_response_is_current(7, 7));
+        assert!(
+            !query_response_is_current(7, 8),
+            "the cancel moved the id forward"
+        );
     }
 
     #[test]

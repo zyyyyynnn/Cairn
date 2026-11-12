@@ -221,6 +221,7 @@ bin_error_items = { $items }: { $reason }
 bin_error_more_items = , and { $count } more
 bin_list_separator = ", "
 empty_no_matches = No files or folders match; try another keyword or path
+search_cancelled_title = Search cancelled
 empty_content_loading_title = Reading the content search status
 empty_content_disabled_title = Content search is off; turn it on to search file contents
 empty_content_backfilling_title = Building the content index; content search starts when it finishes

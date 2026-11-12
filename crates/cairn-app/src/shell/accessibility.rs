@@ -498,6 +498,7 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         messages: &[
             "empty_index_empty_title",
             "empty_no_matches",
+            "search_cancelled_title",
             "empty_content_scope_line",
             "empty_content_loading_title",
             "empty_content_unreadable_title",

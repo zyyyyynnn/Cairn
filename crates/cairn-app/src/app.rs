@@ -276,6 +276,9 @@ pub struct QueryDomain {
     /// The service's refusal of the current query, if it answered with one. Cleared when a new
     /// query starts and when a result set arrives, so the band never outlives its query.
     pub rejection: Option<crate::search::query_orchestration::QueryRejection>,
+    /// The current query stopped before the service answered. The rows already shown stay; the
+    /// empty band states the stop instead of claiming a no-match.
+    pub cancelled: bool,
     pub is_fetching_more: bool,
     pub is_searching: bool,
     /// Byte offset where mouse text drag selection started, if a drag is in progress.
@@ -485,6 +488,7 @@ impl CairnApp {
                 query_id: 0,
                 active_session_id: None,
                 rejection: None,
+                cancelled: false,
                 is_fetching_more: false,
                 is_searching: false,
                 text_selection_anchor: None,

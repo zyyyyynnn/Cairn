@@ -572,6 +572,21 @@ impl CairnApp {
             );
         }
 
+        // A cancelled search is not a no-match: it stopped before the service answered.
+        if self.query.cancelled {
+            let message = self.i18n.get_text("search_cancelled_title");
+            return render_state_band(
+                tokens,
+                control,
+                message,
+                Icon::new(AssetIconName::Search)
+                    .size_8()
+                    .text_color(tokens.muted_foreground)
+                    .into_any_element(),
+                None,
+            );
+        }
+
         let has_query = self.has_query();
         let notice = if self.has_content_query() {
             content_query_notice(&self.index_menu_state())

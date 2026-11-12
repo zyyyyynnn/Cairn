@@ -213,6 +213,7 @@ bin_error_items = { $items }：{ $reason }
 bin_error_more_items = ，还有 { $count } 个项目
 bin_list_separator = 、
 empty_no_matches = 没有匹配的文件或文件夹，尝试其他关键词或路径
+search_cancelled_title = 搜索已取消
 empty_content_loading_title = 正在读取内容搜索状态
 empty_content_disabled_title = 内容搜索未开启，开启后可搜索文件正文
 empty_content_backfilling_title = 正在建立内容索引；完成后才能搜索内容

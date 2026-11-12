@@ -780,6 +780,22 @@ mod tests {
     }
 
     #[test]
+    fn a_cancel_request_cancels_the_matching_in_flight_query() {
+        let harness = Harness::new(ServiceConfig::default());
+        let token = harness.sessions.begin_query(7, &CancellationToken::new());
+        assert!(!token.is_cancelled());
+
+        assert!(matches!(
+            harness.handle(
+                ClientRequest::Cancel { query_id: 7 },
+                CallerAuthorization::StandardUser
+            ),
+            ResponsePayload::CancelAck
+        ));
+        assert!(token.is_cancelled(), "the named query must be cancelled");
+    }
+
+    #[test]
     fn hello_ack_reports_the_callers_privilege_not_a_fixed_value() {
         let harness = Harness::new(ServiceConfig::default());
         let hello = ClientRequest::Hello {

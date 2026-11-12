@@ -391,6 +391,12 @@ impl CairnApp {
         // menu acted on stays selected in the table, which is the only state that outlives it.
         // A scope the sidebar set is part of the query: clearing only the text would leave the
         // window searching a drive or a file type the person just tried to dismiss.
+        // A running search is the innermost state the query itself owns: the first Escape stops
+        // it and keeps the text and rows; the next Escape clears the query.
+        if self.query.is_searching {
+            self.cancel_in_flight_query(cx);
+            return;
+        }
         if self.has_query() {
             self.clear_query_and_scope(window, cx);
             return;
