@@ -1359,10 +1359,41 @@ fn a_content_command_without_a_receiver_reports_an_error() {
     }
 }
 
+/// The workspace-built content worker, injected into the engine's test seam so
+/// the harness location never decides how the service finds its worker.
+fn content_worker_path() -> std::path::PathBuf {
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .and_then(std::path::Path::parent)
+                .expect("workspace root")
+                .join("target")
+        });
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
+    let name = if cfg!(windows) {
+        "CairnWorker.exe"
+    } else {
+        "CairnWorker"
+    };
+    let worker = target.join(profile).join(name);
+    assert!(
+        worker.is_file(),
+        "build the content worker first: {}",
+        worker.display()
+    );
+    worker
+}
+
 /// End-to-end backfill: enables the switch, waits for the controller, and verifies that a file
-/// which existed before enabling becomes searchable. Ignored by default because it needs the
-/// real `CairnWorker` binary beside the test executable; the Service job in
-/// `.github/workflows/ci.yml` builds the worker and runs it explicitly.
+/// which existed before enabling becomes searchable. Ignored by default because it spawns the real
+/// `CairnWorker`; the Service job in `.github/workflows/ci.yml` builds the worker and runs it
+/// explicitly.
 #[test]
 #[ignore = "requires target/debug/CairnWorker.exe"]
 fn a_full_backfill_reaches_ready_and_indexes_existing_files() {
@@ -1420,11 +1451,10 @@ fn a_full_backfill_reaches_ready_and_indexes_existing_files() {
         content_excluded_paths: Vec::new(),
         ..Default::default()
     };
-    let engine = Arc::new(MultiVolumeEngine::with_index_dir_drives_and_config(
-        index.path(),
-        vec![],
-        config,
-    ));
+    let mut engine =
+        MultiVolumeEngine::with_index_dir_drives_and_config(index.path(), vec![], config);
+    engine.set_worker_binary(content_worker_path());
+    let engine = Arc::new(engine);
     engine.add_volume(volume);
     engine.ensure_content_runtime();
 

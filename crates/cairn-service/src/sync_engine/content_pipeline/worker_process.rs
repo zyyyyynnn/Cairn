@@ -75,28 +75,22 @@ impl WorkerProcessPort for SubprocessWorkerPort<'_> {
 }
 
 impl MultiVolumeEngine {
-    fn worker_path() -> Result<PathBuf, String> {
+    fn worker_path(&self) -> Result<PathBuf, String> {
+        if let Some(worker) = &self.worker_binary {
+            return Ok(worker.clone());
+        }
         let exe = std::env::current_exe()
             .map_err(|err| format!("could not locate the service executable: {err}"))?;
         let dir = exe
             .parent()
             .ok_or_else(|| "service executable has no parent directory".to_string())?;
-        // Production ships the worker beside the service only. A test harness may live under
-        // cargo's build-script output tree, so tests also walk the enclosing target directories;
-        // production never consults a parent, where a planted worker could shadow the packaged one.
-        #[cfg(test)]
-        let search_dirs: Vec<PathBuf> = dir
-            .ancestors()
-            .map(|ancestor| ancestor.to_path_buf())
-            .collect();
-        #[cfg(not(test))]
-        let search_dirs = vec![dir.to_path_buf()];
-        for base in search_dirs {
-            for name in ["CairnWorker.exe", "CairnWorker"] {
-                let candidate = base.join(name);
-                if candidate.exists() {
-                    return Ok(candidate);
-                }
+        // Production ships both binaries side by side; that is the only place the
+        // service looks, so a copy in a parent directory can never shadow the
+        // packaged worker.
+        for name in ["CairnWorker.exe", "CairnWorker"] {
+            let candidate = dir.join(name);
+            if candidate.exists() {
+                return Ok(candidate);
             }
         }
         Err(format!(
@@ -146,7 +140,7 @@ impl MultiVolumeEngine {
         deletions: &[(u64, u64)],
         clear: bool,
     ) -> BatchOutcome {
-        let worker = match Self::worker_path() {
+        let worker = match self.worker_path() {
             Ok(path) => path,
             Err(err) => return BatchOutcome::failed(err),
         };

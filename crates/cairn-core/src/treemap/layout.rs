@@ -10,8 +10,9 @@
 //! when its cell can carry the standard label, and every child that cannot is
 //! folded into the directory's one "N items" summary block, which itself takes
 //! its exact byte share and is never inflated. A label-less summary block that
-//! would paint as a remnant strip moves to the directory header instead; a
-//! body that can host no real child keeps the directory as a compact leaf.
+//! would paint as a remnant strip is returned beside the nodes and hosted by
+//! the caller's header; a body that can host no real child keeps the directory
+//! as a compact leaf.
 
 use super::category::TreemapCategory;
 use super::geometry::TreemapRect;
@@ -54,6 +55,32 @@ pub struct TreemapTail {
     pub count: usize,
     pub size: u64,
     pub member_indices: Vec<u32>,
+}
+
+/// One directory layer's painted children and the tail that moved into the
+/// owner's header. The tail is returned separately so no consumer has to
+/// recognise a synthetic cell before it can host the tail.
+#[derive(Clone, Debug, Default)]
+pub struct NestedTreemapLayout {
+    pub nodes: Vec<NestedTreemapLayoutNode>,
+    pub tail: Option<TreemapTail>,
+}
+
+impl std::ops::Deref for NestedTreemapLayout {
+    type Target = [NestedTreemapLayoutNode];
+
+    fn deref(&self) -> &Self::Target {
+        &self.nodes
+    }
+}
+
+impl<'a> IntoIterator for &'a NestedTreemapLayout {
+    type Item = &'a NestedTreemapLayoutNode;
+    type IntoIter = std::slice::Iter<'a, NestedTreemapLayoutNode>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.nodes.iter()
+    }
 }
 
 /// Configuration options for hierarchical nested treemap layout.
@@ -294,9 +321,9 @@ fn dominant_tail_category(nodes: &[TreemapTreeNode], tail: &[usize]) -> TreemapC
 /// Plans a directory with more than one sized child. Areas are strictly
 /// proportional: a child keeps a native tile at its byte area when that cell can
 /// carry the standard label, and folds into the directory's one summary block
-/// when it cannot. A summary block that cannot carry its own label is handed
-/// back to the caller instead of painting a sliver; the caller hosts it in the
-/// directory header.
+/// when it cannot. A summary block that cannot carry its label and would paint
+/// wider than 3:1 is handed back to the caller instead of painting a sliver;
+/// the caller hosts it in the directory header.
 fn plan_with_tail(
     nodes: &[TreemapTreeNode],
     parent: &str,
@@ -438,13 +465,14 @@ fn layout_child(
         rect.width - 2.0 * padding,
         rect.height - header_height - 2.0 * padding,
     );
-    let mut children = if content.width > 12.0 && content.height > 12.0 {
+    let mut laid = if content.width > 12.0 && content.height > 12.0 {
         let child_parent = format!("{path}\\");
         layout_nested_treemap(&node.children, &child_parent, content, options, depth + 1)
     } else {
-        Vec::new()
+        NestedTreemapLayout::default()
     };
-    let tail = take_tail(&mut children);
+    let tail = laid.tail.take();
+    let children = std::mem::take(&mut laid.nodes);
 
     // A body that cannot carry a single real child keeps its directory as a
     // compact leaf: drilling in gives those children the whole canvas, where
@@ -471,20 +499,30 @@ fn layout_child(
 /// body. `depth` is the nesting level of `nodes` below the view root.
 ///
 /// The result is in paint order: larger cells first, and every container
-/// before its children.
+/// before its children. A tail that cannot carry a tile label is returned
+/// beside the nodes instead of taking body area.
 pub fn layout_nested_treemap(
     nodes: &[TreemapTreeNode],
     parent: &str,
     bounds: TreemapRect,
     options: &NestedTreemapOptions,
     depth: usize,
-) -> Vec<NestedTreemapLayoutNode> {
+) -> NestedTreemapLayout {
     if nodes.is_empty() || bounds.width <= 0.0 || bounds.height <= 0.0 {
-        return Vec::new();
+        return NestedTreemapLayout::default();
     }
 
     let total_size: u64 = nodes.iter().map(|node| node.size).sum();
-    let (plan, detached) = if nodes.len() > 1 && total_size > 0 {
+    let (plan, detached) = if nodes.len() > 1 && total_size == 0 {
+        // A layer with no bytes has no proportional shape. Keep its members
+        // behind one "N items" block instead of painting cells that cannot
+        // carry a label; the block is the layer's honest state.
+        let all: Vec<usize> = (0..nodes.len()).collect();
+        (
+            DisplayPlan::squarified(display_entries(nodes, parent, &[], &all), bounds),
+            None,
+        )
+    } else if nodes.len() > 1 {
         plan_with_tail(nodes, parent, bounds, options, depth, total_size)
     } else {
         (
@@ -501,7 +539,7 @@ pub fn layout_nested_treemap(
         )
     };
 
-    let mut laid: Vec<NestedTreemapLayoutNode> = plan
+    let laid: Vec<NestedTreemapLayoutNode> = plan
         .cells
         .iter()
         .map(|cell| match &plan.entries[cell.index] {
@@ -534,49 +572,21 @@ pub fn layout_nested_treemap(
         })
         .collect();
 
-    // A detached tail travels as a zero-cell aggregate so its owner can host it
-    // in the directory header; it never takes area from the body.
-    if let Some(DisplayEntry::Aggregate {
-        path,
-        members,
-        size,
-        category,
-    }) = detached
-    {
-        laid.push(NestedTreemapLayoutNode {
-            aggregate_count: members.len(),
-            aggregate_member_indices: members.iter().map(|&index| index as u32).collect(),
-            ..NestedTreemapLayoutNode::leaf(
-                TreemapItem {
-                    id: 0,
-                    name: String::new(),
-                    size,
-                    is_dir: false,
-                    modified_ts: 0,
-                    category,
-                },
-                path,
-                TreemapRect::new(0.0, 0.0, 0.0, 0.0),
-                depth,
-            )
-        });
-    }
-    laid
-}
-
-/// Removes a detached directory tail from a layout list and returns it. The
-/// tail is a zero-cell aggregate; callers that own a header render it there.
-pub fn take_tail(nodes: &mut Vec<NestedTreemapLayoutNode>) -> Option<TreemapTail> {
-    let index = nodes
-        .iter()
-        .position(|node| node.is_aggregate() && node.rect.area() == 0.0)?;
-    let node = nodes.remove(index);
-    Some(TreemapTail {
-        path: node.path,
-        count: node.aggregate_count,
-        size: node.item.size,
-        member_indices: node.aggregate_member_indices,
-    })
+    let tail = match detached {
+        Some(DisplayEntry::Aggregate {
+            path,
+            members,
+            size,
+            ..
+        }) => Some(TreemapTail {
+            path,
+            count: members.len(),
+            size,
+            member_indices: members.iter().map(|&index| index as u32).collect(),
+        }),
+        _ => None,
+    };
+    NestedTreemapLayout { nodes: laid, tail }
 }
 
 #[cfg(test)]
@@ -923,7 +933,10 @@ mod tests {
                 "root directory {name} must stay a navigation target"
             );
         }
-        let tail = take_tail(&mut layout).expect("the tiny files become the root tail");
+        let tail = layout
+            .tail
+            .take()
+            .expect("the tiny files become the root tail");
         assert_eq!(tail.count, 20);
         assert_eq!(tail.size, 2_000);
         assert!(tail.path.contains("::<tail:"));
@@ -1023,14 +1036,22 @@ mod tests {
     }
 
     #[test]
-    fn zero_size_children_are_not_grouped() {
+    fn a_zero_byte_layer_folds_into_one_item_block() {
         let children = layout_test_children(40, 0, "bin");
         let bounds = TreemapRect::new(0.0, 0.0, 800.0, 600.0);
         let options = NestedTreemapOptions::from_detail_level(3);
 
         let layout = layout_nested_treemap(&children, "C:\\", bounds, &options, 1);
-        assert_eq!(layout.len(), children.len());
-        assert!(layout.iter().all(|node| node.aggregate_count == 0));
+        assert_eq!(
+            layout.len(),
+            1,
+            "a zero-byte layer is one block, not 40 cells"
+        );
+        let block = &layout[0];
+        assert_eq!(block.aggregate_count, children.len());
+        assert_eq!(block.item.size, 0);
+        assert!(block.rect.area() > 0.0, "the layer's block owns the body");
+        assert!(layout.tail.is_none());
     }
 
     /// A dominant child must not delete its folded siblings, and the tail must
@@ -1052,7 +1073,7 @@ mod tests {
         let options = NestedTreemapOptions::from_detail_level(5);
 
         let mut layout = layout_nested_treemap(&children, r"C:\Workspace", bounds, &options, 0);
-        let tail = take_tail(&mut layout).unwrap_or_else(|| {
+        let tail = layout.tail.take().unwrap_or_else(|| {
             panic!(
                 "the folded siblings lost their summary entry: {:?}",
                 layout
@@ -1149,24 +1170,19 @@ mod tests {
         let bounds = TreemapRect::new(0.0, 0.0, 1060.0, 683.0);
 
         let layout = layout_nested_treemap(&nodes, r"C:\Program Files", bounds, &options, 0);
-        let block = layout
-            .iter()
-            .find(|node| node.aggregate_count > 0)
-            .expect("the long tail folds into a block");
-        assert_eq!(block.aggregate_count, 35);
-        assert_eq!(layout.len(), 2);
-        for node in &layout {
-            if node.aggregate_count > 0 {
-                continue;
-            }
-            assert!(
-                tile_can_carry_label(node.rect),
-                "{:?} painted an unlabeled {:.1}x{:.1} cell",
-                node.item.name,
-                node.rect.width,
-                node.rect.height
-            );
-        }
+        let tail = layout
+            .tail
+            .as_ref()
+            .expect("the long tail moves into the header");
+        assert_eq!(tail.count, 35);
+        assert_eq!(layout.len(), 1, "the dominant child keeps the body");
+        let dominant = &layout[0];
+        assert_eq!(dominant.item.name, "WindowsApps");
+        assert!(tile_can_carry_label(dominant.rect));
+        assert_eq!(
+            layout.iter().map(|node| node.item.size).sum::<u64>() + tail.size,
+            nodes.iter().map(|node| node.size).sum::<u64>()
+        );
     }
 
     /// A tail that holds almost every byte folds into one block at its byte
@@ -1319,12 +1335,23 @@ mod tests {
                 visible.push(node.item.name.as_str());
             }
         }
+        if let Some(tail) = &layout.tail {
+            visible.extend(
+                tail.member_indices
+                    .iter()
+                    .map(|&index| nodes[index as usize].name.as_str()),
+            );
+        }
         let mut visible_sorted = visible.clone();
         visible_sorted.sort_unstable();
         let mut expected: Vec<&str> = children.iter().map(|(name, _)| *name).collect();
         expected.sort_unstable();
         assert_eq!(visible_sorted, expected, "every workspace stays reachable");
-        assert_eq!(layout.iter().map(|node| node.item.size).sum::<u64>(), total);
+        assert_eq!(
+            layout.iter().map(|node| node.item.size).sum::<u64>()
+                + layout.tail.as_ref().map_or(0, |tail| tail.size),
+            total
+        );
     }
 
     #[test]
@@ -1564,6 +1591,14 @@ mod tests {
                 shown.push(node.item.name.as_str());
             }
         }
+        if let Some(tail) = &layout.tail {
+            laid_bytes += tail.size;
+            shown.extend(
+                tail.member_indices
+                    .iter()
+                    .map(|&index| nodes[index as usize].name.as_str()),
+            );
+        }
         assert!(
             shown.contains(&"small.txt"),
             "the folded member vanished: {shown:?}"
@@ -1603,6 +1638,14 @@ mod tests {
             } else {
                 shown.push(node.item.name.as_str());
             }
+        }
+        if let Some(tail) = &layout.tail {
+            laid_bytes += tail.size;
+            shown.extend(
+                tail.member_indices
+                    .iter()
+                    .map(|&index| nodes[index as usize].name.as_str()),
+            );
         }
         for node in &nodes {
             assert!(
@@ -1735,7 +1778,7 @@ mod tests {
         let options = NestedTreemapOptions::from_detail_level(5);
         let bounds = TreemapRect::new(0.0, 0.0, 1272.0, 654.0);
         let mut layout = layout_nested_treemap(&nodes, "C:/Users", bounds, &options, 0);
-        let tail = take_tail(&mut layout).expect("the tiny tail leaves the body");
+        let tail = layout.tail.take().expect("the tiny tail leaves the body");
         assert_eq!(tail.count, rest.len());
         assert_eq!(tail.size, tail_size);
         assert!(tail.path.contains("::<tail:"));

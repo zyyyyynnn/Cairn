@@ -128,6 +128,7 @@ recycle_bin_restore_all_confirm_action = 还原所有项目
 delete_failed_title = 无法删除所选项目
 
 service_not_running_title = 后台服务未运行，文件索引和内容搜索暂不可用
+service_timeout_title = 后台服务未响应，请重试
 service_not_installed_title = 后台服务未安装，重新运行安装程序
 service_incompatible_title = 后台服务版本不兼容，请在帮助菜单检查更新并重新安装
 service_unauthorized_title = 当前账户无权使用后台服务，改用授权账户

@@ -24,7 +24,7 @@ pub use category::{FileKind, TreemapCategory};
 pub use geometry::TreemapRect;
 pub use index::DirectorySizeIndex;
 pub use layout::{
-    aggregate_parent_path, layout_nested_treemap, take_tail, NestedTreemapLayoutNode,
+    aggregate_parent_path, layout_nested_treemap, NestedTreemapLayout, NestedTreemapLayoutNode,
     NestedTreemapOptions, TreemapTail,
 };
 pub use path::{

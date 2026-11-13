@@ -384,7 +384,8 @@ impl CairnApp {
         let root_tail = self
             .treemap_state
             .as_ref()
-            .and_then(|state| state.root_tail.clone());
+            .and_then(|state| state.root_tail.as_ref());
+        let tail_control = accessibility::control("treemap-tail");
         let root_tail_chip = root_tail.map(|tail| {
             let mut args = FluentArgs::new();
             args.set("count", tail.count as i64);
@@ -401,12 +402,13 @@ impl CairnApp {
                 .read(cx)
                 .clone();
             let keyboard_navigation = cairn_ui::focus::keyboard_navigation(cx);
-            let chip_tail = tail.clone();
-            let key_tail = tail.clone();
+            let chip_path = tail.path.clone();
+            let key_path = tail.path.clone();
+            let space_path = tail.path.clone();
             let chip_view = view.clone();
             let key_view = view.clone();
-            h_flex()
-                .id(element_id("treemap-root-tail", &tail.path))
+            let space_view = view.clone();
+            accessibility::element_at_key(tail_control, &tail.path)
                 .flex_shrink_0()
                 .items_center()
                 .gap_x(rems(layout::SPACE_8))
@@ -424,9 +426,9 @@ impl CairnApp {
                     this.tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
                 })
                 .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                    let tail = chip_tail.clone();
+                    let path = chip_path.clone();
                     chip_view.update(cx, |this, cx| {
-                        this.open_tail_listing(&tail, window, cx);
+                        this.open_tail_listing(&path, window, cx);
                     });
                     cx.stop_propagation();
                 })
@@ -435,12 +437,21 @@ impl CairnApp {
                           window: &mut Window,
                           cx: &mut App| {
                         cx.stop_propagation();
-                        let tail = key_tail.clone();
+                        let path = key_path.clone();
                         key_view.update(cx, |this, cx| {
-                            this.open_tail_listing(&tail, window, cx);
+                            this.open_tail_listing(&path, window, cx);
                         });
                     },
                 )
+                .on_key_down(move |event: &KeyDownEvent, window, cx| {
+                    if event.keystroke.key.as_str() == "space" {
+                        cx.stop_propagation();
+                        let path = space_path.clone();
+                        space_view.update(cx, |this, cx| {
+                            this.open_tail_listing(&path, window, cx);
+                        });
+                    }
+                })
                 .child(Icon::new(IconName::FileStack).xsmall())
                 .child(div().whitespace_nowrap().child(label))
                 .children(cairn_ui::focus::edge(

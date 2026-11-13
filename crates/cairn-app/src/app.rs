@@ -963,7 +963,9 @@ mod tests {
 
     use super::{join_row_path, CairnApp};
     use crate::search::ResultSetChange;
+    use crate::shell::block_listing::BlockListing;
     use cairn_protocol::message::FileRowData;
+    use cairn_protocol::status::{VolumeState, VolumeStatusSummary};
     use gpui_kit::AppContext;
 
     fn test_row(name: &str) -> FileRowData {
@@ -1086,6 +1088,83 @@ mod tests {
             assert!(!this.table_reveal_pending, "sorting opens no session");
             assert_eq!(this.results.table.total_rows(), 1, "the rows stay");
             assert_eq!(this.table_reveal_fade_epoch, epoch, "nothing fades");
+        });
+    }
+
+    /// A probe is a refresh, not a place change: rows stay, no entrance runs;
+    /// an empty table still gets the first-content entrance.
+    #[test]
+    fn a_probe_refreshes_silently_once_rows_exist() {
+        with_app(|this, cx| {
+            this.results.table.set_rows(vec![test_row("a.txt")], 1);
+            this.table_reveal_pending = false;
+            let epoch = this.table_reveal_fade_epoch;
+
+            this.request_result_set(ResultSetChange::Probe, cx);
+            assert!(
+                !this.table_reveal_pending,
+                "a probe over rows opens no session"
+            );
+            assert_eq!(this.results.table.total_rows(), 1, "the rows stay");
+            assert_eq!(this.table_reveal_fade_epoch, epoch, "nothing fades");
+
+            this.results.table.set_rows(Vec::new(), 0);
+            this.request_result_set(ResultSetChange::Probe, cx);
+            assert!(
+                this.table_reveal_pending,
+                "an empty table gets the replacement entrance"
+            );
+        });
+    }
+
+    /// A block listing owns its rows: a status refresh must filter them in
+    /// place instead of clearing them for an index request.
+    #[test]
+    fn a_refresh_keeps_a_block_listings_rows() {
+        with_app(|this, cx| {
+            let listing = BlockListing::new(r"C:\".to_string(), 1, vec![test_row("member.txt")]);
+            this.block_listing = Some(listing);
+            this.results.table.set_rows(vec![test_row("member.txt")], 1);
+
+            this.request_result_set(ResultSetChange::Replace, cx);
+            assert!(this.block_listing.is_some(), "the listing stays open");
+            assert!(
+                this.results.table.total_rows() >= 1,
+                "the listing's rows survive the refresh"
+            );
+        });
+    }
+
+    /// The index-loading shortcut must supersede an answer still on its way;
+    /// otherwise it installs rows for text the replacement already left.
+    #[test]
+    fn a_replacement_supersedes_the_answer_the_index_guard_leaves_behind() {
+        with_app(|this, cx| {
+            this.results.table.set_rows(Vec::new(), 0);
+            this.request_result_set(ResultSetChange::InPlace, cx);
+            let stale_id = this.query.query_id;
+            assert!(this.query.is_searching, "the first request is in flight");
+
+            this.service
+                .status
+                .update_volumes(vec![VolumeStatusSummary {
+                    drive_letter: 'C',
+                    volume_guid: r"\\?\Volume{test}\".to_string(),
+                    status: VolumeState::CatchingUp(50),
+                    indexed_count: 1,
+                    usn_enabled: true,
+                }]);
+            this.request_result_set(ResultSetChange::Replace, cx);
+
+            assert_ne!(
+                this.query.query_id, stale_id,
+                "the replacement supersedes the in-flight answer"
+            );
+            assert!(!this.query.is_searching, "the stale request is stopped");
+            assert!(
+                this.table_reveal_pending,
+                "the replacement waits for its own first page"
+            );
         });
     }
 

@@ -584,6 +584,18 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         named_by: "path_segments",
         requirement: "DSV-04",
     },
+    // The "remaining N items" entry appears once in the canvas-root path band
+    // and once in each directory header that owns a folded tail; both are
+    // buttons named by the aggregate message and the folded size.
+    KeyControl {
+        key: "treemap-tail",
+        element: "treemap-tail",
+        indexed: true,
+        role: Role::Button,
+        messages: EMPTY,
+        named_by: "treemap_aggregate",
+        requirement: "DSV-04",
+    },
     KeyControl {
         key: "treemap-path",
         element: "treemap-path",
@@ -610,6 +622,15 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         indexed: false,
         role: Role::Alert,
         messages: &["service_not_running_title"],
+        named_by: "",
+        requirement: "SVC-03, SVC-04",
+    },
+    KeyControl {
+        key: "service-issue-timeout",
+        element: "service-issue",
+        indexed: false,
+        role: Role::Alert,
+        messages: &["service_timeout_title"],
         named_by: "",
         requirement: "SVC-03, SVC-04",
     },
@@ -1206,6 +1227,7 @@ mod tests {
                 "service-issue-incompatible",
             ),
             (ServiceIssue::Unauthorized, "service-issue-unauthorized"),
+            (ServiceIssue::Timeout, "service-issue-timeout"),
         ];
         let mut messages = HashSet::new();
         for (_issue, key) in issues {

@@ -169,24 +169,32 @@ impl CairnApp {
     }
 
     /// Opens the member list of a folded tail that moved out of the body into
-    /// its directory header. The tail carries its own members, so no canvas
-    /// lookup is needed.
+    /// its directory header. The tail is resolved from the live layout by its
+    /// path, so a click after a resize or rescan lists the current members
+    /// rather than the set captured at render time.
     pub(crate) fn open_tail_listing(
         &mut self,
-        tail: &cairn_core::treemap::TreemapTail,
+        tail_path: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.discard_rename(cx);
-        let Some(parent) = cairn_core::treemap::aggregate_parent_path(&tail.path) else {
-            return;
+        let (parent, count, rows) = {
+            let Some(state) = self.treemap_state.as_ref() else {
+                return;
+            };
+            let Some(tail) = state.tail_by_path(tail_path) else {
+                return;
+            };
+            let Some(parent) = cairn_core::treemap::aggregate_parent_path(&tail.path) else {
+                return;
+            };
+            let parent = parent.to_string();
+            let rows =
+                block_listing_rows(&parent, &tail.member_indices, state.children_at(&parent));
+            (parent, tail.count, rows)
         };
-        let parent = parent.to_string();
-        let Some(state) = self.treemap_state.as_ref() else {
-            return;
-        };
-        let rows = block_listing_rows(&parent, &tail.member_indices, state.children_at(&parent));
-        self.open_listing(parent, tail.count, rows, window, cx);
+        self.open_listing(parent, count, rows, window, cx);
     }
 
     fn open_listing(

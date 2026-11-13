@@ -297,15 +297,10 @@ impl CairnApp {
         self.service.status.update_volumes(volumes);
         self.start_status_refresh(cx);
         // A connection probe must not replace the location the person is reading;
-        // the bin does not need the index. An empty table shows the first page
-        // with its entrance; a table with rows refreshes in place, silently.
+        // the bin does not need the index. The request owner decides whether the
+        // table is empty enough to need an entrance.
         if !self.recycle_bin.is_open() {
-            let change = if self.results.table.total_rows() == 0 {
-                ResultSetChange::Replace
-            } else {
-                ResultSetChange::Background
-            };
-            self.request_result_set(change, cx);
+            self.request_result_set(ResultSetChange::Probe, cx);
         }
         self.refresh_content_status(cx);
     }

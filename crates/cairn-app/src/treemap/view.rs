@@ -835,16 +835,27 @@ fn render_nested_node(
             let header_size_label = size_str.clone();
             let inner_width = (stable.width - TREEMAP_TEXT_PADDING).max(0.0);
             let size_width = text_width(rcx.window, &header_size_label, FontWeight::NORMAL);
-            // The name is the header's identity; the size yields instead of
-            // squeezing the name below a readable width. The name ellipsizes
-            // at the end rather than disappearing.
+            // The name is the header's identity; the size yields first, then the
+            // tail entry's label, instead of squeezing the name below a
+            // readable width. The name ellipsizes rather than disappearing.
+            let has_tail = node.tail.is_some();
+            let chip_icon_width = 20.0;
             let show_header_size = inner_width
-                >= TREEMAP_ICON_SPACE + TREEMAP_MIN_HEADER_NAME_WIDTH + 2.0 + size_width;
+                >= TREEMAP_ICON_SPACE
+                    + TREEMAP_MIN_HEADER_NAME_WIDTH
+                    + 2.0
+                    + size_width
+                    + if has_tail {
+                        chip_icon_width + TREEMAP_BLOCK_GAP
+                    } else {
+                        0.0
+                    };
             let header_tooltip = SharedString::from(format!("{full_path_drill}\n{size_str}"));
 
             // A tail too small for its own tile lives in the header instead of
             // painting a sliver. It keeps the count, the size and the member
             // list one click away while the body stays label-sized.
+            let tail_control = accessibility::control("treemap-tail");
             let tail_chip = node.tail.as_ref().map(|tail| {
                 let mut args = FluentArgs::new();
                 args.set("count", tail.count as i64);
@@ -862,22 +873,27 @@ fn render_nested_node(
                         } else {
                             0.0
                         }
-                        + 14.0
+                        + chip_icon_width
                         + TREEMAP_BLOCK_GAP
                         + label_width
-                        + 10.0;
+                        + 6.0;
                 let chip_view = header_view.clone();
-                let chip_tail = tail.clone();
-                h_flex()
-                    .id(element_id("treemap-tail-chip", &tail.path))
+                let chip_path = tail.path.clone();
+                let chip_fill = if dimmed {
+                    rcx.palette.dimmed_fill(rcx.palette.body_fill())
+                } else {
+                    rcx.palette.body_fill()
+                };
+                accessibility::element_at_key(tail_control, &tail.path)
                     .flex_shrink_0()
+                    .flex()
                     .items_center()
                     .gap_x(px(TREEMAP_BLOCK_GAP))
                     .pl(px(3.0))
                     .pr(px(if show_label { 5.0 } else { 3.0 }))
                     .h(px(16.0))
                     .rounded(px(TREEMAP_RADIUS))
-                    .bg(rcx.palette.body_fill())
+                    .bg(chip_fill)
                     .text_color(rcx.palette.ink_secondary())
                     .cursor_pointer()
                     .aria_label(SharedString::from(format!("{label} {tail_size}")))
@@ -887,9 +903,9 @@ fn render_nested_node(
                         })
                     })
                     .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                        let tail = chip_tail.clone();
+                        let path = chip_path.clone();
                         chip_view.update(cx, |this, cx| {
-                            this.open_tail_listing(&tail, window, cx);
+                            this.open_tail_listing(&path, window, cx);
                         });
                         cx.stop_propagation();
                     })

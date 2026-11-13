@@ -10,8 +10,7 @@ use crate::treemap::store::{TreemapLru, MAX_CACHED_DIR_TREES, MAX_SCANNED_ITEM_T
 use crate::treemap::zoom::TreemapZoom;
 use cairn_core::treemap::{
     is_drive_root, layout_nested_treemap, path_is_within, relative_segments, same_directory,
-    take_tail, NestedTreemapLayoutNode, NestedTreemapOptions, TreemapRect, TreemapTail,
-    TreemapTreeNode,
+    NestedTreemapLayoutNode, NestedTreemapOptions, TreemapRect, TreemapTail, TreemapTreeNode,
 };
 use cairn_protocol::message::{
     TreeEntryData, ERROR_CODE_TREE_NOT_DIRECTORY, ERROR_CODE_TREE_NOT_INDEXED,
@@ -369,11 +368,20 @@ impl TreemapViewState {
         // from the directory the view is rooted at.
         let parent = self.navigation.current_dir().to_string();
         if let Some(ref tree) = self.root_tree {
-            self.layout_nodes = layout_nested_treemap(&tree.children, &parent, bounds, &options, 0);
-            self.root_tail = take_tail(&mut self.layout_nodes);
+            let laid = layout_nested_treemap(&tree.children, &parent, bounds, &options, 0);
+            self.layout_nodes = laid.nodes;
+            self.root_tail = laid.tail;
         } else {
             self.layout_nodes.clear();
             self.root_tail = None;
+        }
+        // A resize or detail change can fold the selected block into a tail or
+        // remove it; the canvas must not stay dimmed around a node it can no
+        // longer resolve.
+        if let Some(ref selected) = self.selected_path {
+            if self.layout_node(selected).is_none() && self.tail_by_path(selected).is_none() {
+                self.selected_path = None;
+            }
         }
         // A recompute starts from the layout's own width. The render pass then
         // adopts the projection that fits the current sidebar-driven canvas.
@@ -438,6 +446,23 @@ impl TreemapViewState {
     /// The laid-out node with this path, for the summary-block hand-off.
     pub(crate) fn layout_node(&self, path: &str) -> Option<&NestedTreemapLayoutNode> {
         find_node_by_path(&self.layout_nodes, path)
+    }
+
+    /// The folded tail with this path, whether it belongs to the canvas root or
+    /// to a nested directory header.
+    pub(crate) fn tail_by_path(&self, path: &str) -> Option<&TreemapTail> {
+        fn search<'a>(nodes: &'a [NestedTreemapLayoutNode], path: &str) -> Option<&'a TreemapTail> {
+            nodes.iter().find_map(|node| {
+                node.tail
+                    .as_ref()
+                    .filter(|tail| tail.path == path)
+                    .or_else(|| search(&node.children, path))
+            })
+        }
+        self.root_tail
+            .as_ref()
+            .filter(|tail| tail.path == path)
+            .or_else(|| search(&self.layout_nodes, path))
     }
 
     /// The children of `parent_path` in the tree the canvas is showing.
@@ -1312,6 +1337,11 @@ mod tests {
             .expect("the flat tail moves to the path band");
         assert_eq!(tail.count, 3);
         assert_eq!(tail.size, 3_000);
+        assert_eq!(
+            state.tail_by_path(&tail.path).map(|live| live.count),
+            Some(3),
+            "the live layout resolves the tail entry by its path"
+        );
         assert!(
             state.layout_nodes.iter().all(|node| !node.is_aggregate()),
             "the body carries no summary strip"
@@ -1326,5 +1356,22 @@ mod tests {
         );
         assert_eq!(rows.len(), 3);
         assert!(rows.iter().all(|row| row.size == 1_000));
+    }
+
+    /// A relayout can fold or remove the selected block; the canvas must not
+    /// keep a selection it can no longer resolve.
+    #[test]
+    fn a_relayout_clears_a_selection_that_no_longer_exists() {
+        let mut state = TreemapViewState::new_headless('C');
+        let mut root = TreemapTreeNode::new_dir(1, "C:".into(), 0);
+        root.children
+            .push(TreemapTreeNode::new_file(2, "a.txt".into(), 10, 0));
+        apply_tree(&mut state, root);
+
+        state.selected_path = Some(r"C:\ghost.txt".into());
+        state.last_bounds = (640.0, 480.0);
+        state.recompute_layout();
+
+        assert_eq!(state.selected_path, None);
     }
 }

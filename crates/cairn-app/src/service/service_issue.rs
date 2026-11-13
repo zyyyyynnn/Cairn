@@ -24,6 +24,8 @@ pub enum ServiceIssue {
     ProtocolIncompatible,
     /// The service refused this Windows account.
     Unauthorized,
+    /// The service is reachable but did not answer within the client budget.
+    Timeout,
 }
 
 impl ServiceIssue {
@@ -34,6 +36,7 @@ impl ServiceIssue {
         ServiceIssue::NotInstalled,
         ServiceIssue::ProtocolIncompatible,
         ServiceIssue::Unauthorized,
+        ServiceIssue::Timeout,
     ];
 
     pub fn from_client_error(error: &cairn_client::client::ClientError) -> Self {
@@ -41,6 +44,8 @@ impl ServiceIssue {
             ServiceIssue::ProtocolIncompatible
         } else if error.is_unauthorized() {
             ServiceIssue::Unauthorized
+        } else if matches!(error, cairn_client::client::ClientError::Timeout) {
+            ServiceIssue::Timeout
         } else {
             ServiceIssue::NotRunning
         }
@@ -54,6 +59,7 @@ impl ServiceIssue {
             ServiceIssue::NotInstalled => "service-issue-not-installed",
             ServiceIssue::ProtocolIncompatible => "service-issue-incompatible",
             ServiceIssue::Unauthorized => "service-issue-unauthorized",
+            ServiceIssue::Timeout => "service-issue-timeout",
         }
     }
 
@@ -65,6 +71,7 @@ impl ServiceIssue {
             ServiceIssue::NotInstalled => "service_not_installed_title",
             ServiceIssue::ProtocolIncompatible => "service_incompatible_title",
             ServiceIssue::Unauthorized => "service_unauthorized_title",
+            ServiceIssue::Timeout => "service_timeout_title",
         }
     }
 }
@@ -89,7 +96,7 @@ pub enum ServiceBandAction {
 pub const fn band_action(issue: ServiceIssue, service_installed: bool) -> ServiceBandAction {
     match issue {
         ServiceIssue::NotRunning if service_installed => ServiceBandAction::Start,
-        ServiceIssue::NotRunning => ServiceBandAction::Retry,
+        ServiceIssue::NotRunning | ServiceIssue::Timeout => ServiceBandAction::Retry,
         ServiceIssue::NotInstalled
         | ServiceIssue::ProtocolIncompatible
         | ServiceIssue::Unauthorized => ServiceBandAction::None,
@@ -112,11 +119,26 @@ mod tests {
     }
 
     #[test]
+    fn a_timeout_is_its_own_retryable_condition() {
+        assert_eq!(
+            ServiceIssue::from_client_error(&cairn_client::client::ClientError::Timeout),
+            ServiceIssue::Timeout
+        );
+        assert_eq!(
+            ServiceIssue::from_client_error(&cairn_client::client::ClientError::ConnectionClosed),
+            ServiceIssue::NotRunning
+        );
+        let entry = crate::shell::accessibility::control(ServiceIssue::Timeout.accessibility_key());
+        assert_eq!(entry.messages, ["service_timeout_title"].as_slice());
+    }
+
+    #[test]
     fn a_missing_or_incompatible_service_is_not_started_silently() {
         for issue in [
             ServiceIssue::NotInstalled,
             ServiceIssue::ProtocolIncompatible,
             ServiceIssue::Unauthorized,
+            ServiceIssue::Timeout,
         ] {
             assert!(!should_try_silent_start(issue, false), "{issue:?}");
         }
@@ -131,6 +153,14 @@ mod tests {
         );
         assert_eq!(
             band_action(ServiceIssue::NotRunning, false),
+            ServiceBandAction::Retry
+        );
+        assert_eq!(
+            band_action(ServiceIssue::Timeout, true),
+            ServiceBandAction::Retry
+        );
+        assert_eq!(
+            band_action(ServiceIssue::Timeout, false),
             ServiceBandAction::Retry
         );
         for issue in [

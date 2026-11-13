@@ -25,6 +25,10 @@ pub(crate) enum ResultSetChange {
     /// A sort or search-flag change. Rows stay visible, the new order starts
     /// at the top, and nothing fades.
     InPlace,
+    /// A connection probe of the current location. The owner decides from the
+    /// table state: an empty table gets the replacement entrance, a table with
+    /// rows refreshes silently.
+    Probe,
 }
 
 #[derive(Default)]
@@ -238,10 +242,6 @@ fn rows_page_ready(
 
 /// A slow query is not a missing service. Only failures that close the channel or prevent the
 /// connection from being established should move the window into its offline recovery band.
-fn query_error_marks_service_down(error: &cairn_client::client::ClientError) -> bool {
-    !matches!(error, cairn_client::client::ClientError::Timeout)
-}
-
 impl CairnApp {
     /// `true` when there is something the service can answer: typed text, or a drive the sidebar
     /// scoped. A bare flag with no query is not a search, and running one would show an empty table
@@ -390,18 +390,42 @@ impl CairnApp {
     pub(crate) fn request_result_set(&mut self, change: ResultSetChange, cx: &mut Context<Self>) {
         // An explicit result-set request leaves the row the rename editor was opened on.
         self.discard_rename(cx);
-        if change == ResultSetChange::Replace {
+        // A probe is about the connection, not the place: only an empty table
+        // needs an entrance, every table with rows refreshes silently.
+        let change = match change {
+            ResultSetChange::Probe if self.results.table.total_rows() == 0 => {
+                ResultSetChange::Replace
+            }
+            ResultSetChange::Probe => ResultSetChange::Background,
+            other => other,
+        };
+        // A block listing and the recycle bin own their rows; an index request
+        // must neither clear them nor take the index-loading shortcut.
+        let local_surface = self.recycle_bin.is_open() || self.block_listing.is_some();
+        if change == ResultSetChange::Replace && !local_surface {
             self.begin_table_replacement();
         }
         // The all-files view can only be final once the index has settled. Querying a growing
         // index would publish a partial total that climbs in steps as batches land, and each query
         // is a full index scan; the status poll asks for the one result set of the completed index
         // instead. A query the user typed still runs immediately against what is indexed so far.
-        if change != ResultSetChange::Background
+        if !local_surface
+            && change != ResultSetChange::Background
             && !self.has_query()
             && self.results.table.total_rows() == 0
             && self.service.status.is_any_loading()
         {
+            // The index poll supersedes any answer still on its way for the
+            // text that was just replaced; otherwise that answer installs rows
+            // for a query the empty box no longer shows.
+            if self.query.is_searching {
+                let mut transport = QueuedTransport::default();
+                self.query.coordinator.cancel_in_flight(&mut transport);
+                self.query.query_id = self.query.coordinator.current_query_id();
+                self.query.is_searching = false;
+                self.query.is_fetching_more = false;
+                self.spawn_queued_cancels(transport.cancels);
+            }
             // An empty query is never refused, so a refusal of the cleared text must not
             // outlive it and block the all-files view once the index settles.
             self.query.rejection = None;
@@ -636,10 +660,11 @@ impl CairnApp {
                         this.query.coordinator.abort_waiting_on_error(qid);
                         this.query.is_searching = this.query.coordinator.is_searching();
                         tracing::warn!("Cairn IPC query error: {}", e);
-                        if query_error_marks_service_down(&e) {
-                            this.service.is_service_connected = false;
-                            this.service.service_issue = Some(ServiceIssue::from_client_error(&e));
-                        }
+                        // A refused, timed-out or dropped answer is a service state the
+                        // result band must name; rows cleared for a replacement must not
+                        // fall through to the empty band.
+                        this.service.is_service_connected = false;
+                        this.service.service_issue = Some(ServiceIssue::from_client_error(&e));
                     }
                 }
                 cx.notify();
@@ -697,10 +722,8 @@ impl CairnApp {
                     },
                     Ok(Err(e)) => {
                         tracing::warn!("Cairn page fetch error: {e}");
-                        if query_error_marks_service_down(&e) {
-                            this.service.is_service_connected = false;
-                            this.service.service_issue = Some(ServiceIssue::from_client_error(&e));
-                        }
+                        this.service.is_service_connected = false;
+                        this.service.service_issue = Some(ServiceIssue::from_client_error(&e));
                     }
                     Err(e) => {
                         tracing::warn!("Cairn page fetch task lost: {e}");
@@ -858,16 +881,6 @@ mod tests {
         assert!(!rows_page_ready(true, true, false, false, true));
         assert!(!rows_page_ready(true, false, false, true, true));
         assert!(!rows_page_ready(true, false, false, false, false));
-    }
-
-    #[test]
-    fn a_slow_query_does_not_report_the_service_as_down() {
-        assert!(!query_error_marks_service_down(
-            &cairn_client::client::ClientError::Timeout
-        ));
-        assert!(query_error_marks_service_down(
-            &cairn_client::client::ClientError::ConnectionClosed
-        ));
     }
 
     #[test]
