@@ -81,12 +81,16 @@ impl MultiVolumeEngine {
         let dir = exe
             .parent()
             .ok_or_else(|| "service executable has no parent directory".to_string())?;
-        // Production keeps both binaries side by side. Unit tests run from target/debug/deps, so
-        // the parent directory is the cargo target directory that holds CairnWorker.exe.
-        let mut search_dirs = vec![dir.to_path_buf()];
-        if let Some(parent) = dir.parent() {
-            search_dirs.push(parent.to_path_buf());
-        }
+        // Production ships the worker beside the service only. A test harness may live under
+        // cargo's build-script output tree, so tests also walk the enclosing target directories;
+        // production never consults a parent, where a planted worker could shadow the packaged one.
+        #[cfg(test)]
+        let search_dirs: Vec<PathBuf> = dir
+            .ancestors()
+            .map(|ancestor| ancestor.to_path_buf())
+            .collect();
+        #[cfg(not(test))]
+        let search_dirs = vec![dir.to_path_buf()];
         for base in search_dirs {
             for name in ["CairnWorker.exe", "CairnWorker"] {
                 let candidate = base.join(name);
