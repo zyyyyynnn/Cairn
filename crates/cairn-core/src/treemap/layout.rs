@@ -5,10 +5,13 @@
 //! Hierarchical nested Treemap layout.
 //!
 //! Directory containers take a header band and lay their children out
-//! recursively in the body below it. Every painted tile stays within a 3:1
-//! aspect bound and a label-sized minimum; children that cannot meet it are
-//! folded into bounded "N items" summary blocks, and a directory whose body
-//! cannot host a legal child stays a compact leaf.
+//! recursively in the body below it. Areas are strictly proportional to bytes,
+//! as in WinDirStat and SpaceSniffer: a real child keeps a native tile only
+//! when its cell can carry the standard label, and every child that cannot is
+//! folded into the directory's one "N items" summary block, which itself takes
+//! its exact byte share and is never inflated. A label-less summary block that
+//! would paint as a remnant strip moves to the directory header instead; a
+//! body that can host no real child keeps the directory as a compact leaf.
 
 use super::category::TreemapCategory;
 use super::geometry::TreemapRect;
@@ -38,6 +41,19 @@ pub struct NestedTreemapLayoutNode {
     /// The folded children as indices into the owning directory's children, so a view can open the
     /// block as a canvas layer.
     pub aggregate_member_indices: Vec<u32>,
+    /// A directory's folded tail when that tail cannot carry a label on the canvas. The directory
+    /// header hosts it instead of painting a sliver; the tail never takes area from the body.
+    pub tail: Option<TreemapTail>,
+}
+
+/// A folded tail that moved out of the canvas body into its directory header.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TreemapTail {
+    /// The summary path (`目录::<tail:<类别>>`) used to open the member list.
+    pub path: String,
+    pub count: usize,
+    pub size: u64,
+    pub member_indices: Vec<u32>,
 }
 
 /// Configuration options for hierarchical nested treemap layout.
@@ -62,7 +78,7 @@ pub struct NestedTreemapOptions {
     /// itself scales with the canvas area. Readable root directories are always
     /// kept and a nested tail of fewer than two members merges back, so this is
     /// a guide rather than a hard cap; the smallest remaining tail folds into
-    /// summary blocks.
+    /// the directory's summary block.
     pub max_children: usize,
     /// A child below this predicted pixel area joins the aggregate tail.
     pub min_tile_area: f32,
@@ -114,19 +130,22 @@ impl NestedTreemapLayoutNode {
             depth,
             aggregate_count: 0,
             aggregate_member_indices: Vec::new(),
+            tail: None,
         }
     }
 }
 
-/// Every painted tile must stay within this width:height ratio. Cells that
-/// exceed it are folded into the directory summary and the directory is laid
-/// out again, so a long strip can never survive as a tile.
-const TREEMAP_MAX_ASPECT_RATIO: f32 = 3.0;
-/// Every painted tile must be large enough to carry the standard icon lane and
-/// a name. Smaller cells are folded into the summary or hidden, never painted
-/// as an unlabeled strip.
+/// Every real tile must be large enough to carry the standard icon lane and a
+/// name. Smaller cells are folded into the directory summary at their true
+/// bytes, never grown to fit. The summary block itself is exempt: it keeps its
+/// proportional share, and its label appears only when the block is large
+/// enough.
 const TREEMAP_MIN_TILE_WIDTH: f32 = 46.0;
 const TREEMAP_MIN_TILE_HEIGHT: f32 = 30.0;
+/// A summary block that cannot carry its label and is also this elongated is a
+/// remnant strip rather than a block. The directory header hosts it instead of
+/// painting a sliver; real tiles are never subject to this aspect.
+const TREEMAP_TAIL_MAX_ASPECT_RATIO: f32 = 3.0;
 
 /// Marker between a summary block's owning directory and its category tag.
 const AGGREGATE_MARKER: &str = "::<tail:";
@@ -150,19 +169,16 @@ pub fn aggregate_parent_path(path: &str) -> Option<&str> {
 #[derive(Clone, Debug)]
 enum DisplayEntry {
     /// A real child, by index into the directory's children, laid out at its
-    /// byte size; a child that cannot fit folds into the tail instead.
+    /// byte size; a child that cannot carry a label folds into the tail.
     Node { index: usize, weight: u64 },
-    /// A summary of folded children, normally one category's tail; a body too
-    /// small for one cell per category keeps a single mixed block instead.
+    /// The directory's one summary of folded children, laid out at exactly the
+    /// bytes it stands for.
     Aggregate {
         path: String,
         members: Vec<usize>,
         size: u64,
         /// The category most of the folded bytes belong to; the block takes that tone.
         category: TreemapCategory,
-        /// Area weight the block competes with; raised above `size` when the
-        /// block would otherwise be painted as a strip.
-        weight: u64,
     },
 }
 
@@ -179,49 +195,48 @@ impl DisplayPlan {
             .iter()
             .map(|entry| match entry {
                 DisplayEntry::Node { weight, .. } => *weight,
-                DisplayEntry::Aggregate { weight, .. } => *weight,
+                DisplayEntry::Aggregate { size, .. } => *size,
             })
             .collect();
         let cells = squarify(&weights, bounds);
         Self { entries, cells }
     }
 
-    /// Splits the cells that break the tile bounds into real children to reflow into the tail and
-    /// the folded members an offending summary block stands for.
-    fn offenders(&self) -> (Vec<usize>, Vec<usize>) {
-        let mut slivers = Vec::new();
-        let mut dropped = Vec::new();
-        for cell in &self.cells {
-            if tile_fits(cell.rect) {
-                continue;
-            }
-            match &self.entries[cell.index] {
-                DisplayEntry::Node { index, .. } => slivers.push(*index),
-                DisplayEntry::Aggregate { members, .. } => dropped.extend(members.iter().copied()),
-            }
-        }
-        (slivers, dropped)
+    /// The real children whose cell cannot carry the standard label. The summary block is not
+    /// listed: it keeps its byte share whatever shape that share produces.
+    fn offenders(&self) -> Vec<usize> {
+        self.cells
+            .iter()
+            .filter_map(|cell| match &self.entries[cell.index] {
+                DisplayEntry::Node { index, .. } if !tile_can_carry_label(cell.rect) => {
+                    Some(*index)
+                }
+                _ => None,
+            })
+            .collect()
     }
 }
 
-/// Whether a laid-out rect may be painted as a tile.
-fn tile_fits(rect: TreemapRect) -> bool {
-    let shorter = rect.shorter_side();
-    rect.width >= TREEMAP_MIN_TILE_WIDTH
-        && rect.height >= TREEMAP_MIN_TILE_HEIGHT
-        && !(shorter > 0.0 && rect.longer_side() / shorter > TREEMAP_MAX_ASPECT_RATIO)
+/// Whether a real child's laid-out rect may be painted as a labeled tile.
+fn tile_can_carry_label(rect: TreemapRect) -> bool {
+    rect.width >= TREEMAP_MIN_TILE_WIDTH && rect.height >= TREEMAP_MIN_TILE_HEIGHT
 }
 
-/// Builds the display entries for the kept children plus one summary block per category present in
-/// the tail. A body too small for one cell per category keeps a single mixed summary instead, so a
-/// tail never disappears into the directory's total.
+/// Whether a summary block is a label-less remnant strip. A small block that
+/// still reads as a rectangle stays in the body and keeps its byte share.
+fn tail_is_remnant_strip(rect: TreemapRect) -> bool {
+    let shorter = rect.shorter_side();
+    shorter > 0.0 && rect.longer_side() / shorter > TREEMAP_TAIL_MAX_ASPECT_RATIO
+}
+
+/// Builds the display entries for the kept children plus one mixed summary block standing for the
+/// whole tail. The block's weight is the folded bytes themselves, so its area is proportional; its
+/// tone and identity follow the bytes-dominant category.
 fn display_entries(
     nodes: &[TreemapTreeNode],
     parent: &str,
     kept: &[usize],
     tail: &[usize],
-    aggregate_floor: u64,
-    collapse: bool,
 ) -> Vec<DisplayEntry> {
     let mut entries = Vec::with_capacity(kept.len() + 1);
     entries.extend(kept.iter().map(|&index| DisplayEntry::Node {
@@ -231,8 +246,6 @@ fn display_entries(
     if tail.is_empty() {
         return entries;
     }
-    // One block per category so its tone and label agree; a body too small for
-    // several cells keeps a single mixed block instead (see `collapse`).
     let parent_buf;
     let parent = if is_drive_root(parent) {
         if parent.len() == 3 && parent.ends_with('\\') {
@@ -244,71 +257,46 @@ fn display_entries(
     } else {
         parent.trim_end_matches(['\\', '/'])
     };
-    let groups = if collapse {
-        // A body too small for one cell per category keeps one summary of the
-        // whole tail; its tone follows the bytes it holds. Members are never
-        // deleted while the body can still carry a readable cell.
-        vec![TailGroup {
-            category: tail_category_groups(nodes, tail)
-                .into_iter()
-                .max_by(|a, b| a.size.cmp(&b.size))
-                .map(|group| group.category)
-                .unwrap_or(TreemapCategory::Other),
-            size: tail.iter().map(|&index| nodes[index].size).sum(),
-            members: tail.to_vec(),
-        }]
-    } else {
-        tail_category_groups(nodes, tail)
-    };
-    for group in groups {
-        entries.push(DisplayEntry::Aggregate {
-            path: aggregate_path(parent, group.category),
-            members: group.members,
-            size: group.size,
-            category: group.category,
-            weight: group.size.max(aggregate_floor),
-        });
-    }
+    let category = dominant_tail_category(nodes, tail);
+    let size: u64 = tail.iter().map(|&index| nodes[index].size).sum();
+    entries.push(DisplayEntry::Aggregate {
+        path: aggregate_path(parent, category),
+        members: tail.to_vec(),
+        size,
+        category,
+    });
     entries
 }
 
-/// One category's folded tail, largest bytes first.
-struct TailGroup {
-    category: TreemapCategory,
-    members: Vec<usize>,
-    size: u64,
-}
-
-/// Groups the tail by category so each block's tone and label describe its members.
-fn tail_category_groups(nodes: &[TreemapTreeNode], tail: &[usize]) -> Vec<TailGroup> {
-    let mut groups: Vec<TailGroup> = Vec::new();
+/// The bytes-dominant category of the folded tail; the mixed block takes its tone and identity.
+fn dominant_tail_category(nodes: &[TreemapTreeNode], tail: &[usize]) -> TreemapCategory {
+    let mut totals: Vec<(TreemapCategory, u64)> = Vec::new();
     for &index in tail {
         let category = nodes[index].category;
-        match groups.iter_mut().find(|group| group.category == category) {
-            Some(group) => {
-                group.members.push(index);
-                group.size = group.size.saturating_add(nodes[index].size);
-            }
-            None => groups.push(TailGroup {
-                category,
-                members: vec![index],
-                size: nodes[index].size,
-            }),
+        match totals
+            .iter_mut()
+            .find(|(existing, _)| *existing == category)
+        {
+            Some((_, size)) => *size = size.saturating_add(nodes[index].size),
+            None => totals.push((category, nodes[index].size)),
         }
     }
-    groups.sort_by(|a, b| {
-        b.size
-            .cmp(&a.size)
-            .then_with(|| a.category.machine_key().cmp(b.category.machine_key()))
-    });
-    groups
+    totals
+        .into_iter()
+        .max_by(|a, b| {
+            a.1.cmp(&b.1)
+                .then_with(|| b.0.machine_key().cmp(a.0.machine_key()))
+        })
+        .map(|(category, _)| category)
+        .unwrap_or(TreemapCategory::Other)
 }
 
 /// Plans a directory with more than one sized child. Areas are strictly
-/// proportional: a child keeps a native tile at its byte area when that area can
-/// carry the smallest readable cell, and folds into one summary block per
-/// category when it cannot (or when the arrangement would paint it as a strip).
-/// A summary block is the only cell allowed a readable floor.
+/// proportional: a child keeps a native tile at its byte area when that cell can
+/// carry the standard label, and folds into the directory's one summary block
+/// when it cannot. A summary block that cannot carry its own label is handed
+/// back to the caller instead of painting a sliver; the caller hosts it in the
+/// directory header.
 fn plan_with_tail(
     nodes: &[TreemapTreeNode],
     parent: &str,
@@ -316,7 +304,7 @@ fn plan_with_tail(
     options: &NestedTreemapOptions,
     depth: usize,
     total_size: u64,
-) -> DisplayPlan {
+) -> (DisplayPlan, Option<DisplayEntry>) {
     let mut order: Vec<usize> = (0..nodes.len()).collect();
     order.sort_by(|&a, &b| {
         nodes[b]
@@ -347,133 +335,58 @@ fn plan_with_tail(
         kept.append(&mut tail);
     }
 
-    let mut aggregate_floor: u64 = 0;
-    let mut collapse = false;
-    let assemble = |kept: &[usize], tail: &[usize], aggregate_floor: u64, collapse: bool| {
-        DisplayPlan::squarified(
-            display_entries(nodes, parent, kept, tail, aggregate_floor, collapse),
-            bounds,
-        )
+    let assemble = |kept: &[usize], tail: &[usize]| {
+        DisplayPlan::squarified(display_entries(nodes, parent, kept, tail), bounds)
     };
-    let mut plan = assemble(&kept, &tail, aggregate_floor, collapse);
+    let mut plan = assemble(&kept, &tail);
+    // A real child whose cell cannot carry its label folds into the summary at
+    // its true bytes. Each pass removes at least one candidate, so this settles
+    // within the kept budget without growing any cell.
     for _ in 0..64 {
-        let (slivers, dropped) = plan.offenders();
-        if slivers.is_empty() && dropped.is_empty() {
+        let offenders = plan.offenders();
+        if offenders.is_empty() {
             break;
         }
-        if !slivers.is_empty() {
-            // Areas stay proportional: a child that cannot carry a tile at its
-            // byte area folds into the summary instead of growing.
-            kept.retain(|index| !slivers.contains(index));
-            tail.extend(slivers.iter().copied());
-            if kept.is_empty() && tail.is_empty() {
-                plan = DisplayPlan::default();
-                break;
-            }
-            plan = assemble(&kept, &tail, aggregate_floor, collapse);
-            continue;
-        }
-        if !tail.is_empty() {
-            // Only a folded block breaks the bounds: it may grow past its byte
-            // share until it can carry a readable cell. The scale stops at the
-            // whole body, where one block can fill the directory.
-            if aggregate_floor < total_size {
-                aggregate_floor = aggregate_floor
-                    .saturating_mul(2)
-                    .max((total_size / 200).max(1))
-                    .min(total_size);
-            } else if !collapse {
-                // Per-category blocks cannot share a body this small: keep one
-                // summary of the whole tail instead of deleting its members.
-                collapse = true;
-            } else {
-                // Only a body that cannot carry any readable cell drops them.
-                tail.retain(|index| !dropped.contains(index));
-            }
-            if kept.is_empty() && tail.is_empty() {
-                plan = DisplayPlan::default();
-                break;
-            }
-            plan = assemble(&kept, &tail, aggregate_floor, collapse);
-            continue;
-        }
-        break;
+        kept.retain(|index| !offenders.contains(index));
+        tail.extend(offenders);
+        plan = assemble(&kept, &tail);
     }
 
-    // The floor escalates by doubling, so the first plan that fits can leave a summary block far
-    // larger than the minimum readable cell. Search back down over the same kept/tail set: a block
-    // may take the area it needs to be readable, not a column.
-    if aggregate_floor > 0 && !tail.is_empty() {
-        let mut low = 0u64;
-        let mut high = aggregate_floor;
-        for _ in 0..12 {
-            let mid = low + (high - low) / 2;
-            if mid == low {
+    // A summary block too small to carry its label would paint as a sliver.
+    // Give its area back to the real children and hand the block to the
+    // directory header instead; the members stay reachable through that entry.
+    let mut detached = None;
+    let aggregate_cell = plan
+        .cells
+        .iter()
+        .find(|cell| matches!(plan.entries[cell.index], DisplayEntry::Aggregate { .. }))
+        .copied();
+    if aggregate_cell
+        .is_some_and(|cell| !tile_can_carry_label(cell.rect) && tail_is_remnant_strip(cell.rect))
+    {
+        plan = assemble(&kept, &[]);
+        for _ in 0..64 {
+            let offenders = plan.offenders();
+            if offenders.is_empty() {
                 break;
             }
-            let candidate = assemble(&kept, &tail, mid, collapse);
-            let (slivers, dropped) = candidate.offenders();
-            if slivers.is_empty() && dropped.is_empty() {
-                high = mid;
-            } else {
-                low = mid;
-            }
-        }
-        if high < aggregate_floor {
-            aggregate_floor = high;
-            plan = assemble(&kept, &tail, aggregate_floor, collapse);
-        }
-    }
-
-    // The loop has a hard budget; a pathological canvas may still carry an
-    // offending cell. Fold it away rather than painting a strip.
-    let (slivers, dropped) = plan.offenders();
-    if !slivers.is_empty() || !dropped.is_empty() {
-        kept.retain(|index| !slivers.contains(index));
-        tail.extend(slivers.iter().copied());
-        if !tail.is_empty() {
-            collapse = true;
-        }
-        // Reassemble before the next check: the folded members belong to a
-        // plan that must be laid out again, not to the one just measured.
-        plan = assemble(&kept, &tail, aggregate_floor, collapse);
-        let (slivers, dropped) = plan.offenders();
-        if !slivers.is_empty() || !dropped.is_empty() {
-            // Only a body that cannot carry any readable cell drops members.
-            kept.retain(|index| !slivers.contains(index));
-            tail.extend(slivers.iter().copied());
-            tail.retain(|index| !dropped.contains(index));
-            plan = if kept.is_empty() && tail.is_empty() {
+            kept.retain(|index| !offenders.contains(index));
+            tail.extend(offenders);
+            plan = if kept.is_empty() {
                 DisplayPlan::default()
             } else {
-                assemble(&kept, &tail, aggregate_floor, collapse)
+                assemble(&kept, &[])
             };
         }
-    }
-
-    // A container must never end up with an empty body. If repeated folds
-    // removed every display item, fall back to its largest child so the area
-    // is tiled and labeled instead of showing an empty pane.
-    if plan.entries.is_empty() {
-        if let Some(&largest) = order.first() {
-            plan = DisplayPlan::squarified(
-                vec![DisplayEntry::Node {
-                    index: largest,
-                    weight: nodes[largest].size,
-                }],
-                bounds,
-            );
+        if kept.is_empty() {
+            // Every real child folded too: keep one full-body summary so the
+            // body is never blank, even if its cell is not label-sized.
+            plan = assemble(&[], &tail);
+        } else if !tail.is_empty() {
+            detached = display_entries(nodes, parent, &[], &tail).pop();
         }
     }
-    plan
-}
-
-/// True when a laid-out subtree contains no painted rectangle outside the
-/// aspect bound. A zero-area rectangle is not painted and cannot be a strip.
-fn layout_tree_meets_tile_aspect(node: &NestedTreemapLayoutNode) -> bool {
-    let shorter = node.rect.shorter_side();
-    let aspect_ok = shorter <= 0.0 || node.rect.longer_side() / shorter <= TREEMAP_MAX_ASPECT_RATIO;
-    aspect_ok && node.children.iter().all(layout_tree_meets_tile_aspect)
+    (plan, detached)
 }
 
 /// Joins a child name onto its containing directory's path. An empty parent
@@ -525,19 +438,18 @@ fn layout_child(
         rect.width - 2.0 * padding,
         rect.height - header_height - 2.0 * padding,
     );
-    let children = if content.width > 12.0 && content.height > 12.0 {
+    let mut children = if content.width > 12.0 && content.height > 12.0 {
         let child_parent = format!("{path}\\");
         layout_nested_treemap(&node.children, &child_parent, content, options, depth + 1)
     } else {
         Vec::new()
     };
+    let tail = take_tail(&mut children);
 
-    // A parent that is itself inside the aspect bound can still leave a child
-    // content area too narrow for its own children: the 20px header turns a
-    // 3:1 tile into a wider-than-3:1 body. When the resulting tree contains
-    // any strip, keep more detail out and paint the directory as one compact
-    // leaf instead.
-    if !children.iter().all(layout_tree_meets_tile_aspect) {
+    // A body that cannot carry a single real child keeps its directory as a
+    // compact leaf: drilling in gives those children the whole canvas, where
+    // their shares are large enough to label, as the mature analyzers do.
+    if children.is_empty() || children.iter().all(|child| child.is_aggregate()) {
         return NestedTreemapLayoutNode::leaf(item, path, rect, depth);
     }
     NestedTreemapLayoutNode {
@@ -550,6 +462,7 @@ fn layout_child(
         depth,
         aggregate_count: 0,
         aggregate_member_indices: Vec::new(),
+        tail,
     }
 }
 
@@ -571,21 +484,25 @@ pub fn layout_nested_treemap(
     }
 
     let total_size: u64 = nodes.iter().map(|node| node.size).sum();
-    let plan = if nodes.len() > 1 && total_size > 0 {
+    let (plan, detached) = if nodes.len() > 1 && total_size > 0 {
         plan_with_tail(nodes, parent, bounds, options, depth, total_size)
     } else {
-        DisplayPlan::squarified(
-            (0..nodes.len())
-                .map(|index| DisplayEntry::Node {
-                    index,
-                    weight: nodes[index].size,
-                })
-                .collect(),
-            bounds,
+        (
+            DisplayPlan::squarified(
+                (0..nodes.len())
+                    .map(|index| DisplayEntry::Node {
+                        index,
+                        weight: nodes[index].size,
+                    })
+                    .collect(),
+                bounds,
+            ),
+            None,
         )
     };
 
-    plan.cells
+    let mut laid: Vec<NestedTreemapLayoutNode> = plan
+        .cells
         .iter()
         .map(|cell| match &plan.entries[cell.index] {
             DisplayEntry::Node { index, .. } => {
@@ -615,7 +532,51 @@ pub fn layout_nested_treemap(
                 )
             },
         })
-        .collect()
+        .collect();
+
+    // A detached tail travels as a zero-cell aggregate so its owner can host it
+    // in the directory header; it never takes area from the body.
+    if let Some(DisplayEntry::Aggregate {
+        path,
+        members,
+        size,
+        category,
+    }) = detached
+    {
+        laid.push(NestedTreemapLayoutNode {
+            aggregate_count: members.len(),
+            aggregate_member_indices: members.iter().map(|&index| index as u32).collect(),
+            ..NestedTreemapLayoutNode::leaf(
+                TreemapItem {
+                    id: 0,
+                    name: String::new(),
+                    size,
+                    is_dir: false,
+                    modified_ts: 0,
+                    category,
+                },
+                path,
+                TreemapRect::new(0.0, 0.0, 0.0, 0.0),
+                depth,
+            )
+        });
+    }
+    laid
+}
+
+/// Removes a detached directory tail from a layout list and returns it. The
+/// tail is a zero-cell aggregate; callers that own a header render it there.
+pub fn take_tail(nodes: &mut Vec<NestedTreemapLayoutNode>) -> Option<TreemapTail> {
+    let index = nodes
+        .iter()
+        .position(|node| node.is_aggregate() && node.rect.area() == 0.0)?;
+    let node = nodes.remove(index);
+    Some(TreemapTail {
+        path: node.path,
+        count: node.aggregate_count,
+        size: node.item.size,
+        member_indices: node.aggregate_member_indices,
+    })
 }
 
 #[cfg(test)]
@@ -856,7 +817,7 @@ mod tests {
     /// A tail holding several categories paints one block per category: no block mixes categories
     /// and no block swallows the whole tail, so each block names a set a person can open.
     #[test]
-    fn a_mixed_tail_folds_into_one_block_per_category() {
+    fn a_mixed_tail_folds_into_one_block() {
         let mut children = Vec::new();
         for index in 0..40 {
             children.push(TreemapTreeNode::new_file(
@@ -880,31 +841,24 @@ mod tests {
         options.max_children = 20;
         options.min_tile_area = 1200.0;
 
-        let layout = layout_nested_treemap(&children, "C:\\", bounds, &options, 1);
+        let layout = layout_nested_treemap(&children, "C:/", bounds, &options, 1);
         let aggregates: Vec<_> = layout
             .iter()
             .filter(|node| node.aggregate_count > 0)
             .collect();
         assert_eq!(
             aggregates.len(),
-            2,
-            "two categories in the tail, two blocks"
+            1,
+            "one mixed block stands for the whole tail, not one per category"
         );
-        let mut categories: Vec<_> = aggregates.iter().map(|node| node.item.category).collect();
-        categories.sort_by_key(|category| category.machine_key());
-        categories.dedup();
-        assert_eq!(categories.len(), 2, "each block stands for one category");
         let tiles = layout
             .iter()
             .filter(|node| node.aggregate_count == 0)
             .count();
         assert_eq!(
-            aggregates
-                .iter()
-                .map(|node| node.aggregate_count)
-                .sum::<usize>(),
+            aggregates[0].aggregate_count,
             children.len() - tiles,
-            "the blocks together fold exactly the children that are not tiles"
+            "the block folds exactly the children that are not tiles"
         );
         assert_eq!(layout.iter().map(|node| node.item.size).sum::<u64>(), total);
     }
@@ -961,7 +915,7 @@ mod tests {
         let bounds = TreemapRect::new(0.0, 0.0, 800.0, 600.0);
         let options = NestedTreemapOptions::from_detail_level(3);
 
-        let layout = layout_nested_treemap(&children, "C:\\", bounds, &options, 0);
+        let mut layout = layout_nested_treemap(&children, "C:\\", bounds, &options, 0);
         for index in 0..4 {
             let name = format!("dir{index}");
             assert!(
@@ -969,21 +923,18 @@ mod tests {
                 "root directory {name} must stay a navigation target"
             );
         }
+        let tail = take_tail(&mut layout).expect("the tiny files become the root tail");
+        assert_eq!(tail.count, 20);
+        assert_eq!(tail.size, 2_000);
+        assert!(tail.path.contains("::<tail:"));
         assert_eq!(
             layout.len(),
-            5,
-            "tiny root files keep one readable summary block"
-        );
-        let block = layout
-            .iter()
-            .find(|node| node.aggregate_count > 0)
-            .expect("the tiny files need their summary block");
-        assert_eq!(block.aggregate_count, 20);
-        assert!(
-            tile_fits(block.rect),
-            "the summary block must not be a leftover strip: {:.1}x{:.1}",
-            block.rect.width,
-            block.rect.height
+            4,
+            "the four directories keep the body: {:?}",
+            layout
+                .iter()
+                .map(|node| (node.item.name.clone(), node.rect.width, node.rect.height))
+                .collect::<Vec<_>>()
         );
     }
 
@@ -1048,7 +999,7 @@ mod tests {
     }
 
     #[test]
-    fn sliver_children_are_reflowed_into_the_tail() {
+    fn children_that_cannot_carry_a_label_fold_into_the_tail() {
         let mut children = layout_test_children(20, 1_000, "bin");
         children[0].size = 10_000;
         let total: u64 = children.iter().map(|node| node.size).sum();
@@ -1058,13 +1009,12 @@ mod tests {
         let layout = layout_nested_treemap(&children, "C:\\", bounds, &options, 1);
         assert!(layout.iter().any(|node| node.aggregate_count > 0));
         for node in &layout {
-            let shorter = node.rect.width.min(node.rect.height);
-            let longer = node.rect.width.max(node.rect.height);
+            if node.aggregate_count > 0 {
+                continue;
+            }
             assert!(
-                node.rect.width >= TREEMAP_MIN_TILE_WIDTH
-                    && node.rect.height >= TREEMAP_MIN_TILE_HEIGHT
-                    && (shorter <= 0.0 || longer / shorter <= TREEMAP_MAX_ASPECT_RATIO),
-                "a painted tile survived as a {:.1}x{:.1} strip",
+                tile_can_carry_label(node.rect),
+                "a real tile survived without room for its label: {:.1}x{:.1}",
                 node.rect.width,
                 node.rect.height
             );
@@ -1083,10 +1033,11 @@ mod tests {
         assert!(layout.iter().all(|node| node.aggregate_count == 0));
     }
 
-    /// A dominant child must not delete its folded siblings: the summary block
-    /// stays a readable cell, and every folded byte stays inside the layout.
+    /// A dominant child must not delete its folded siblings, and the tail must
+    /// not be painted as a sliver: it moves to the directory header and the
+    /// dominant child owns the body.
     #[test]
-    fn a_dominant_child_keeps_the_folded_tail_visible() {
+    fn a_dominant_child_sends_the_tiny_tail_to_the_header() {
         let mut children = Vec::new();
         let mut dominant = TreemapTreeNode::new_dir(1, "dominant".to_string(), 0);
         dominant.size = 1_000_000_000;
@@ -1100,30 +1051,29 @@ mod tests {
         let bounds = TreemapRect::new(0.0, 0.0, 1072.0, 666.0);
         let options = NestedTreemapOptions::from_detail_level(5);
 
-        let layout = layout_nested_treemap(&children, r"C:\Workspace", bounds, &options, 0);
-        let block = layout
-            .iter()
-            .find(|node| node.aggregate_count > 0)
-            .unwrap_or_else(|| {
-                panic!(
-                    "the folded siblings lost their summary block: {:?}",
-                    layout
-                        .iter()
-                        .map(|node| (node.item.name.clone(), node.item.size))
-                        .collect::<Vec<_>>()
-                )
-            });
-        assert_eq!(block.aggregate_count, 2);
+        let mut layout = layout_nested_treemap(&children, r"C:\Workspace", bounds, &options, 0);
+        let tail = take_tail(&mut layout).unwrap_or_else(|| {
+            panic!(
+                "the folded siblings lost their summary entry: {:?}",
+                layout
+                    .iter()
+                    .map(|node| (node.item.name.clone(), node.item.size))
+                    .collect::<Vec<_>>()
+            )
+        });
+        assert_eq!(tail.count, 2);
+        assert_eq!(tail.size, 2_000_000);
+        assert_eq!(layout.len(), 1, "the dominant child owns the body");
+        let dominant = &layout[0];
+        assert_eq!(dominant.item.name, "dominant");
         assert!(
-            tile_fits(block.rect),
-            "the summary block must be a readable cell, got {:.1}x{:.1}",
-            block.rect.width,
-            block.rect.height
+            (dominant.rect.area() / bounds.area() - 1.0).abs() < 0.01,
+            "the dominant child fills the body once the tail moves to the header"
         );
         assert_eq!(
-            layout.iter().map(|node| node.item.size).sum::<u64>(),
+            layout.iter().map(|node| node.item.size).sum::<u64>() + tail.size,
             total,
-            "every folded byte stays inside the layout"
+            "every folded byte stays accounted for"
         );
     }
 
@@ -1152,13 +1102,6 @@ mod tests {
         let layout = layout_nested_treemap(&nodes, r"C:\Workspace", bounds, &options, 0);
         let mut visible: Vec<&str> = Vec::new();
         for node in &layout {
-            assert!(
-                tile_fits(node.rect),
-                "{:?} painted a {:.1}x{:.1} cell",
-                node.item.name,
-                node.rect.width,
-                node.rect.height
-            );
             if node.aggregate_count > 0 {
                 visible.extend(
                     node.aggregate_member_indices
@@ -1166,6 +1109,13 @@ mod tests {
                         .map(|&index| nodes[index as usize].name.as_str()),
                 );
             } else {
+                assert!(
+                    tile_can_carry_label(node.rect),
+                    "{:?} painted an unlabeled {:.1}x{:.1} cell",
+                    node.item.name,
+                    node.rect.width,
+                    node.rect.height
+                );
                 visible.push(node.item.name.as_str());
             }
         }
@@ -1206,9 +1156,12 @@ mod tests {
         assert_eq!(block.aggregate_count, 35);
         assert_eq!(layout.len(), 2);
         for node in &layout {
+            if node.aggregate_count > 0 {
+                continue;
+            }
             assert!(
-                tile_fits(node.rect),
-                "{:?} painted a {:.1}x{:.1} fragment",
+                tile_can_carry_label(node.rect),
+                "{:?} painted an unlabeled {:.1}x{:.1} cell",
                 node.item.name,
                 node.rect.width,
                 node.rect.height
@@ -1217,9 +1170,9 @@ mod tests {
     }
 
     /// A tail that holds almost every byte folds into one block at its byte
-    /// share; no cell may be painted as a strip.
+    /// share; no real cell is painted without room for its label.
     #[test]
-    fn a_tail_that_dominates_folds_without_painting_strips() {
+    fn a_tail_that_dominates_keeps_every_byte_at_its_share() {
         let mut nodes = Vec::new();
         let mut largest = TreemapTreeNode::new_file(1, "largest.bin".to_string(), 1_000_000, 0);
         largest.size = 1_000_000;
@@ -1238,9 +1191,12 @@ mod tests {
 
         let layout = layout_nested_treemap(&nodes, r"C:\Program Files", bounds, &options, 0);
         for node in &layout {
+            if node.aggregate_count > 0 {
+                continue;
+            }
             assert!(
-                tile_fits(node.rect),
-                "{:?} painted a {:.1}x{:.1} cell",
+                tile_can_carry_label(node.rect),
+                "{:?} painted an unlabeled {:.1}x{:.1} cell",
                 node.item.name,
                 node.rect.width,
                 node.rect.height
@@ -1279,9 +1235,12 @@ mod tests {
             0,
         );
         for node in &layout {
+            if node.aggregate_count > 0 {
+                continue;
+            }
             assert!(
-                tile_fits(node.rect),
-                "{:?} painted a {:.1}x{:.1} cell",
+                tile_can_carry_label(node.rect),
+                "{:?} painted an unlabeled {:.1}x{:.1} cell",
                 node.item.name,
                 node.rect.width,
                 node.rect.height
@@ -1341,13 +1300,15 @@ mod tests {
         let layout = layout_nested_treemap(&nodes, r"C:\Workspace", bounds, &options, 0);
         let mut visible: Vec<&str> = Vec::new();
         for node in &layout {
-            assert!(
-                tile_fits(node.rect),
-                "{:?} painted a {:.1}x{:.1} cell",
-                node.item.name,
-                node.rect.width,
-                node.rect.height
-            );
+            if node.aggregate_count == 0 {
+                assert!(
+                    tile_can_carry_label(node.rect),
+                    "{:?} painted an unlabeled {:.1}x{:.1} cell",
+                    node.item.name,
+                    node.rect.width,
+                    node.rect.height
+                );
+            }
             if node.aggregate_count > 0 {
                 visible.extend(
                     node.aggregate_member_indices
@@ -1391,10 +1352,10 @@ mod tests {
     }
 
     /// Progressive snapshots pair one completed subtree with partial placeholder
-    /// directories whose byte counters are still tiny. Every painted rectangle at every depth must
-    /// satisfy the minimum side and aspect-ratio bounds.
+    /// directories whose byte counters are still tiny. Every painted real tile at every depth must
+    /// leave room for its label; summary blocks keep their proportional share instead.
     #[test]
-    fn progressive_root_snapshots_never_paint_strips() {
+    fn progressive_root_snapshots_keep_real_tiles_label_sized() {
         fn walk<'a>(
             nodes: &'a [NestedTreemapLayoutNode],
             out: &mut Vec<&'a NestedTreemapLayoutNode>,
@@ -1448,23 +1409,16 @@ mod tests {
                     let mut all = Vec::new();
                     walk(&layout, &mut all);
                     for node in all {
+                        if node.aggregate_count > 0 {
+                            continue;
+                        }
                         let painted = node.rect.width > 0.0 && node.rect.height > 0.0;
                         if !painted {
                             continue;
                         }
-                        let shorter = node.rect.width.min(node.rect.height);
-                        let longer = node.rect.width.max(node.rect.height);
                         assert!(
-                            node.rect.width >= TREEMAP_MIN_TILE_WIDTH
-                                && node.rect.height >= TREEMAP_MIN_TILE_HEIGHT,
-                            "partial snapshot left {:?} at {:.1}x{:.1} (dir_count={dir_count}, huge={huge}, small={small})",
-                            node.item.name,
-                            node.rect.width,
-                            node.rect.height
-                        );
-                        assert!(
-                            shorter <= 0.0 || longer / shorter <= TREEMAP_MAX_ASPECT_RATIO,
-                            "partial snapshot left {:?} as a {:.1}x{:.1} strip (dir_count={dir_count}, huge={huge}, small={small})",
+                            tile_can_carry_label(node.rect),
+                            "partial snapshot left {:?} unlabeled at {:.1}x{:.1} (dir_count={dir_count}, huge={huge}, small={small})",
                             node.item.name,
                             node.rect.width,
                             node.rect.height
@@ -1475,11 +1429,11 @@ mod tests {
         }
     }
 
-    /// A tile can be within the aspect bound while its header and padding leave
-    /// a body that is not. The child would be a strip, so the directory must fall
-    /// back to a compact leaf rather than subdividing into that strip.
+    /// A wide directory tile still subdivides: its body gives the only child a
+    /// full-width cell that carries a label, so proportional area alone decides,
+    /// without an aspect-ratio floor on the tile.
     #[test]
-    fn a_parent_whose_body_would_be_a_strip_renders_as_a_leaf() {
+    fn a_wide_directory_tile_shows_its_only_child() {
         let mut parent = TreemapTreeNode::new_dir(1, "Parent".to_string(), 0);
         parent.size = 2_048;
         parent.children.push(TreemapTreeNode::new_file(
@@ -1489,21 +1443,23 @@ mod tests {
             0,
         ));
         let options = NestedTreemapOptions::from_detail_level(5);
-        // A 3:1 tile stays within the parent bound; after the 20px header its
-        // 600x180 body would give the only child a 3.33:1 strip.
         let layout = layout_nested_treemap(
             &[parent],
             "C:\\",
-            TreemapRect::new(0.0, 0.0, 600.0, 200.0),
+            TreemapRect::new(0.0, 0.0, 600.0, 110.0),
             &options,
             0,
         );
 
         assert_eq!(layout.len(), 1);
-        assert!(
-            layout[0].header_rect.is_none() && layout[0].children.is_empty(),
-            "a directory whose body cannot host a legal child must stay a compact leaf"
-        );
+        let child = layout[0]
+            .children
+            .first()
+            .expect("a 600x90 body carries the only child");
+        assert_eq!(child.item.name, "only.bin");
+        assert!((child.rect.width - 600.0).abs() < 1e-3);
+        assert!((child.rect.height - 90.0).abs() < 1e-3);
+        assert!(tile_can_carry_label(child.rect));
     }
 
     #[test]
@@ -1549,21 +1505,21 @@ mod tests {
             TreemapTreeNode::new_file(1, "a.txt".to_string(), 10, 0),
             TreemapTreeNode::new_file(2, "b.txt".to_string(), 10, 0),
         ];
-        let entries_forward_drive = display_entries(&nodes, "C:/", &[0], &[1], 0, false);
+        let entries_forward_drive = display_entries(&nodes, "C:/", &[0], &[1]);
         let DisplayEntry::Aggregate { path, .. } = &entries_forward_drive[1] else {
             panic!("expected aggregate entry");
         };
         assert_eq!(path, "C:\\::<tail:documents>");
 
-        let entries_forward_dir = display_entries(&nodes, "C:/Users/Alice/", &[0], &[1], 0, false);
+        let entries_forward_dir = display_entries(&nodes, "C:/Users/Alice/", &[0], &[1]);
         let DisplayEntry::Aggregate { path, .. } = &entries_forward_dir[1] else {
             panic!("expected aggregate entry");
         };
         assert_eq!(path, "C:/Users/Alice::<tail:documents>");
     }
 
-    /// A small body still carries its summary block at a readable size instead
-    /// of deleting the folded members.
+    /// A small body still carries its summary block at the block's byte share
+    /// instead of deleting the folded members.
     #[test]
     fn a_small_body_keeps_its_summary_block() {
         let nodes = vec![
@@ -1583,9 +1539,12 @@ mod tests {
             0,
         );
         for node in &layout {
+            if node.aggregate_count > 0 {
+                continue;
+            }
             assert!(
-                tile_fits(node.rect),
-                "{:?} painted a {:.1}x{:.1} cell",
+                tile_can_carry_label(node.rect),
+                "{:?} painted an unlabeled {:.1}x{:.1} cell",
                 node.item.name,
                 node.rect.width,
                 node.rect.height
@@ -1655,10 +1614,39 @@ mod tests {
         assert_eq!(laid_bytes, total, "the body keeps every byte");
     }
 
-    /// A directory body too flat to hold a readable child keeps its compact
-    /// leaf instead of painting a strip through its children.
+    /// A body that can show no real child keeps its compact leaf: every child is
+    /// too small to carry a label, so the directory is drilled into instead.
     #[test]
-    fn a_flat_directory_body_stays_a_compact_leaf() {
+    fn a_body_without_a_label_sized_child_stays_a_compact_leaf() {
+        let mut flat = TreemapTreeNode::new_dir(1, "Flat".to_string(), 0);
+        for index in 0..40u64 {
+            flat.children.push(TreemapTreeNode::new_file(
+                index + 2,
+                format!("photo{index:02}.jpg"),
+                1_000,
+                0,
+            ));
+        }
+        flat.compute_aggregated_sizes();
+        let options = NestedTreemapOptions::from_detail_level(5);
+        let laid = layout_child(
+            &flat,
+            r"C:\",
+            TreemapRect::new(0.0, 0.0, 480.0, 70.0),
+            &options,
+            0,
+        );
+        assert!(
+            laid.children.is_empty(),
+            "a body with no label-sized child stays a compact leaf"
+        );
+        assert!(laid.header_rect.is_none());
+    }
+
+    /// A wide body still subdivides when its dominant child can carry a label;
+    /// the tiny tail keeps its proportional share instead of a readable floor.
+    #[test]
+    fn a_wide_directory_body_keeps_its_proportional_children() {
         let mut flat = TreemapTreeNode::new_dir(1, "Flat".to_string(), 0);
         flat.children.push(TreemapTreeNode::new_file(
             2,
@@ -1675,26 +1663,46 @@ mod tests {
             ));
         }
         flat.compute_aggregated_sizes();
+        let total: u64 = flat.children.iter().map(|node| node.size).sum();
         let options = NestedTreemapOptions::from_detail_level(5);
         let laid = layout_child(
             &flat,
             r"C:\",
-            TreemapRect::new(0.0, 0.0, 480.0, 150.0),
+            TreemapRect::new(0.0, 0.0, 480.0, 70.0),
             &options,
             0,
         );
+        assert!(laid.header_rect.is_some());
+        let block = laid
+            .children
+            .iter()
+            .find(|child| child.aggregate_count > 0)
+            .expect("a compact small tail stays a block");
+        assert_eq!(block.aggregate_count, 40);
         assert!(
-            laid.children.is_empty(),
-            "a body that cannot tile its children stays a compact leaf"
+            laid.tail.is_none(),
+            "a small block that is not a strip keeps its body cell"
         );
-        assert!(laid.header_rect.is_none());
+        let body = laid
+            .content_rect
+            .expect("a subdivided directory has a body");
+        let byte_share = 40_000.0 / total as f32;
+        let painted_share = block.rect.area() / body.area();
+        assert!(
+            (painted_share - byte_share).abs() < 0.005,
+            "the block keeps its byte share: {painted_share:.4} vs {byte_share:.4} \
+             ({:.1}x{:.1})",
+            block.rect.width,
+            block.rect.height
+        );
     }
 
     /// The live C:\Users shape: two dominant directories beside a handful of tiny
-    /// categories. A readable summary block may take the minimum area it needs, not a
-    /// full-height column far beyond its byte share.
+    /// mixed items. The whole tail stays one block at its byte share; it is not
+    /// never painted as a sliver: the canvas root hosts it in the path band and
+    /// the two dominants split the body by their relative bytes.
     #[test]
-    fn tiny_summary_blocks_do_not_take_giant_columns() {
+    fn a_tiny_tail_moves_out_of_the_body_beside_two_dominants() {
         let mut nodes = Vec::new();
         nodes.push(TreemapTreeNode::new_dir(0, "ZYN".to_string(), 0));
         nodes[0].size = 138_170_000_000;
@@ -1722,31 +1730,32 @@ mod tests {
                 0,
             ));
         }
+        let total: u64 = nodes.iter().map(|node| node.size).sum();
+        let tail_size: u64 = rest.iter().map(|(_, size)| size).sum();
         let options = NestedTreemapOptions::from_detail_level(5);
         let bounds = TreemapRect::new(0.0, 0.0, 1272.0, 654.0);
-        let layout = layout_nested_treemap(&nodes, r"C:\Users", bounds, &options, 0);
+        let mut layout = layout_nested_treemap(&nodes, "C:/Users", bounds, &options, 0);
+        let tail = take_tail(&mut layout).expect("the tiny tail leaves the body");
+        assert_eq!(tail.count, rest.len());
+        assert_eq!(tail.size, tail_size);
+        assert!(tail.path.contains("::<tail:"));
+        assert_eq!(layout.len(), 2, "only the two dominants tile the body");
+        let real_bytes = (total - tail_size) as f32;
         for node in &layout {
             assert!(
-                tile_fits(node.rect),
-                "{:?} painted a {:.1}x{:.1} cell",
+                tile_can_carry_label(node.rect),
+                "{:?} painted an unlabeled {:.1}x{:.1} cell",
                 node.item.name,
                 node.rect.width,
                 node.rect.height
             );
-            if node.aggregate_count > 0 {
-                assert!(
-                    node.rect.width <= 60.0,
-                    "summary block took a {:.1}px-wide column for {} bytes",
-                    node.rect.width,
-                    node.item.size
-                );
-                assert!(
-                    node.rect.area() <= 6_000.0,
-                    "summary block took {:.0}px2 for {} bytes",
-                    node.rect.area(),
-                    node.item.size
-                );
-            }
+            let byte_share = node.item.size as f32 / real_bytes;
+            let painted_share = node.rect.area() / bounds.area();
+            assert!(
+                (painted_share - byte_share).abs() < 0.01,
+                "{} painted {painted_share:.4} for a {byte_share:.4} share",
+                node.item.name
+            );
         }
     }
 

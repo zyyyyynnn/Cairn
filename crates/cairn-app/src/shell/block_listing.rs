@@ -165,6 +165,38 @@ impl CairnApp {
             );
             (parent, node.aggregate_count, rows)
         };
+        self.open_listing(parent, count, rows, window, cx);
+    }
+
+    /// Opens the member list of a folded tail that moved out of the body into
+    /// its directory header. The tail carries its own members, so no canvas
+    /// lookup is needed.
+    pub(crate) fn open_tail_listing(
+        &mut self,
+        tail: &cairn_core::treemap::TreemapTail,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.discard_rename(cx);
+        let Some(parent) = cairn_core::treemap::aggregate_parent_path(&tail.path) else {
+            return;
+        };
+        let parent = parent.to_string();
+        let Some(state) = self.treemap_state.as_ref() else {
+            return;
+        };
+        let rows = block_listing_rows(&parent, &tail.member_indices, state.children_at(&parent));
+        self.open_listing(parent, tail.count, rows, window, cx);
+    }
+
+    fn open_listing(
+        &mut self,
+        parent: String,
+        count: usize,
+        rows: Vec<FileRowData>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // A late answer to an earlier query must not replace the listing rows.
         self.query.query_id += 1;
         self.query.is_searching = false;

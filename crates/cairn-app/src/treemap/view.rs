@@ -731,9 +731,9 @@ fn render_nested_node(
     let has_header = is_dir && node.header_rect.is_some();
     let is_label_sized =
         stable.width >= TREEMAP_LABEL_MIN_WIDTH && stable.height >= TREEMAP_LABEL_MIN_HEIGHT;
-    if !has_header && !is_label_sized {
-        // Sub-label cells are texture, not blocks with missing content. The
-        // core keeps these rare by folding anything this small into a summary.
+    if !has_header && !is_label_sized && !node.is_aggregate() {
+        // Sub-label real cells are texture: the core folds anything this small
+        // into the directory's summary block, which keeps its byte share.
         push_flat_fill(elements, display, texture_fill, rcx.palette, dimmed);
         return;
     }
@@ -752,15 +752,23 @@ fn render_nested_node(
             "{label}
 {size_str}"
         ));
-        let content = compact_block_content(
-            IconName::FileStack,
-            label,
-            &size_str,
-            stable,
-            rcx.window,
-            rcx.palette.ink(),
-            rcx.palette.ink_secondary(),
-        );
+        // A summary block keeps its byte share whatever shape that is, so it
+        // can be too small for text. It still paints, stays selectable and
+        // opens its member list on double click; only the label is dropped.
+        let content: AnyElement = if is_label_sized {
+            compact_block_content(
+                IconName::FileStack,
+                label,
+                &size_str,
+                stable,
+                rcx.window,
+                rcx.palette.ink(),
+                rcx.palette.ink_secondary(),
+            )
+            .into_any_element()
+        } else {
+            div().size_full().into_any_element()
+        };
         let aggregate_view = rcx.view.clone();
         let aggregate_path = full_path.clone();
         let block_bg = header_bg;
@@ -833,6 +841,63 @@ fn render_nested_node(
             let show_header_size = inner_width
                 >= TREEMAP_ICON_SPACE + TREEMAP_MIN_HEADER_NAME_WIDTH + 2.0 + size_width;
             let header_tooltip = SharedString::from(format!("{full_path_drill}\n{size_str}"));
+
+            // A tail too small for its own tile lives in the header instead of
+            // painting a sliver. It keeps the count, the size and the member
+            // list one click away while the body stays label-sized.
+            let tail_chip = node.tail.as_ref().map(|tail| {
+                let mut args = FluentArgs::new();
+                args.set("count", tail.count as i64);
+                args.set("count_text", format_count(tail.count));
+                let label = rcx.i18n.get_text_with_args("treemap_aggregate", &args);
+                let tail_size = format_size_bytes(tail.size);
+                let chip_tooltip = SharedString::from(format!("{label}\n{tail_size}"));
+                let label_width = text_width(rcx.window, &label, FontWeight::NORMAL);
+                let show_label = inner_width
+                    >= TREEMAP_ICON_SPACE
+                        + TREEMAP_MIN_HEADER_NAME_WIDTH
+                        + 2.0
+                        + if show_header_size {
+                            size_width + TREEMAP_BLOCK_GAP
+                        } else {
+                            0.0
+                        }
+                        + 14.0
+                        + TREEMAP_BLOCK_GAP
+                        + label_width
+                        + 10.0;
+                let chip_view = header_view.clone();
+                let chip_tail = tail.clone();
+                h_flex()
+                    .id(element_id("treemap-tail-chip", &tail.path))
+                    .flex_shrink_0()
+                    .items_center()
+                    .gap_x(px(TREEMAP_BLOCK_GAP))
+                    .pl(px(3.0))
+                    .pr(px(if show_label { 5.0 } else { 3.0 }))
+                    .h(px(16.0))
+                    .rounded(px(TREEMAP_RADIUS))
+                    .bg(rcx.palette.body_fill())
+                    .text_color(rcx.palette.ink_secondary())
+                    .cursor_pointer()
+                    .aria_label(SharedString::from(format!("{label} {tail_size}")))
+                    .when(!rcx.panning && !rcx.suppress_tooltip, move |this| {
+                        this.tooltip(move |window, cx| {
+                            Tooltip::new(chip_tooltip.clone()).build(window, cx)
+                        })
+                    })
+                    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                        let tail = chip_tail.clone();
+                        chip_view.update(cx, |this, cx| {
+                            this.open_tail_listing(&tail, window, cx);
+                        });
+                        cx.stop_propagation();
+                    })
+                    .child(Icon::new(IconName::FileStack).xsmall())
+                    .when(show_label, |this| {
+                        this.child(div().whitespace_nowrap().text_sm().child(label))
+                    })
+            });
 
             // A container body is a low-share plate of the same tone, so nesting reads as tonal
             // plates instead of white boxes; it dims with its header when the node is out of focus.
@@ -926,7 +991,8 @@ fn render_nested_node(
                             .text_color(rcx.palette.ink_secondary())
                             .child(header_size_label),
                     )
-                });
+                })
+                .when_some(tail_chip, |this, chip| this.child(chip));
             // The container owns the press: it selects, drills on double click,
             // and stops propagation so the canvas does not clear the selection.
             // The header tints itself on hover/press; no ancestor frame reacts.

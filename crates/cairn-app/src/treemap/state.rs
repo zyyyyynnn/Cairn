@@ -10,7 +10,8 @@ use crate::treemap::store::{TreemapLru, MAX_CACHED_DIR_TREES, MAX_SCANNED_ITEM_T
 use crate::treemap::zoom::TreemapZoom;
 use cairn_core::treemap::{
     is_drive_root, layout_nested_treemap, path_is_within, relative_segments, same_directory,
-    NestedTreemapLayoutNode, NestedTreemapOptions, TreemapRect, TreemapTreeNode,
+    take_tail, NestedTreemapLayoutNode, NestedTreemapOptions, TreemapRect, TreemapTail,
+    TreemapTreeNode,
 };
 use cairn_protocol::message::{
     TreeEntryData, ERROR_CODE_TREE_NOT_DIRECTORY, ERROR_CODE_TREE_NOT_INDEXED,
@@ -82,6 +83,9 @@ pub struct TreemapViewState {
     cached_dir_trees: TreemapLru<String, Arc<TreemapTreeNode>>,
     /// Calculated rectangular layout nodes (hierarchical nested)
     pub(super) layout_nodes: Vec<NestedTreemapLayoutNode>,
+    /// The canvas root's folded tail when it cannot carry a tile label. The path
+    /// band hosts it; the body keeps its area for label-sized tiles.
+    pub(super) root_tail: Option<TreemapTail>,
     /// A context menu is open: hover tooltips stay hidden while the menu is active so a
     /// tooltip cannot cover the menu.
     pub(super) suppress_tooltip: bool,
@@ -170,6 +174,7 @@ impl TreemapViewState {
             stored_drive_tree: None,
             cached_dir_trees: TreemapLru::with_capacity(MAX_CACHED_DIR_TREES),
             layout_nodes: Vec::new(),
+            root_tail: None,
             detail_level: 5,
             suppress_tooltip: false,
             selected_path: None,
@@ -277,6 +282,7 @@ impl TreemapViewState {
         self.unavailable = None;
         self.content_revealed = false;
         self.layout_nodes.clear();
+        self.root_tail = None;
         self.root_tree = None;
     }
 
@@ -311,6 +317,7 @@ impl TreemapViewState {
         self.content_revealed = true;
         self.root_tree = None;
         self.layout_nodes.clear();
+        self.root_tail = None;
         self.current_dir_total_size = 0;
         self.current_dir_total_items = 0;
     }
@@ -363,8 +370,10 @@ impl TreemapViewState {
         let parent = self.navigation.current_dir().to_string();
         if let Some(ref tree) = self.root_tree {
             self.layout_nodes = layout_nested_treemap(&tree.children, &parent, bounds, &options, 0);
+            self.root_tail = take_tail(&mut self.layout_nodes);
         } else {
             self.layout_nodes.clear();
+            self.root_tail = None;
         }
         // A recompute starts from the layout's own width. The render pass then
         // adopts the projection that fits the current sidebar-driven canvas.
@@ -732,6 +741,7 @@ mod tests {
             depth: 0,
             aggregate_count: 0,
             aggregate_member_indices: Vec::new(),
+            tail: None,
         }
     }
 
@@ -1275,5 +1285,46 @@ mod tests {
         assert_eq!(state.children_at(r"D:\Windows").len(), 0);
         assert_eq!(state.children_at(r"C:\Nonexistent").len(), 0);
         assert_eq!(state.children_at(r"C:\Windows_Old").len(), 0);
+    }
+
+    /// A root tail too flat to carry a tile label leaves the body for the path
+    /// band entry, and that entry still resolves exactly the folded members.
+    #[test]
+    fn a_flat_root_tail_moves_to_the_path_band_with_its_members() {
+        let mut state = TreemapViewState::new_headless('C');
+        let mut root = TreemapTreeNode::new_dir(1, "C:".into(), 0);
+        let mut win = TreemapTreeNode::new_dir(2, "Windows".into(), 0);
+        win.size = 10_000_000_000;
+        root.children.push(win);
+        for index in 0..3u64 {
+            root.children.push(TreemapTreeNode::new_file(
+                index + 3,
+                format!("tiny{index}.bin"),
+                1_000,
+                0,
+            ));
+        }
+        apply_tree(&mut state, root);
+
+        let tail = state
+            .root_tail
+            .clone()
+            .expect("the flat tail moves to the path band");
+        assert_eq!(tail.count, 3);
+        assert_eq!(tail.size, 3_000);
+        assert!(
+            state.layout_nodes.iter().all(|node| !node.is_aggregate()),
+            "the body carries no summary strip"
+        );
+        let parent = cairn_core::treemap::aggregate_parent_path(&tail.path)
+            .expect("the tail names its directory");
+        assert_eq!(parent, r"C:\");
+        let rows = crate::shell::block_listing::block_listing_rows(
+            parent,
+            &tail.member_indices,
+            state.children_at(parent),
+        );
+        assert_eq!(rows.len(), 3);
+        assert!(rows.iter().all(|row| row.size == 1_000));
     }
 }

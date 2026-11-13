@@ -7,10 +7,12 @@
 
 use crate::app::{element_id, layout, CairnApp};
 use crate::shell::accessibility;
+use crate::shell::status_bar::format_count;
 use crate::shell::theme::{self, ShellTokens};
 use crate::treemap::dir_menu::{list_menu_directories, PATH_MENU_LIMIT};
 use crate::treemap::paint::text_width;
 use crate::treemap::path_input::normalize_treemap_path;
+use cairn_core::format_size_bytes;
 use cairn_core::treemap::path_segments;
 use fluent_bundle::FluentArgs;
 use gpui_kit::assets::IconName;
@@ -377,6 +379,80 @@ impl CairnApp {
         let error = self.treemap_path.error;
         let show_clear = editing && !self.treemap_path.input.read(cx).value().is_empty();
         let snap_margin = window.rem_size() * layout::SPACE_8;
+        // A canvas root whose folded tail cannot carry a tile label hosts it
+        // here instead of painting a sliver in the body.
+        let root_tail = self
+            .treemap_state
+            .as_ref()
+            .and_then(|state| state.root_tail.clone());
+        let root_tail_chip = root_tail.map(|tail| {
+            let mut args = FluentArgs::new();
+            args.set("count", tail.count as i64);
+            args.set("count_text", format_count(tail.count));
+            let label = self.i18n.get_text_with_args("treemap_aggregate", &args);
+            let tail_size = format_size_bytes(tail.size);
+            let tooltip = SharedString::from(format!("{label}\n{tail_size}"));
+            let chip_focus = window
+                .use_keyed_state(
+                    element_id("treemap-root-tail-focus", &tail.path),
+                    cx,
+                    |_, cx| cx.focus_handle().tab_stop(true),
+                )
+                .read(cx)
+                .clone();
+            let keyboard_navigation = cairn_ui::focus::keyboard_navigation(cx);
+            let chip_tail = tail.clone();
+            let key_tail = tail.clone();
+            let chip_view = view.clone();
+            let key_view = view.clone();
+            h_flex()
+                .id(element_id("treemap-root-tail", &tail.path))
+                .flex_shrink_0()
+                .items_center()
+                .gap_x(rems(layout::SPACE_8))
+                .h(rems(layout::SPACE_24))
+                .px(rems(layout::SPACE_8))
+                .rounded(tokens.radius)
+                .bg(tokens.background)
+                .text_color(tokens.muted_foreground)
+                .text_sm()
+                .cursor_pointer()
+                .aria_label(SharedString::from(format!("{label} {tail_size}")))
+                .track_focus(&chip_focus)
+                .hover(|this| this.bg(tokens.row_hover).text_color(tokens.foreground))
+                .when(!editing, move |this| {
+                    this.tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+                })
+                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                    let tail = chip_tail.clone();
+                    chip_view.update(cx, |this, cx| {
+                        this.open_tail_listing(&tail, window, cx);
+                    });
+                    cx.stop_propagation();
+                })
+                .on_action(
+                    move |_: &crate::shell::commands::OpenSelected,
+                          window: &mut Window,
+                          cx: &mut App| {
+                        cx.stop_propagation();
+                        let tail = key_tail.clone();
+                        key_view.update(cx, |this, cx| {
+                            this.open_tail_listing(&tail, window, cx);
+                        });
+                    },
+                )
+                .child(Icon::new(IconName::FileStack).xsmall())
+                .child(div().whitespace_nowrap().child(label))
+                .children(cairn_ui::focus::edge(
+                    &chip_focus,
+                    tokens.ring,
+                    tokens.radius,
+                    keyboard_navigation,
+                    window,
+                    cx,
+                ))
+                .into_any_element()
+        });
 
         let content = if editing {
             Input::new(&self.treemap_path.input)
@@ -728,6 +804,7 @@ impl CairnApp {
                             .justify_start()
                             .child(content),
                     )
+                    .when_some(root_tail_chip, |this, chip| this.child(chip))
                     .when(show_clear, |this| {
                         this.child(crate::view::treemap_path_clear_button(
                             &self.i18n,
