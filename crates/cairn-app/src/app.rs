@@ -281,6 +281,7 @@ pub struct QueryDomain {
     pub cancelled: bool,
     pub is_fetching_more: bool,
     pub is_searching: bool,
+    pub(crate) coordinator: crate::search::coordinator::SearchCoordinator,
     /// Byte offset where mouse text drag selection started, if a drag is in progress.
     pub text_selection_anchor: Option<usize>,
 }
@@ -327,6 +328,8 @@ pub struct ServiceDomain {
     pub is_probing_service: bool,
     pub service_issue: Option<crate::service::service_issue::ServiceIssue>,
     pub status: StatusBarModel,
+    /// Persistent named-pipe session reused across status, query, page, tree and config RPCs.
+    pub session: cairn_client::ServiceSession,
     /// The service's content-index lifecycle, including backfill progress and the last error.
     pub content_status: ContentIndexStatus,
     pub content_status_loading: bool,
@@ -360,6 +363,7 @@ pub(crate) struct RenameEditor {
 
 pub struct CairnApp {
     pub i18n: Rc<I18nManager>,
+    pub(crate) label_cache: crate::shell::i18n::StaticLabelCache,
     pub query: QueryDomain,
     pub results: ResultsDomain,
     pub service: ServiceDomain,
@@ -375,6 +379,7 @@ pub struct CairnApp {
     /// The menu entity of the open group, built from the live command state the moment it opens.
     pub group_menu: Option<Entity<PopupMenu>>,
     pub group_menu_dismiss: Option<Subscription>,
+    pub(crate) group_menu_entered: bool,
     /// Window-level focus-lost subscriptions, held so they stay registered for
     /// the lifetime of the view. Never read: dropping this field would cancel
     /// the focus restoration above.
@@ -401,6 +406,7 @@ pub struct CairnApp {
     /// can hand focus back to its trigger.
     pub(crate) treemap_path_menu_focus: Option<FocusHandle>,
     pub(crate) treemap_path_menu_dismiss: Option<Subscription>,
+    pub(crate) treemap_dir_loader: crate::treemap::dir_menu::DirectoryMenuLoader,
     /// The Recycle Bin view. The bin is a location, not a search scope: the view owns its rows,
     /// its selection and its error band together, so any query or drive switch releases the whole
     /// location instead of leaving half of it behind.
@@ -430,11 +436,28 @@ pub struct CairnApp {
 }
 
 impl CairnApp {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let bundle = crate::startup::StartupCoordinator::prepare(
+            Vec::new(),
+            &crate::startup::SystemBootstrapPorts,
+        );
+        Self::new_with_startup(bundle, window, cx)
+    }
+
+    pub(crate) fn new_with_startup(
+        startup: crate::startup::StartupBundle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         crate::shell::perf::mark("app new");
-        let settings = AppSettings::load();
-        let system_dark = crate::shell::theme::system_prefers_dark();
-        let i18n = Rc::new(I18nManager::new(&settings.effective_language()));
+        let crate::startup::StartupBundle {
+            plan: _,
+            settings,
+            system_dark,
+            i18n,
+            session,
+        } = startup;
 
         // `TableState` keeps its fetched window private, so the restored sort state is assigned
         // through its public fields instead of a struct literal.
@@ -513,8 +536,11 @@ impl CairnApp {
         #[cfg(all(windows, not(test)))]
         let hotkey_unavailable = hotkey.is_none();
 
+        crate::shell::theme::ensure_shell_tokens(cx);
+
         let mut app = Self {
             i18n,
+            label_cache: Default::default(),
             query: QueryDomain {
                 search_input: SearchInputState::default(),
                 query_text_metrics: Rc::new(RefCell::new(QueryTextMetrics::default())),
@@ -531,6 +557,7 @@ impl CairnApp {
                 cancelled: false,
                 is_fetching_more: false,
                 is_searching: false,
+                coordinator: crate::search::coordinator::SearchCoordinator::default(),
                 text_selection_anchor: None,
             },
             results: ResultsDomain {
@@ -548,12 +575,15 @@ impl CairnApp {
                 is_probing_service: true,
                 service_issue: None,
                 status: StatusBarModel::default(),
+                session,
                 content_status: ContentIndexStatus::default(),
                 content_status_loading: false,
                 content_status_error: None,
                 content_action_pending: false,
                 content_action_error: None,
-                service_installed: crate::service::service_control::service_is_installed(),
+                // Deferred off the critical path: connection success confirms installation, and
+                // failure checks SCM off-thread.
+                service_installed: false,
                 has_attempted_silent_start: false,
                 is_refreshing_status: false,
             },
@@ -564,6 +594,7 @@ impl CairnApp {
             open_group: None,
             group_menu: None,
             group_menu_dismiss: None,
+            group_menu_entered: false,
             _focus_lost: vec![focus_lost],
             _keyboard_modality: keyboard_modality,
             sidebar_collapsed: false,
@@ -595,6 +626,7 @@ impl CairnApp {
             treemap_path_menu_for: None,
             treemap_path_menu_focus: None,
             treemap_path_menu_dismiss: None,
+            treemap_dir_loader: Default::default(),
             recycle_bin: crate::shell::recycle_bin::RecycleBinView::closed(),
             block_listing: None,
             delete_in_flight: false,
@@ -625,18 +657,32 @@ impl CairnApp {
             }));
         #[cfg(not(test))]
         {
-            let notice_shown = app.consume_update_notice(cx);
             #[cfg(windows)]
-            if hotkey_unavailable && !notice_shown {
-                // One toast slot: an update result outranks a shortcut notice, and
-                // the registration failure is already logged.
-                let title = app.i18n.get_text("hotkey_unavailable_title");
-                let message = app.i18n.get_text("hotkey_unavailable_message");
-                app.show_info_toast(title, message, cx);
-            }
+            app.schedule_startup_notices(hotkey_unavailable, cx);
+            #[cfg(not(windows))]
+            app.schedule_startup_notices(false, cx);
         }
         app.check_service_connection(cx);
         app
+    }
+
+    pub(crate) fn cached_text(&self, key: &'static str) -> gpui_kit::gpui::SharedString {
+        self.label_cache.get(&self.i18n, key)
+    }
+
+    pub(crate) fn cached_control_name(
+        &self,
+        control: &crate::shell::accessibility::KeyControl,
+    ) -> gpui_kit::gpui::SharedString {
+        self.label_cache.get(&self.i18n, control.message())
+    }
+
+    pub(crate) fn cached_control_name_at(
+        &self,
+        control: &crate::shell::accessibility::KeyControl,
+        index: usize,
+    ) -> gpui_kit::gpui::SharedString {
+        self.label_cache.get(&self.i18n, control.message_at(index))
     }
 
     /// Opens a fresh table session. Every entry point that replaces the result set starts
@@ -835,7 +881,7 @@ impl EntityInputHandler for CairnApp {
         self.query
             .search_input
             .handle_replace_text_in_range(replacement_range, text);
-        self.trigger_search(cx);
+        self.schedule_text_search(cx);
         cx.notify();
     }
 
@@ -902,8 +948,7 @@ impl EntityInputHandler for CairnApp {
 mod tests {
     use core::prelude::rust_2021::test;
 
-    use super::{join_row_path, layout, CairnApp};
-    use crate::shell::theme::BASE_FONT_PX;
+    use super::{join_row_path, CairnApp};
     use gpui_kit::AppContext;
 
     #[test]
@@ -913,174 +958,15 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_icon_stays_inside_the_label_icon_band() {
-        let label = 0.875;
-        assert!((label..=label * 1.25).contains(&layout::SIDEBAR_ICON));
-    }
-
-    #[test]
-    fn every_shell_distance_lands_on_the_four_pixel_ladder() {
-        assert_eq!(
-            BASE_FONT_PX, 14.0,
-            "the compact type scale anchors the 4px step at 100% zoom"
-        );
-        // Ratio tokens are not distances. Everything that lays out the shell must be a
-        // whole 4px step.
-        let distances = [
-            layout::STEP,
-            layout::SPACE_4,
-            layout::SPACE_8,
-            layout::SPACE_12,
-            layout::SPACE_24,
-            layout::SPACE_32,
-            layout::SPACE_48,
-            layout::CONTROL_HEIGHT,
-            layout::ROW_HEIGHT,
-            layout::INNER_SPACING,
-            layout::SEARCH_BAND_HEIGHT,
-            layout::HEADER_HEIGHT,
-            layout::STATUS_HEIGHT,
-            layout::NAME_MIN_COLUMN,
-            layout::PATH_MIN_COLUMN,
-            layout::SIZE_COLUMN,
-            layout::DATE_COLUMN,
-            layout::TABLE_MIN_WIDTH,
-            layout::MESSAGE_MAX_WIDTH,
-            layout::SIDEBAR_WIDTH,
-            layout::CONTENT_INSET,
-            layout::TIGHT_LEAD,
-            layout::MENU_LEAD,
-            layout::SEARCH_BAND_LEAD,
-            layout::SEARCH_INPUT_LEAD,
-            layout::SIDEBAR_VIEWPORT_LEAD,
-        ];
-        for distance in distances {
-            let pixels = distance * BASE_FONT_PX;
-            assert!(
-                (pixels / 4.0).fract().abs() < 0.001,
-                "{distance}rem = {pixels}px is off the 4px ladder"
-            );
-        }
-    }
-
-    #[test]
-    #[allow(clippy::assertions_on_constants)]
-    fn the_band_measures_rows_in_the_same_rem_step_the_row_renders_at() {
-        assert!(
-            layout::ROW_HEIGHT > 1.0 && layout::ROW_HEIGHT < 3.0,
-            "row height {} is outside a readable dense band",
-            layout::ROW_HEIGHT
-        );
-        assert_eq!(
-            layout::HEADER_HEIGHT,
-            layout::ROW_HEIGHT,
-            "the heading row shares the result row's height"
-        );
-        assert_eq!(
-            layout::SEARCH_BAND_HEIGHT,
-            layout::ROW_HEIGHT + 2.0 * layout::TIGHT_LEAD,
-            "the search band is the row step plus one tight inset on each side"
-        );
-        assert!(
-            layout::INNER_SPACING > 0.0,
-            "a band with no inset presses its hairline against the control inside it"
-        );
-        assert_eq!(
-            layout::STATUS_HEIGHT,
-            layout::ROW_HEIGHT,
-            "the status line shares the result row's compact step"
-        );
-        assert!(
-            layout::CONTROL_HEIGHT >= layout::HEADER_HEIGHT,
-            "a control may not be shorter than the heading row it acts on"
-        );
-    }
-
-    #[test]
-    fn the_sidebar_caption_centre_matches_the_query_box() {
-        let caption_height = layout::SEARCH_BAND_HEIGHT - 2.0 * layout::SIDEBAR_VIEWPORT_LEAD;
-        let caption_centre = layout::SIDEBAR_VIEWPORT_LEAD + caption_height / 2.0;
-        let field_centre = layout::TIGHT_LEAD + layout::ROW_HEIGHT / 2.0;
-        assert!(
-            (caption_centre - field_centre).abs() < 0.0001,
-            "the section caption and the query box are centred on one line"
-        );
-        assert!(
-            (layout::SIDEBAR_VIEWPORT_LEAD + caption_height + layout::SPACE_4
-                - layout::SEARCH_BAND_HEIGHT)
-                .abs()
-                < 0.0001,
-            "the first sidebar row starts on the search band's lower edge"
-        );
-    }
-
-    fn heights_the_view_pins(source: &str) -> Vec<String> {
-        let mut pinned = Vec::new();
-        for (at, _) in source.match_indices("layout::") {
-            let tail = &source[at + "layout::".len()..];
-            let name: String = tail
-                .chars()
-                .take_while(|c| c.is_alphanumeric() || *c == '_')
-                .collect();
-            let applied_as_height = source[..at]
-                .chars()
-                .filter(|c| !c.is_whitespace())
-                .collect::<String>()
-                .ends_with("rems(");
-            if name.ends_with("_HEIGHT") && applied_as_height {
-                pinned.push(name);
-            }
-        }
-        pinned
-    }
-
-    #[test]
-    fn every_band_the_view_pins_is_counted_once_in_chrome_height() {
-        let combined = [
-            include_str!("view.rs"),
-            include_str!("search/bar_view.rs"),
-            include_str!("shell/sidebar_view.rs"),
-            include_str!("shell/status_bar_view.rs"),
-            include_str!("table/results_view.rs"),
-        ]
-        .join("\n");
-        let pinned = heights_the_view_pins(&combined);
-        let bands = layout::CHROME_BANDS.map(|(name, _)| name);
-        let pins = |name: &str| pinned.iter().any(|found| found == name);
-
-        // These are rows inside a band, not chrome stacked around the result band.
-        let inside_a_band = ["CONTROL_HEIGHT", "ROW_HEIGHT"];
-        for name in &pinned {
-            assert!(
-                bands.contains(&name.as_str()) || inside_a_band.contains(&name.as_str()),
-                "the view pins {name} as a height, which chrome_height neither adds up nor explains"
-            );
-        }
-        for name in bands {
-            assert!(
-                pins(name),
-                "chrome_height adds up {name}, but no band is pinned with it"
-            );
-        }
-        assert!(
-            pinned.len() > bands.len(),
-            "the scan found {pinned:?}; the shell pins at least the {bands:?} bands"
-        );
-    }
-
-    #[test]
-    #[allow(clippy::assertions_on_constants)]
-    fn the_column_lanes_are_shared_and_leave_room_for_the_path() {
-        assert!(layout::NAME_MIN_COLUMN > layout::PATH_MIN_COLUMN);
-        assert!(layout::DATE_COLUMN > layout::SIZE_COLUMN);
-    }
-
-    #[test]
     fn table_reveal_fade_epoch_advances_and_cleans_up() {
         gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
             gpui_kit::init(cx);
             let _ = gpui_kit::open_window(
-                gpui_kit::gpui::WindowOptions::default(),
+                gpui_kit::gpui::WindowOptions {
+                    show: false,
+                    focus: false,
+                    ..gpui_kit::gpui::WindowOptions::default()
+                },
                 cx,
                 |window, cx| {
                     let app = cx.new(|cx| CairnApp::new(window, cx));

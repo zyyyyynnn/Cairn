@@ -163,7 +163,7 @@ impl MultiVolumeEngine {
                     {
                         continue;
                     }
-                    if !vol.status.state().is_synced() && vol.records.is_empty() {
+                    if !vol.status.state().is_synced() && vol.records().is_empty() {
                         continue;
                     }
                     // A pure content disjunction can only match where some term hit, so a
@@ -175,7 +175,7 @@ impl MultiVolumeEngine {
                     // to. The FRN list is consumed as the bitmap is built.
                     let union_bits = hit_bitset(vol, &frns, cancel);
                     let mut matches = Vec::new();
-                    for (idx, rec) in vol.records.iter().enumerate() {
+                    for (idx, rec) in vol.records().iter().enumerate() {
                         if (idx & 0x3FFF) == 0 && cancel.is_cancelled() {
                             return (Vec::new(), 0, highlight_terms, snippets, 0);
                         }
@@ -189,7 +189,7 @@ impl MultiVolumeEngine {
                         return (Vec::new(), 0, highlight_terms, snippets, 0);
                     };
                     for &idx in &vol_matches {
-                        let frn = vol.records[idx as usize].frn;
+                        let frn = vol.records()[idx as usize].frn;
                         if let Some(snippet) = snippets_by_key.get(&(vol.drive_letter, frn)) {
                             snippets.insert((vol.drive_letter, frn), snippet.clone());
                         }
@@ -247,15 +247,15 @@ impl MultiVolumeEngine {
                     let Some(vol) = lock.get(&drive_letter) else {
                         continue;
                     };
-                    if !vol.status.state().is_synced() && vol.records.is_empty() {
+                    if !vol.status.state().is_synced() && vol.records().is_empty() {
                         continue;
                     }
-                    let Some(indices) = vol.frn_to_idx.get(&hit.frn) else {
+                    let Some(indices) = vol.record_indices_for_frn(hit.frn) else {
                         continue;
                     };
 
                     for &idx in indices {
-                        let rec = &vol.records[idx as usize];
+                        let rec = &vol.records()[idx as usize];
                         if rec.is_tombstone() {
                             continue;
                         }
@@ -263,9 +263,9 @@ impl MultiVolumeEngine {
                             if !compiled.evaluate_record(
                                 rec,
                                 idx,
-                                &vol.records,
-                                &vol.arena,
-                                &vol.path_cache,
+                                vol.records(),
+                                vol.arena(),
+                                vol.path_cache(),
                                 vol.drive_letter,
                             ) {
                                 continue;
@@ -277,7 +277,7 @@ impl MultiVolumeEngine {
                         all_results.push(SearchResultItem {
                             drive_letter: vol.drive_letter,
                             record_idx: idx,
-                            generation: vol.generation,
+                            generation: vol.generation(),
                         });
                         tantivy_vol_matches
                             .entry(vol.drive_letter)
@@ -389,7 +389,7 @@ impl MultiVolumeEngine {
                     {
                         continue;
                     }
-                    if !vol.status.state().is_synced() && vol.records.is_empty() {
+                    if !vol.status.state().is_synced() && vol.records().is_empty() {
                         continue;
                     }
                     // One record-index bitmap per content term. A hit FRN sets every record it
@@ -413,9 +413,9 @@ impl MultiVolumeEngine {
                         })
                     };
                     let matches = cairn_core::engine::execute_query_with_content(
-                        &vol.records,
-                        &vol.arena,
-                        &vol.path_cache,
+                        vol.records(),
+                        vol.arena(),
+                        vol.path_cache(),
                         vol.drive_letter,
                         &query_expr,
                         &matcher,
@@ -427,7 +427,7 @@ impl MultiVolumeEngine {
                         return (Vec::new(), 0, highlight_terms, snippets, 0);
                     };
                     for &idx in &vol_matches {
-                        let frn = vol.records[idx as usize].frn;
+                        let frn = vol.records()[idx as usize].frn;
                         if let Some(snippet) = snippets_by_key.get(&(vol.drive_letter, frn)) {
                             snippets.insert((vol.drive_letter, frn), snippet.clone());
                         }
@@ -438,7 +438,6 @@ impl MultiVolumeEngine {
             }
         } else {
             lock = self.volumes.read().unwrap();
-            let mut single_vol_presorted = false;
             // Every match would otherwise pay a full-path reconstruction just to apply a few
             // segment rules (a broad query could match most of the table). Compute the same
             // verdict once per volume and use it as an O(1) lookup; unsupported rule forms keep
@@ -453,26 +452,79 @@ impl MultiVolumeEngine {
                     {
                         return false;
                     }
-                    v.status.state().is_synced() || !v.records.is_empty()
+                    v.status.state().is_synced() || !v.records().is_empty()
                 })
                 .collect();
 
-            let is_single_vol = active_vols.len() == 1;
+            if active_vols.len() == 1 {
+                let vol = active_vols[0];
+                if cancel.is_cancelled() {
+                    return (Vec::new(), 0, highlight_terms, snippets, 0);
+                }
+                let presorted_col = vol.presorted_order(sort_by);
+                let mut matches = cairn_core::engine::execute_query_ordered(
+                    vol.records(),
+                    vol.arena(),
+                    vol.path_cache(),
+                    vol.drive_letter,
+                    &query_expr,
+                    presorted_col,
+                    cancel,
+                );
+                let Some(vol_bytes) =
+                    filter_unique_volume_matches(vol, &mut matches, &exclusions, cancel)
+                else {
+                    return (Vec::new(), 0, highlight_terms, snippets, 0);
+                };
+                if presorted_col.is_some() {
+                    if !sort_asc {
+                        matches.reverse();
+                    }
+                } else if matches.len() > 1 && !cancel.is_cancelled() {
+                    let dir = if sort_asc {
+                        SortDirection::Ascending
+                    } else {
+                        SortDirection::Descending
+                    };
+                    cairn_core::sort::sort_indices(
+                        &mut matches,
+                        vol.records(),
+                        vol.arena(),
+                        vol.path_cache(),
+                        vol.drive_letter,
+                        sort_by,
+                        dir,
+                        cancel,
+                    );
+                }
+                if cancel.is_cancelled() {
+                    return (Vec::new(), 0, highlight_terms, snippets, 0);
+                }
+                let gen = vol.generation();
+                let drive_letter = vol.drive_letter;
+                all_results = matches
+                    .into_iter()
+                    .map(|record_idx| SearchResultItem {
+                        drive_letter,
+                        record_idx,
+                        generation: gen,
+                    })
+                    .collect();
+                let total = all_results.len();
+                return (all_results, total, highlight_terms, snippets, vol_bytes);
+            }
+
             for vol in active_vols {
                 if cancel.is_cancelled() {
                     return (Vec::new(), 0, highlight_terms, snippets, 0);
                 }
-                let presorted_col = presorted_order(vol, sort_by);
-                if is_single_vol {
-                    single_vol_presorted = presorted_col.is_some();
-                }
                 let matches = cairn_core::engine::execute_query_ordered(
-                    &vol.records,
-                    &vol.arena,
-                    &vol.path_cache,
+                    vol.records(),
+                    vol.arena(),
+                    vol.path_cache(),
                     vol.drive_letter,
                     &query_expr,
-                    presorted_col,
+                    None,
                     cancel,
                 );
                 let Some(vol_matches) =
@@ -480,18 +532,8 @@ impl MultiVolumeEngine {
                 else {
                     return (Vec::new(), 0, highlight_terms, snippets, 0);
                 };
-                total_bytes = total_bytes.saturating_add(vol.calculate_matched_bytes(&vol_matches));
-            }
-
-            if single_vol_presorted {
-                if !sort_asc {
-                    all_results.reverse();
-                }
-                if cancel.is_cancelled() {
-                    return (Vec::new(), 0, highlight_terms, snippets, 0);
-                }
-                let total = all_results.len();
-                return (all_results, total, highlight_terms, snippets, total_bytes);
+                total_bytes =
+                    total_bytes.saturating_add(vol.sum_unique_matched_bytes(&vol_matches));
             }
         }
 
@@ -532,14 +574,14 @@ impl MultiVolumeEngine {
                 .into_par_iter()
                 .map(|item| {
                     let vol = get_vol(item.drive_letter);
-                    let rec = &vol.records[item.record_idx as usize];
-                    let name = vol.arena.get_name(rec.name_offset, rec.name_len);
+                    let rec = &vol.records()[item.record_idx as usize];
+                    let name = vol.arena().get_name(rec.name_offset, rec.name_len);
                     let key = match sort_by {
                         SortColumn::Name => SortKey::Name(name),
                         SortColumn::Path => {
-                            let parent = vol.path_cache.get_parent_path(
-                                &vol.records,
-                                &vol.arena,
+                            let parent = vol.path_cache().get_parent_path(
+                                vol.records(),
+                                vol.arena(),
                                 vol.drive_letter,
                                 item.record_idx,
                             );
@@ -550,7 +592,7 @@ impl MultiVolumeEngine {
                         SortColumn::DateCreated => SortKey::DateCreated(rec.created_ts, name),
                         SortColumn::Extension => {
                             let ext =
-                                vol.arena
+                                vol.arena()
                                     .get_ext(rec.name_offset, rec.name_len, rec.ext_offset);
                             SortKey::Extension(ext, name)
                         }
@@ -608,6 +650,37 @@ impl MultiVolumeEngine {
     }
 }
 
+/// Retains non-excluded unique record indices in place and sums live file sizes.
+/// Returns `None` if `cancel` triggers mid-loop.
+fn filter_unique_volume_matches(
+    vol: &VolumeIndex,
+    matches: &mut Vec<u32>,
+    exclusions: &PathExclusions,
+    cancel: &CancellationToken,
+) -> Option<u64> {
+    let mut write = 0usize;
+    let mut total_bytes: u64 = 0;
+    let records = vol.records();
+    for read in 0..matches.len() {
+        if (read & 0xFFF) == 0 && cancel.is_cancelled() {
+            return None;
+        }
+        let idx = matches[read];
+        if exclusions.excludes(vol, idx) {
+            continue;
+        }
+        if let Some(rec) = records.get(idx as usize) {
+            if rec.is_file() && !rec.is_tombstone() {
+                total_bytes = total_bytes.saturating_add(rec.size);
+            }
+        }
+        matches[write] = idx;
+        write += 1;
+    }
+    matches.truncate(write);
+    Some(total_bytes)
+}
+
 /// Filters `matches` against `exclusions` and appends non-excluded [`SearchResultItem`]s into
 /// `all_results`. Returns `None` if `cancel` triggers mid-loop.
 fn collect_volume_matches(
@@ -630,7 +703,7 @@ fn collect_volume_matches(
         all_results.push(SearchResultItem {
             drive_letter: vol.drive_letter,
             record_idx: idx,
-            generation: vol.generation,
+            generation: vol.generation(),
         });
     }
     Some(vol_matches)
@@ -658,14 +731,15 @@ fn hit_bitset(vol: &VolumeIndex, frns: &[u64], cancel: &CancellationToken) -> Bi
     if frns.is_empty() {
         return BitSet::with_capacity(0);
     }
+    let total_records = vol.records().len();
     frns.par_chunks(HIT_RESOLVE_CHUNK)
         .map(|chunk| {
             if cancel.is_cancelled() {
-                return BitSet::with_capacity(vol.records.len());
+                return BitSet::with_capacity(total_records);
             }
-            let mut bits = BitSet::with_capacity(vol.records.len());
+            let mut bits = BitSet::with_capacity(total_records);
             for &frn in chunk {
-                if let Some(indices) = vol.frn_to_idx.get(&frn) {
+                if let Some(indices) = vol.record_indices_for_frn(frn) {
                     for &idx in indices {
                         bits.insert(idx as usize);
                     }
@@ -674,26 +748,10 @@ fn hit_bitset(vol: &VolumeIndex, frns: &[u64], cancel: &CancellationToken) -> Bi
             bits
         })
         .reduce(
-            || BitSet::with_capacity(vol.records.len()),
+            || BitSet::with_capacity(total_records),
             |mut left, right| {
                 left.merge(&right);
                 left
             },
         )
-}
-
-/// Presorted index to use as the order for `sort_by`, or `None` when it cannot be trusted: a
-/// dirty index no longer matches the records, and DateCreated/Extension have no presorted array.
-pub(super) fn presorted_order(vol: &VolumeIndex, sort_by: SortColumn) -> Option<&[u32]> {
-    if vol.presorted_dirty {
-        return None;
-    }
-    let order = match sort_by {
-        SortColumn::Name => &vol.presorted.by_name,
-        SortColumn::Size => &vol.presorted.by_size,
-        SortColumn::DateModified => &vol.presorted.by_date_modified,
-        SortColumn::Path => &vol.presorted.by_path,
-        SortColumn::DateCreated | SortColumn::Extension => return None,
-    };
-    (!order.is_empty()).then_some(order.as_slice())
 }

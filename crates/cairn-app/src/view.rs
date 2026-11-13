@@ -47,7 +47,7 @@ const WINDOW_CONTROL_FOCUS_SIZE: Pixels = px(22.0);
 /// site keeps its own closure.
 struct WindowControl<'a> {
     control: &'static KeyControl,
-    label: String,
+    label: SharedString,
     icon: IconName,
     area: WindowControlArea,
     focus: &'a FocusHandle,
@@ -721,12 +721,13 @@ impl CairnApp {
         rem_size: Pixels,
     ) -> impl IntoElement {
         let control = accessibility::control_at(&element_id("toolbar-menu", group.key()));
-        let name = accessibility::name(control, &self.i18n);
+        let name = self.cached_control_name(control);
         let is_open = self.open_group == Some(group);
         let menu = self.group_menu.clone();
         let mouse_view = view.clone();
         let click_view = view.clone();
         let hover_view = view.clone();
+        let pop_view = view.clone();
 
         let trigger = Button::new(element_id("toolbar-menu", group.key()))
             .font_weight(FontWeight::MEDIUM)
@@ -737,7 +738,7 @@ impl CairnApp {
             // exceeds the platform bar: at 110% the control step is taller than the 34px bar.
             .h(rems(layout::CONTROL_HEIGHT))
             .max_h(layout::TITLE_BAR_HEIGHT)
-            .label(self.i18n.get_text(group.label_key()))
+            .label(self.cached_text(group.label_key()))
             .text_color(if is_open {
                 tokens.foreground
             } else {
@@ -793,6 +794,13 @@ impl CairnApp {
                                 .id(element_id("toolbar-menu-pop", group.key()))
                                 .occlude()
                                 .top(rems(layout::CONTROL_HEIGHT))
+                                .on_hover(move |hovered, _window, cx| {
+                                    if *hovered {
+                                        pop_view.update(cx, |this, _cx| {
+                                            this.mark_group_menu_entered();
+                                        });
+                                    }
+                                })
                                 .child(menu),
                         ),
                 ))
@@ -834,12 +842,12 @@ impl CairnApp {
             .read(cx)
             .clone();
         let minimize_control = accessibility::control("window-minimize");
-        let minimize_label = accessibility::name(minimize_control, &self.i18n);
+        let minimize_label = self.cached_control_name(minimize_control);
         let maximize_control = accessibility::control("window-maximize");
         let maximize_label =
-            accessibility::name_at(maximize_control, usize::from(is_maximized), &self.i18n);
+            self.cached_control_name_at(maximize_control, usize::from(is_maximized));
         let close_control = accessibility::control("window-close");
-        let close_label = accessibility::name(close_control, &self.i18n);
+        let close_label = self.cached_control_name(close_control);
 
         div()
             .id("cairn-title-bar")
@@ -881,7 +889,7 @@ impl CairnApp {
                                     .line_height(relative(theme::SERIF_LINE_HEIGHT))
                                     .font(theme::serif_font(FontWeight::SEMIBOLD))
                                     .text_color(tokens.foreground)
-                                    .child(self.i18n.get_text("app_title")),
+                                    .child(self.cached_text("app_title")),
                             ),
                     )
                     .child(
@@ -897,10 +905,11 @@ impl CairnApp {
                                             .size(rems(theme::UI_ICON_SIZE)),
                                     )
                                     .disabled(!can_back)
-                                    .accessibility_label(accessibility::name(
-                                        accessibility::control("nav-back"),
-                                        &self.i18n,
-                                    ))
+                                    .accessibility_label(
+                                        self.cached_control_name(accessibility::control(
+                                            "nav-back",
+                                        )),
+                                    )
                                     .on_click(move |_, window, cx| {
                                         back_view.update(cx, |this, cx| this.go_back(window, cx));
                                     }),
@@ -914,10 +923,11 @@ impl CairnApp {
                                             .size(rems(theme::UI_ICON_SIZE)),
                                     )
                                     .disabled(!can_forward)
-                                    .accessibility_label(accessibility::name(
-                                        accessibility::control("nav-forward"),
-                                        &self.i18n,
-                                    ))
+                                    .accessibility_label(
+                                        self.cached_control_name(accessibility::control(
+                                            "nav-forward",
+                                        )),
+                                    )
                                     .on_click(move |_, window, cx| {
                                         forward_view
                                             .update(cx, |this, cx| this.go_forward(window, cx));
@@ -932,10 +942,9 @@ impl CairnApp {
                                             .size(rems(theme::UI_ICON_SIZE)),
                                     )
                                     .disabled(!can_up)
-                                    .accessibility_label(accessibility::name(
-                                        accessibility::control("nav-up"),
-                                        &self.i18n,
-                                    ))
+                                    .accessibility_label(
+                                        self.cached_control_name(accessibility::control("nav-up")),
+                                    )
                                     .on_click(move |_, window, cx| {
                                         up_view.update(cx, |this, cx| this.go_up(window, cx));
                                     }),
@@ -954,9 +963,8 @@ impl CairnApp {
                                         })
                                         .size(rems(theme::UI_ICON_SIZE)),
                                     )
-                                    .accessibility_label(accessibility::name(
+                                    .accessibility_label(self.cached_control_name(
                                         accessibility::control("sidebar-toggle"),
-                                        &self.i18n,
                                     ))
                                     .on_click(move |_, _window, cx| {
                                         toggle_view.update(cx, |this, cx| this.toggle_sidebar(cx));

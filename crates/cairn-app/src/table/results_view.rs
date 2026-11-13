@@ -13,7 +13,8 @@ use crate::shell::file_icon::file_kind_icon;
 use crate::shell::menu_rules::IndexMenuState;
 use crate::shell::state_view::{icon_action, render_state_band};
 use crate::shell::theme::{self, ShellTokens};
-use crate::table::model::{format_timestamp, ColumnBoundary, SortColumn, SortColumnLabel};
+use crate::table::model::{ColumnBoundary, SortColumn, SortColumnLabel};
+use crate::table::presentation::format_timestamp_cached;
 use crate::table::surface::{result_surface, ResultSurface, ResultSurfaceInputs};
 use crate::view::announce_shortcut;
 use cairn_core::format_size_bytes;
@@ -1134,7 +1135,7 @@ impl CairnApp {
                             .bg(tokens.muted)
                             .text_sm()
                             .text_color(tokens.muted_foreground)
-                            .child(self.i18n.get_text("result_content_match")),
+                            .child(self.cached_text("result_content_match")),
                     )
                 })
             })
@@ -1200,7 +1201,7 @@ impl CairnApp {
             } else {
                 tokens.muted_foreground
             })
-            .child(format_timestamp(row.modified_ts))
+            .child(format_timestamp_cached(row.modified_ts))
     }
 
     /// A row the service has not delivered yet: an explicit loading state, so a scrollbar ahead of

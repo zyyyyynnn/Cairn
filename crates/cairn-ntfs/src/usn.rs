@@ -129,6 +129,7 @@ pub fn parse_usn_records(buf: &[u8]) -> (i64, Vec<UsnChange>) {
     // The first 8 bytes of the buffer contain the NextUsn to use for subsequent queries
     let next_usn = i64::from_le_bytes(buf[0..8].try_into().unwrap());
     let mut changes = Vec::new();
+    let mut utf16_scratch: Vec<u16> = Vec::with_capacity(256);
     let mut cursor = 8;
 
     while cursor + 60 <= buf.len() {
@@ -139,30 +140,9 @@ pub fn parse_usn_records(buf: &[u8]) -> (i64, Vec<UsnChange>) {
 
         let major_ver = u16::from_le_bytes(buf[cursor + 4..cursor + 6].try_into().unwrap());
         if major_ver == 2 || major_ver == 3 {
-            let frn = u64::from_le_bytes(buf[cursor + 8..cursor + 16].try_into().unwrap());
-            let parent_frn = u64::from_le_bytes(buf[cursor + 16..cursor + 24].try_into().unwrap());
-            let timestamp = i64::from_le_bytes(buf[cursor + 32..cursor + 40].try_into().unwrap());
             let reason = u32::from_le_bytes(buf[cursor + 40..cursor + 44].try_into().unwrap());
-            let file_attrs = u32::from_le_bytes(buf[cursor + 52..cursor + 56].try_into().unwrap());
-            let fn_len =
-                u16::from_le_bytes(buf[cursor + 56..cursor + 58].try_into().unwrap()) as usize;
-            let fn_offset =
-                u16::from_le_bytes(buf[cursor + 58..cursor + 60].try_into().unwrap()) as usize;
-
-            let is_dir = (file_attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
-
-            let name = if cursor + fn_offset + fn_len <= cursor + record_len {
-                let name_bytes = &buf[cursor + fn_offset..cursor + fn_offset + fn_len];
-                let u16_chars: Vec<u16> = name_bytes
-                    .chunks_exact(2)
-                    .map(|c| u16::from_le_bytes([c[0], c[1]]))
-                    .collect();
-                String::from_utf16_lossy(&u16_chars)
-            } else {
-                String::new()
-            };
-
-            // SPEC IDX-03: Process only final CLOSE records or rename pair records
+            // SPEC IDX-03: Process only final CLOSE records or rename pair records before
+            // touching parent/name fields so intermediate unclosed churn costs a single branch.
             let is_close = (reason & USN_REASON_CLOSE) != 0;
             let is_rename =
                 (reason & (USN_REASON_RENAME_NEW_NAME | USN_REASON_RENAME_OLD_NAME)) != 0;
@@ -171,6 +151,31 @@ pub fn parse_usn_records(buf: &[u8]) -> (i64, Vec<UsnChange>) {
                 continue;
             }
 
+            let frn = u64::from_le_bytes(buf[cursor + 8..cursor + 16].try_into().unwrap());
+            let parent_frn = u64::from_le_bytes(buf[cursor + 16..cursor + 24].try_into().unwrap());
+            let timestamp = i64::from_le_bytes(buf[cursor + 32..cursor + 40].try_into().unwrap());
+            let file_attrs = u32::from_le_bytes(buf[cursor + 52..cursor + 56].try_into().unwrap());
+            let is_dir = (file_attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+
+            let decode_name = |scratch: &mut Vec<u16>| -> String {
+                let fn_len =
+                    u16::from_le_bytes(buf[cursor + 56..cursor + 58].try_into().unwrap()) as usize;
+                let fn_offset =
+                    u16::from_le_bytes(buf[cursor + 58..cursor + 60].try_into().unwrap()) as usize;
+                if cursor + fn_offset + fn_len <= cursor + record_len {
+                    let name_bytes = &buf[cursor + fn_offset..cursor + fn_offset + fn_len];
+                    scratch.clear();
+                    scratch.extend(
+                        name_bytes
+                            .chunks_exact(2)
+                            .map(|c| u16::from_le_bytes([c[0], c[1]])),
+                    );
+                    String::from_utf16_lossy(scratch)
+                } else {
+                    String::new()
+                }
+            };
+
             // MUST prioritize USN_REASON_FILE_DELETE
             if (reason & USN_REASON_FILE_DELETE) != 0 {
                 changes.push(UsnChange::Deleted { frn });
@@ -178,7 +183,7 @@ pub fn parse_usn_records(buf: &[u8]) -> (i64, Vec<UsnChange>) {
                 changes.push(UsnChange::Created {
                     frn,
                     parent_frn,
-                    name,
+                    name: decode_name(&mut utf16_scratch),
                     is_dir,
                     attributes: file_attrs,
                     ts: timestamp,
@@ -187,7 +192,7 @@ pub fn parse_usn_records(buf: &[u8]) -> (i64, Vec<UsnChange>) {
                 changes.push(UsnChange::Renamed {
                     frn,
                     parent_frn,
-                    name,
+                    name: decode_name(&mut utf16_scratch),
                     is_dir,
                     is_new_name: true,
                 });
@@ -195,7 +200,7 @@ pub fn parse_usn_records(buf: &[u8]) -> (i64, Vec<UsnChange>) {
                 changes.push(UsnChange::Renamed {
                     frn,
                     parent_frn,
-                    name,
+                    name: decode_name(&mut utf16_scratch),
                     is_dir,
                     is_new_name: false,
                 });
@@ -308,5 +313,131 @@ mod tests {
 
         // Buffer too small should error
         assert!(UsnJournalData::parse(&buf[..40]).is_err());
+    }
+
+    #[test]
+    fn parse_usn_records_skips_unclosed_and_keeps_rename_and_unicode_names() {
+        fn push_record(
+            out: &mut Vec<u8>,
+            frn: u64,
+            parent_frn: u64,
+            reason: u32,
+            attrs: u32,
+            name_bytes: &[u8],
+        ) {
+            let record_len = (60 + name_bytes.len() + 7) & !7;
+            let start = out.len();
+            out.resize(start + record_len, 0);
+            out[start..start + 4].copy_from_slice(&(record_len as u32).to_le_bytes());
+            out[start + 4..start + 6].copy_from_slice(&2u16.to_le_bytes());
+            out[start + 8..start + 16].copy_from_slice(&frn.to_le_bytes());
+            out[start + 16..start + 24].copy_from_slice(&parent_frn.to_le_bytes());
+            out[start + 32..start + 40].copy_from_slice(&999i64.to_le_bytes());
+            out[start + 40..start + 44].copy_from_slice(&reason.to_le_bytes());
+            out[start + 52..start + 56].copy_from_slice(&attrs.to_le_bytes());
+            out[start + 56..start + 58].copy_from_slice(&(name_bytes.len() as u16).to_le_bytes());
+            out[start + 58..start + 60].copy_from_slice(&60u16.to_le_bytes());
+            out[start + 60..start + 60 + name_bytes.len()].copy_from_slice(name_bytes);
+        }
+
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&5000i64.to_le_bytes());
+
+        // 1. Unclosed non-rename record must be skipped even with non-UTF-16 odd payload.
+        push_record(
+            &mut buf,
+            10,
+            1,
+            USN_REASON_DATA_EXTEND,
+            0,
+            &[0xFF, 0x00, 0xAA],
+        );
+        // 2. Deleted closed record carries no name; odd filename bytes must be ignored.
+        push_record(
+            &mut buf,
+            11,
+            1,
+            USN_REASON_FILE_DELETE | USN_REASON_CLOSE,
+            0,
+            &[0xAA, 0xBB, 0xCC],
+        );
+        // 3. Created record with Unicode UTF-16 filename.
+        let unicode_bytes: Vec<u8> = "设计文档.md"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        push_record(
+            &mut buf,
+            12,
+            1,
+            USN_REASON_FILE_CREATE | USN_REASON_CLOSE,
+            0,
+            &unicode_bytes,
+        );
+        // 4. Rename old & new (without USN_REASON_CLOSE, because rename records arrive unclosed).
+        let old_bytes: Vec<u8> = "old.txt"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let new_bytes: Vec<u8> = "new.txt"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        push_record(&mut buf, 13, 1, USN_REASON_RENAME_OLD_NAME, 0, &old_bytes);
+        push_record(&mut buf, 13, 2, USN_REASON_RENAME_NEW_NAME, 0, &new_bytes);
+        // 5. DataChanged & BasicInfoChanged carry no filename.
+        push_record(
+            &mut buf,
+            14,
+            1,
+            USN_REASON_DATA_OVERWRITE | USN_REASON_CLOSE,
+            0,
+            &old_bytes,
+        );
+        push_record(
+            &mut buf,
+            15,
+            1,
+            USN_REASON_BASIC_INFO_CHANGE | USN_REASON_CLOSE,
+            FILE_ATTRIBUTE_DIRECTORY,
+            &new_bytes,
+        );
+
+        let (next, changes) = parse_usn_records(&buf);
+        assert_eq!(next, 5000);
+        assert_eq!(
+            changes,
+            vec![
+                UsnChange::Deleted { frn: 11 },
+                UsnChange::Created {
+                    frn: 12,
+                    parent_frn: 1,
+                    name: "设计文档.md".to_string(),
+                    is_dir: false,
+                    attributes: 0,
+                    ts: 999,
+                },
+                UsnChange::Renamed {
+                    frn: 13,
+                    parent_frn: 1,
+                    name: "old.txt".to_string(),
+                    is_dir: false,
+                    is_new_name: false,
+                },
+                UsnChange::Renamed {
+                    frn: 13,
+                    parent_frn: 2,
+                    name: "new.txt".to_string(),
+                    is_dir: false,
+                    is_new_name: true,
+                },
+                UsnChange::DataChanged { frn: 14 },
+                UsnChange::BasicInfoChanged {
+                    frn: 15,
+                    ts: 999,
+                    attributes: FILE_ATTRIBUTE_DIRECTORY,
+                },
+            ]
+        );
     }
 }

@@ -11,6 +11,7 @@
 //! standard user change.
 
 use cairn_client::client::{CairnClient, ClientError};
+use cairn_client::ServiceSession;
 
 /// The index-configuration change this build can submit.
 ///
@@ -113,8 +114,11 @@ pub fn submission_from_service_answer(
 ///
 /// Sequence: read the live configuration over the pipe, edit it, send the edited document back via
 /// `SetConfig`. No elevation is involved; the service persists the document as LocalSystem.
-pub async fn submit_index_scope(change: IndexScopeChange) -> SubmissionState {
-    let live = match read_live_config().await {
+pub async fn submit_index_scope(
+    session: &ServiceSession,
+    change: IndexScopeChange,
+) -> SubmissionState {
+    let live = match read_live_config(session).await {
         Ok(live) => live,
         Err(error) => return prepare_failed(error.to_string()),
     };
@@ -124,7 +128,7 @@ pub async fn submit_index_scope(change: IndexScopeChange) -> SubmissionState {
         Err(error) => return prepare_failed(error.to_string()),
     };
 
-    submission_from_service_answer(submit_config(&updated).await)
+    submission_from_service_answer(submit_config(session, &updated).await)
 }
 
 /// The configuration the service runs, in the TOML form `GetConfig` reports.
@@ -138,10 +142,8 @@ fn prepare_failed(detail: String) -> SubmissionState {
 }
 
 /// Reads the configuration the running service reports (read class).
-async fn read_live_config() -> Result<ServiceConfigDocument, ClientError> {
-    let mut client = cairn_client::client::CairnClient::connect().await?;
-    client.hello().await?;
-    let envelope = client.get_config().await?;
+async fn read_live_config(session: &ServiceSession) -> Result<ServiceConfigDocument, ClientError> {
+    let envelope = session.get_config().await?;
 
     match CairnClient::unwrap_service_response(envelope.payload)? {
         cairn_protocol::message::ResponsePayload::ConfigResult { config_toml } => Ok(config_toml),
@@ -150,10 +152,11 @@ async fn read_live_config() -> Result<ServiceConfigDocument, ClientError> {
 }
 
 /// Sends the edited document to the service, which persists and applies it.
-async fn submit_config(document: &str) -> Result<(bool, String), ClientError> {
-    let mut client = cairn_client::client::CairnClient::connect().await?;
-    client.hello().await?;
-    client.submit_service_config(document).await
+async fn submit_config(
+    session: &ServiceSession,
+    document: &str,
+) -> Result<(bool, String), ClientError> {
+    session.submit_service_config(document).await
 }
 
 #[cfg(test)]

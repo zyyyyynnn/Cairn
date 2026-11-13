@@ -5,10 +5,27 @@
 //! Query orchestration: search triggering, query lifecycle, paging requests, and highlight slicing.
 
 use crate::app::{layout, CairnApp, HighlightSpan};
+use crate::search::coordinator::{MonotonicClock, SearchCommand, SearchPlan, ServiceTransport};
 use crate::service::ipc_tasks::get_tokio_runtime;
 use crate::service::service_issue::ServiceIssue;
 use gpui_kit::gpui::{AsyncApp, Context, Pixels, Point};
 use std::ops::Range;
+
+#[derive(Default)]
+struct QueuedTransport {
+    cancels: Vec<u64>,
+    query: Option<(u64, SearchCommand)>,
+}
+
+impl ServiceTransport for QueuedTransport {
+    fn send_cancel(&mut self, query_id: u64) {
+        self.cancels.push(query_id);
+    }
+
+    fn send_query(&mut self, query_id: u64, command: SearchCommand) {
+        self.query = Some((query_id, command));
+    }
+}
 
 /// Slices a file name into alternating highlighted and plain spans based on byte offsets.
 pub fn split_name_highlights<'a>(
@@ -309,6 +326,54 @@ impl CairnApp {
             .is_some()
     }
 
+    /// Schedules an interactive search after text/IME/delete edits. Keeps already visible rows
+    /// intact until new results arrive (no per-keystroke white flash), coalesces rapid key bursts,
+    /// and cancels superseded in-flight queries on the service before dispatching newer ones.
+    pub fn schedule_text_search(&mut self, cx: &mut Context<Self>) {
+        self.discard_rename(cx);
+        if self.recycle_bin.is_open() {
+            self.query.is_searching = false;
+            self.filter_recycle_bin(cx);
+            return;
+        }
+        if self.block_listing.is_some() {
+            self.query.is_searching = false;
+            self.filter_block_listing(cx);
+            return;
+        }
+        let command = self.build_search_command(true);
+        let mut transport = QueuedTransport::default();
+        let plan =
+            self.query
+                .coordinator
+                .schedule_text_edit(command, &MonotonicClock, &mut transport);
+        self.apply_coordinator_dispatch(transport, cx);
+        if let SearchPlan::Debounced { token, delay } = plan {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(delay).await;
+                let _ = this.update(cx, |this: &mut CairnApp, cx| {
+                    this.flush_debounced_search(token, cx);
+                });
+            })
+            .detach();
+        }
+    }
+
+    fn flush_debounced_search(&mut self, token: u64, cx: &mut Context<Self>) {
+        if self.recycle_bin.is_open() || self.block_listing.is_some() {
+            return;
+        }
+        let mut transport = QueuedTransport::default();
+        if self
+            .query
+            .coordinator
+            .flush_debounced(token, &MonotonicClock, &mut transport)
+            .is_some()
+        {
+            self.apply_coordinator_dispatch(transport, cx);
+        }
+    }
+
     pub fn trigger_search(&mut self, cx: &mut Context<Self>) {
         // An explicit search leaves the row the rename editor was opened on.
         self.discard_rename(cx);
@@ -325,6 +390,7 @@ impl CairnApp {
             self.query.rejection = None;
             // An explicit trigger is a new state: a stop belongs to the query it stopped.
             self.query.cancelled = false;
+            self.query.coordinator.set_cancelled(false);
             self.start_status_refresh(cx);
             cx.notify();
             return;
@@ -345,23 +411,15 @@ impl CairnApp {
         if !self.query.is_searching {
             return;
         }
-        let cancelled_id = self.query.query_id;
-        self.query.query_id += 1;
+        let mut transport = QueuedTransport::default();
+        self.query.coordinator.cancel_in_flight(&mut transport);
+        self.query.query_id = self.query.coordinator.current_query_id();
         self.query.is_searching = false;
         self.query.is_fetching_more = false;
         self.query.cancelled = true;
         // A stopped first page reveals the band through the same entrance an empty answer uses.
         self.note_table_empty(cx);
-        get_tokio_runtime().spawn(async move {
-            match cairn_client::client::CairnClient::connect().await {
-                Ok(mut client) => {
-                    if let Err(err) = client.cancel(cancelled_id).await {
-                        tracing::warn!("cancel request for query {cancelled_id} failed: {err}");
-                    }
-                }
-                Err(err) => tracing::warn!("cancel connection failed: {err}"),
-            }
-        });
+        self.spawn_queued_cancels(transport.cancels);
         cx.notify();
     }
 
@@ -375,6 +433,7 @@ impl CairnApp {
         // for a new one.
         if self.query.is_searching
             || self.query.cancelled
+            || !self.query.coordinator.can_background_refresh()
             || self.recycle_bin.is_open()
             || self.drive_view.is_some()
             || self.query.rejection.is_some()
@@ -384,52 +443,7 @@ impl CairnApp {
         self.run_query(cx, false);
     }
 
-    fn run_query(&mut self, cx: &mut Context<Self>, clear_rows: bool) {
-        // While the bin is open the search box is an in-place filter over the
-        // shell listing, not a request for an index page. Typing, paste, undo
-        // and IME commit all arrive here, so this one branch keeps the location
-        // stable for every text path.
-        if self.recycle_bin.is_open() {
-            self.query.query_id += 1;
-            self.query.is_searching = false;
-            self.filter_recycle_bin(cx);
-            return;
-        }
-        if self.block_listing.is_some() {
-            self.query.query_id += 1;
-            self.query.is_searching = false;
-            self.filter_block_listing(cx);
-            return;
-        }
-        self.query.query_id += 1;
-        let qid = self.query.query_id;
-        self.query.rejection = None;
-        self.query.cancelled = false;
-
-        if clear_rows {
-            // A new result set starts at its first row. The view republishes the scroll handle's
-            // offset into `table.scroll_top` every frame, so resetting the table alone would be
-            // overwritten by the previous result's offset on the next render; the handle has to
-            // return to the top too.
-            self.results.rows_scroll.set_offset(Point::default());
-            self.results.table.scroll_top = 0.0;
-            self.results.table.set_rows(Vec::new(), 0);
-            self.query.active_session_id = None;
-            // The new result set has no completed count yet; the band shows only its loading
-            // control until the query and any index build settle.
-            self.service.status.clear_objects_count();
-            self.begin_table_session();
-        }
-
-        // An empty query is not an idle state: it is the "所有文件" view. The service answers it
-        // with the whole index, so startup, service reconnect and Escape all land here and show
-        // the table rather than a "start typing" placeholder.
-        self.query.is_searching = true;
-        // Any index query leaves the Recycle Bin view: the bin is a location,
-        // not a search scope. Its filtered listing is released with the view.
-        self.recycle_bin.leave();
-        cx.notify();
-
+    fn build_search_command(&self, reset_scroll_on_apply: bool) -> SearchCommand {
         let raw_text = self.query.search_input.text.trim().to_string();
         let query_defaults = cairn_protocol::message::QueryDefaults {
             case_sensitive: self.query.case_sensitive,
@@ -442,31 +456,93 @@ impl CairnApp {
             exclude_hidden: false,
             exclude_system: false,
         };
-        let mut q = raw_text;
+        let mut query = raw_text;
         if let Some(mac) = self.query.active_filter.query_macro() {
-            q = format!("{mac} {q}");
+            query = format!("{mac} {query}");
         }
         if let Some(drive) = self.query.scope_drive {
-            q = format!("{}: {q}", drive.to_ascii_uppercase());
+            query = format!("{}: {query}", drive.to_ascii_uppercase());
         }
+        SearchCommand {
+            query,
+            defaults: query_defaults,
+            sort_column: self.results.table.sort_column,
+            sort_asc: self.results.table.sort_asc,
+            page_size: layout::RESULT_PAGE_SIZE,
+            reset_scroll_on_apply,
+        }
+    }
 
-        let sort_column = self.results.table.sort_column;
-        let sort_asc = self.results.table.sort_asc;
-        let page_size = layout::RESULT_PAGE_SIZE;
+    fn run_query(&mut self, cx: &mut Context<Self>, reset_scroll_on_apply: bool) {
+        // While the bin is open the search box is an in-place filter over the
+        // shell listing, not a request for an index page. Typing, paste, undo
+        // and IME commit all arrive here, so this one branch keeps the location
+        // stable for every text path.
+        if self.recycle_bin.is_open() {
+            self.query.is_searching = false;
+            self.filter_recycle_bin(cx);
+            return;
+        }
+        if self.block_listing.is_some() {
+            self.query.is_searching = false;
+            self.filter_block_listing(cx);
+            return;
+        }
+        let command = self.build_search_command(reset_scroll_on_apply);
+        let mut transport = QueuedTransport::default();
+        self.query
+            .coordinator
+            .dispatch_immediate(command, &MonotonicClock, &mut transport);
+        self.apply_coordinator_dispatch(transport, cx);
+    }
 
+    fn spawn_queued_cancels(&self, cancels: Vec<u64>) {
+        if cancels.is_empty() {
+            return;
+        }
+        let session = self.service.session.clone();
+        get_tokio_runtime().spawn(async move {
+            for cancelled_id in cancels {
+                if let Err(err) = session.cancel(cancelled_id).await {
+                    tracing::warn!("cancel request for query {cancelled_id} failed: {err}");
+                }
+            }
+        });
+    }
+
+    fn apply_coordinator_dispatch(&mut self, transport: QueuedTransport, cx: &mut Context<Self>) {
+        self.query.query_id = self.query.coordinator.current_query_id();
+        self.query.rejection = None;
+        self.query.cancelled = self.query.coordinator.is_cancelled();
+        self.query.is_searching = self.query.coordinator.is_searching();
+        self.recycle_bin.leave();
+        if self.results.table.total_rows() == 0 {
+            self.begin_table_session();
+        }
+        self.spawn_queued_cancels(transport.cancels);
+
+        let Some((qid, cmd)) = transport.query else {
+            cx.notify();
+            return;
+        };
+
+        cx.notify();
+        let session = self.service.session.clone();
         cx.spawn(async move |this, cx: &mut AsyncApp| {
             let (tx, rx) = tokio::sync::oneshot::channel();
             crate::shell::perf::mark("query start");
             get_tokio_runtime().spawn(async move {
                 let started = std::time::Instant::now();
-                let res = match cairn_client::client::CairnClient::connect().await {
-                    Ok(mut client) => {
-                        client
-                            .query(qid, &q, query_defaults, sort_column, sort_asc, page_size)
-                            .await
-                    }
-                    Err(e) => Err(e),
-                };
+                let res = session
+                    .query(
+                        qid,
+                        &cmd.query,
+                        cmd.defaults,
+                        cmd.sort_column,
+                        cmd.sort_asc,
+                        cmd.page_size,
+                    )
+                    .await;
                 crate::shell::perf::mark(&format!(
                     "query ipc {:.3}ms",
                     started.elapsed().as_secs_f64() * 1000.0
@@ -476,25 +552,25 @@ impl CairnApp {
 
             let res = rx.await;
             this.update(cx, |this: &mut CairnApp, cx| {
-                // Cancelling moves the id forward, so the answer the service was finishing when
-                // it stopped is dropped like any superseded answer.
                 if qid != this.query.query_id {
                     return;
                 }
                 let res = match res {
                     Ok(res) => res,
                     Err(e) => {
-                        this.query.is_searching = false;
-                        // The background task ended without answering, so no later response will
-                        // end the loading state this query started.
+                        this.query.coordinator.abort_waiting_on_error(qid);
+                        this.query.is_searching = this.query.coordinator.is_searching();
                         tracing::warn!("Cairn query response task lost: {e}");
                         cx.notify();
                         return;
                     }
                 };
-                this.query.is_searching = false;
                 match res {
                     Ok(envelope) => {
+                        let Some(reset_scroll) = this.query.coordinator.accept_response(qid) else {
+                            return;
+                        };
+                        this.query.is_searching = this.query.coordinator.is_searching();
                         this.service.is_service_connected = true;
                         this.service.service_issue = None;
                         this.service.status.update_volumes(envelope.volumes);
@@ -510,26 +586,21 @@ impl CairnApp {
                                 this.query.rejection = None;
                                 this.query.cancelled = false;
                                 this.query.active_session_id = Some(session_id);
-                                if clear_rows {
+                                if reset_scroll {
+                                    this.results.rows_scroll.set_offset(Point::default());
+                                    this.results.table.scroll_top = 0.0;
                                     this.results.table.set_rows(first_page, total_matches);
                                 } else {
                                     this.results.table.refresh_rows(first_page, total_matches);
                                 }
-                                // A row the reloaded window no longer shows
-                                // cannot keep an inline editor.
                                 this.discard_rename_if_row_unloaded(cx);
                                 crate::shell::perf::mark(&format!(
                                     "query applied id={qid} total={total_matches}"
                                 ));
-                                // The entrance starts with the first visible content, not when the
-                                // request left the input handler. An empty answer reveals the state
-                                // band through the same entrance.
                                 this.note_table_content(cx);
                                 if total_matches == 0 {
                                     this.note_table_empty(cx);
                                 }
-                                // The band shows the exact total only after the result set has
-                                // settled; there is no animated or partial number.
                                 this.service
                                     .status
                                     .set_objects_summary(total_matches, total_bytes);
@@ -538,8 +609,9 @@ impl CairnApp {
                                 this.query.rejection = QueryRejection::from_error_code(code);
                                 this.query.cancelled = false;
                                 if this.query.rejection.is_some() {
-                                    // The refusal band is content too; it enters through the
-                                    // same reveal as an empty answer.
+                                    this.results.table.set_rows(Vec::new(), 0);
+                                    this.query.active_session_id = None;
+                                    this.service.status.clear_objects_count();
                                     this.note_table_empty(cx);
                                 }
                             }
@@ -547,6 +619,8 @@ impl CairnApp {
                         }
                     }
                     Err(e) => {
+                        this.query.coordinator.abort_waiting_on_error(qid);
+                        this.query.is_searching = this.query.coordinator.is_searching();
                         tracing::warn!("Cairn IPC query error: {}", e);
                         if query_error_marks_service_down(&e) {
                             this.service.is_service_connected = false;
@@ -572,13 +646,11 @@ impl CairnApp {
         // offset that is so a response already in flight cannot be mistaken for it.
         self.results.table.note_page_request(offset);
 
+        let session = self.service.session.clone();
         cx.spawn(async move |this, cx: &mut AsyncApp| {
             let (tx, rx) = tokio::sync::oneshot::channel();
             get_tokio_runtime().spawn(async move {
-                let res = match cairn_client::client::CairnClient::connect().await {
-                    Ok(mut client) => client.get_rows(session_id, offset, limit).await,
-                    Err(e) => Err(e),
-                };
+                let res = session.get_rows(session_id, offset, limit).await;
                 let _ = tx.send(res);
             });
 
@@ -836,7 +908,11 @@ mod tests {
         gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
             gpui_kit::init(cx);
             let _ = gpui_kit::open_window(
-                gpui_kit::gpui::WindowOptions::default(),
+                gpui_kit::gpui::WindowOptions {
+                    show: false,
+                    focus: false,
+                    ..gpui_kit::gpui::WindowOptions::default()
+                },
                 cx,
                 |window, cx| {
                     let app = cx.new(|cx| CairnApp::new(window, cx));
@@ -872,7 +948,11 @@ mod tests {
         gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
             gpui_kit::init(cx);
             let _ = gpui_kit::open_window(
-                gpui_kit::gpui::WindowOptions::default(),
+                gpui_kit::gpui::WindowOptions {
+                    show: false,
+                    focus: false,
+                    ..gpui_kit::gpui::WindowOptions::default()
+                },
                 cx,
                 |window, cx| {
                     let app = cx.new(|cx| CairnApp::new(window, cx));

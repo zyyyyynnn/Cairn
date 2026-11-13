@@ -65,12 +65,12 @@ impl CairnApp {
         let clear = accessibility::control("search-clear");
         let metrics = self.query.query_text_metrics.clone();
         let accessible_name = if self.recycle_bin.is_open() {
-            self.i18n.get_text("recycle_bin_filter_label")
+            self.cached_text("recycle_bin_filter_label")
         } else {
-            accessibility::name(control, &self.i18n)
+            self.cached_control_name(control)
         };
 
-        let clear_label = accessibility::name(clear, &self.i18n);
+        let clear_label = self.cached_control_name(clear);
         let show_clear = !self.query.search_input.text.is_empty();
         announce_shortcut(accessibility::element(control), control)
             .aria_label(accessible_name)
@@ -290,7 +290,7 @@ impl CairnApp {
 
     /// Normal queries match names and paths; body search is the explicit `content:` term, so the
     /// placeholder does not promise content results for text that never asked for them.
-    pub(crate) fn placeholder_text(&self) -> String {
+    pub(crate) fn placeholder_text(&self) -> SharedString {
         if let Some(listing) = self.block_listing.as_ref() {
             // The path scope lives in the box; the status bar stays the plain
             // count/size summary of whatever the rows currently are.
@@ -298,12 +298,14 @@ impl CairnApp {
             args.set("dir", listing.directory().to_string());
             args.set("count", listing.count() as i64);
             args.set("count_text", format_count(listing.count()));
-            self.i18n
-                .get_text_with_args("treemap_block_filter_placeholder", &args)
+            SharedString::from(
+                self.i18n
+                    .get_text_with_args("treemap_block_filter_placeholder", &args),
+            )
         } else if self.recycle_bin.is_open() {
-            self.i18n.get_text("recycle_bin_filter_placeholder")
+            self.cached_text("recycle_bin_filter_placeholder")
         } else {
-            self.i18n.get_text("search_placeholder")
+            self.cached_text("search_placeholder")
         }
     }
 

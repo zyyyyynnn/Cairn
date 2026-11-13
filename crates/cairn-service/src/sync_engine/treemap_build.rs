@@ -97,7 +97,7 @@ impl MultiVolumeEngine {
             .ok_or(TreeUnavailable::NotIndexed)?;
         let volumes = self.volumes.read().unwrap();
         let volume = volumes.get(&drive).ok_or(TreeUnavailable::NotIndexed)?;
-        let dir_index = DirectorySizeIndex::build(&volume.records, &volume.arena);
+        let dir_index = DirectorySizeIndex::build(volume.records(), volume.arena());
 
         let is_root = path
             .trim_end_matches('\\')
@@ -106,20 +106,14 @@ impl MultiVolumeEngine {
             (None, format!("{drive}:\\"))
         } else {
             let idx = dir_index
-                .resolve_path_to_idx(&volume.records, &volume.arena, path)
+                .resolve_path_to_idx(volume.records(), volume.arena(), path)
                 .flatten()
                 .ok_or(TreeUnavailable::NotIndexed)?;
-            let record = &volume.records[idx as usize];
+            let record = &volume.records()[idx as usize];
             if !record.is_dir() {
                 return Err(TreeUnavailable::NotDirectory);
             }
-            (
-                Some(idx),
-                volume
-                    .arena
-                    .get_name(record.name_offset, record.name_len)
-                    .to_string(),
-            )
+            (Some(idx), volume.record_name(record).to_string())
         };
 
         // The budget picks the depth, not the caller. A depth-capped subtree that
@@ -134,7 +128,7 @@ impl MultiVolumeEngine {
         )
         .ok_or(TreeUnavailable::TooLarge)?;
         let tree =
-            dir_index.build_tree_node(&volume.records, &volume.arena, dir_idx, &root_name, depth);
+            dir_index.build_tree_node(volume.records(), volume.arena(), dir_idx, &root_name, depth);
         let mut entries = Vec::with_capacity(entry_count);
         flatten_tree(&tree, 0, &mut entries);
         // A path above either budget cannot be answered in one response.

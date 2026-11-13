@@ -8,9 +8,6 @@
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if cairn_setup::quiet::handle_cleanup_helper(&args) {
-        return;
-    }
     if args.iter().any(|arg| is_quiet(arg)) {
         std::process::exit(cairn_setup::quiet::quiet_uninstall());
     }

@@ -22,7 +22,8 @@ pub(crate) struct BlockListing {
     /// The block's member count, independent of the in-place filter.
     count: usize,
     all: Vec<FileRowData>,
-    rows: Vec<FileRowData>,
+    /// Populated only while a filter query is active, avoiding a second full copy when unfiltered.
+    filtered: Option<Vec<FileRowData>>,
     total_bytes: u64,
 }
 
@@ -32,8 +33,8 @@ impl BlockListing {
         Self {
             directory,
             count,
-            all: rows.clone(),
-            rows,
+            all: rows,
+            filtered: None,
             total_bytes,
         }
     }
@@ -47,11 +48,11 @@ impl BlockListing {
     }
 
     pub(crate) fn rows(&self) -> &[FileRowData] {
-        &self.rows
+        self.filtered.as_deref().unwrap_or(&self.all)
     }
 
     pub(crate) fn total(&self) -> usize {
-        self.rows.len()
+        self.rows().len()
     }
 
     pub(crate) fn total_bytes(&self) -> u64 {
@@ -61,7 +62,9 @@ impl BlockListing {
     /// Reorders the listing to the table's current sort.
     pub(crate) fn sort(&mut self, column: SortColumn, ascending: bool) {
         sort_rows(&mut self.all, column, ascending);
-        sort_rows(&mut self.rows, column, ascending);
+        if let Some(filtered) = self.filtered.as_mut() {
+            sort_rows(filtered, column, ascending);
+        }
     }
 
     /// Drops the given full paths from the listing after a successful delete.
@@ -70,16 +73,30 @@ impl BlockListing {
             let full = join_listing_path(&self.directory, &row.name);
             !paths.iter().any(|path| path.eq_ignore_ascii_case(&full))
         });
+        if let Some(filtered) = self.filtered.as_mut() {
+            filtered.retain(|row| {
+                let full = join_listing_path(&self.directory, &row.name);
+                !paths.iter().any(|path| path.eq_ignore_ascii_case(&full))
+            });
+        }
         self.count = self.all.len();
     }
 
     /// Applies a successful rename to the rows a later filter, sort or page
     /// reinstall reads from.
     pub(crate) fn rename_path(&mut self, old_path: &str, new_name: &str) {
-        for row in self.all.iter_mut().chain(self.rows.iter_mut()) {
+        for row in self.all.iter_mut() {
             let full = join_listing_path(&self.directory, &row.name);
             if full.eq_ignore_ascii_case(old_path) {
                 row.name = new_name.to_string();
+            }
+        }
+        if let Some(filtered) = self.filtered.as_mut() {
+            for row in filtered.iter_mut() {
+                let full = join_listing_path(&self.directory, &row.name);
+                if full.eq_ignore_ascii_case(old_path) {
+                    row.name = new_name.to_string();
+                }
             }
         }
     }
@@ -88,20 +105,27 @@ impl BlockListing {
     /// search text, the same in-place filter the Recycle Bin uses.
     pub(crate) fn apply_filter(&mut self, needle: &str, case_sensitive: bool) {
         let needle = needle.trim();
-        self.rows = if needle.is_empty() {
-            self.all.clone()
+        self.filtered = if needle.is_empty() {
+            None
         } else {
             let lowered = needle.to_lowercase();
-            self.all
-                .iter()
-                .filter(|row| {
-                    listing_matches(&row.name, needle, &lowered, case_sensitive)
-                        || listing_matches(&row.path, needle, &lowered, case_sensitive)
-                })
-                .cloned()
-                .collect()
+            Some(
+                self.all
+                    .iter()
+                    .filter(|row| {
+                        listing_matches(&row.name, needle, &lowered, case_sensitive)
+                            || listing_matches(&row.path, needle, &lowered, case_sensitive)
+                    })
+                    .cloned()
+                    .collect(),
+            )
         };
-        self.total_bytes = self.rows.iter().map(|row| row.size).sum();
+        self.total_bytes = self.rows().iter().map(|row| row.size).sum();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_filtered_buffer(&self) -> bool {
+        self.filtered.is_some()
     }
 }
 
@@ -389,5 +413,22 @@ mod tests {
             listing.rows().iter().all(|row| row.name != "boot.ini"),
             "the old name must not come back through a reinstall"
         );
+    }
+
+    #[test]
+    fn unfiltered_listing_shares_single_buffer_until_filtered() {
+        let children = vec![child("Windows", 300, true), child("boot.ini", 100, false)];
+        let rows = block_listing_rows(r"C:\", &[0, 1], &children);
+        let mut listing = BlockListing::new(r"C:\".to_string(), 2, rows);
+        assert!(!listing.has_filtered_buffer());
+        assert_eq!(listing.rows().len(), 2);
+
+        listing.apply_filter("boot", false);
+        assert!(listing.has_filtered_buffer());
+        assert_eq!(listing.rows().len(), 1);
+
+        listing.apply_filter("", false);
+        assert!(!listing.has_filtered_buffer());
+        assert_eq!(listing.rows().len(), 2);
     }
 }

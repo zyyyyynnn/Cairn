@@ -107,14 +107,11 @@ impl CairnApp {
         cx.notify();
 
         let path_for_service = scan_path.to_string_lossy().into_owned();
+        let session = self.service.session.clone();
         cx.spawn(async move |this, cx: &mut AsyncApp| {
             let (tx, rx) = tokio::sync::oneshot::channel();
             get_tokio_runtime().spawn(async move {
-                let result = async {
-                    let mut client = cairn_client::client::CairnClient::connect().await?;
-                    client.get_tree(&path_for_service, MAX_TREE_DEPTH).await
-                }
-                .await;
+                let result = session.get_tree(&path_for_service, MAX_TREE_DEPTH).await;
                 let _ = tx.send(result);
             });
 
@@ -318,7 +315,7 @@ mod tests {
 
     #[test]
     fn revealing_a_finished_scan_keys_the_dissolve_to_that_generation() {
-        let mut state = crate::treemap::state::TreemapViewState::new_for_test('C');
+        let mut state = crate::treemap::state::TreemapViewState::new_headless('C');
         state.is_scanning = true;
         state.reveal_content();
         assert!(
@@ -336,7 +333,11 @@ mod tests {
         gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
             gpui_kit::init(cx);
             let _ = gpui_kit::open_window(
-                gpui_kit::gpui::WindowOptions::default(),
+                gpui_kit::gpui::WindowOptions {
+                    show: false,
+                    focus: false,
+                    ..gpui_kit::gpui::WindowOptions::default()
+                },
                 cx,
                 |window, cx| {
                     let app = cx.new(|cx| CairnApp::new(window, cx));

@@ -11,9 +11,11 @@
 //! file can crash or stall this process without touching the LocalSystem service.
 
 use cairn_content::extractor::CompositeExtractor;
-use cairn_content::indexer::ContentIndex;
+use cairn_content::indexer::ContentWriter;
 use cairn_protocol::ContentIndexTask;
 use clap::Parser;
+use std::fs::File;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -44,14 +46,14 @@ struct WorkerCli {
 
 fn extract_and_index(
     extractor: &CompositeExtractor,
-    index: &ContentIndex,
+    writer: &ContentWriter,
     task: &ContentIndexTask,
     max_bytes: usize,
 ) -> Result<(), String> {
     let body = extractor
-        .extract_file(std::path::Path::new(&task.path), max_bytes)
+        .extract_file(Path::new(&task.path), max_bytes)
         .map_err(|err| err.to_string())?;
-    index
+    writer
         .index_document_deferred(
             task.volume_id,
             task.frn,
@@ -63,33 +65,44 @@ fn extract_and_index(
         .map_err(|err| err.to_string())
 }
 
+fn for_each_non_empty_line<R: BufRead>(
+    mut reader: R,
+    mut on_line: impl FnMut(&str),
+) -> std::io::Result<()> {
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if reader.read_line(&mut line)? == 0 {
+            break;
+        }
+        let trimmed = line.trim();
+        if !trimmed.is_empty() {
+            on_line(trimmed);
+        }
+    }
+    Ok(())
+}
+
 /// Applies clear, deletions and documents to one writer generation and commits them together.
 /// The caller waits for Tantivy's merges before this process exits.
-fn apply_batches(
+fn apply_batches<RB: BufRead, RD: BufRead>(
     extractor: &CompositeExtractor,
-    index: &ContentIndex,
-    batch: Option<&Path>,
-    delete_batch: Option<&Path>,
+    writer: &ContentWriter,
+    batch: Option<RB>,
+    delete_batch: Option<RD>,
     clear: bool,
     max_bytes: usize,
 ) -> Result<(u64, u64), Box<dyn std::error::Error>> {
     if clear {
-        index.clear_deferred()?;
+        writer.clear_deferred()?;
     }
 
     let mut processed = 0u64;
     let mut failed = 0u64;
     let mut deletions = Vec::new();
-    if let Some(delete_path) = delete_batch {
-        use std::io::BufRead;
-        let file = std::fs::File::open(delete_path)?;
-        let reader = std::io::BufReader::new(file);
-        for line in reader.lines() {
-            let line = line?;
-            if line.trim().is_empty() {
-                continue;
-            }
-            match serde_json::from_str::<(u64, u64)>(&line) {
+    if let Some(delete_reader) = delete_batch {
+        for_each_non_empty_line(delete_reader, |line| {
+            match serde_json::from_str::<(u64, u64)>(line) {
                 Ok(pair) => deletions.push(pair),
                 Err(err) => {
                     // Deletion lines share the summary's failure counter so a corrupt batch
@@ -98,51 +111,46 @@ fn apply_batches(
                     error!("Malformed deletion task: {err}");
                 }
             }
-        }
-        index.delete_documents_deferred(&deletions)?;
+        })?;
+        writer.delete_documents_deferred(&deletions)?;
     }
 
-    if let Some(batch_path) = batch {
-        use std::io::BufRead;
-        let file = std::fs::File::open(batch_path)?;
-        let reader = std::io::BufReader::new(file);
-        for line in reader.lines() {
-            let line = line?;
-            if line.trim().is_empty() {
-                continue;
-            }
-            let task: ContentIndexTask = match serde_json::from_str(&line) {
+    if let Some(batch_reader) = batch {
+        for_each_non_empty_line(batch_reader, |line| {
+            let task: ContentIndexTask = match serde_json::from_str(line) {
                 Ok(task) => task,
                 Err(err) => {
                     failed += 1;
                     error!("Malformed batch task: {err}");
-                    continue;
+                    return;
                 }
             };
-            match extract_and_index(extractor, index, &task, max_bytes) {
+            match extract_and_index(extractor, writer, &task, max_bytes) {
                 Ok(()) => processed += 1,
                 Err(err) => {
                     failed += 1;
                     info!("Skipped {}: {err}", task.path);
                 }
             }
-        }
+        })?;
     }
 
     if clear || !deletions.is_empty() || processed > 0 {
-        index.commit()?;
+        writer.commit()?;
     }
 
     Ok((processed, failed))
 }
 
 fn main() -> std::process::ExitCode {
+    let args = WorkerCli::parse();
+
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::from_default_env())
         .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .init();
 
-    match run(WorkerCli::parse()) {
+    match run(args) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
             error!("{error}");
@@ -162,38 +170,64 @@ fn worker_exit_code(error: &(dyn std::error::Error + 'static)) -> u8 {
     }
 }
 
-fn run(args: WorkerCli) -> Result<(), Box<dyn std::error::Error>> {
-    let extractor = CompositeExtractor::new();
-    let index = ContentIndex::open_or_create(&args.index_dir)?;
+fn open_buf_reader(path: &Path) -> std::io::Result<BufReader<File>> {
+    Ok(BufReader::new(File::open(path)?))
+}
 
-    if args.batch.is_some() || args.delete_batch.is_some() {
-        let (processed, failed) = apply_batches(
-            &extractor,
-            &index,
-            args.batch.as_deref(),
-            args.delete_batch.as_deref(),
-            args.clear,
-            args.max_bytes,
-        )?;
+fn run_worker<RB: BufRead, RD: BufRead, W: Write>(
+    index_dir: &Path,
+    batch: Option<RB>,
+    delete_batch: Option<RD>,
+    clear: bool,
+    max_bytes: usize,
+    out: &mut W,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let extractor = CompositeExtractor::new();
+    let writer = ContentWriter::open_or_create(index_dir)?;
+
+    if batch.is_some() || delete_batch.is_some() {
+        let (processed, failed) =
+            apply_batches(&extractor, &writer, batch, delete_batch, clear, max_bytes)?;
         // Merges run asynchronously; exiting now would abort them and leave one segment per
         // commit. The service starts a new worker for every batch, so the merge must finish here.
-        index.finish()?;
+        writer.finish()?;
         // The service reads this line; keep it the only stdout output.
-        println!(
+        writeln!(
+            out,
             "{}",
             serde_json::json!({ "processed": processed, "failed": failed })
-        );
+        )?;
+        out.flush()?;
         return Ok(());
     }
 
-    if args.clear {
-        index.clear()?;
+    if clear {
+        writer.clear()?;
     } else {
         info!("Nothing to do: pass --batch, --delete-batch or --clear");
     }
 
-    index.finish()?;
+    writer.finish()?;
     Ok(())
+}
+
+fn run(args: WorkerCli) -> Result<(), Box<dyn std::error::Error>> {
+    let batch = args.batch.as_deref().map(open_buf_reader).transpose()?;
+    let delete_batch = args
+        .delete_batch
+        .as_deref()
+        .map(open_buf_reader)
+        .transpose()?;
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    run_worker(
+        &args.index_dir,
+        batch,
+        delete_batch,
+        args.clear,
+        args.max_bytes,
+        &mut out,
+    )
 }
 
 #[cfg(test)]
@@ -225,14 +259,23 @@ mod tests {
 
     #[test]
     fn test_apply_batches_empty_and_malformed() {
+        use std::io::Cursor;
+
         let temp = tempfile::tempdir().expect("tempdir");
         let idx_dir = temp.path().join("idx");
-        let index = ContentIndex::open_or_create(&idx_dir).expect("create index");
+        let writer = ContentWriter::open_or_create(&idx_dir).expect("create writer");
         let extractor = CompositeExtractor::new();
 
         // 1. Empty runs
-        let (processed, failed) =
-            apply_batches(&extractor, &index, None, None, false, 1024 * 1024).expect("empty batch");
+        let (processed, failed) = apply_batches(
+            &extractor,
+            &writer,
+            None::<Cursor<&[u8]>>,
+            None::<Cursor<&[u8]>>,
+            false,
+            1024 * 1024,
+        )
+        .expect("empty batch");
         assert_eq!(processed, 0);
         assert_eq!(failed, 0);
 
@@ -260,9 +303,9 @@ mod tests {
 
         let (processed, failed) = apply_batches(
             &extractor,
-            &index,
-            Some(&batch_file),
-            Some(&del_file),
+            &writer,
+            Some(open_buf_reader(&batch_file).expect("open batch")),
+            Some(open_buf_reader(&del_file).expect("open dels")),
             false,
             1024 * 1024,
         )
@@ -312,5 +355,68 @@ mod tests {
             worker_exit_code(&WrappedError(std::io::Error::from_raw_os_error(5))),
             worker_exit::ACCESS_DENIED
         );
+    }
+
+    #[test]
+    fn run_worker_writes_summary_and_persists_content_writer_index() {
+        use cairn_content::ContentSearcher;
+        use std::io::Cursor;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let idx_dir = temp.path().join("idx");
+        let doc_a = temp.path().join("alpha.txt");
+        let doc_b = temp.path().join("beta.txt");
+        std::fs::write(&doc_a, "Rust 全文检索架构").expect("write alpha");
+        std::fs::write(&doc_b, "将被删除的旧文档").expect("write beta");
+
+        let seed_task = ContentIndexTask {
+            volume_id: 1,
+            frn: 200,
+            size: 24,
+            modified_ts: 100,
+            path: doc_b.to_string_lossy().into_owned(),
+        };
+        let seed_jsonl = format!("{}\n", serde_json::to_string(&seed_task).unwrap());
+        let mut seed_out = Vec::new();
+        run_worker(
+            &idx_dir,
+            Some(Cursor::new(seed_jsonl.as_bytes())),
+            None::<Cursor<&[u8]>>,
+            false,
+            1024 * 1024,
+            &mut seed_out,
+        )
+        .expect("seed run_worker");
+
+        let new_task = ContentIndexTask {
+            volume_id: 1,
+            frn: 100,
+            size: 23,
+            modified_ts: 200,
+            path: doc_a.to_string_lossy().into_owned(),
+        };
+        let batch_jsonl = format!("{}\n", serde_json::to_string(&new_task).unwrap());
+        let delete_jsonl = "[1, 200]\n";
+        let mut out = Vec::new();
+        run_worker(
+            &idx_dir,
+            Some(Cursor::new(batch_jsonl.as_bytes())),
+            Some(Cursor::new(delete_jsonl.as_bytes())),
+            false,
+            1024 * 1024,
+            &mut out,
+        )
+        .expect("update+delete run_worker");
+
+        let summary: serde_json::Value = serde_json::from_slice(&out).expect("stdout JSON summary");
+        assert_eq!(summary["processed"], 1);
+        assert_eq!(summary["failed"], 0);
+
+        let searcher = ContentSearcher::open(&idx_dir).expect("open searcher");
+        assert_eq!(searcher.document_count().unwrap(), 1);
+        let hits = searcher.search("全文检索", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!((hits[0].volume_id, hits[0].frn), (1, 100));
+        assert!(searcher.search("旧文档", 10).unwrap().is_empty());
     }
 }

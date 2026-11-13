@@ -21,9 +21,8 @@ thread_local! {
     static MENU_ITEMS: RefCell<Option<[MenuItem; 2]>> = const { RefCell::new(None) };
 }
 
-/// The words the two rows show in `language`.
-fn labels(language: &str) -> [String; 2] {
-    let i18n = I18nManager::new(language);
+/// The words the two rows show using an already-built `I18nManager`.
+pub(crate) fn labels_with_i18n(i18n: &I18nManager) -> [String; 2] {
     MENU_KEYS.map(|key| i18n.get_text(key))
 }
 
@@ -99,11 +98,11 @@ pub(crate) fn toggle_main_window() {
     }
 }
 
-/// Creates the tray icon with its menu named in `language` and keeps the row handles for later
+/// Creates the tray icon with its menu named via `i18n` and keeps the row handles for later
 /// language changes. `None` when the shell offers no icon, so the window still opens.
-pub fn init(language: &str) -> Option<TrayIcon> {
+pub(crate) fn init_with_i18n(i18n: &I18nManager) -> Option<TrayIcon> {
     let menu = Menu::new();
-    let [show_text, exit_text] = labels(language);
+    let [show_text, exit_text] = labels_with_i18n(i18n);
     let show = MenuItem::new(show_text, true, None);
     let exit = MenuItem::new(exit_text, true, None);
     let _ = menu.append(&show);
@@ -145,9 +144,9 @@ pub fn init(language: &str) -> Option<TrayIcon> {
     Some(tray)
 }
 
-/// Rewrites the two rows in `language`. Without a tray this does nothing.
-pub fn set_language(language: &str) {
-    let [show_text, exit_text] = labels(language);
+/// Rewrites the two rows via `i18n`. Without a tray this does nothing.
+pub(crate) fn set_language_with_i18n(i18n: &I18nManager) {
+    let [show_text, exit_text] = labels_with_i18n(i18n);
     MENU_ITEMS.with(|items| {
         if let Some([show, exit]) = &*items.borrow() {
             show.set_text(show_text);
@@ -160,14 +159,17 @@ pub fn set_language(language: &str) {
 mod tests {
     use core::prelude::rust_2021::test;
 
-    use super::{labels, set_language, MENU_KEYS};
+    use super::{labels_with_i18n, set_language_with_i18n, MENU_KEYS};
+    use crate::shell::i18n::I18nManager;
     use crate::shell::settings::{LANGUAGE_EN_US, LANGUAGE_ZH_CN};
 
     /// Both rows resolve in both locales, so a missing message would show its raw id in the tray.
     #[test]
     fn every_tray_row_has_a_message_in_both_locales() {
-        let zh = labels(LANGUAGE_ZH_CN);
-        let en = labels(LANGUAGE_EN_US);
+        let zh_i18n = I18nManager::new(LANGUAGE_ZH_CN);
+        let en_i18n = I18nManager::new(LANGUAGE_EN_US);
+        let zh = labels_with_i18n(&zh_i18n);
+        let en = labels_with_i18n(&en_i18n);
         for (index, key) in MENU_KEYS.iter().enumerate() {
             assert_ne!(zh[index], *key, "{key} falls back to its id in zh-CN");
             assert_ne!(en[index], *key, "{key} falls back to its id in en-US");
@@ -181,7 +183,7 @@ mod tests {
     /// must still be safe.
     #[test]
     fn changing_the_language_without_a_tray_is_a_no_op() {
-        set_language(LANGUAGE_ZH_CN);
-        set_language(LANGUAGE_EN_US);
+        set_language_with_i18n(&I18nManager::new(LANGUAGE_ZH_CN));
+        set_language_with_i18n(&I18nManager::new(LANGUAGE_EN_US));
     }
 }

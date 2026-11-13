@@ -26,10 +26,10 @@ fn directory_sizes_aggregate_their_indexed_descendants() {
         sized_item(6, 5, "c.bin", false, 25),
     ]);
 
-    assert_eq!(vol.records[record_index(&vol, 2) as usize].size, 150);
-    assert_eq!(vol.records[record_index(&vol, 5) as usize].size, 25);
-    assert_eq!(vol.records[record_index(&vol, 1) as usize].size, 175);
-    assert_eq!(vol.records[record_index(&vol, 3) as usize].size, 100);
+    assert_eq!(vol.records()[record_index(&vol, 2) as usize].size, 150);
+    assert_eq!(vol.records()[record_index(&vol, 5) as usize].size, 25);
+    assert_eq!(vol.records()[record_index(&vol, 1) as usize].size, 175);
+    assert_eq!(vol.records()[record_index(&vol, 3) as usize].size, 100);
 }
 
 #[test]
@@ -43,19 +43,19 @@ fn directory_sizes_follow_file_resizes_and_deletes() {
     ]);
     let a = record_index(&vol, 3);
     vol.update_file_size(a, 200);
-    assert_eq!(vol.records[record_index(&vol, 2) as usize].size, 250);
-    assert_eq!(vol.records[record_index(&vol, 1) as usize].size, 250);
+    assert_eq!(vol.records()[record_index(&vol, 2) as usize].size, 250);
+    assert_eq!(vol.records()[record_index(&vol, 1) as usize].size, 250);
 
-    vol.apply_usn_change(UsnChange::Deleted { frn: 3 });
-    assert_eq!(vol.records[record_index(&vol, 2) as usize].size, 50);
-    assert_eq!(vol.records[record_index(&vol, 1) as usize].size, 50);
+    vol.apply_usn_changes([UsnChange::Deleted { frn: 3 }]);
+    assert_eq!(vol.records()[record_index(&vol, 2) as usize].size, 50);
+    assert_eq!(vol.records()[record_index(&vol, 1) as usize].size, 50);
 
     // Deleting the directory removes its remaining descendant total; the child's later
     // tombstone must not subtract the same bytes again.
-    vol.apply_usn_change(UsnChange::Deleted { frn: 2 });
-    assert_eq!(vol.records[record_index(&vol, 1) as usize].size, 0);
-    vol.apply_usn_change(UsnChange::Deleted { frn: 4 });
-    assert_eq!(vol.records[record_index(&vol, 1) as usize].size, 0);
+    vol.apply_usn_changes([UsnChange::Deleted { frn: 2 }]);
+    assert_eq!(vol.records()[record_index(&vol, 1) as usize].size, 0);
+    vol.apply_usn_changes([UsnChange::Deleted { frn: 4 }]);
+    assert_eq!(vol.records()[record_index(&vol, 1) as usize].size, 0);
 }
 
 /// One oversized subtree shallows its own depth instead of failing the request, because the
@@ -148,17 +148,17 @@ fn directory_sizes_follow_a_move_across_parents() {
         index_item(4, 1, "B", true),
     ]);
 
-    vol.apply_usn_change(UsnChange::Renamed {
+    vol.apply_usn_changes([UsnChange::Renamed {
         frn: 3,
         parent_frn: 4,
         name: "a.bin".to_string(),
         is_dir: false,
         is_new_name: true,
-    });
+    }]);
 
-    assert_eq!(vol.records[record_index(&vol, 2) as usize].size, 0);
-    assert_eq!(vol.records[record_index(&vol, 4) as usize].size, 100);
-    assert_eq!(vol.records[record_index(&vol, 1) as usize].size, 100);
+    assert_eq!(vol.records()[record_index(&vol, 2) as usize].size, 0);
+    assert_eq!(vol.records()[record_index(&vol, 4) as usize].size, 100);
+    assert_eq!(vol.records()[record_index(&vol, 1) as usize].size, 100);
 }
 
 #[test]
@@ -170,18 +170,18 @@ fn usn_delete_removes_pending_renames_to_prevent_leak() {
     ]);
 
     // First half of a rename: records pending rename
-    vol.apply_usn_change(UsnChange::Renamed {
+    vol.apply_usn_changes([UsnChange::Renamed {
         frn: 2,
         parent_frn: 1,
         name: "test.txt".to_string(),
         is_dir: false,
         is_new_name: false,
-    });
-    assert!(vol.pending_renames.contains_key(&2));
+    }]);
+    assert!(vol.has_pending_rename(2));
 
     // File is deleted before second half of rename arrives
-    vol.apply_usn_change(UsnChange::Deleted { frn: 2 });
-    assert!(!vol.pending_renames.contains_key(&2));
+    vol.apply_usn_changes([UsnChange::Deleted { frn: 2 }]);
+    assert!(!vol.has_pending_rename(2));
 }
 
 #[test]
@@ -193,10 +193,14 @@ fn directory_sizes_survive_compaction() {
         sized_item(3, 2, "a.bin", false, 100),
         index_item(4, 2, "dead", true),
     ]);
-    vol.apply_usn_change(UsnChange::Deleted { frn: 4 });
-    vol.compact();
-    assert_eq!(vol.records[record_index(&vol, 2) as usize].size, 100);
-    assert_eq!(vol.records[record_index(&vol, 1) as usize].size, 100);
+    vol.apply_usn_changes([UsnChange::Deleted { frn: 4 }]);
+    vol.compact_with_policy(crate::sync_engine::volume_index::CompactPolicy {
+        min_records: 1,
+        min_droppable_percent: 25,
+        min_arena_waste_percent: 25,
+    });
+    assert_eq!(vol.records()[record_index(&vol, 2) as usize].size, 100);
+    assert_eq!(vol.records()[record_index(&vol, 1) as usize].size, 100);
 }
 
 #[test]
@@ -210,11 +214,11 @@ fn appended_batches_report_folder_sizes() {
 
     // Still mid-scan: no finalize ran, yet the parent already totals its indexed child.
     assert_eq!(
-        vol.records[record_index(&vol, 2) as usize].size,
+        vol.records()[record_index(&vol, 2) as usize].size,
         100,
         "a folder must not read 0 B while its children are already indexed"
     );
-    assert_eq!(vol.records[record_index(&vol, 1) as usize].size, 100);
+    assert_eq!(vol.records()[record_index(&vol, 1) as usize].size, 100);
 
     vol.append_items(vec![
         index_item(4, 2, "B", true),
@@ -222,10 +226,10 @@ fn appended_batches_report_folder_sizes() {
         sized_item(6, 2, "c.bin", false, 25),
     ]);
 
-    assert_eq!(vol.records[record_index(&vol, 2) as usize].size, 175);
-    assert_eq!(vol.records[record_index(&vol, 4) as usize].size, 50);
-    assert_eq!(vol.records[record_index(&vol, 1) as usize].size, 175);
-    assert_eq!(vol.records[record_index(&vol, 3) as usize].size, 100);
+    assert_eq!(vol.records()[record_index(&vol, 2) as usize].size, 175);
+    assert_eq!(vol.records()[record_index(&vol, 4) as usize].size, 50);
+    assert_eq!(vol.records()[record_index(&vol, 1) as usize].size, 175);
+    assert_eq!(vol.records()[record_index(&vol, 3) as usize].size, 100);
 }
 
 #[test]
@@ -239,9 +243,9 @@ fn ingest_items_aggregates_directory_sizes_and_marks_valid() {
         sized_item(4, 2, "file2.txt", false, 600),
     ]);
 
-    assert!(vol.directory_sizes_valid);
-    assert_eq!(vol.records[record_index(&vol, 2) as usize].size, 1000);
-    assert_eq!(vol.records[record_index(&vol, 1) as usize].size, 1000);
+    assert!(vol.directory_sizes_valid());
+    assert_eq!(vol.records()[record_index(&vol, 2) as usize].size, 1000);
+    assert_eq!(vol.records()[record_index(&vol, 1) as usize].size, 1000);
 }
 
 #[test]
@@ -277,16 +281,19 @@ fn a_batch_with_several_kind_changes_ends_with_one_correct_aggregate() {
         },
     ]);
 
-    assert!(vol.directory_sizes_valid, "the batch ends fully aggregated");
-    assert_eq!(vol.records[record_index(&vol, 3) as usize].size, 0);
-    assert_eq!(vol.records[record_index(&vol, 4) as usize].size, 0);
+    assert!(
+        vol.directory_sizes_valid(),
+        "the batch ends fully aggregated"
+    );
+    assert_eq!(vol.records()[record_index(&vol, 3) as usize].size, 0);
+    assert_eq!(vol.records()[record_index(&vol, 4) as usize].size, 0);
     assert_eq!(
-        vol.records[record_index(&vol, 2) as usize].size,
+        vol.records()[record_index(&vol, 2) as usize].size,
         25,
         "A now holds two empty directories and the moved file"
     );
-    assert_eq!(vol.records[record_index(&vol, 5) as usize].size, 0);
-    assert_eq!(vol.records[record_index(&vol, 1) as usize].size, 25);
+    assert_eq!(vol.records()[record_index(&vol, 5) as usize].size, 0);
+    assert_eq!(vol.records()[record_index(&vol, 1) as usize].size, 25);
 }
 
 #[test]
@@ -302,24 +309,34 @@ fn a_cache_without_the_directory_size_flag_is_recomputed_and_migrated() {
     ]);
     // Exactly what an older cache holds: every directory size is still zero, and the header
     // has no validity flag because that byte did not exist.
-    for record in &mut vol.records {
+    let mut legacy_records = vol.records().to_vec();
+    for record in &mut legacy_records {
         if record.is_dir() && !record.is_tombstone() {
             record.size = 0;
         }
     }
-    vol.directory_sizes_valid = false;
-    vol.save_to_dir(temp_dir.path()).expect("legacy cache");
+    persistence::save_volume_index_atomic(
+        temp_dir.path(),
+        'Z',
+        vol.volume_serial,
+        vol.journal_id,
+        vol.last_usn,
+        &legacy_records,
+        vol.arena(),
+        false,
+    )
+    .expect("legacy cache");
 
     let engine = MultiVolumeEngine::with_index_dir_and_drives(temp_dir.path(), vec!['Z']);
     engine.with_volumes(|volumes| {
         let volume = &volumes[&'Z'];
         assert_eq!(
-            volume.records[record_index(volume, 2) as usize].size,
+            volume.records()[record_index(volume, 2) as usize].size,
             150,
             "the one-time load pass must rebuild folder totals"
         );
-        assert_eq!(volume.records[record_index(volume, 1) as usize].size, 150);
-        assert!(volume.directory_sizes_valid);
+        assert_eq!(volume.records()[record_index(volume, 1) as usize].size, 150);
+        assert!(volume.directory_sizes_valid());
     });
 
     let migrated =
@@ -343,15 +360,26 @@ fn a_cache_with_a_valid_flag_keeps_its_stored_folder_sizes() {
     // A sentinel no aggregation would produce: keeping it proves the load trusted the flag
     // instead of walking the whole table again.
     let a = record_index(&vol, 2) as usize;
-    vol.records[a].size = 777;
-    assert!(vol.directory_sizes_valid);
-    vol.save_to_dir(temp_dir.path()).expect("valid cache");
+    let mut seeded_records = vol.records().to_vec();
+    seeded_records[a].size = 777;
+    assert!(vol.directory_sizes_valid());
+    persistence::save_volume_index_atomic(
+        temp_dir.path(),
+        'Y',
+        vol.volume_serial,
+        vol.journal_id,
+        vol.last_usn,
+        &seeded_records,
+        vol.arena(),
+        true,
+    )
+    .expect("valid cache");
 
     let engine = MultiVolumeEngine::with_index_dir_and_drives(temp_dir.path(), vec!['Y']);
     engine.with_volumes(|volumes| {
         let volume = &volumes[&'Y'];
-        assert_eq!(volume.records[record_index(volume, 2) as usize].size, 777);
-        assert!(volume.directory_sizes_valid);
+        assert_eq!(volume.records()[record_index(volume, 2) as usize].size, 777);
+        assert!(volume.directory_sizes_valid());
     });
 }
 
@@ -369,15 +397,16 @@ fn append_items_drops_the_excluded_service_data_subtree() {
 
     let frns: Vec<u64> = vol.records().iter().map(|record| record.frn).collect();
     assert_eq!(frns, [1, 3, 5]);
-    let notes = &vol.records[2];
+    let notes = &vol.records()[2];
     assert_eq!(
-        vol.records[notes.parent_idx as usize].frn, 3,
+        vol.records()[notes.parent_idx as usize].frn,
+        3,
         "a kept child must still resolve its parent after skipped rows"
     );
-    assert!(vol.excluded_frns.contains(&2));
-    assert!(!vol.excluded_frns.contains(&4));
-    assert!(!vol.frn_to_idx.contains_key(&2));
-    assert!(!vol.frn_to_idx.contains_key(&4));
+    assert!(vol.is_excluded_frn(2));
+    assert!(!vol.is_excluded_frn(4));
+    assert!(!vol.contains_frn(2));
+    assert!(!vol.contains_frn(4));
 }
 
 #[test]
@@ -388,40 +417,43 @@ fn usn_events_for_the_excluded_subtree_never_enter_the_index() {
         index_item(1, 0, "C:", true),
         index_item(3, 1, "Users", true),
     ]);
-    let before = vol.records.len();
+    let before = vol.records().len();
 
-    vol.apply_usn_change(UsnChange::Created {
+    vol.apply_usn_changes([UsnChange::Created {
         frn: 4,
         parent_frn: 2,
         name: "vol_C.idx".to_string(),
         is_dir: false,
         attributes: 0,
         ts: 10,
-    });
-    assert_eq!(vol.records.len(), before);
-    assert!(!vol.frn_to_idx.contains_key(&4));
+    }]);
+    assert_eq!(vol.records().len(), before);
+    assert!(!vol.contains_frn(4));
 
-    vol.apply_usn_change(UsnChange::Deleted { frn: 4 });
+    vol.apply_usn_changes([UsnChange::Deleted { frn: 4 }]);
     assert!(
-        vol.pending_content_deletions.is_empty(),
+        vol.flush_pending_content_deletions().is_empty(),
         "a file that was never indexed has no content document to delete"
     );
-    assert!(vol.records.iter().all(|record| !record.is_tombstone()));
+    assert!(vol.records().iter().all(|record| !record.is_tombstone()));
 
-    vol.apply_usn_change(UsnChange::Created {
+    vol.apply_usn_changes([UsnChange::Created {
         frn: 6,
         parent_frn: 3,
         name: "new.txt".to_string(),
         is_dir: false,
         attributes: 0,
         ts: 11,
-    });
-    assert_eq!(vol.records.len(), before + 1);
-    assert_eq!(vol.records.last().expect("new record").frn, 6);
+    }]);
+    assert_eq!(vol.records().len(), before + 1);
+    assert_eq!(vol.records().last().expect("new record").frn, 6);
 }
 
 #[test]
 fn compact_drops_tombstones_and_excluded_subtrees_and_remaps_parents() {
+    use crate::sync_engine::volume_index::CompactPolicy;
+    use cairn_core::sort::SortColumn;
+
     let mut vol = VolumeIndex::new('C');
     vol.append_items(vec![
         index_item(1, 0, "C:", true),
@@ -437,45 +469,60 @@ fn compact_drops_tombstones_and_excluded_subtrees_and_remaps_parents() {
     ]);
     // Loaded caches predate the exclusion, so the roots are registered after the records.
     vol.set_excluded_roots([2]);
-    vol.apply_usn_change(UsnChange::Deleted { frn: 7 });
-    vol.apply_usn_change(UsnChange::Deleted { frn: 9 });
-    vol.apply_usn_change(UsnChange::Deleted { frn: 6 });
+    vol.apply_usn_changes([
+        UsnChange::Deleted { frn: 7 },
+        UsnChange::Deleted { frn: 9 },
+        UsnChange::Deleted { frn: 6 },
+    ]);
     vol.last_usn = 777;
     vol.journal_id = 9;
     vol.volume_serial = 42;
     vol.usn_enabled = false;
     vol.status.set(VolumeState::CatchingUp(50));
-    assert_eq!(vol.records.len(), 10);
+    assert_eq!(vol.records().len(), 10);
 
+    let policy = CompactPolicy {
+        min_records: 1,
+        min_droppable_percent: 25,
+        min_arena_waste_percent: 25,
+    };
     // 2, 4, 7 and 8 are service data (7 is also a tombstone); 9 and 6 are tombstones. 10's
     // parent is gone but its own row is still live, so it is kept and re-rooted.
-    assert_eq!(vol.compact(), 6);
-    let frns: Vec<u64> = vol.records.iter().map(|record| record.frn).collect();
+    assert_eq!(
+        vol.compact_with_policy(policy).map(|r| r.dropped_records),
+        Some(6)
+    );
+    let frns: Vec<u64> = vol.records().iter().map(|record| record.frn).collect();
     assert_eq!(frns, [1, 3, 5, 10]);
-    assert_eq!(vol.record_name(&vol.records[2]), "notes.txt");
-    assert_eq!(vol.record_name(&vol.records[3]), "scratch.txt");
-    assert_eq!(vol.records[2].parent_idx, 1);
-    assert_eq!(vol.records[1].frn, 3);
-    assert_eq!(vol.records[3].parent_idx, FileRecord::ROOT_PARENT);
+    assert_eq!(vol.record_name(&vol.records()[2]), "notes.txt");
+    assert_eq!(vol.record_name(&vol.records()[3]), "scratch.txt");
+    assert_eq!(vol.records()[2].parent_idx, 1);
+    assert_eq!(vol.records()[1].frn, 3);
+    assert_eq!(vol.records()[3].parent_idx, FileRecord::ROOT_PARENT);
 
     for frn in [2, 4, 6, 7, 8, 9] {
-        assert!(!vol.frn_to_idx.contains_key(&frn));
+        assert!(!vol.contains_frn(frn));
     }
-    assert_eq!(vol.frn_to_idx[&5], vec![2]);
-    assert!(vol.excluded_frns.contains(&2), "configuration must survive");
+    assert_eq!(vol.record_indices_for_frn(5), Some([2].as_slice()));
+    assert!(vol.is_excluded_frn(2), "configuration must survive");
     assert_eq!(vol.last_usn, 777);
     assert_eq!(vol.journal_id, 9);
     assert_eq!(vol.volume_serial, 42);
     assert!(!vol.usn_enabled);
     assert_eq!(vol.status.state(), VolumeState::CatchingUp(50));
-    assert!(!vol.presorted_dirty);
-    assert_eq!(vol.presorted.by_name.len(), 4);
+    assert!(!vol.is_presorted_dirty());
+    assert!(!vol.has_presorted_column(SortColumn::Name));
+    vol.ensure_presorted_column(SortColumn::Name);
+    assert_eq!(
+        vol.presorted_order(SortColumn::Name).map(<[u32]>::len),
+        Some(4)
+    );
 
     let cancel = CancellationToken::new();
     let matches = cairn_core::engine::execute_query(
-        &vol.records,
-        &vol.arena,
-        &vol.path_cache,
+        vol.records(),
+        vol.arena(),
+        vol.path_cache(),
         vol.drive_letter,
         &parse_query("notes"),
         &cancel,
@@ -484,9 +531,8 @@ fn compact_drops_tombstones_and_excluded_subtrees_and_remaps_parents() {
     let row = vol.build_file_row(2, &[], |_| None).expect("file row");
     assert_eq!(row.name, "notes.txt");
 
-    assert_eq!(
-        vol.compact(),
-        0,
+    assert!(
+        vol.compact_with_policy(policy).is_none(),
         "a compacted volume has nothing left to drop"
     );
 }
@@ -495,13 +541,13 @@ fn compact_drops_tombstones_and_excluded_subtrees_and_remaps_parents() {
 fn compact_if_needed_leaves_a_small_index_alone() {
     let mut vol = VolumeIndex::new('C');
     vol.append_items(vec![index_item(1, 0, "only.txt", false)]);
-    vol.apply_usn_change(UsnChange::Deleted { frn: 1 });
+    vol.apply_usn_changes([UsnChange::Deleted { frn: 1 }]);
     assert!(
         !vol.compact_if_needed(),
         "a table below the size threshold must not be compacted"
     );
-    assert_eq!(vol.records.len(), 1);
-    assert!(vol.records[0].is_tombstone());
+    assert_eq!(vol.records().len(), 1);
+    assert!(vol.records()[0].is_tombstone());
 }
 
 #[test]
@@ -551,9 +597,9 @@ fn test_volume_index_ingest_and_usn_changes() {
     // 1. Initial search finds report
     let q_report = parse_query("annual");
     let matches = cairn_core::engine::execute_query(
-        &vol.records,
-        &vol.arena,
-        &vol.path_cache,
+        vol.records(),
+        vol.arena(),
+        vol.path_cache(),
         vol.drive_letter,
         &q_report,
         &cancel,
@@ -561,20 +607,20 @@ fn test_volume_index_ingest_and_usn_changes() {
     assert_eq!(matches.len(), 1);
 
     // 2. USN Create: add "presentation.pptx"
-    vol.apply_usn_change(UsnChange::Created {
+    vol.apply_usn_changes([UsnChange::Created {
         frn: 13,
         parent_frn: 10,
         name: "presentation.pptx".to_string(),
         is_dir: false,
         attributes: 0,
         ts: 1003,
-    });
+    }]);
 
     let q_pres = parse_query("presentation");
     let matches_pres = cairn_core::engine::execute_query(
-        &vol.records,
-        &vol.arena,
-        &vol.path_cache,
+        vol.records(),
+        vol.arena(),
+        vol.path_cache(),
         vol.drive_letter,
         &q_pres,
         &cancel,
@@ -582,26 +628,28 @@ fn test_volume_index_ingest_and_usn_changes() {
     assert_eq!(matches_pres.len(), 1);
 
     // 3. USN Rename: rename "annual_report.pdf" to "q4_report.pdf"
-    vol.apply_usn_change(UsnChange::Renamed {
-        frn: 11,
-        parent_frn: 10,
-        name: "annual_report.pdf".to_string(),
-        is_dir: false,
-        is_new_name: false,
-    });
-    vol.apply_usn_change(UsnChange::Renamed {
-        frn: 11,
-        parent_frn: 10,
-        name: "q4_report.pdf".to_string(),
-        is_dir: false,
-        is_new_name: true,
-    });
+    vol.apply_usn_changes([
+        UsnChange::Renamed {
+            frn: 11,
+            parent_frn: 10,
+            name: "annual_report.pdf".to_string(),
+            is_dir: false,
+            is_new_name: false,
+        },
+        UsnChange::Renamed {
+            frn: 11,
+            parent_frn: 10,
+            name: "q4_report.pdf".to_string(),
+            is_dir: false,
+            is_new_name: true,
+        },
+    ]);
 
     let q_annual = parse_query("annual");
     let matches_annual = cairn_core::engine::execute_query(
-        &vol.records,
-        &vol.arena,
-        &vol.path_cache,
+        vol.records(),
+        vol.arena(),
+        vol.path_cache(),
         vol.drive_letter,
         &q_annual,
         &cancel,
@@ -610,9 +658,9 @@ fn test_volume_index_ingest_and_usn_changes() {
 
     let q_q4 = parse_query("q4_report");
     let matches_q4 = cairn_core::engine::execute_query(
-        &vol.records,
-        &vol.arena,
-        &vol.path_cache,
+        vol.records(),
+        vol.arena(),
+        vol.path_cache(),
         vol.drive_letter,
         &q_q4,
         &cancel,
@@ -620,12 +668,12 @@ fn test_volume_index_ingest_and_usn_changes() {
     assert_eq!(matches_q4.len(), 1);
 
     // 4. USN Delete: delete "budget.xlsx"
-    vol.apply_usn_change(UsnChange::Deleted { frn: 12 });
+    vol.apply_usn_changes([UsnChange::Deleted { frn: 12 }]);
     let q_budget = parse_query("budget");
     let matches_budget = cairn_core::engine::execute_query(
-        &vol.records,
-        &vol.arena,
-        &vol.path_cache,
+        vol.records(),
+        vol.arena(),
+        vol.path_cache(),
         vol.drive_letter,
         &q_budget,
         &cancel,
@@ -718,12 +766,12 @@ fn matched_bytes_are_counted_once_at_the_highest_matched_point() {
     // Windows: 50
     // Users: 0
     // Root (FRN 5): 150
-    let root_idx = vol.frn_to_idx[&5][0];
-    let win_idx = vol.frn_to_idx[&10][0];
-    let sys_idx = vol.frn_to_idx[&20][0];
-    let users_idx = vol.frn_to_idx[&40][0];
-    let note_idx = vol.frn_to_idx[&30][0];
-    let out_idx = vol.frn_to_idx[&50][0];
+    let root_idx = vol.first_record_index_for_frn(5).expect("root");
+    let win_idx = vol.first_record_index_for_frn(10).expect("win");
+    let sys_idx = vol.first_record_index_for_frn(20).expect("sys");
+    let users_idx = vol.first_record_index_for_frn(40).expect("users");
+    let note_idx = vol.first_record_index_for_frn(30).expect("note");
+    let out_idx = vol.first_record_index_for_frn(50).expect("out");
 
     // 1. Folders alone contribute zero bytes.
     let all_folders = vec![root_idx, win_idx, sys_idx, users_idx];
@@ -749,16 +797,7 @@ fn matched_bytes_are_counted_once_at_the_highest_matched_point() {
     let duplicates = vec![note_idx, note_idx, out_idx, out_idx];
     assert_eq!(vol.calculate_matched_bytes(&duplicates), 150);
 
-    // 7. Tombstoned records contribute zero bytes.
-    vol.records[note_idx as usize].flags |= cairn_core::FLAG_TOMBSTONE;
-    assert_eq!(
-        vol.calculate_matched_bytes(&[note_idx, out_idx]),
-        100,
-        "tombstoned file contributes zero bytes"
-    );
-    vol.records[note_idx as usize].flags &= !cairn_core::FLAG_TOMBSTONE;
-
-    // 8. Large query sets (> 64 items) use BitSet deduplication.
+    // 7. Large query sets (> 64 items) use BitSet deduplication.
     let mut large_query = Vec::new();
     for _ in 0..50 {
         large_query.push(note_idx);
@@ -766,6 +805,14 @@ fn matched_bytes_are_counted_once_at_the_highest_matched_point() {
     }
     assert!(large_query.len() > 64);
     assert_eq!(vol.calculate_matched_bytes(&large_query), 150);
+
+    // 8. Tombstoned records contribute zero bytes.
+    vol.apply_usn_changes([UsnChange::Deleted { frn: 30 }]);
+    assert_eq!(
+        vol.calculate_matched_bytes(&[note_idx, out_idx]),
+        100,
+        "tombstoned file contributes zero bytes"
+    );
 }
 
 #[test]
@@ -816,4 +863,89 @@ fn bitset_operations_and_boundaries() {
     // Out of bounds insertion returns false
     assert!(!bs.insert(128));
     assert!(!bs.insert(1000));
+}
+
+#[test]
+fn loaded_volume_absorbs_small_usn_burst_without_doubling_capacity() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut source = VolumeIndex::new('C');
+    let mut items = Vec::with_capacity(2_000);
+    items.push(index_item(5, 0, "C:", true));
+    for i in 0..1_999u64 {
+        items.push(sized_item(
+            100 + i,
+            5,
+            &format!("file_{i:04}.txt"),
+            false,
+            128,
+        ));
+    }
+    source.ingest_items(items);
+    let saved = source.save_to_dir(temp.path()).expect("save index");
+    let loaded = crate::persistence::load_volume_index(&saved).expect("load index");
+
+    let mut vol = VolumeIndex::new('C');
+    vol.restore_from_loaded(loaded);
+    let before = vol.memory_footprint();
+    assert_eq!(before.presorted_bytes, 0);
+
+    let burst: Vec<UsnChange> = (0..40u64)
+        .map(|k| UsnChange::Created {
+            frn: 50_000 + k,
+            parent_frn: 5,
+            name: format!("burst_{k:02}.log"),
+            is_dir: false,
+            attributes: 0,
+            ts: 99,
+        })
+        .collect();
+    vol.apply_usn_changes(burst);
+    let after = vol.memory_footprint();
+    assert_eq!(after.records_bytes, before.records_bytes);
+    assert_eq!(after.arena_bytes, before.arena_bytes);
+    assert_eq!(after.folded_arena_bytes, before.folded_arena_bytes);
+}
+
+#[test]
+fn compaction_triggers_on_arena_rename_bloat_and_shrinks_capacity() {
+    let mut vol = VolumeIndex::new('C');
+    let mut items = Vec::with_capacity(100);
+    items.push(index_item(5, 0, "C:", true));
+    for i in 0..99u64 {
+        items.push(index_item(100 + i, 5, &format!("short_{i:02}.txt"), false));
+    }
+    vol.ingest_items(items);
+
+    for round in 0..12u64 {
+        let mut renames = Vec::new();
+        for i in 0..50u64 {
+            renames.push(UsnChange::Renamed {
+                frn: 100 + i,
+                parent_frn: 5,
+                name: format!("renamed_long_prefix_{round:02}_{i:02}_artifact_payload.txt"),
+                is_dir: false,
+                is_new_name: true,
+            });
+        }
+        vol.apply_usn_changes(renames);
+    }
+
+    let bloated = vol.memory_footprint();
+    let policy = super::super::volume_index::CompactPolicy {
+        min_records: 50,
+        min_droppable_percent: 25,
+        min_arena_waste_percent: 25,
+    };
+    let report = vol
+        .compact_with_policy(policy)
+        .expect("arena rename bloat must trigger compaction even with zero tombstones");
+    assert!(report.reclaimed_arena_bytes > 0);
+
+    let shrunk = vol.memory_footprint();
+    assert!(
+        shrunk.arena_bytes < bloated.arena_bytes / 2,
+        "compaction must shrink over-allocated arena: before={} after={}",
+        bloated.arena_bytes,
+        shrunk.arena_bytes
+    );
 }

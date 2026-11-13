@@ -94,7 +94,7 @@ impl CairnApp {
         self.query
             .search_input
             .handle_replace_text_in_range(None, &text);
-        self.trigger_search(cx);
+        self.schedule_text_search(cx);
         cx.notify();
         true
     }
@@ -103,7 +103,7 @@ impl CairnApp {
         if self.drive_view.is_some() || !self.query.search_input.undo() {
             return false;
         }
-        self.trigger_search(cx);
+        self.schedule_text_search(cx);
         cx.notify();
         true
     }
@@ -112,7 +112,7 @@ impl CairnApp {
         if self.drive_view.is_some() || !self.query.search_input.redo() {
             return false;
         }
-        self.trigger_search(cx);
+        self.schedule_text_search(cx);
         cx.notify();
         true
     }
@@ -126,7 +126,7 @@ impl CairnApp {
         };
         let _ = crate::shell::os::set_clipboard_text(&text);
         self.query.search_input.delete_backward();
-        self.trigger_search(cx);
+        self.schedule_text_search(cx);
         cx.notify();
         true
     }
@@ -166,13 +166,13 @@ impl CairnApp {
         }
         if ctrl && key == "backspace" {
             self.query.search_input.delete_word_backward();
-            self.trigger_search(cx);
+            self.schedule_text_search(cx);
             cx.notify();
             return;
         }
         if ctrl && key == "delete" {
             self.query.search_input.delete_word_forward();
-            self.trigger_search(cx);
+            self.schedule_text_search(cx);
             cx.notify();
             return;
         }
@@ -215,7 +215,7 @@ impl CairnApp {
             _ => return,
         }
 
-        self.trigger_search(cx);
+        self.schedule_text_search(cx);
         cx.notify();
     }
 }
@@ -231,7 +231,11 @@ mod query_edit_tests {
         gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
             gpui_kit::init(cx);
             let _ = gpui_kit::open_window(
-                gpui_kit::gpui::WindowOptions::default(),
+                gpui_kit::gpui::WindowOptions {
+                    show: false,
+                    focus: false,
+                    ..gpui_kit::gpui::WindowOptions::default()
+                },
                 cx,
                 |window, cx| {
                     let app = cx.new(|cx| CairnApp::new(window, cx));

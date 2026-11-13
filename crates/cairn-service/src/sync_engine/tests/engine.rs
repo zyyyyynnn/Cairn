@@ -94,7 +94,7 @@ fn volume_summary_counts_live_records_not_tombstones() {
         index_item(2, 1, "live.txt", false),
         index_item(3, 1, "deleted.txt", false),
     ]);
-    vol.apply_usn_change(UsnChange::Deleted { frn: 3 });
+    vol.apply_usn_changes([UsnChange::Deleted { frn: 3 }]);
 
     assert_eq!(
         vol.to_summary().indexed_count,
@@ -135,11 +135,15 @@ fn the_exclusion_mask_matches_the_full_path_reference() {
         .single_segments()
         .expect("bare segment rules must use the memoized mask");
 
-    let mask = vol.excluded_record_mask(&segments);
+    let states = vol.segment_excluded_states(&segments);
+    let mask: Vec<bool> = states
+        .iter()
+        .map(|&state| state == crate::sync_engine::volume_index::SUBTREE_EXCLUDED)
+        .collect();
     for (idx, excluded) in mask.iter().enumerate() {
         let path = vol
-            .path_cache
-            .get_full_path(&vol.records, &vol.arena, 'C', idx as u32);
+            .path_cache()
+            .get_full_path(vol.records(), vol.arena(), 'C', idx as u32);
         assert_eq!(
             *excluded,
             parsed.excludes(&crate::exclusion::ExclusionPath::new(&path)),
@@ -323,9 +327,9 @@ fn test_volume_cache_invalidation_does_not_silently_return_stale_data() {
         vol_z.volume_serial,
         vol_z.journal_id,
         vol_z.last_usn,
-        &vol_z.records,
-        &vol_z.arena,
-        vol_z.directory_sizes_valid,
+        vol_z.records(),
+        vol_z.arena(),
+        vol_z.directory_sizes_valid(),
     )
     .expect("save_volume_index_atomic");
 
@@ -380,7 +384,7 @@ fn test_journal_id_mismatch_and_usn_out_of_range_invalidates_volume() {
     }]);
     vol.journal_id = 500;
     vol.last_usn = 1000;
-    assert_eq!(vol.records.len(), 1);
+    assert_eq!(vol.records().len(), 1);
 
     // A journal recreated under a snapshot leaves it on no valid timeline (IDX-05), and the
     // rebuild verdict comes from the same function the full-scan paths run through.
@@ -395,8 +399,8 @@ fn test_journal_id_mismatch_and_usn_out_of_range_invalidates_volume() {
 
     // Must be marked Rebuilding with records wiped (never Synced with stale data)
     assert_eq!(vol.status.state(), VolumeState::Rebuilding);
-    assert_eq!(vol.records.len(), 0);
-    assert_eq!(vol.arena.len(), 0);
+    assert_eq!(vol.records().len(), 0);
+    assert_eq!(vol.arena().len(), 0);
 }
 
 #[test]
@@ -413,37 +417,38 @@ fn test_usn_create_already_captured_by_the_snapshot_is_not_duplicated() {
         flags: 0,
         is_reparse_point: false,
     }]);
-    assert_eq!(vol.records.len(), 1);
+    assert_eq!(vol.records().len(), 1);
 
     // `[T0, T1)` overlaps the scan itself, so the create for a captured file arrives again.
-    vol.apply_usn_change(UsnChange::Created {
+    vol.apply_usn_changes([UsnChange::Created {
         frn: 20,
         parent_frn: 5,
         name: "mid_scan.txt".to_string(),
         is_dir: false,
         attributes: 0,
         ts: 300,
-    });
+    }]);
     assert_eq!(
-        vol.records.len(),
+        vol.records().len(),
         1,
         "replaying a create the snapshot already holds must not double the row"
     );
     assert_eq!(
-        vol.records[0].size, 7,
+        vol.records()[0].size,
+        7,
         "the real size beats the journal's zero"
     );
 
     // A different name for the same FRN is a hard link and stays a record of its own (IDX-06).
-    vol.apply_usn_change(UsnChange::Created {
+    vol.apply_usn_changes([UsnChange::Created {
         frn: 20,
         parent_frn: 9,
         name: "hard_link.txt".to_string(),
         is_dir: false,
         attributes: 0,
         ts: 300,
-    });
-    assert_eq!(vol.records.len(), 2);
+    }]);
+    assert_eq!(vol.records().len(), 2);
 }
 
 #[test]

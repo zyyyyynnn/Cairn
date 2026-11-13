@@ -104,11 +104,7 @@ fn service_data_files_are_never_content_tasks() {
     .with_service_data_root(root);
     let cfg = engine.get_config();
     let index_of = |volume: &VolumeIndex, frn: u64| {
-        *volume
-            .frn_to_idx
-            .get(&frn)
-            .and_then(|indices| indices.first())
-            .expect("record") as usize
+        volume.first_record_index_for_frn(frn).expect("record") as usize
     };
 
     for (i, frn) in frns.iter().take(5).enumerate() {
@@ -153,11 +149,7 @@ fn a_sibling_of_the_service_data_root_is_not_excluded() {
     )
     .with_service_data_root(root);
     let index_of = |volume: &VolumeIndex, frn: u64| {
-        *volume
-            .frn_to_idx
-            .get(&frn)
-            .and_then(|indices| indices.first())
-            .expect("record") as usize
+        volume.first_record_index_for_frn(frn).expect("record") as usize
     };
 
     let task = engine
@@ -183,11 +175,7 @@ fn reparse_point_records_are_never_content_tasks() {
     let engine = MultiVolumeEngine::with_index_dir_and_drives(index.path(), vec![]);
     let cfg = content_config();
     let index_of = |volume: &VolumeIndex, frn: u64| {
-        *volume
-            .frn_to_idx
-            .get(&frn)
-            .and_then(|indices| indices.first())
-            .expect("record") as usize
+        volume.first_record_index_for_frn(frn).expect("record") as usize
     };
 
     assert!(
@@ -222,34 +210,30 @@ fn reparse_point_records_are_never_content_tasks() {
 fn a_created_reparse_point_never_becomes_a_content_task() {
     let (mut volume, _) = volume_with_files(&[(&["Users", "Public", "seed.txt"], 0)]);
     let public_frn = volume
-        .records
+        .records()
         .iter()
         .find(|record| {
             volume
-                .arena
+                .arena()
                 .get_name(record.name_offset, record.name_len)
                 .eq_ignore_ascii_case("Public")
         })
         .expect("Public directory")
         .frn;
 
-    volume.apply_usn_change(UsnChange::Created {
+    volume.apply_usn_changes([UsnChange::Created {
         frn: 900,
         parent_frn: public_frn,
         name: "link.txt".to_string(),
         is_dir: false,
         attributes: FILE_ATTRIBUTE_REPARSE_POINT,
         ts: 5,
-    });
+    }]);
 
     let index = |volume: &VolumeIndex, frn: u64| {
-        *volume
-            .frn_to_idx
-            .get(&frn)
-            .and_then(|indices| indices.first())
-            .expect("record") as usize
+        volume.first_record_index_for_frn(frn).expect("record") as usize
     };
-    let record = &volume.records[index(&volume, 900)];
+    let record = &volume.records()[index(&volume, 900)];
     assert!(record.is_reparse_point());
     assert!(!record.is_dir());
 
@@ -283,13 +267,7 @@ fn content_exclusions_skip_system_dependency_and_cache_trees() {
     let index = tempfile::tempdir().expect("index");
     let engine = MultiVolumeEngine::with_index_dir_and_drives(index.path(), vec![]);
     let cfg = backfill_config();
-    let record_index = |frn: u64| {
-        *volume
-            .frn_to_idx
-            .get(&frn)
-            .and_then(|indices| indices.first())
-            .expect("record") as usize
-    };
+    let record_index = |frn: u64| volume.first_record_index_for_frn(frn).expect("record") as usize;
 
     let keep = engine
         .content_task(&volume, record_index(frns[0]), &ContentRules::new(&cfg))
@@ -311,14 +289,14 @@ fn a_basic_info_change_to_a_reparse_point_queues_a_deletion() {
     let (mut volume, frns) = volume_with_files(&[(&["Users", "Public", "notes.txt"], 0)]);
     let frn = frns[0];
 
-    volume.apply_usn_change(UsnChange::BasicInfoChanged {
+    volume.apply_usn_changes([UsnChange::BasicInfoChanged {
         frn,
         ts: 2,
         attributes: FILE_ATTRIBUTE_REPARSE_POINT,
-    });
+    }]);
 
     let record = volume
-        .records
+        .records()
         .iter()
         .find(|record| record.frn == frn)
         .expect("record");
@@ -331,7 +309,7 @@ fn a_basic_info_change_to_a_reparse_point_queues_a_deletion() {
         "a file attribute set without DIRECTORY must not make it a directory"
     );
     assert!(
-        volume.pending_data_changes.contains(&frn),
+        volume.has_pending_data_change(frn),
         "the content pipeline must re-evaluate the changed record"
     );
 
@@ -361,19 +339,21 @@ fn compaction_keeps_pending_work_replayed_before_startup() {
     let keep = frns[0];
     let gone = frns[1];
 
-    volume.apply_usn_change(UsnChange::DataChanged { frn: keep });
-    volume.apply_usn_change(UsnChange::Renamed {
-        frn: keep,
-        parent_frn: 0,
-        name: "old-name.txt".to_string(),
-        is_dir: false,
-        is_new_name: false,
-    });
-    volume.apply_usn_change(UsnChange::Deleted { frn: gone });
+    volume.apply_usn_changes([
+        UsnChange::DataChanged { frn: keep },
+        UsnChange::Renamed {
+            frn: keep,
+            parent_frn: 0,
+            name: "old-name.txt".to_string(),
+            is_dir: false,
+            is_new_name: false,
+        },
+        UsnChange::Deleted { frn: gone },
+    ]);
 
     // A cache written before the service data root was excluded still holds its files.
     let cairn = volume
-        .records
+        .records()
         .iter()
         .find(|record| volume.record_name(record) == "Cairn")
         .expect("Cairn directory")
@@ -381,18 +361,24 @@ fn compaction_keeps_pending_work_replayed_before_startup() {
     volume.set_excluded_roots([cairn]);
 
     assert!(
-        volume.compact() > 0,
+        volume
+            .compact_with_policy(crate::sync_engine::volume_index::CompactPolicy {
+                min_records: 1,
+                min_droppable_percent: 25,
+                min_arena_waste_percent: 25,
+            })
+            .is_some_and(|report| report.dropped_records > 0),
         "the tombstone and the service-data subtree must be dropped"
     );
     assert!(
-        volume.records.iter().all(|record| record.frn != gone),
+        volume.records().iter().all(|record| record.frn != gone),
         "a compacted tombstone must not stay in the table"
     );
-    assert!(volume.pending_data_changes.contains(&keep));
-    assert!(volume.pending_renames.contains_key(&keep));
-    assert!(volume.pending_content_deletions.contains(&(2, gone)));
+    assert!(volume.has_pending_data_change(keep));
+    assert!(volume.has_pending_rename(keep));
+    assert!(volume.has_pending_content_deletion(2, gone));
     assert!(
-        volume.excluded_frns.contains(&cairn),
+        volume.is_excluded_frn(cairn),
         "the exclusion itself is configuration and must survive"
     );
 
@@ -460,6 +446,18 @@ fn the_debounce_refresh_marks_a_created_symlink_as_reparse() {
         next_frn += 1;
     }
 
+    items.push(ExtractedItem {
+        frn: next_frn,
+        parent_frn,
+        name: "link.txt".to_string(),
+        is_dir: false,
+        size: 0,
+        created_ts: 1,
+        modified_ts: 1,
+        flags: cairn_core::FLAG_HIDDEN,
+        is_reparse_point: false,
+    });
+
     let mut volume = VolumeIndex::new('C');
     volume.ingest_items(items);
 
@@ -467,20 +465,7 @@ fn the_debounce_refresh_marks_a_created_symlink_as_reparse() {
     let engine = MultiVolumeEngine::with_index_dir_and_drives(index_dir.path(), vec![]);
     engine.add_volume(volume);
     engine.update_volume('C', |volume| {
-        volume.apply_usn_change(UsnChange::Created {
-            frn: next_frn,
-            parent_frn,
-            name: "link.txt".to_string(),
-            is_dir: false,
-            attributes: 0,
-            ts: 1,
-        });
-        let index = *volume
-            .frn_to_idx
-            .get(&next_frn)
-            .and_then(|indices| indices.first())
-            .expect("created record");
-        volume.records[index as usize].flags |= cairn_core::FLAG_HIDDEN;
+        volume.apply_usn_changes([UsnChange::DataChanged { frn: next_frn }]);
     });
 
     engine.process_pending_data_changes();
@@ -490,7 +475,7 @@ fn the_debounce_refresh_marks_a_created_symlink_as_reparse() {
             volumes
                 .get(&'C')
                 .expect("volume C")
-                .records
+                .records()
                 .iter()
                 .find(|record| record.frn == next_frn)
                 .copied()
@@ -523,8 +508,8 @@ fn test_pending_data_changes_tracking_and_drain() {
     }]);
 
     // A DataChanged event is debounced until the next drain.
-    vol.apply_usn_change(UsnChange::DataChanged { frn: 42 });
-    assert!(vol.pending_data_changes.contains(&42));
+    vol.apply_usn_changes([UsnChange::DataChanged { frn: 42 }]);
+    assert!(vol.has_pending_data_change(42));
 
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let engine = MultiVolumeEngine::with_index_dir_and_drives(temp_dir.path(), vec![]);
@@ -617,13 +602,7 @@ fn excluded_paths_are_not_sent_to_the_content_worker() {
         content_excluded_paths: Vec::new(),
         ..Default::default()
     };
-    let index_of = |frn: u64| {
-        *volume
-            .frn_to_idx
-            .get(&frn)
-            .and_then(|indices| indices.first())
-            .expect("record") as usize
-    };
+    let index_of = |frn: u64| volume.first_record_index_for_frn(frn).expect("record") as usize;
     let index = tempfile::tempdir().expect("index");
     let engine = MultiVolumeEngine::with_index_dir_and_drives(index.path(), vec![]);
 
@@ -681,14 +660,14 @@ fn a_created_event_reads_the_real_size_and_time_from_disk() {
     let engine = MultiVolumeEngine::with_index_dir_and_drives(index.path(), vec![]);
     engine.add_volume(volume);
     engine.update_volume('C', |volume| {
-        volume.apply_usn_change(UsnChange::Created {
+        volume.apply_usn_changes([UsnChange::Created {
             frn: next_frn,
             parent_frn,
             name: "created.bin".to_string(),
             is_dir: false,
             attributes: 0,
             ts: 1,
-        })
+        }])
     });
 
     let created_size = |engine: &MultiVolumeEngine| {
@@ -696,7 +675,7 @@ fn a_created_event_reads_the_real_size_and_time_from_disk() {
             volumes
                 .get(&'C')
                 .expect("volume C")
-                .records
+                .records()
                 .iter()
                 .find(|record| record.frn == next_frn)
                 .expect("created record")
@@ -712,7 +691,7 @@ fn a_created_event_reads_the_real_size_and_time_from_disk() {
     engine.process_pending_data_changes();
 
     let (size, created_ts, modified_ts, parent_size) = engine.with_volumes(|volumes| {
-        let records = &volumes.get(&'C').expect("volume C").records;
+        let records = volumes.get(&'C').expect("volume C").records();
         let record = records
             .iter()
             .find(|record| record.frn == next_frn)
@@ -740,9 +719,12 @@ fn a_created_event_reads_the_real_size_and_time_from_disk() {
 #[test]
 fn test_content_query_intersection_with_mft() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
-    let engine = MultiVolumeEngine::with_index_dir_and_drives(temp_dir.path(), vec![]);
-
-    // 1. Ingest MFT files on drive C:
+    let config = ServiceConfig {
+        content_index_enabled: true,
+        ..Default::default()
+    };
+    let engine =
+        MultiVolumeEngine::with_index_dir_drives_and_config(temp_dir.path(), vec![], config);
     let mut vol = VolumeIndex::new('C');
     vol.ingest_items(vec![
         ExtractedItem {
@@ -794,8 +776,8 @@ fn test_content_query_intersection_with_mft() {
         .expect("index doc 102");
     writer.commit().expect("commit content index");
     writer.finish().expect("finish content index");
-    assert!(engine.get_or_create_content_searcher().is_some());
-    engine.mark_content_index_ready_for_test();
+    engine.reopen_content_index_ready();
+    assert!(engine.content_index_status().state.is_ready());
 
     let cancel = CancellationToken::new();
 
@@ -876,8 +858,12 @@ fn test_content_query_intersection_with_mft() {
 #[test]
 fn test_clear_content_index_roundtrip() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
-    let engine = MultiVolumeEngine::with_index_dir_and_drives(temp_dir.path(), vec![]);
-
+    let config = ServiceConfig {
+        content_index_enabled: true,
+        ..Default::default()
+    };
+    let engine =
+        MultiVolumeEngine::with_index_dir_drives_and_config(temp_dir.path(), vec![], config);
     let mut vol = VolumeIndex::new('C');
     vol.ingest_items(vec![ExtractedItem {
         frn: 101,
@@ -898,8 +884,8 @@ fn test_clear_content_index_roundtrip() {
         .unwrap();
     writer.commit().expect("commit content index");
     writer.finish().expect("finish content index");
-    assert!(engine.get_or_create_content_searcher().is_some());
-    engine.mark_content_index_ready_for_test();
+    engine.reopen_content_index_ready();
+    assert!(engine.content_index_status().state.is_ready());
 
     let cancel = CancellationToken::new();
     let (_, total, ..) = engine.execute_search_multi(
@@ -1016,8 +1002,8 @@ fn engine_with_completed_backfill(
         .expect("index document");
     writer.commit().expect("commit content index");
     writer.finish().expect("finish content index");
-    assert!(engine.get_or_create_content_searcher().is_some());
-    engine.mark_content_index_ready_for_test();
+    engine.reopen_content_index_ready();
+    assert!(engine.content_index_status().state.is_ready());
     engine.write_backfill_marker(config);
     assert!(engine.backfill_marker_path().exists(), "marker was written");
     engine
@@ -1038,8 +1024,8 @@ fn the_backfill_marker_keeps_the_configuration_the_backfill_ran_with() {
         .expect("index document");
     writer.commit().expect("commit content index");
     writer.finish().expect("finish content index");
-    assert!(engine.get_or_create_content_searcher().is_some());
-    engine.mark_content_index_ready_for_test();
+    engine.reopen_content_index_ready();
+    assert!(engine.content_index_status().state.is_ready());
 
     let snapshot = engine.get_config();
     let mut changed = snapshot.clone();
@@ -1244,8 +1230,8 @@ fn a_marker_without_a_usable_index_is_discarded() {
         MultiVolumeEngine::with_index_dir_drives_and_config(empty.path(), vec![], config.clone());
     let writer = ContentIndex::open_or_create(&engine.content_dir).expect("content index");
     writer.finish().expect("finish empty index");
-    assert!(engine.get_or_create_content_searcher().is_some());
-    engine.mark_content_index_ready_for_test();
+    engine.reopen_content_index_ready();
+    assert!(engine.content_index_status().state.is_ready());
     engine.write_backfill_marker(&config);
     assert!(engine.backfill_marker_path().exists());
     assert!(
@@ -1274,8 +1260,8 @@ fn an_incremental_commit_keeps_the_index_searchable_until_reopen() {
         .expect("index first document");
     writer.commit().expect("commit content index");
     writer.finish().expect("finish content index");
-    assert!(engine.get_or_create_content_searcher().is_some());
-    engine.mark_content_index_ready_for_test();
+    engine.reopen_content_index_ready();
+    assert!(engine.content_index_status().state.is_ready());
     assert!(engine.content_index_status().state.is_ready());
 
     // The worker commits its batch while the service still holds the existing reader.
@@ -1490,7 +1476,7 @@ fn a_full_backfill_reaches_ready_and_indexes_existing_files() {
             flags: 0,
             is_reparse_point: false,
         }]);
-        volume.apply_usn_change(UsnChange::DataChanged { frn: later_frn });
+        volume.apply_usn_changes([UsnChange::DataChanged { frn: later_frn }]);
     });
     engine.process_pending_data_changes();
 
@@ -1519,7 +1505,7 @@ fn a_full_backfill_reaches_ready_and_indexes_existing_files() {
     // could expose a previous file after NTFS reuses the FRN.
     std::fs::remove_file(&later).expect("remove later fixture");
     engine.update_volume('C', |volume| {
-        volume.apply_usn_change(UsnChange::Deleted { frn: later_frn });
+        volume.apply_usn_changes([UsnChange::Deleted { frn: later_frn }]);
     });
     engine.process_pending_data_changes();
 
@@ -1546,13 +1532,13 @@ fn a_full_backfill_reaches_ready_and_indexes_existing_files() {
 
     // Renaming out of the whitelist is a deletion, not a stale document under the old name.
     engine.update_volume('C', |volume| {
-        volume.apply_usn_change(UsnChange::Renamed {
+        volume.apply_usn_changes([UsnChange::Renamed {
             frn: hello_frn,
             parent_frn,
             name: "hello.bin".to_string(),
             is_dir: false,
             is_new_name: true,
-        });
+        }]);
     });
     engine.process_pending_data_changes();
 
@@ -1576,4 +1562,117 @@ fn a_full_backfill_reaches_ready_and_indexes_existing_files() {
         &cancel,
     );
     assert_eq!(total, 0, "a renamed-out file must not stay searchable");
+}
+
+#[test]
+fn worker_port_full_backfill_retries_transient_failure_without_sleeping() {
+    use super::worker_process::WorkerProcessPort;
+    use std::cell::RefCell;
+
+    struct FakeWorkerPort<'a> {
+        engine: &'a MultiVolumeEngine,
+        calls: RefCell<Vec<usize>>,
+        retry_waits: RefCell<usize>,
+    }
+
+    impl WorkerProcessPort for FakeWorkerPort<'_> {
+        fn run_batch(
+            &self,
+            tasks: &[ContentIndexTask],
+            _deletions: &[(u64, u64)],
+            clear: bool,
+        ) -> BatchOutcome {
+            let mut calls = self.calls.borrow_mut();
+            calls.push(tasks.len());
+            if calls.len() == 1 {
+                return BatchOutcome::worker_failed(
+                    "transient sharing violation",
+                    Some(i32::from(cairn_protocol::worker_exit::SHARING_VIOLATION)),
+                );
+            }
+            if !tasks.is_empty() || clear {
+                let writer =
+                    ContentIndex::open_or_create(&self.engine.content_dir).expect("content dir");
+                if clear {
+                    writer.clear().expect("clear");
+                }
+                for task in tasks {
+                    writer
+                        .index_document_deferred(
+                            task.volume_id,
+                            task.frn,
+                            task.size,
+                            task.modified_ts,
+                            &task.path,
+                            "fake indexed body",
+                        )
+                        .expect("index doc");
+                }
+                writer.commit().expect("commit");
+                writer.finish().expect("finish");
+            }
+            BatchOutcome::Completed
+        }
+
+        fn wait_before_retry(&self) -> bool {
+            *self.retry_waits.borrow_mut() += 1;
+            true
+        }
+    }
+
+    let dir = tempfile::tempdir().expect("dir");
+    let (vol, _) = volume_with_files(&[(&["docs", "note.txt"], 0)]);
+    let config = backfill_config();
+    let engine = MultiVolumeEngine::with_index_dir_drives_and_config(dir.path(), vec![], config);
+    engine.add_volume(vol);
+
+    let port = FakeWorkerPort {
+        engine: &engine,
+        calls: RefCell::new(Vec::new()),
+        retry_waits: RefCell::new(0),
+    };
+    engine.run_full_backfill_with(&port);
+
+    assert_eq!(&*port.calls.borrow(), &[1, 1]);
+    assert_eq!(*port.retry_waits.borrow(), 1);
+    let status = engine.content_index_status();
+    assert_eq!(status.state, ContentIndexState::Ready);
+    assert_eq!(status.indexed_documents, 1);
+    assert!(engine.backfill_marker_path().exists());
+
+    // Cancelling during retry backoff aborts without running a duplicate worker batch.
+    struct CancelOnWaitPort {
+        calls: RefCell<usize>,
+    }
+
+    impl WorkerProcessPort for CancelOnWaitPort {
+        fn run_batch(
+            &self,
+            _tasks: &[ContentIndexTask],
+            _deletions: &[(u64, u64)],
+            clear: bool,
+        ) -> BatchOutcome {
+            assert!(clear);
+            *self.calls.borrow_mut() += 1;
+            BatchOutcome::worker_failed(
+                "transient access denied",
+                Some(i32::from(cairn_protocol::worker_exit::ACCESS_DENIED)),
+            )
+        }
+
+        fn wait_before_retry(&self) -> bool {
+            false
+        }
+    }
+
+    let cancel_port = CancelOnWaitPort {
+        calls: RefCell::new(0),
+    };
+    engine.run_clear_content_with(&cancel_port);
+    assert_eq!(*cancel_port.calls.borrow(), 1);
+    assert_eq!(
+        engine.content_index_status().state,
+        ContentIndexState::Disabled
+    );
+    assert!(!engine.backfill_marker_path().exists());
 }

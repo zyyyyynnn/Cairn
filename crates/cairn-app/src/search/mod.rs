@@ -6,6 +6,7 @@
 //! orchestration that turns a submitted query into a service session.
 
 pub(crate) mod bar_view;
+pub(crate) mod coordinator;
 pub(crate) mod filters;
 pub(crate) mod input;
 pub(crate) mod query_orchestration;

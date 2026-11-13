@@ -42,10 +42,7 @@ use windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, HKEY_USERS, KEY_READ, KEY_SET_VALUE,
     KEY_WOW64_64KEY, REG_EXPAND_SZ, REG_SZ, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ,
 };
-use windows::Win32::System::Threading::{
-    CreateMutexW, OpenProcess, ReleaseMutex, WaitForSingleObject, INFINITE,
-    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
-};
+use windows::Win32::System::Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject};
 use windows::Win32::UI::Shell::{
     FileOpenDialog, IFileOpenDialog, IShellItem, FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST,
     FOS_PICKFOLDERS, SIGDN_FILESYSPATH,
@@ -653,13 +650,13 @@ pub fn create_payload_dir() -> std::io::Result<PathBuf> {
 /// Data that belongs to the product but not to the MSI's component tree. The installer is
 /// machine-wide, so uninstalling removes every profile's Cairn data, not just the profile of the
 /// account that happened to provide the administrator token.
-pub fn product_data_dirs() -> Vec<PathBuf> {
+fn product_data_dirs(profiles: &[(String, PathBuf)]) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Ok(base) = program_data_root() {
         push_unique(&mut dirs, base.join("Cairn"));
     }
-    for (_, profile) in user_profiles() {
-        push_user_data_dirs(&mut dirs, &profile);
+    for (_, profile) in profiles {
+        push_user_data_dirs(&mut dirs, profile);
     }
     dirs
 }
@@ -685,8 +682,9 @@ fn push_unique(dirs: &mut Vec<PathBuf>, path: PathBuf) {
 /// machine data, and the autostart values of loaded user hives. Directories are retried because the
 /// service may release its index handles just after the MSI reports success.
 pub fn remove_product_data() -> Vec<String> {
+    let profiles = user_profiles();
     let mut failures = Vec::new();
-    for dir in product_data_dirs() {
+    for dir in product_data_dirs(&profiles) {
         if !dir.exists() {
             continue;
         }
@@ -711,7 +709,7 @@ pub fn remove_product_data() -> Vec<String> {
             failures.push(format!("{}: {error}", dir.display()));
         }
     }
-    failures.extend(remove_autostart_values());
+    failures.extend(remove_autostart_values_for(&profiles));
     failures
 }
 
@@ -719,9 +717,9 @@ const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 
 /// Deletes the `Cairn` value from every loaded user hive and from the current hive. An absent key,
 /// hive or value is success; a loaded hive that denies the delete is reported.
-fn remove_autostart_values() -> Vec<String> {
+fn remove_autostart_values_for(profiles: &[(String, PathBuf)]) -> Vec<String> {
     let mut failures = Vec::new();
-    for (sid, _) in user_profiles() {
+    for (sid, _) in profiles {
         let subkey = format!(r"{sid}\{RUN_KEY}");
         if let Err(error) = remove_run_value(HKEY_USERS, &subkey) {
             failures.push(format!("autostart value for {sid}: {error}"));
@@ -793,10 +791,7 @@ const ENVIRONMENT_KEY: &str = r"SYSTEM\CurrentControlSet\Control\Session Manager
 /// Removes the leftover registration of a Cairn entry whose MSI product record is gone. The ARP
 /// key is critical because it owns the visible entry; the remaining leftovers are reported as
 /// warnings and written to the same uninstall log.
-pub fn remove_orphan_registration(
-    install_dir: &Path,
-    helper: Option<PathBuf>,
-) -> Result<Vec<String>, String> {
+pub fn remove_orphan_registration(install_dir: &Path) -> Result<Vec<String>, String> {
     remove_hklm_key_tree(r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Cairn")
         .map_err(|error| format!("Apps & features entry: {error}"))?;
 
@@ -812,7 +807,7 @@ pub fn remove_orphan_registration(
     }
     warnings.extend(remove_orphan_shortcuts());
     warnings.extend(remove_product_data());
-    if let Err(error) = spawn_install_dir_cleanup(install_dir, helper) {
+    if let Err(error) = spawn_install_dir_cleanup(install_dir) {
         warnings.push(format!("install folder: {error}"));
     }
     Ok(warnings)
@@ -1029,76 +1024,59 @@ fn is_local_profile(path: &Path) -> bool {
     )
 }
 
-/// Copies this binary to a temporary helper before the MSI removes it from the install folder.
-/// The copy must happen before uninstall starts; the running image's original path can be gone by
-/// the time the transaction finishes.
-pub fn prepare_install_dir_cleanup() -> Option<PathBuf> {
-    let current = std::env::current_exe().ok()?;
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    let helper = staging_root()
-        .ok()?
-        .join(format!("cleanup-{}-{nanos}.exe", std::process::id()));
-    std::fs::copy(&current, &helper).ok()?;
-    Some(helper)
-}
+/// Starts a hidden system PowerShell worker that waits for this process to exit and removes
+/// leftover product executables and the empty install folder, without copying this executable.
+pub fn spawn_install_dir_cleanup(install_dir: &Path) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Stdio;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    const CLEANUP_SCRIPT: &str = "\
+$p = [int]$env:CAIRN_CLEANUP_PID; \
+if ($p -gt 0) { try { [System.Diagnostics.Process]::GetProcessById($p).WaitForExit() } catch {} }; \
+$d = $env:CAIRN_CLEANUP_DIR; \
+$fs = $env:CAIRN_CLEANUP_FILES -split ';'; \
+for ($i = 0; $i -lt 5; $i++) { \
+    $rem = $false; \
+    foreach ($f in $fs) { \
+        if ($f) { \
+            $t = Join-Path $d $f; \
+            if ([System.IO.File]::Exists($t)) { \
+                Remove-Item -LiteralPath $t -Force -ErrorAction SilentlyContinue; \
+                if ([System.IO.File]::Exists($t)) { $rem = $true } \
+            } \
+        } \
+    }; \
+    if (-not $rem) { break }; \
+    Start-Sleep -Milliseconds 100 \
+}; \
+if ([System.IO.Directory]::Exists($d)) { try { [System.IO.Directory]::Delete($d, $false) } catch {} }";
 
-/// Starts the prepared helper whose only job is to delete the install folder after this process
-/// exits. The install folder contains the running uninstaller, so it cannot remove itself in place.
-pub fn spawn_install_dir_cleanup(
-    install_dir: &Path,
-    helper: Option<PathBuf>,
-) -> Result<(), String> {
-    if crate::model::validate_install_path(&install_dir.to_string_lossy()).is_err() {
-        return Err("install folder is outside the administrator-owned root".to_string());
-    }
-    let helper = helper
-        .or_else(prepare_install_dir_cleanup)
-        .ok_or_else(|| "cleanup helper could not be prepared".to_string())?;
-    let working_dir = helper
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(std::env::temp_dir);
-    Command::new(&helper)
-        .arg("--cleanup-install-dir")
-        .arg(install_dir)
-        .arg("--wait-pid")
-        .arg(std::process::id().to_string())
-        .current_dir(working_dir)
+    let install_dir = crate::model::validate_install_path(&install_dir.to_string_lossy())
+        .map_err(|_| "install folder is outside the administrator-owned root".to_string())?;
+    let powershell = system32(r"WindowsPowerShell\v1.0\powershell.exe");
+    Command::new(powershell)
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-WindowStyle",
+            "Hidden",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            CLEANUP_SCRIPT,
+        ])
+        .env("CAIRN_CLEANUP_DIR", &install_dir)
+        .env("CAIRN_CLEANUP_PID", std::process::id().to_string())
+        .env("CAIRN_CLEANUP_FILES", PRODUCT_FILES.join(";"))
+        .current_dir(std::env::temp_dir())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .map(|_| ())
         .map_err(|error| error.to_string())
-}
-
-/// The helper side of [`spawn_install_dir_cleanup`]. It waits for the uninstaller to exit, removes
-/// the folder, then schedules its own temporary copy for deletion at reboot.
-pub fn run_install_dir_cleanup(install_dir: &Path, wait_pid: u32) {
-    let Ok(install_dir) = crate::model::validate_install_path(&install_dir.to_string_lossy())
-    else {
-        schedule_self_delete();
-        return;
-    };
-    if let Ok(handle) = unsafe {
-        OpenProcess(
-            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
-            false,
-            wait_pid,
-        )
-    } {
-        unsafe {
-            let _ = WaitForSingleObject(handle, INFINITE);
-            let _ = CloseHandle(handle);
-        }
-    }
-    // The MSI owns its component tree; this helper only removes product executables that survived
-    // the transaction. User files in a shared folder are never deleted.
-    for name in PRODUCT_FILES {
-        let _ = std::fs::remove_file(install_dir.join(name));
-    }
-    let _ = std::fs::remove_dir(&install_dir);
-    schedule_self_delete();
 }
 
 pub const PRODUCT_FILES: [&str; 6] = [
@@ -1109,33 +1087,6 @@ pub const PRODUCT_FILES: [&str; 6] = [
     "CairnSetup.exe",
     "CairnUninstall.exe",
 ];
-
-fn schedule_self_delete() {
-    use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_DELAY_UNTIL_REBOOT};
-    let Ok(current) = std::env::current_exe() else {
-        return;
-    };
-    let path = wide(current.as_os_str());
-    unsafe {
-        let _ = MoveFileExW(
-            PCWSTR(path.as_ptr()),
-            PCWSTR::null(),
-            MOVEFILE_DELAY_UNTIL_REBOOT,
-        );
-    }
-}
-
-/// Reads a PID from `--wait-pid`.
-pub fn wait_pid_from_args(args: &[String]) -> Option<u32> {
-    let index = args.iter().position(|arg| arg == "--wait-pid")?;
-    args.get(index + 1)?.parse().ok()
-}
-
-/// Reads a path from `--cleanup-install-dir`.
-pub fn cleanup_dir_from_args(args: &[String]) -> Option<PathBuf> {
-    let index = args.iter().position(|arg| arg == "--cleanup-install-dir")?;
-    args.get(index + 1).map(PathBuf::from)
-}
 
 #[cfg(test)]
 mod tests {

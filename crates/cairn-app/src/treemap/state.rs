@@ -6,6 +6,7 @@
 
 use crate::treemap::navigation::TreemapNavigation;
 use crate::treemap::paint::painted_gutter_device;
+use crate::treemap::store::{TreemapLru, MAX_CACHED_DIR_TREES, MAX_SCANNED_ITEM_TOTALS};
 use crate::treemap::zoom::TreemapZoom;
 use cairn_core::treemap::{
     is_drive_root, layout_nested_treemap, path_is_within, relative_segments, same_directory,
@@ -17,7 +18,6 @@ use cairn_protocol::message::{
 };
 use gpui_kit::gpui::*;
 use std::cell::Cell;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -79,7 +79,7 @@ pub struct TreemapViewState {
     /// root, so a finished tree is held once, not twice.
     stored_drive_tree: Option<Arc<TreemapTreeNode>>,
     /// Cached directory trees for drilled subdirectories fetched from the service.
-    cached_dir_trees: HashMap<String, Arc<TreemapTreeNode>>,
+    cached_dir_trees: TreemapLru<String, Arc<TreemapTreeNode>>,
     /// Calculated rectangular layout nodes (hierarchical nested)
     pub(super) layout_nodes: Vec<NestedTreemapLayoutNode>,
     /// A context menu is open: hover tooltips stay hidden while the menu is active so a
@@ -130,7 +130,7 @@ pub struct TreemapViewState {
     /// Exact item totals from scans completed in this view, keyed by directory.
     /// A later stored-tree load of the same directory reuses the scan total
     /// instead of the depth-capped tree count.
-    scanned_item_totals: HashMap<String, usize>,
+    scanned_item_totals: TreemapLru<String, usize>,
     /// Wheel zoom transform. The layout above stays in base pixel space.
     pub(super) zoom: TreemapZoom,
 }
@@ -142,34 +142,9 @@ fn normalize_dir_key(path: &str) -> String {
 impl TreemapViewState {
     pub(super) fn new(drive: char, entry_dir: &str, focus: FocusHandle) -> (Self, Option<PathBuf>) {
         let drive_upper = drive.to_ascii_uppercase();
-
-        let mut state = Self {
-            drive: drive_upper,
-            navigation: TreemapNavigation::at_directory(drive_upper, entry_dir),
-            root_tree: None,
-            stored_drive_tree: None,
-            cached_dir_trees: HashMap::new(),
-            layout_nodes: Vec::new(),
-            detail_level: 5,
-            suppress_tooltip: false,
-            selected_path: None,
-            current_dir_total_size: 0,
-            current_dir_total_items: 0,
-            focus: Some(focus.tab_stop(true)),
-            reveal_generation: 0,
-            last_bounds: (800.0, 600.0),
-            last_window_size: (0.0, 0.0),
-            last_scale_factor: 1.0,
-            painted_canvas_bounds: Rc::new(Cell::new(None)),
-            scan_fade_epoch: 0,
-            scan_fade_timer_armed: 0,
-            is_scanning: false,
-            request_epoch: 0,
-            unavailable: None,
-            content_revealed: false,
-            scanned_item_totals: HashMap::new(),
-            zoom: TreemapZoom::new(),
-        };
+        let mut state = Self::new_headless(drive_upper);
+        state.navigation = TreemapNavigation::at_directory(drive_upper, entry_dir);
+        state.focus = Some(focus.tab_stop(true));
 
         let scan_target = state.load_current_dir();
         (state, scan_target)
@@ -185,15 +160,15 @@ impl TreemapViewState {
             .unwrap_or(fallback)
     }
 
-    #[cfg(test)]
-    pub(super) fn new_for_test(drive: char) -> Self {
+    /// Creates a windowless treemap state rooted at `drive` without reading focus handles.
+    pub(super) fn new_headless(drive: char) -> Self {
         let drive_upper = drive.to_ascii_uppercase();
         Self {
             drive: drive_upper,
             navigation: TreemapNavigation::at_drive_root(drive_upper),
             root_tree: None,
             stored_drive_tree: None,
-            cached_dir_trees: HashMap::new(),
+            cached_dir_trees: TreemapLru::with_capacity(MAX_CACHED_DIR_TREES),
             layout_nodes: Vec::new(),
             detail_level: 5,
             suppress_tooltip: false,
@@ -212,7 +187,7 @@ impl TreemapViewState {
             request_epoch: 0,
             unavailable: None,
             content_revealed: false,
-            scanned_item_totals: HashMap::new(),
+            scanned_item_totals: TreemapLru::with_capacity(MAX_SCANNED_ITEM_TOTALS),
             zoom: TreemapZoom::new(),
         }
     }
@@ -303,15 +278,6 @@ impl TreemapViewState {
         self.content_revealed = false;
         self.layout_nodes.clear();
         self.root_tree = None;
-    }
-
-    /// Aggregates, sorts and adopts a freshly built tree. Test entry points build trees through
-    /// this; runtime paths receive already prepared trees from the service.
-    #[cfg(test)]
-    fn set_tree(&mut self, mut tree: TreemapTreeNode) {
-        tree.compute_aggregated_sizes();
-        tree.sort_recursive();
-        self.set_prepared_tree(tree);
     }
 
     /// Adopts a tree the scanner already aggregated and sorted.
@@ -532,7 +498,22 @@ impl TreemapViewState {
     /// selection on the removed path is dropped.
     pub fn remove_item(&mut self, target_path: &str) {
         let current_dir = self.navigation.current_dir().to_string();
+        let current_dir_key = normalize_dir_key(&current_dir);
         let drive_root = format!("{}:\\", self.drive);
+        let at_drive_root = is_drive_root(&current_dir);
+
+        // Drop duplicate Arc strong references held by caches before `Arc::make_mut` so
+        // removing a deleted entry mutates the root allocation in-place without deep cloning.
+        let restore_drive_tree = at_drive_root
+            && self
+                .stored_drive_tree
+                .as_ref()
+                .zip(self.root_tree.as_ref())
+                .is_some_and(|(stored, root)| Arc::ptr_eq(stored, root));
+        if restore_drive_tree {
+            self.stored_drive_tree = None;
+        }
+        let had_dir_cache = self.cached_dir_trees.remove(&current_dir_key).is_some();
 
         let mut removed_count = None;
 
@@ -551,9 +532,11 @@ impl TreemapViewState {
             }
         }
 
-        // 2. Also remove from stored_drive_tree if present
-        if is_drive_root(&current_dir) {
-            self.stored_drive_tree = self.root_tree.clone();
+        // 2. Also restore or update stored_drive_tree
+        if at_drive_root {
+            if restore_drive_tree || removed_count.is_some() {
+                self.stored_drive_tree = self.root_tree.clone();
+            }
         } else if let Some(drive_tree) = self.stored_drive_tree.as_mut() {
             if let Some((drive_segments, drive_name)) =
                 resolve_relative_segments(&drive_root, target_path)
@@ -569,6 +552,11 @@ impl TreemapViewState {
         }
 
         let Some(count) = removed_count else {
+            if had_dir_cache {
+                if let Some(ref tree) = self.root_tree {
+                    self.cached_dir_trees.insert(current_dir_key, tree.clone());
+                }
+            }
             return;
         };
 
@@ -593,8 +581,7 @@ impl TreemapViewState {
             }
         });
         self.scanned_item_totals
-            .entry(current_dir)
-            .or_insert(self.current_dir_total_items);
+            .insert_if_absent(current_dir, self.current_dir_total_items);
 
         if let Some(ref sel) = self.selected_path {
             if path_is_within(sel, target_path) {
@@ -715,6 +702,12 @@ mod tests {
 
     use super::*;
     use cairn_core::treemap::{TreemapCategory, TreemapItem};
+
+    fn apply_tree(state: &mut TreemapViewState, mut tree: TreemapTreeNode) {
+        tree.compute_aggregated_sizes();
+        tree.sort_recursive();
+        state.set_prepared_tree(tree);
+    }
 
     fn layout_node(
         id: u64,
@@ -877,7 +870,7 @@ mod tests {
 
     #[test]
     fn remove_item_at_drive_root_updates_sizes_counts_and_cache() {
-        let mut state = TreemapViewState::new_for_test('C');
+        let mut state = TreemapViewState::new_headless('C');
         let mut root = TreemapTreeNode::new_dir(1, "C:".into(), 0);
         root.children
             .push(TreemapTreeNode::new_file(2, "notes.txt".into(), 500, 0));
@@ -886,7 +879,7 @@ mod tests {
             .push(TreemapTreeNode::new_file(4, "notepad.exe".into(), 1000, 0));
         root.children.push(win);
 
-        state.set_tree(root);
+        apply_tree(&mut state, root);
         assert_eq!(state.current_dir_total_size, 1500);
         assert_eq!(state.current_dir_total_items, 3); // notes.txt, Windows, notepad.exe
         state.selected_path = Some(r"C:\notes.txt".into());
@@ -899,13 +892,33 @@ mod tests {
         assert_eq!(state.selected_path, None);
         assert_eq!(state.current_dir_total_size, 1000);
         assert_eq!(state.current_dir_total_items, 2);
-        assert_eq!(state.scanned_item_totals.get(r"C:\"), Some(&2));
+        assert_eq!(state.scanned_item_totals.peek(r"C:\"), Some(&2));
         assert!(state.stored_drive_tree.is_some());
     }
 
     #[test]
+    fn remove_item_at_drive_root_mutates_shared_arc_in_place_without_deep_clone() {
+        let mut state = TreemapViewState::new_headless('C');
+        let entries = vec![
+            entry("C:", 0, true, 0),
+            entry("notes.txt", 500, false, 1),
+            entry("app.exe", 1000, false, 1),
+        ];
+        assert!(state.adopt_service_tree(entries));
+        let before_ptr = Arc::as_ptr(state.root_tree.as_ref().unwrap());
+        assert_eq!(Arc::strong_count(state.root_tree.as_ref().unwrap()), 2);
+
+        state.remove_item(r"C:\notes.txt");
+
+        let root_arc = state.root_tree.as_ref().unwrap();
+        let stored_arc = state.stored_drive_tree.as_ref().unwrap();
+        assert_eq!(Arc::as_ptr(root_arc), before_ptr);
+        assert!(Arc::ptr_eq(root_arc, stored_arc));
+    }
+
+    #[test]
     fn remove_item_drilled_subdirectory_updates_ancestors_and_leaves_unrelated_alone() {
-        let mut state = TreemapViewState::new_for_test('C');
+        let mut state = TreemapViewState::new_headless('C');
         let mut root = TreemapTreeNode::new_dir(1, "C:".into(), 0);
         let mut win = TreemapTreeNode::new_dir(2, "Windows".into(), 0);
         let mut sys = TreemapTreeNode::new_dir(3, "System32".into(), 0);
@@ -935,7 +948,7 @@ mod tests {
             .find_by_path(r"C:\Windows")
             .unwrap()
             .clone();
-        state.set_tree(current_sub);
+        apply_tree(&mut state, current_sub);
 
         // Prepopulate scanned_item_totals
         state.scanned_item_totals.insert(r"C:\".into(), 6);
@@ -954,15 +967,15 @@ mod tests {
         // 2. Current dir items exact (cmd.exe + System32 = 2)
         assert_eq!(state.current_dir_total_items, 2);
         // 3. Current dir scan total equals current_dir_total_items (NOT double-decremented!)
-        assert_eq!(state.scanned_item_totals.get(r"C:\Windows"), Some(&2));
+        assert_eq!(state.scanned_item_totals.peek(r"C:\Windows"), Some(&2));
         // 4. Ancestors decremented by removed count (1)
-        assert_eq!(state.scanned_item_totals.get(r"C:\"), Some(&5));
+        assert_eq!(state.scanned_item_totals.peek(r"C:\"), Some(&5));
         assert_eq!(
-            state.scanned_item_totals.get(r"C:\Windows\System32"),
+            state.scanned_item_totals.peek(r"C:\Windows\System32"),
             Some(&1)
         );
         // 5. Unrelated directory (C:\Users) untouched
-        assert_eq!(state.scanned_item_totals.get(r"C:\Users"), Some(&1));
+        assert_eq!(state.scanned_item_totals.peek(r"C:\Users"), Some(&1));
         // 6. Stored drive tree also has calc.exe removed
         let drive_tree = state.stored_drive_tree.as_ref().unwrap();
         assert!(drive_tree
@@ -972,7 +985,7 @@ mod tests {
 
     #[test]
     fn remove_item_deleting_directory_cleans_cached_subdirectories() {
-        let mut state = TreemapViewState::new_for_test('C');
+        let mut state = TreemapViewState::new_headless('C');
         let mut root = TreemapTreeNode::new_dir(1, "C:".into(), 0);
         let mut win = TreemapTreeNode::new_dir(2, "Windows".into(), 0);
         let mut sys = TreemapTreeNode::new_dir(3, "System32".into(), 0);
@@ -992,7 +1005,7 @@ mod tests {
             .find_by_path(r"C:\Windows")
             .unwrap()
             .clone();
-        state.set_tree(current_sub);
+        apply_tree(&mut state, current_sub);
 
         state.scanned_item_totals.insert(r"C:\".into(), 4);
         state.scanned_item_totals.insert(r"C:\Windows".into(), 2);
@@ -1004,17 +1017,18 @@ mod tests {
         state.remove_item(r"C:\Windows\System32");
 
         assert_eq!(state.current_dir_total_items, 0);
-        assert_eq!(state.scanned_item_totals.get(r"C:\Windows"), Some(&0));
-        assert_eq!(state.scanned_item_totals.get(r"C:\"), Some(&2)); // 4 - 2 = 2
-                                                                     // Deleted directory entry is purged from cache
-        assert!(!state
+        assert_eq!(state.scanned_item_totals.peek(r"C:\Windows"), Some(&0));
+        assert_eq!(state.scanned_item_totals.peek(r"C:\"), Some(&2)); // 4 - 2 = 2
+                                                                      // Deleted directory entry is purged from cache
+        assert!(state
             .scanned_item_totals
-            .contains_key(r"C:\Windows\System32"));
+            .peek(r"C:\Windows\System32")
+            .is_none());
     }
 
     #[test]
     fn adopt_service_tree_at_drive_root_caches_drive_tree_and_totals() {
-        let mut state = TreemapViewState::new_for_test('C');
+        let mut state = TreemapViewState::new_headless('C');
         assert_eq!(state.current_dir(), r"C:\");
         assert!(state.stored_drive_tree.is_none());
 
@@ -1032,7 +1046,7 @@ mod tests {
         // 2. stored_drive_tree is cached
         assert!(state.stored_drive_tree.is_some());
         // 3. scanned_item_totals contains root count
-        assert_eq!(state.scanned_item_totals.get(r"C:\"), Some(&3));
+        assert_eq!(state.scanned_item_totals.peek(r"C:\"), Some(&3));
 
         // 4. Drilling into a subdirectory requires querying the service for that directory
         // instead of assuming stored_drive_tree has infinite depth
@@ -1066,8 +1080,30 @@ mod tests {
     }
 
     #[test]
+    fn adopt_service_tree_caps_cached_subtrees_and_scanned_totals_with_lru() {
+        let mut state = TreemapViewState::new_headless('C');
+        for i in 0..(MAX_SCANNED_ITEM_TOTALS + 8) {
+            let dir_name = format!("dir{i}");
+            let dir_path = format!(r"C:\{dir_name}");
+            state.navigation.enter(&dir_path);
+            let _ = state.load_current_dir();
+            assert!(state.adopt_service_tree(vec![
+                entry(&dir_name, 100, true, 0),
+                entry("leaf.txt", 100, false, 1),
+            ]));
+        }
+        assert_eq!(state.cached_dir_trees.len(), MAX_CACHED_DIR_TREES);
+        assert_eq!(state.scanned_item_totals.len(), MAX_SCANNED_ITEM_TOTALS);
+        assert!(state.cached_dir_trees.peek(r"C:\DIR0").is_none());
+        assert!(state
+            .cached_dir_trees
+            .peek(&format!(r"C:\DIR{}", MAX_SCANNED_ITEM_TOTALS + 7))
+            .is_some());
+    }
+
+    #[test]
     fn remove_item_clears_selected_path_when_ancestor_is_deleted() {
-        let mut state = TreemapViewState::new_for_test('C');
+        let mut state = TreemapViewState::new_headless('C');
         let mut root = TreemapTreeNode::new_dir(1, "C:".into(), 0);
         let mut win = TreemapTreeNode::new_dir(2, "Windows".into(), 0);
         let mut sys = TreemapTreeNode::new_dir(3, "System32".into(), 0);
@@ -1083,7 +1119,7 @@ mod tests {
         root.compute_aggregated_sizes();
         root.sort_recursive();
 
-        state.set_tree(root);
+        apply_tree(&mut state, root);
 
         // Selecting a deeply nested file inside C:\Windows
         state.selected_path = Some(r"C:\Windows\System32\calc.exe".into());
@@ -1108,7 +1144,7 @@ mod tests {
 
     #[test]
     fn remove_item_outside_current_dir_still_updates_stored_drive_tree_and_selection() {
-        let mut state = TreemapViewState::new_for_test('C');
+        let mut state = TreemapViewState::new_headless('C');
         let mut root = TreemapTreeNode::new_dir(1, "C:".into(), 0);
         let mut win = TreemapTreeNode::new_dir(2, "Windows".into(), 0);
         let mut sys = TreemapTreeNode::new_dir(3, "System32".into(), 0);
@@ -1133,7 +1169,7 @@ mod tests {
             .find_by_path(r"C:\Windows")
             .unwrap()
             .clone();
-        state.set_tree(current_sub);
+        apply_tree(&mut state, current_sub);
 
         state.scanned_item_totals.insert(r"C:\".into(), 6);
         state.scanned_item_totals.insert(r"C:\Windows".into(), 3);
@@ -1150,8 +1186,8 @@ mod tests {
         let drive_tree = state.stored_drive_tree.as_ref().unwrap();
         assert!(drive_tree.find_by_path(r"C:\Users\alice.txt").is_none());
         // Must update scanned_item_totals
-        assert_eq!(state.scanned_item_totals.get(r"C:\"), Some(&5));
-        assert_eq!(state.scanned_item_totals.get(r"C:\Users"), Some(&0));
+        assert_eq!(state.scanned_item_totals.peek(r"C:\"), Some(&5));
+        assert_eq!(state.scanned_item_totals.peek(r"C:\Users"), Some(&0));
     }
 
     #[test]
@@ -1196,7 +1232,7 @@ mod tests {
 
     #[test]
     fn an_unavailable_load_is_not_an_empty_folder() {
-        let mut state = TreemapViewState::new_for_test('C');
+        let mut state = TreemapViewState::new_headless('C');
         state.is_scanning = true;
         state.mark_unavailable(TreemapUnavailable::NotIndexed);
 
@@ -1209,7 +1245,7 @@ mod tests {
 
     #[test]
     fn suppress_tooltip_resets_on_navigation() {
-        let mut state = TreemapViewState::new_for_test('C');
+        let mut state = TreemapViewState::new_headless('C');
         state.suppress_tooltip = true;
         state.drill_down(r"C:\Windows");
         assert!(!state.suppress_tooltip);
@@ -1217,13 +1253,13 @@ mod tests {
 
     #[test]
     fn children_at_resolves_root_and_descendants_strictly() {
-        let mut state = TreemapViewState::new_for_test('C');
+        let mut state = TreemapViewState::new_headless('C');
         let mut root = TreemapTreeNode::new_dir(1, "C:".into(), 0);
         let mut win = TreemapTreeNode::new_dir(2, "Windows".into(), 0);
         win.children
             .push(TreemapTreeNode::new_file(3, "notepad.exe".into(), 100, 0));
         root.children.push(win);
-        state.set_tree(root);
+        apply_tree(&mut state, root);
 
         // Drive root matching with or without trailing separator
         assert_eq!(state.children_at(r"C:\").len(), 1);

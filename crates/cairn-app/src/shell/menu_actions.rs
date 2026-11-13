@@ -149,6 +149,35 @@ pub(super) fn style_confirmation_alert_with_variant(
     dialogs::alert_surface(alert, window, cx, surface, actions)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GroupHoverAction {
+    Noop,
+    RebuildOpenGroup(MenuGroup),
+    SwitchGroup(MenuGroup),
+}
+
+pub(crate) fn decide_group_hover(
+    open_group: Option<MenuGroup>,
+    hovered: MenuGroup,
+    menu_entered: bool,
+    keyboard_driven: bool,
+) -> GroupHoverAction {
+    if keyboard_driven {
+        return GroupHoverAction::Noop;
+    }
+    match open_group {
+        Some(open) if open == hovered => {
+            if menu_entered {
+                GroupHoverAction::RebuildOpenGroup(hovered)
+            } else {
+                GroupHoverAction::Noop
+            }
+        }
+        Some(_) => GroupHoverAction::SwitchGroup(hovered),
+        None => GroupHoverAction::Noop,
+    }
+}
+
 impl CairnApp {
     pub fn move_selection(
         &mut self,
@@ -460,14 +489,20 @@ impl CairnApp {
     /// and arriving on a different trigger switches the open menu to it. A keyboard-driven
     /// selection is left intact.
     pub fn hover_group(&mut self, group: MenuGroup, window: &mut Window, cx: &mut Context<Self>) {
-        if window.last_input_was_keyboard() {
-            return;
+        match decide_group_hover(
+            self.open_group,
+            group,
+            self.group_menu_entered && self.group_menu.is_some(),
+            window.last_input_was_keyboard(),
+        ) {
+            GroupHoverAction::Noop => {}
+            GroupHoverAction::RebuildOpenGroup(group) => self.build_group_menu(group, window, cx),
+            GroupHoverAction::SwitchGroup(group) => self.show_group(group, window, cx),
         }
-        match self.open_group {
-            Some(open) if open == group => self.build_group_menu(group, window, cx),
-            Some(_) => self.show_group(group, window, cx),
-            None => {}
-        }
+    }
+
+    pub fn mark_group_menu_entered(&mut self) {
+        self.group_menu_entered = true;
     }
 
     pub fn set_group_open(
@@ -498,11 +533,13 @@ impl CairnApp {
     }
 
     fn clear_group_menu(&mut self) {
+        self.group_menu_entered = false;
         self.group_menu_dismiss = None;
         self.group_menu = None;
     }
 
     fn build_group_menu(&mut self, group: MenuGroup, window: &mut Window, cx: &mut Context<Self>) {
+        self.group_menu_entered = false;
         let view = cx.entity();
         let this = &*self;
         let mut items = Vec::new();
@@ -522,6 +559,7 @@ impl CairnApp {
             window,
             move |this, _menu, _event: &DismissEvent, window, cx| {
                 this.open_group = None;
+                this.group_menu_entered = false;
                 this.group_menu_dismiss = None;
                 this.group_menu = None;
                 // A rename opened from the File menu owns the keyboard now; handing focus back
@@ -1327,7 +1365,11 @@ mod visibility_tests {
         gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
             gpui_kit::init(cx);
             let _ = gpui_kit::open_window(
-                gpui_kit::gpui::WindowOptions::default(),
+                gpui_kit::gpui::WindowOptions {
+                    show: false,
+                    focus: false,
+                    ..gpui_kit::gpui::WindowOptions::default()
+                },
                 cx,
                 |window, cx| {
                     let app = cx.new(|cx| CairnApp::new(window, cx));
@@ -1370,7 +1412,11 @@ mod visibility_tests {
         gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
             gpui_kit::init(cx);
             let _ = gpui_kit::open_window(
-                gpui_kit::gpui::WindowOptions::default(),
+                gpui_kit::gpui::WindowOptions {
+                    show: false,
+                    focus: false,
+                    ..gpui_kit::gpui::WindowOptions::default()
+                },
                 cx,
                 |window, cx| {
                     let app = cx.new(|cx| CairnApp::new(window, cx));
@@ -1406,7 +1452,11 @@ mod visibility_tests {
         gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
             gpui_kit::init(cx);
             let _ = gpui_kit::open_window(
-                gpui_kit::gpui::WindowOptions::default(),
+                gpui_kit::gpui::WindowOptions {
+                    show: false,
+                    focus: false,
+                    ..gpui_kit::gpui::WindowOptions::default()
+                },
                 cx,
                 |window, cx| {
                     let app = cx.new(|cx| CairnApp::new(window, cx));
@@ -1446,7 +1496,11 @@ mod visibility_tests {
         gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
             gpui_kit::init(cx);
             let _ = gpui_kit::open_window(
-                gpui_kit::gpui::WindowOptions::default(),
+                gpui_kit::gpui::WindowOptions {
+                    show: false,
+                    focus: false,
+                    ..gpui_kit::gpui::WindowOptions::default()
+                },
                 cx,
                 |window, cx| {
                     let app = cx.new(|cx| CairnApp::new(window, cx));
@@ -1470,5 +1524,43 @@ mod visibility_tests {
                 },
             );
         });
+    }
+}
+
+#[cfg(test)]
+mod hover_group_tests {
+    use super::{decide_group_hover, GroupHoverAction};
+    use crate::shell::command_groups::MenuGroup;
+
+    #[test]
+    fn hovering_open_trigger_without_entering_popup_does_not_rebuild_menu() {
+        assert_eq!(
+            decide_group_hover(Some(MenuGroup::File), MenuGroup::File, false, false),
+            GroupHoverAction::Noop
+        );
+    }
+
+    #[test]
+    fn returning_from_popup_to_open_trigger_rebuilds_menu_once() {
+        assert_eq!(
+            decide_group_hover(Some(MenuGroup::File), MenuGroup::File, true, false),
+            GroupHoverAction::RebuildOpenGroup(MenuGroup::File)
+        );
+    }
+
+    #[test]
+    fn hovering_different_trigger_or_keyboard_navigation_behaves_expectedly() {
+        assert_eq!(
+            decide_group_hover(Some(MenuGroup::File), MenuGroup::View, false, false),
+            GroupHoverAction::SwitchGroup(MenuGroup::View)
+        );
+        assert_eq!(
+            decide_group_hover(Some(MenuGroup::File), MenuGroup::File, true, true),
+            GroupHoverAction::Noop
+        );
+        assert_eq!(
+            decide_group_hover(None, MenuGroup::File, false, false),
+            GroupHoverAction::Noop
+        );
     }
 }

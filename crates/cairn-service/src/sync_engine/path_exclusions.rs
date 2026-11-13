@@ -4,47 +4,48 @@
 
 //! One exclusion view for a query or a content batch.
 
+use super::volume_index::SUBTREE_EXCLUDED;
 use super::VolumeIndex;
 use crate::exclusion::{ExclusionPath, ExclusionRules};
 use std::collections::HashMap;
 
 /// The configured path exclusions of one operation, read once. Segment rules are answered from a
-/// per-volume record mask; rule forms the mask cannot express read the record's full path through
-/// the same parsed rule set. Neither route re-parses the configuration per record.
+/// per-volume subtree state table; rule forms the table cannot express read the record's full path
+/// through the same parsed rule set. Neither route re-parses the configuration per record.
 pub(super) struct PathExclusions {
-    masks: Option<HashMap<char, Vec<bool>>>,
+    states: Option<HashMap<char, Vec<u8>>>,
     rules: ExclusionRules,
 }
 
 impl PathExclusions {
     pub(super) fn new(volumes: &HashMap<char, VolumeIndex>, excluded_paths: &[String]) -> Self {
         let rules = ExclusionRules::parse(excluded_paths);
-        let masks = if rules.is_empty() {
+        let states = if rules.is_empty() {
             None
         } else {
             rules.single_segments().map(|segments| {
                 volumes
                     .iter()
-                    .map(|(drive, volume)| (*drive, volume.excluded_record_mask(&segments)))
+                    .map(|(drive, volume)| (*drive, volume.segment_excluded_states(&segments)))
                     .collect()
             })
         };
-        Self { masks, rules }
+        Self { states, rules }
     }
 
     /// Whether one record of `volume` falls under the rules.
     pub(super) fn excludes(&self, volume: &VolumeIndex, index: u32) -> bool {
-        if let Some(masks) = &self.masks {
-            return masks
+        if let Some(states) = &self.states {
+            return states
                 .get(&volume.drive_letter)
-                .is_some_and(|mask| mask.get(index as usize).copied().unwrap_or(false));
+                .is_some_and(|table| table.get(index as usize).copied() == Some(SUBTREE_EXCLUDED));
         }
         if self.rules.is_empty() {
             return false;
         }
-        let path = volume.path_cache.get_full_path(
-            &volume.records,
-            &volume.arena,
+        let path = volume.path_cache().get_full_path(
+            volume.records(),
+            volume.arena(),
             volume.drive_letter,
             index,
         );

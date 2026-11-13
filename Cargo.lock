@@ -951,9 +951,7 @@ dependencies = [
  "csv",
  "serde_json",
  "tempfile",
- "thiserror 2.0.21",
  "tokio",
- "tracing",
  "winresource",
 ]
 
@@ -1056,7 +1054,6 @@ dependencies = [
  "sha2 0.11.1",
  "tempfile",
  "thiserror 2.0.21",
- "tokio",
  "tracing",
  "windows 0.62.2",
 ]
@@ -1089,8 +1086,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "thiserror 2.0.21",
- "tokio",
  "tracing",
  "tracing-subscriber",
  "winresource",
@@ -2374,12 +2369,6 @@ dependencies = [
  "libc",
  "pkg-config",
 ]
-
-[[package]]
-name = "frostem"
-version = "1.20260821.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e2488a10218a17366ce6bd38b6d081b4387a9548d350029db9feddc9bb44d6d"
 
 [[package]]
 name = "fs4"
@@ -7362,7 +7351,6 @@ dependencies = [
  "downcast-rs 2.0.2",
  "fastdivide",
  "fnv",
- "frostem",
  "fs4",
  "htmlescape",
  "itertools 0.14.0",
@@ -10014,7 +10002,6 @@ dependencies = [
  "typed-path",
  "windows-sys 0.61.2",
  "zeroize",
- "zopfli",
 ]
 
 [[package]]
@@ -10028,18 +10015,6 @@ name = "zmij"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
-
-[[package]]
-name = "zopfli"
-version = "0.8.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aaf7fc5d30c28483d93805c4a5e12b05bbb52407fa67c5f8bd552374cd01fb11"
-dependencies = [
- "bumpalo",
- "crc32fast",
- "log",
- "simd-adler32",
-]
 
 [[package]]
 name = "zruntime"

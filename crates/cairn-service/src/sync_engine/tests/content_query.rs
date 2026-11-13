@@ -33,8 +33,8 @@ fn engine_with_indexed_content() -> (MultiVolumeEngine, tempfile::TempDir) {
     }
     writer.commit().expect("commit content index");
     writer.finish().expect("finish content index");
-    assert!(engine.get_or_create_content_searcher().is_some());
-    engine.mark_content_index_ready_for_test();
+    engine.reopen_content_index_ready();
+    assert!(engine.content_index_status().state.is_ready());
 
     let mut volume = VolumeIndex::new('C');
     volume.ingest_items(vec![
@@ -61,7 +61,7 @@ fn matched_content_frns(engine: &MultiVolumeEngine, query: &str) -> Vec<u64> {
     let volumes = engine.volumes.read().unwrap();
     let mut frns: Vec<u64> = results
         .iter()
-        .map(|item| volumes[&item.drive_letter].records[item.record_idx as usize].frn)
+        .map(|item| volumes[&item.drive_letter].records()[item.record_idx as usize].frn)
         .collect();
     frns.sort_unstable();
     frns
@@ -88,8 +88,8 @@ fn engine_with_hardlinked_content() -> (MultiVolumeEngine, tempfile::TempDir) {
     }
     writer.commit().expect("commit content index");
     writer.finish().expect("finish content index");
-    assert!(engine.get_or_create_content_searcher().is_some());
-    engine.mark_content_index_ready_for_test();
+    engine.reopen_content_index_ready();
+    assert!(engine.content_index_status().state.is_ready());
 
     let mut volume = VolumeIndex::new('C');
     volume.ingest_items(vec![
@@ -215,7 +215,7 @@ fn an_or_content_query_keeps_snippets_on_content_hit_rows() {
     assert_eq!(results.len(), 3);
     let volumes = engine.volumes.read().unwrap();
     for item in &results {
-        let frn = volumes[&item.drive_letter].records[item.record_idx as usize].frn;
+        let frn = volumes[&item.drive_letter].records()[item.record_idx as usize].frn;
         assert!(
             snippets.contains_key(&(item.drive_letter, frn)),
             "row frn {frn} matched its content term and must carry a snippet"
@@ -237,7 +237,7 @@ fn a_negated_content_term_never_supplies_a_content_snippet() {
     let volumes = engine.volumes.read().unwrap();
     let mut frns: Vec<u64> = results
         .iter()
-        .map(|item| volumes[&item.drive_letter].records[item.record_idx as usize].frn)
+        .map(|item| volumes[&item.drive_letter].records()[item.record_idx as usize].frn)
         .collect();
     frns.sort_unstable();
     assert_eq!(
@@ -246,7 +246,7 @@ fn a_negated_content_term_never_supplies_a_content_snippet() {
         "the union of the report branch and the negated term must be present"
     );
     for item in &results {
-        let frn = volumes[&item.drive_letter].records[item.record_idx as usize].frn;
+        let frn = volumes[&item.drive_letter].records()[item.record_idx as usize].frn;
         assert!(
             !snippets.contains_key(&(item.drive_letter, frn)),
             "row frn {frn} must not carry a snippet from a negated content term"

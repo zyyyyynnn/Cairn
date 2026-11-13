@@ -219,7 +219,7 @@ impl CairnApp {
         let effective = crate::shell::settings::effective_language(language);
         self.i18n.set_language(&effective);
         #[cfg(windows)]
-        crate::shell::tray::set_language(&effective);
+        crate::shell::tray::set_language_with_i18n(&self.i18n);
         self.save_settings();
         self.repaint_shell_and_overlays(cx);
     }
@@ -268,7 +268,11 @@ mod tests {
         gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
             gpui_kit::init(cx);
             let _ = gpui_kit::open_window(
-                gpui_kit::gpui::WindowOptions::default(),
+                gpui_kit::gpui::WindowOptions {
+                    show: false,
+                    focus: false,
+                    ..gpui_kit::gpui::WindowOptions::default()
+                },
                 cx,
                 |window, cx| {
                     let app = cx.new(|cx| CairnApp::new(window, cx));
@@ -298,7 +302,11 @@ mod tests {
         gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
             gpui_kit::init(cx);
             let _ = gpui_kit::open_window(
-                gpui_kit::gpui::WindowOptions::default(),
+                gpui_kit::gpui::WindowOptions {
+                    show: false,
+                    focus: false,
+                    ..gpui_kit::gpui::WindowOptions::default()
+                },
                 cx,
                 |window, cx| {
                     let app = cx.new(|cx| CairnApp::new(window, cx));

@@ -668,91 +668,10 @@ impl TableState {
     }
 }
 
-/// Civil year, month and day for a count of days since the Unix epoch.
-///
-/// Howard Hinnant's `civil_from_days`: it moves across the 400-year Gregorian cycle with integer
-/// arithmetic only, so it needs no lookup table and no dependency.
-fn civil_from_days(days_since_epoch: i64) -> (i64, i64, i64) {
-    let z = days_since_epoch + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let day_of_era = z - era * 146_097;
-    let year_of_era =
-        (day_of_era - day_of_era / 1460 + day_of_era / 36524 - day_of_era / 146_096) / 365;
-    let year = year_of_era + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let shifted_month = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
-    let month = if shifted_month < 10 {
-        shifted_month + 3
-    } else {
-        shifted_month - 9
-    };
-    // The algorithm runs March..February, so January and February belong to the year just counted.
-    (if month <= 2 { year + 1 } else { year }, month, day)
-}
-
-fn format_utc_seconds(sec: i64) -> String {
-    let (year, month, day) = civil_from_days(sec.div_euclid(86400));
-    let rem_sec = sec.rem_euclid(86400);
-    format!(
-        "{:04}.{:02}.{:02} {:02}:{:02}",
-        year,
-        month,
-        day,
-        rem_sec / 3600,
-        (rem_sec % 3600) / 60
-    )
-}
-
-/// The deterministic UTC rendering used by the calendar tests; production rows display local time.
-#[cfg(test)]
-pub fn format_timestamp_utc(ts: i64) -> String {
-    if ts == 0 {
-        return String::new();
-    }
-    format_utc_seconds(cairn_core::time::timestamp_to_unix_seconds(ts))
-}
-
-/// Renders a row's timestamp as `YYYY.MM.DD HH:mm` in the user's local time. The index and the
-/// Recycle Bin store UTC; Explorer and the native shell warnings show the local clock, so the table
-/// must present the same wall time.
+/// Renders a row's timestamp as `YYYY.MM.DD HH:mm` in the user's local time via the bounded
+/// minute-bucket cache.
 pub fn format_timestamp(ts: i64) -> String {
-    if ts == 0 {
-        return String::new();
-    }
-    let sec = cairn_core::time::timestamp_to_unix_seconds(ts);
-    #[cfg(windows)]
-    if let Some(local) = format_local_seconds(sec) {
-        return local;
-    }
-    format_utc_seconds(sec)
-}
-
-#[cfg(windows)]
-fn format_local_seconds(sec: i64) -> Option<String> {
-    use windows::Win32::Foundation::{FILETIME, SYSTEMTIME};
-    use windows::Win32::Storage::FileSystem::FileTimeToLocalFileTime;
-    use windows::Win32::System::Time::FileTimeToSystemTime;
-
-    let ticks = (sec as i128 + 11_644_473_600).checked_mul(10_000_000)?;
-    if !(0..=u64::MAX as i128).contains(&ticks) {
-        return None;
-    }
-    let ticks = ticks as u64;
-    let utc = FILETIME {
-        dwLowDateTime: ticks as u32,
-        dwHighDateTime: (ticks >> 32) as u32,
-    };
-    let mut local = FILETIME::default();
-    // SAFETY: both pointers reference live FILETIME values; the API only writes the output.
-    unsafe { FileTimeToLocalFileTime(&utc, &mut local) }.ok()?;
-    let mut system = SYSTEMTIME::default();
-    // SAFETY: the local FILETIME is initialized and the output points at a live SYSTEMTIME.
-    unsafe { FileTimeToSystemTime(&local, &mut system) }.ok()?;
-    Some(format!(
-        "{:04}.{:02}.{:02} {:02}:{:02}",
-        system.wYear, system.wMonth, system.wDay, system.wHour, system.wMinute
-    ))
+    crate::table::presentation::format_timestamp_cached(ts).to_string()
 }
 
 #[cfg(test)]
@@ -760,8 +679,8 @@ mod tests {
     use core::prelude::rust_2021::test;
 
     use super::{
-        format_timestamp, format_timestamp_utc, visible_range, ColumnBoundary, ColumnWidths,
-        SortColumn, TableState, OVERSCAN_ROWS,
+        format_timestamp, visible_range, ColumnBoundary, ColumnWidths, SortColumn, TableState,
+        OVERSCAN_ROWS,
     };
     use cairn_protocol::message::FileRowData;
 
@@ -1557,26 +1476,6 @@ mod tests {
     }
 
     /// Every expected string here was produced by .NET's `DateTimeOffset.FromUnixTimeSeconds` over the
-    /// same FILETIME, not by the function under test — the previous formula divided the day count by
-    /// 365 and the remainder by 30, and would have been perfectly happy asserting its own answer.
-    /// The leap day and the two New Year rows are the cases that arithmetic got wrong.
-    #[test]
-    fn timestamps_render_the_real_calendar_date() {
-        for (filetime, expected) in [
-            (116_444_736_000_000_000, "1970.01.01 00:00"),
-            (130_103_999_900_000_000, "2013.04.14 07:59"),
-            (132_000_000_000_000_000, "2019.04.17 18:40"),
-            (133_000_000_000_000_000, "2022.06.18 04:26"),
-            (133_484_544_000_000_000, "2023.12.31 00:00"),
-            (133_485_408_000_000_000, "2024.01.01 00:00"),
-            (133_536_384_000_000_000, "2024.02.29 00:00"),
-            // A row read out of the live index while this arithmetic was being fixed.
-            (133_564_628_421_147_572, "2024.04.01 16:34"),
-        ] {
-            assert_eq!(format_timestamp_utc(filetime), expected, "{filetime}");
-        }
-    }
-
     /// A row with no recorded time stays blank rather than becoming the epoch.
     #[test]
     fn an_absent_timestamp_stays_blank() {

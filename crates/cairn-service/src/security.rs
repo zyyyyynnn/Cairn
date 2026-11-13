@@ -1009,43 +1009,124 @@ mod windows_acl {
             detail: after.summary(),
         })
     }
+}
 
-    /// Test-only: writes an arbitrary SDDL so a probe location can be made deletable again after it
-    /// has been locked down. Never used by the service itself.
-    #[cfg(test)]
-    pub fn apply_sddl_for_test(path: &Path, sddl: &str) -> Result<(), DataDirectoryError> {
-        let parsed = parse_descriptor(path, sddl)?;
-        apply_dacl(path, &parsed).map(|_| ())
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[cfg(windows)]
+    fn apply_sddl(path: &std::path::Path, sddl: &str) -> Result<(), DataDirectoryError> {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::core::{BOOL, PCWSTR};
+        use windows::Win32::Foundation::{LocalFree, HLOCAL};
+        use windows::Win32::Security::Authorization::{
+            ConvertStringSecurityDescriptorToSecurityDescriptorW, SetNamedSecurityInfoW,
+            SE_FILE_OBJECT,
+        };
+        use windows::Win32::Security::{
+            GetSecurityDescriptorDacl, ACL, DACL_SECURITY_INFORMATION,
+            PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+        };
+
+        struct DescriptorGuard(PSECURITY_DESCRIPTOR);
+        impl Drop for DescriptorGuard {
+            fn drop(&mut self) {
+                if !self.0 .0.is_null() {
+                    // SAFETY: allocated by ConvertStringSecurityDescriptorToSecurityDescriptorW.
+                    let _ = unsafe { LocalFree(Some(HLOCAL(self.0 .0))) };
+                }
+            }
+        }
+
+        let wide_sddl: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut raw = PSECURITY_DESCRIPTOR(std::ptr::null_mut());
+        // SAFETY: `wide_sddl` is a null-terminated SDDL string.
+        unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                PCWSTR(wide_sddl.as_ptr()),
+                1,
+                &mut raw,
+                None,
+            )
+        }
+        .map_err(|_| DataDirectoryError::Repair {
+            path: path.to_path_buf(),
+            reason: format!("{sddl} could not be parsed"),
+        })?;
+        let guard = DescriptorGuard(raw);
+
+        let mut dacl_present = BOOL::default();
+        let mut dacl_ptr: *mut ACL = std::ptr::null_mut();
+        let mut defaulted = BOOL::default();
+        // SAFETY: `guard.0` holds a live security descriptor from the conversion above.
+        unsafe {
+            GetSecurityDescriptorDacl(guard.0, &mut dacl_present, &mut dacl_ptr, &mut defaulted)
+        }
+        .map_err(|err| DataDirectoryError::Repair {
+            path: path.to_path_buf(),
+            reason: err.to_string(),
+        })?;
+        if !dacl_present.as_bool() || dacl_ptr.is_null() {
+            return Err(DataDirectoryError::Repair {
+                path: path.to_path_buf(),
+                reason: format!("{sddl} carries no readable DACL"),
+            });
+        }
+
+        let wide_path: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: `wide_path` is null-terminated and `dacl_ptr` points inside `guard.0`.
+        let status = unsafe {
+            SetNamedSecurityInfoW(
+                PCWSTR(wide_path.as_ptr()),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                None,
+                None,
+                Some(dacl_ptr),
+                None,
+            )
+        };
+        if status.is_ok() {
+            Ok(())
+        } else {
+            Err(DataDirectoryError::Repair {
+                path: path.to_path_buf(),
+                reason: format!("SetNamedSecurityInfoW failed: {status:?}"),
+            })
+        }
     }
 
-    /// Test-only: asks the token, over a call path independent of
-    /// [`enable_take_ownership_privilege`], whether `SeTakeOwnershipPrivilege` is actually in effect.
-    /// `PrivilegeCheck` reports a privilege that is assigned but disabled as absent, which is exactly
-    /// the distinction the ownership repair depends on.
-    #[cfg(test)]
-    pub fn take_ownership_privilege_is_effective() -> bool {
-        use windows::Win32::Security::{PrivilegeCheck, PRIVILEGE_SET};
+    #[cfg(windows)]
+    fn take_ownership_privilege_is_effective() -> bool {
+        use windows::core::{BOOL, PCWSTR};
+        use windows::Win32::Foundation::{CloseHandle, HANDLE, LUID};
+        use windows::Win32::Security::{
+            LookupPrivilegeValueW, PrivilegeCheck, LUID_AND_ATTRIBUTES, PRIVILEGE_SET,
+            SE_TAKE_OWNERSHIP_NAME, TOKEN_QUERY,
+        };
+        use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
         let mut luid = LUID {
             LowPart: 0,
             HighPart: 0,
         };
-        // SAFETY: as in `enable_take_ownership_privilege`; `luid` is a writable out-parameter that
-        // outlives the call.
+        // SAFETY: `luid` is a writable out-parameter that outlives the call.
         if unsafe { LookupPrivilegeValueW(PCWSTR::null(), SE_TAKE_OWNERSHIP_NAME, &mut luid) }
             .is_err()
         {
             return false;
         }
-
-        let mut raw_token = HANDLE(std::ptr::null_mut());
-        // SAFETY: as in `enable_take_ownership_privilege`, and TOKEN_QUERY alone asks for no
-        // adjustment at all.
-        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut raw_token) }.is_err() {
+        let mut token = HANDLE(std::ptr::null_mut());
+        // SAFETY: TOKEN_QUERY queries the current process token without modifying it.
+        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }.is_err() {
             return false;
         }
-        let token = OwnedToken(raw_token);
-
         let mut required = PRIVILEGE_SET {
             PrivilegeCount: 1,
             Control: 0,
@@ -1055,18 +1136,14 @@ mod windows_acl {
             }],
         };
         let mut result = BOOL::default();
-        // SAFETY: `token.0` is live for the whole call because the guard owns it; `required` is both
-        // read and written by the call and `result` is a writable out-parameter, and both outlive it.
-        unsafe { PrivilegeCheck(token.0, &mut required, &mut result) }
+        // SAFETY: `token` is open and `required`/`result` outlive the call.
+        let ok = unsafe { PrivilegeCheck(token, &mut required, &mut result) }
             .map(|_| result.as_bool())
-            .unwrap_or(false)
+            .unwrap_or(false);
+        // SAFETY: `token` was opened above.
+        let _ = unsafe { CloseHandle(token) };
+        ok
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::PathBuf;
 
     #[test]
     fn restricted_descriptor_grants_nothing_to_users() {
@@ -1198,10 +1275,7 @@ mod tests {
             .expect("probe still present");
 
         // Whatever happened, give the creator its access back so the probe can be deleted.
-        let cleanup = super::windows_acl::apply_sddl_for_test(
-            &probe,
-            "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;CO)",
-        );
+        let cleanup = apply_sddl(&probe, "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;CO)");
         let removed = std::fs::remove_dir(&probe);
 
         // The DACL is the part any owner can fix with its implicit WRITE_DAC right.
@@ -1233,7 +1307,7 @@ mod tests {
         let probe = fresh_probe_root("mask-probe");
         std::fs::create_dir_all(&probe).expect("probe directory");
 
-        super::windows_acl::apply_sddl_for_test(&probe, "D:P(A;;GR;;;SY)(A;;GR;;;BA)")
+        apply_sddl(&probe, "D:P(A;;GR;;;SY)(A;;GR;;;BA)")
             .expect("write a partial-grant descriptor");
         let trust = inspect_path_trust(&probe)
             .expect("inspect")
@@ -1252,15 +1326,13 @@ mod tests {
             trust.untrusted_grants
         );
 
-        super::windows_acl::apply_sddl_for_test(&probe, RESTRICTED_SDDL)
-            .expect("write the restricted descriptor");
+        apply_sddl(&probe, RESTRICTED_SDDL).expect("write the restricted descriptor");
         let trust = inspect_path_trust(&probe)
             .expect("inspect")
             .expect("present");
         assert!(trust.acl_compliant, "{}", trust.summary());
 
-        super::windows_acl::apply_sddl_for_test(&probe, "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;CO)")
-            .expect("cleanup descriptor");
+        apply_sddl(&probe, "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;CO)").expect("cleanup descriptor");
         std::fs::remove_dir(&probe).expect("probe removable after cleanup");
     }
 
@@ -1299,15 +1371,9 @@ mod tests {
             Err(other) => panic!("unexpected failure: {other}"),
         }
 
-        let _ = super::windows_acl::apply_sddl_for_test(
-            &probe,
-            "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;CO)",
-        );
+        let _ = apply_sddl(&probe, "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;CO)");
         for dir in [&layout.logs_dir, &layout.content_dir, &layout.index_dir] {
-            let _ = super::windows_acl::apply_sddl_for_test(
-                dir,
-                "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;CO)",
-            );
+            let _ = apply_sddl(dir, "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;CO)");
             let _ = std::fs::remove_dir(dir);
         }
         let _ = std::fs::remove_dir(&probe);
@@ -1332,15 +1398,11 @@ mod tests {
         // Lock the root down on its own: each child keeps the owner's implicit READ_CONTROL, which is
         // what lets the descriptor check reach it, while the query that would have to prove the child
         // exists is refused by the protected parent.
-        super::windows_acl::apply_sddl_for_test(&probe, RESTRICTED_SDDL)
-            .expect("lock the probe root down");
+        apply_sddl(&probe, RESTRICTED_SDDL).expect("lock the probe root down");
 
         let cleanup = |probe: &std::path::Path| {
             for dir in ServiceDataLayout::new(probe).writable_locations() {
-                let _ = super::windows_acl::apply_sddl_for_test(
-                    &dir,
-                    "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;CO)",
-                );
+                let _ = apply_sddl(&dir, "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;CO)");
             }
             let _ = std::fs::remove_dir_all(probe);
         };
@@ -1446,7 +1508,7 @@ mod tests {
     #[test]
     fn the_privilege_report_agrees_with_the_token_that_holds_it() {
         let adjusted = super::windows_acl::enable_take_ownership_privilege();
-        let in_effect = super::windows_acl::take_ownership_privilege_is_effective();
+        let in_effect = take_ownership_privilege_is_effective();
 
         match adjusted {
             Ok(_) => assert!(

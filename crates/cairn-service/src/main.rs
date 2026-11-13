@@ -27,10 +27,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let args = Cli::parse();
-    let rt = tokio::runtime::Runtime::new()?;
 
     if args.console {
         info!("Running Cairn Service in interactive console mode...");
+        let rt = tokio::runtime::Runtime::new()?;
         let runtime = ServiceRuntime::build()?;
         rt.block_on(async move {
             let shutdown = async {

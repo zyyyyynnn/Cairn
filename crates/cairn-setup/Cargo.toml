@@ -15,7 +15,6 @@ cairn-protocol.workspace = true
 cairn-ui.workspace = true
 gpui-kit.workspace = true
 fluent-bundle.workspace = true
-tokio.workspace = true
 tracing.workspace = true
 crc32fast.workspace = true
 sha2.workspace = true

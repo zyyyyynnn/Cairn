@@ -48,8 +48,8 @@ impl CairnApp {
 
         if self.recycle_bin.error().is_some() {
             view_name = "recycle-bin";
-            let text = self.i18n.get_text("status_recycle_bin_unavailable");
-            summary_aria = Some(text.clone());
+            let text = self.cached_text("status_recycle_bin_unavailable");
+            summary_aria = Some(text.to_string());
             summary = Some(
                 div()
                     .min_w_0()
@@ -160,7 +160,10 @@ impl CairnApp {
                             args.set("percent", format!("{:.1}", pct));
                             args.set(
                                 "date",
-                                crate::table::model::format_timestamp(node.item.modified_ts),
+                                crate::table::presentation::format_timestamp_cached(
+                                    node.item.modified_ts,
+                                )
+                                .to_string(),
                             );
                             // The full path/date stay available to assistive technology;
                             // the visible bar only carries the two values the tile shows.
@@ -263,7 +266,7 @@ impl CairnApp {
         // and takes the component's own loading state: the RefreshCw glyph becomes the spinner,
         // the button dims and stops answering clicks. A second circular mark beside the refresh
         // arrow would read as two loaders.
-        let refresh_label = self.i18n.get_text(if icon_loading {
+        let refresh_label = self.cached_text(if icon_loading {
             "status_refreshing"
         } else {
             "status_refresh"
@@ -303,13 +306,14 @@ impl CairnApp {
             self.query.query_id,
         ));
 
-        let aria_summary = summary_aria.unwrap_or_else(|| {
-            if summary_loading {
-                self.i18n.get_text("status_loading")
-            } else {
-                self.i18n.get_text("status_refresh")
-            }
-        });
+        let aria_summary: SharedString =
+            summary_aria.map(SharedString::from).unwrap_or_else(|| {
+                if summary_loading {
+                    self.cached_text("status_loading")
+                } else {
+                    self.cached_text("status_refresh")
+                }
+            });
 
         let mut left = h_flex()
             .min_w_0()
@@ -323,7 +327,7 @@ impl CairnApp {
         }
         if let Some(percent) = zoom_percent {
             let reset = accessibility::control("treemap-zoom-reset");
-            let reset_name = accessibility::name(reset, &self.i18n);
+            let reset_name = self.cached_control_name(reset);
             let mut args = FluentArgs::new();
             args.set("percent", percent);
             let reset_tooltip = self

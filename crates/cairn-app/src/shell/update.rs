@@ -274,30 +274,63 @@ fn remove_pending_version() {
     let _ = std::fs::remove_file(pending_version_path());
 }
 
+#[cfg(not(test))]
+fn take_pending_update_target() -> Option<String> {
+    let path = pending_version_path();
+    let target = std::fs::read_to_string(&path).ok()?;
+    let _ = std::fs::remove_file(path);
+    let target = normalize_version(&target);
+    if target.is_empty() {
+        None
+    } else {
+        Some(target)
+    }
+}
+
 impl CairnApp {
-    /// Reports the outcome of the previous silent install. The marker keeps only the requested
-    /// version, so the current binary itself decides whether the install reached its target.
-    /// Shows the result of an update this process interrupted, when one is pending. Returns whether
-    /// the toast slot is now taken, so a later startup notice does not overwrite it.
-    #[cfg_attr(test, allow(dead_code))]
-    pub(crate) fn consume_update_notice(&mut self, cx: &mut Context<Self>) -> bool {
-        let path = pending_version_path();
-        let Ok(target) = std::fs::read_to_string(&path) else {
-            return false;
-        };
-        let _ = std::fs::remove_file(path);
-        let target = normalize_version(&target);
+    /// Schedules the startup update marker read off the UI thread so the first frame paints
+    /// immediately; if no update toast applies and the global hotkey failed to bind, shows the
+    /// hotkey notice in the shared toast slot.
+    #[cfg(not(test))]
+    pub(crate) fn schedule_startup_notices(
+        &mut self,
+        hotkey_unavailable: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        get_tokio_runtime().spawn_blocking(move || {
+            let _ = tx.send(take_pending_update_target());
+        });
+        cx.spawn(async move |this, cx| {
+            let target = rx.await.ok().flatten();
+            let _ = this.update(cx, |this, cx| {
+                let notice_shown = match target {
+                    Some(target) => this.show_update_notice_for(&target, cx),
+                    None => false,
+                };
+                if hotkey_unavailable && !notice_shown {
+                    let title = this.i18n.get_text("hotkey_unavailable_title");
+                    let message = this.i18n.get_text("hotkey_unavailable_message");
+                    this.show_info_toast(title, message, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    #[cfg(not(test))]
+    fn show_update_notice_for(&mut self, target: &str, cx: &mut Context<Self>) -> bool {
         if target.is_empty() {
             return false;
         }
-        if is_newer(&target, &current_version()) {
+        if is_newer(target, &current_version()) {
             let title = self.i18n.get_text("update_interrupted_title");
             let body = self.i18n.get_text("update_interrupted_body");
             self.show_error_toast(title, body, cx);
         } else {
             let title = self.i18n.get_text("update_success_title");
             let mut args = FluentArgs::new();
-            args.set("version", target.as_str());
+            args.set("version", target);
             let body = self.i18n.get_text_with_args("update_success_body", &args);
             self.show_info_toast(title, body, cx);
         }

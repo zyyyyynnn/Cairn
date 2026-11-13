@@ -8,28 +8,54 @@
 //! the bundle construction, the language choice and the formatting fallback so those policies
 //! cannot drift between them.
 
+use std::borrow::Cow;
+use std::sync::OnceLock;
+
 use fluent_bundle::{FluentArgs, FluentBundle, FluentResource};
 use unic_langid::LanguageIdentifier;
 
 pub struct Messages {
-    zh: FluentBundle<FluentResource>,
-    en: FluentBundle<FluentResource>,
+    zh_source: Cow<'static, str>,
+    en_source: Cow<'static, str>,
+    zh: OnceLock<FluentBundle<FluentResource>>,
+    en: OnceLock<FluentBundle<FluentResource>>,
 }
 
 impl Messages {
-    /// Builds both bundles from the two embedded locale sources.
+    /// Builds a lazily parsed bundle pair from arbitrary locale sources.
     pub fn new(zh_source: &str, en_source: &str) -> Self {
         Self {
-            zh: bundle("zh-CN", zh_source),
-            en: bundle("en-US", en_source),
+            zh_source: Cow::Owned(zh_source.to_string()),
+            en_source: Cow::Owned(en_source.to_string()),
+            zh: OnceLock::new(),
+            en: OnceLock::new(),
+        }
+    }
+
+    /// Builds a lazily parsed bundle pair from embedded static locale sources without copying.
+    pub fn from_static(zh_source: &'static str, en_source: &'static str) -> Self {
+        Self {
+            zh_source: Cow::Borrowed(zh_source),
+            en_source: Cow::Borrowed(en_source),
+            zh: OnceLock::new(),
+            en: OnceLock::new(),
+        }
+    }
+
+    /// Returns whether the target locale bundle has been parsed into memory.
+    pub fn is_loaded(&self, language: &str) -> bool {
+        if language.starts_with("zh") {
+            self.zh.get().is_some()
+        } else {
+            self.en.get().is_some()
         }
     }
 
     fn bundle(&self, language: &str) -> &FluentBundle<FluentResource> {
         if language.starts_with("zh") {
-            &self.zh
+            self.zh.get_or_init(|| bundle("zh-CN", &self.zh_source))
         } else {
-            &self.en
+            self.en.get_or_init(|| bundle("en-US", &self.en_source))
         }
     }
 
@@ -95,5 +121,19 @@ mod tests {
             formatted.replace(['\u{2068}', '\u{2069}'], ""),
             "Hello, Cairn"
         );
+    }
+
+    #[test]
+    fn bundles_parse_lazily_on_first_locale_access() {
+        let messages = Messages::from_static(ZH, EN);
+        assert!(!messages.is_loaded("zh-CN"));
+        assert!(!messages.is_loaded("en-US"));
+
+        assert_eq!(messages.value("zh-CN", "hello").as_deref(), Some("你好"));
+        assert!(messages.is_loaded("zh-CN"));
+        assert!(!messages.is_loaded("en-US"));
+
+        assert_eq!(messages.value("de-DE", "hello").as_deref(), Some("Hello"));
+        assert!(messages.is_loaded("en-US"));
     }
 }

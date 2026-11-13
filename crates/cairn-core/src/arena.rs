@@ -91,6 +91,12 @@ impl NamePool {
         let valid_str = &name[..valid_len];
         let len = valid_len as u16;
         let slice = valid_str.as_bytes();
+        let needed = self.arena.len().saturating_add(slice.len());
+        if needed > self.arena.capacity() && self.arena.len() >= 65_536 {
+            let step = (self.arena.len() / 16).max(slice.len() + 4_096);
+            self.arena.reserve_exact(step);
+            self.folded_arena.reserve_exact(step);
+        }
 
         self.arena.extend_from_slice(slice);
         fold_append(valid_str, &mut self.folded_arena);
@@ -168,6 +174,17 @@ impl NamePool {
     pub fn clear(&mut self) {
         self.arena.clear();
         self.folded_arena.clear();
+    }
+
+    /// Clears the arena and releases all backing allocations.
+    pub fn clear_and_shrink(&mut self) {
+        self.arena = Vec::new();
+        self.folded_arena = Vec::new();
+    }
+
+    /// Returns allocated backing capacities `(arena_bytes, folded_arena_bytes)`.
+    pub fn allocated_bytes(&self) -> (usize, usize) {
+        (self.arena.capacity(), self.folded_arena.capacity())
     }
 }
 

@@ -35,6 +35,45 @@ fn lower_worker_priority(child: &std::process::Child) {
     let _ = unsafe { CloseHandle(handle) };
 }
 
+/// Port abstracting child-process execution and retry backoff for one `CairnWorker` batch.
+pub(super) trait WorkerProcessPort {
+    fn run_batch(
+        &self,
+        tasks: &[ContentIndexTask],
+        deletions: &[(u64, u64)],
+        clear: bool,
+    ) -> BatchOutcome;
+
+    /// Waits before retrying a transient sharing conflict; returns `false` if cancelled.
+    fn wait_before_retry(&self) -> bool;
+}
+
+pub(super) struct SubprocessWorkerPort<'a> {
+    engine: &'a MultiVolumeEngine,
+}
+
+impl<'a> SubprocessWorkerPort<'a> {
+    pub(super) fn new(engine: &'a MultiVolumeEngine) -> Self {
+        Self { engine }
+    }
+}
+
+impl WorkerProcessPort for SubprocessWorkerPort<'_> {
+    fn run_batch(
+        &self,
+        tasks: &[ContentIndexTask],
+        deletions: &[(u64, u64)],
+        clear: bool,
+    ) -> BatchOutcome {
+        self.engine.run_worker_process(tasks, deletions, clear)
+    }
+
+    fn wait_before_retry(&self) -> bool {
+        std::thread::sleep(Duration::from_millis(250));
+        !self.engine.content_cancel.load(Ordering::SeqCst)
+    }
+}
+
 impl MultiVolumeEngine {
     fn worker_path() -> Result<PathBuf, String> {
         let exe = std::env::current_exe()
@@ -72,7 +111,17 @@ impl MultiVolumeEngine {
         deletions: &[(u64, u64)],
         clear: bool,
     ) -> BatchOutcome {
-        let first = self.run_worker_process(tasks, deletions, clear);
+        self.run_worker_batch_with(&SubprocessWorkerPort::new(self), tasks, deletions, clear)
+    }
+
+    pub(super) fn run_worker_batch_with(
+        &self,
+        port: &dyn WorkerProcessPort,
+        tasks: &[ContentIndexTask],
+        deletions: &[(u64, u64)],
+        clear: bool,
+    ) -> BatchOutcome {
+        let first = port.run_batch(tasks, deletions, clear);
         let err = match &first {
             BatchOutcome::Failed(failure) if failure.transient => failure.message.clone(),
             _ => return first,
@@ -81,11 +130,10 @@ impl MultiVolumeEngine {
             "CairnWorker hit a transient sharing error; releasing the searcher and retrying once: {err}"
         );
         self.drop_content_searcher();
-        std::thread::sleep(Duration::from_millis(250));
-        if self.content_cancel.load(Ordering::SeqCst) {
+        if !port.wait_before_retry() || self.content_cancel.load(Ordering::SeqCst) {
             return BatchOutcome::Cancelled;
         }
-        self.run_worker_process(tasks, deletions, clear)
+        port.run_batch(tasks, deletions, clear)
     }
 
     fn run_worker_process(
