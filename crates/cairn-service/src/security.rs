@@ -1228,10 +1228,30 @@ mod tests {
 
     #[test]
     fn pipe_dacl_keeps_standard_users_able_to_connect() {
-        // SPEC SVC-02: standard users may connect and query; only the admin-only switch removes that, and it
-        // never grants write access to the data locations.
+        // SPEC SVC-02: standard users may connect and query; only the admin-only switch removes that,
+        // while remote Network Users and Everyone/World are always excluded.
+        assert!(DEFAULT_SDDL.contains("SY"), "{DEFAULT_SDDL}");
+        assert!(DEFAULT_SDDL.contains("BA"), "{DEFAULT_SDDL}");
         assert!(DEFAULT_SDDL.contains("(A;;GRGW;;;IU)"), "{DEFAULT_SDDL}");
+        assert!(!DEFAULT_SDDL.contains("NU"), "{DEFAULT_SDDL}");
+        assert!(!DEFAULT_SDDL.contains("WD"), "{DEFAULT_SDDL}");
+
+        assert!(ADMIN_ONLY_SDDL.contains("SY"), "{ADMIN_ONLY_SDDL}");
+        assert!(ADMIN_ONLY_SDDL.contains("BA"), "{ADMIN_ONLY_SDDL}");
         assert!(!ADMIN_ONLY_SDDL.contains("IU"), "{ADMIN_ONLY_SDDL}");
+        assert!(!ADMIN_ONLY_SDDL.contains("NU"), "{ADMIN_ONLY_SDDL}");
+        assert!(!ADMIN_ONLY_SDDL.contains("WD"), "{ADMIN_ONLY_SDDL}");
+
+        #[cfg(windows)]
+        {
+            let default_sd = SafeSecurityDescriptor::create(false)
+                .expect("default pipe security descriptor builds cleanly");
+            assert!(!default_sd.sa.lpSecurityDescriptor.is_null());
+
+            let admin_sd = SafeSecurityDescriptor::create(true)
+                .expect("admin-only pipe security descriptor builds cleanly");
+            assert!(!admin_sd.sa.lpSecurityDescriptor.is_null());
+        }
     }
 
     #[test]

@@ -863,3 +863,112 @@ fn a_rebuild_is_visible_in_the_cached_summary() {
     engine.restore_volume_status('C', previous);
     assert_eq!(engine.get_volume_summaries()[0].status, VolumeState::Synced);
 }
+
+#[test]
+fn hard_link_rename_updates_only_target_and_keeps_sibling() {
+    let mut vol = VolumeIndex::new('C');
+    vol.ingest_items(vec![
+        index_item(1001, 5, "target.txt", false),
+        index_item(1001, 6, "link_to_target.txt", false),
+    ]);
+    assert_eq!(vol.records().len(), 2);
+
+    vol.apply_usn_changes([UsnChange::Renamed {
+        frn: 1001,
+        parent_frn: 10,
+        name: "renamed_target.txt".to_string(),
+        is_dir: false,
+        is_new_name: true,
+    }]);
+
+    assert_eq!(vol.record_name(&vol.records()[0]), "renamed_target.txt");
+    assert_eq!(vol.record_name(&vol.records()[1]), "link_to_target.txt");
+}
+
+#[test]
+fn sm5_10000_usn_operations_match_full_rebuild_with_zero_difference() {
+    use cairn_ntfs::usn::FILE_ATTRIBUTE_DIRECTORY;
+    use std::collections::BTreeMap;
+
+    let mut incremental = VolumeIndex::new('C');
+    let mut truth: BTreeMap<u64, (u64, String, bool)> = BTreeMap::new();
+
+    for i in 0..10_000u64 {
+        match i % 4 {
+            0 | 1 => {
+                let frn = 1000 + i;
+                let parent_frn = 5 + (i % 10);
+                let is_dir = i % 5 == 0;
+                let name = format!("file_{i}_{}.dat", if is_dir { "dir" } else { "file" });
+
+                truth.insert(frn, (parent_frn, name.clone(), is_dir));
+                incremental.apply_usn_changes([UsnChange::Created {
+                    frn,
+                    parent_frn,
+                    name,
+                    is_dir,
+                    attributes: if is_dir { FILE_ATTRIBUTE_DIRECTORY } else { 0 },
+                    ts: 1_600_000_000 + i as i64,
+                }]);
+            }
+            2 => {
+                if let Some((&frn, entry)) = truth.iter_mut().next() {
+                    let new_name = format!("renamed_item_{i}.dat");
+                    let new_parent = entry.0 + 1;
+                    entry.0 = new_parent;
+                    entry.1 = new_name.clone();
+
+                    incremental.apply_usn_changes([UsnChange::Renamed {
+                        frn,
+                        parent_frn: new_parent,
+                        name: new_name,
+                        is_dir: entry.2,
+                        is_new_name: true,
+                    }]);
+                }
+            }
+            _ => {
+                if let Some(&frn) = truth.keys().next() {
+                    truth.remove(&frn);
+                    incremental.apply_usn_changes([UsnChange::Deleted { frn }]);
+                }
+            }
+        }
+    }
+
+    let mut rebuilt = VolumeIndex::new('C');
+    let rebuild_items: Vec<ExtractedItem> = truth
+        .iter()
+        .map(|(&frn, (parent_frn, name, is_dir))| ExtractedItem {
+            frn,
+            parent_frn: *parent_frn,
+            name: name.clone(),
+            is_dir: *is_dir,
+            size: 1024,
+            created_ts: 1_600_000_000,
+            modified_ts: 1_600_000_000,
+            flags: if *is_dir {
+                cairn_core::FLAG_DIRECTORY
+            } else {
+                0
+            },
+            is_reparse_point: false,
+        })
+        .collect();
+    rebuilt.ingest_items(rebuild_items);
+
+    let inc_active: BTreeMap<u64, String> = incremental
+        .records()
+        .iter()
+        .filter(|r| !r.is_tombstone())
+        .map(|r| (r.frn, incremental.record_name(r).to_string()))
+        .collect();
+    let rebuilt_active: BTreeMap<u64, String> = rebuilt
+        .records()
+        .iter()
+        .map(|r| (r.frn, rebuilt.record_name(r).to_string()))
+        .collect();
+
+    assert_eq!(incremental.live_count(), rebuilt.live_count());
+    assert_eq!(inc_active, rebuilt_active);
+}

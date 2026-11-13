@@ -5,7 +5,7 @@
 //! The notification-area icon and its two-row menu.
 //!
 //! The tray belongs to the thread that created it and its menu handles are neither `Send` nor
-//! `Sync`, so the handles live in a thread-local slot: [`init`] fills it, [`set_language`]
+//! `Sync`, so the handles live in a thread-local slot: [`init_with_i18n`] fills it, [`set_language_with_i18n`]
 //! rewrites the rows in place. A process the shell gives no icon (or a test thread) runs every
 //! operation as a no-op.
 

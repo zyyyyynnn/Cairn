@@ -282,7 +282,9 @@ impl PresortedIndices {
                 entries.par_sort_unstable_by(|a, b| {
                     cmp_name_entries(a, b, arena).then_with(|| a.idx.cmp(&b.idx))
                 });
-                self.by_name = entries.into_iter().map(|e| e.idx).collect();
+                let mut by_name: Vec<u32> = Vec::with_capacity(count as usize);
+                by_name.extend(entries.into_iter().map(|e| e.idx));
+                self.by_name = by_name;
             }
             SortColumn::Size if self.by_size.is_empty() => {
                 let mut entries: Vec<(u64, NameSortEntry)> = (0..count)
@@ -297,7 +299,9 @@ impl PresortedIndices {
                         .then_with(|| cmp_name_entries(na, nb, arena))
                         .then_with(|| na.idx.cmp(&nb.idx))
                 });
-                self.by_size = entries.into_iter().map(|(_, n)| n.idx).collect();
+                let mut by_size: Vec<u32> = Vec::with_capacity(count as usize);
+                by_size.extend(entries.into_iter().map(|(_, n)| n.idx));
+                self.by_size = by_size;
             }
             SortColumn::DateModified if self.by_date_modified.is_empty() => {
                 let mut entries: Vec<(i64, NameSortEntry)> = (0..count)
@@ -312,7 +316,9 @@ impl PresortedIndices {
                         .then_with(|| cmp_name_entries(na, nb, arena))
                         .then_with(|| na.idx.cmp(&nb.idx))
                 });
-                self.by_date_modified = entries.into_iter().map(|(_, n)| n.idx).collect();
+                let mut by_date: Vec<u32> = Vec::with_capacity(count as usize);
+                by_date.extend(entries.into_iter().map(|(_, n)| n.idx));
+                self.by_date_modified = by_date;
             }
             SortColumn::Path if self.by_path.is_empty() => {
                 let mut by_path: Vec<u32> = (0..count).collect();

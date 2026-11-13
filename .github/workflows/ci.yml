@@ -204,7 +204,9 @@ jobs:
           cache-bin: false
           save-if: false
       - name: Run tests
-        run: cargo test -p cairn-cli -p cairn-worker -p cairn-setup -p xtask
+        run: cargo test -p cairn-cli -p cairn-worker -p cairn-setup -p cairn-setup-bin -p xtask
+      - name: Query memory and latency regression check
+        run: cargo run --release -p xtask -- bench-query --check
       - name: Locate installer test binary
         shell: pwsh
         run: |
