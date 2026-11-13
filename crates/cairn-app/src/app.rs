@@ -1139,6 +1139,8 @@ mod tests {
     /// poll can answer it; a place change clears them at once even mid catch-up.
     #[test]
     fn a_refresh_keeps_the_rows_while_a_place_change_does_not() {
+        use crate::search::filters::FilterCategory;
+
         fn catching_up(this: &mut CairnApp) {
             this.service
                 .status
@@ -1165,6 +1167,13 @@ mod tests {
             assert!(
                 !this.table_reveal_pending,
                 "the poll answers the refresh without an entrance"
+            );
+
+            this.set_filter(FilterCategory::All, cx);
+            assert_eq!(
+                this.results.table.total_rows(),
+                1,
+                "re-selecting the active location is the same refresh"
             );
 
             this.request_result_set(ResultSetChange::Replace, cx);

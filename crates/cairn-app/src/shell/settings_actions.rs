@@ -159,7 +159,7 @@ impl CairnApp {
         {
             // Re-selecting the active location refreshes it, matching the
             // recycle-bin and drive entries.
-            self.request_result_set(ResultSetChange::Replace, cx);
+            self.request_result_set(ResultSetChange::Refresh, cx);
             cx.notify();
             return;
         }
