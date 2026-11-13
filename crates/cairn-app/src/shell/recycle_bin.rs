@@ -562,8 +562,7 @@ impl CairnApp {
     /// a result that arrives after the person has left or reloaded the location.
     pub(crate) fn begin_recycle_bin_load(&mut self, cx: &mut Context<Self>) {
         let generation = self.recycle_bin.begin_load();
-        self.begin_table_session();
-        self.results.table.set_rows(Vec::new(), 0);
+        self.begin_table_replacement();
         cx.notify();
 
         let (tx, rx) = tokio::sync::oneshot::channel();

@@ -757,7 +757,7 @@ impl CairnApp {
     pub fn set_initial_query(&mut self, text: &str, cx: &mut Context<Self>) {
         self.query.search_input.text = text.to_string();
         self.query.search_input.selection = text.len()..text.len();
-        self.trigger_search(cx);
+        self.request_result_set(crate::search::ResultSetChange::Replace, cx);
     }
 
     /// The font the painted query text used. Before the first paint there is no capture, so the
@@ -962,7 +962,47 @@ mod tests {
     use core::prelude::rust_2021::test;
 
     use super::{join_row_path, CairnApp};
+    use crate::search::ResultSetChange;
+    use cairn_protocol::message::FileRowData;
     use gpui_kit::AppContext;
+
+    fn test_row(name: &str) -> FileRowData {
+        FileRowData {
+            frn: 1,
+            name: name.to_string(),
+            path: r"C:\".to_string(),
+            size: 1,
+            modified_ts: 0,
+            created_ts: 0,
+            is_dir: false,
+            flags: 0,
+            name_highlights: Vec::new(),
+            path_highlights: Vec::new(),
+            snippet: None,
+        }
+    }
+
+    fn with_app(
+        test: impl FnOnce(&mut CairnApp, &mut gpui_kit::gpui::Context<CairnApp>) + 'static,
+    ) {
+        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
+            gpui_kit::init(cx);
+            let _ = gpui_kit::open_window(
+                gpui_kit::gpui::WindowOptions {
+                    show: false,
+                    focus: false,
+                    ..gpui_kit::gpui::WindowOptions::default()
+                },
+                cx,
+                |window, cx| {
+                    let app = cx.new(|cx| CairnApp::new(window, cx));
+                    app.update(cx, test);
+                    cx.quit();
+                    app
+                },
+            );
+        });
+    }
 
     #[test]
     fn row_paths_join_without_doubling_the_separator() {
@@ -975,63 +1015,77 @@ mod tests {
     #[test]
     fn a_category_switch_starts_a_replacement_entrance() {
         use crate::search::filters::FilterCategory;
-        use cairn_protocol::message::FileRowData;
 
-        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
-            gpui_kit::init(cx);
-            let _ = gpui_kit::open_window(
-                gpui_kit::gpui::WindowOptions {
-                    show: false,
-                    focus: false,
-                    ..gpui_kit::gpui::WindowOptions::default()
-                },
-                cx,
-                |window, cx| {
-                    let app = cx.new(|cx| CairnApp::new(window, cx));
-                    app.update(cx, |this, cx| {
-                        let row = |name: &str| FileRowData {
-                            frn: 1,
-                            name: name.to_string(),
-                            path: r"C:\".to_string(),
-                            size: 1,
-                            modified_ts: 0,
-                            created_ts: 0,
-                            is_dir: false,
-                            flags: 0,
-                            name_highlights: Vec::new(),
-                            path_highlights: Vec::new(),
-                            snippet: None,
-                        };
-                        this.results.table.set_rows(vec![row("old.txt")], 1);
-                        let generation = this.table_reveal_generation;
+        with_app(|this, cx| {
+            this.results.table.set_rows(vec![test_row("old.txt")], 1);
+            this.table_reveal_pending = false;
+            let generation = this.table_reveal_generation;
 
-                        this.set_filter(FilterCategory::Document, cx);
-                        assert!(
-                            this.table_reveal_pending,
-                            "a new location opens a table session"
-                        );
-                        assert_eq!(
-                            this.results.table.total_rows(),
-                            0,
-                            "the previous location's rows leave at once"
-                        );
-                        assert_eq!(
-                            this.table_reveal_generation, generation,
-                            "no fade runs before the new content exists"
-                        );
-
-                        this.results.table.set_rows(vec![row("new.docx")], 1);
-                        this.note_table_content(cx);
-                        assert_eq!(
-                            this.table_reveal_fade_epoch,
-                            generation + 1,
-                            "the new page fades in"
-                        );
-                    });
-                    cx.quit();
-                    app
-                },
+            this.set_filter(FilterCategory::Document, cx);
+            assert!(
+                this.table_reveal_pending,
+                "a new location opens a table session"
             );
+            assert_eq!(
+                this.results.table.total_rows(),
+                0,
+                "the previous location's rows leave at once"
+            );
+            assert_eq!(
+                this.table_reveal_generation, generation,
+                "no fade runs before the new content exists"
+            );
+
+            this.results.table.set_rows(vec![test_row("new.docx")], 1);
+            this.note_table_content(cx);
+            assert_eq!(
+                this.table_reveal_fade_epoch,
+                generation + 1,
+                "the new page fades in"
+            );
+        });
+    }
+
+    /// Re-clicking the active location or the status-bar icon is the same
+    /// replacement: the rows leave at once and the refreshed page fades in.
+    #[test]
+    fn a_table_refresh_replaces_the_result_set_at_once() {
+        with_app(|this, cx| {
+            this.results.table.set_rows(vec![test_row("old.txt")], 1);
+            this.table_reveal_pending = false;
+            let generation = this.table_reveal_generation;
+
+            this.refresh_current_view(cx);
+            assert!(this.table_reveal_pending, "refresh opens a table session");
+            assert_eq!(
+                this.results.table.total_rows(),
+                0,
+                "the stale rows leave before the new page exists"
+            );
+            assert_eq!(this.table_reveal_generation, generation);
+
+            this.results.table.set_rows(vec![test_row("old.txt")], 1);
+            this.note_table_content(cx);
+            assert_eq!(
+                this.table_reveal_fade_epoch,
+                generation + 1,
+                "the refreshed page fades in"
+            );
+        });
+    }
+
+    /// Sorting is in-place: the rows stay on screen and no entrance runs.
+    #[test]
+    fn a_sort_keeps_the_rows_without_a_table_entrance() {
+        with_app(|this, cx| {
+            this.results.table.set_rows(vec![test_row("old.txt")], 1);
+            this.table_reveal_pending = false;
+            let epoch = this.table_reveal_fade_epoch;
+
+            this.request_result_set(ResultSetChange::InPlace, cx);
+            assert!(!this.table_reveal_pending, "sorting opens no session");
+            assert_eq!(this.results.table.total_rows(), 1, "the rows stay");
+            assert_eq!(this.table_reveal_fade_epoch, epoch, "nothing fades");
         });
     }
 

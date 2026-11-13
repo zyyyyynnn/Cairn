@@ -6,6 +6,7 @@
 
 use crate::app::CairnApp;
 use crate::search::filters::FilterCategory;
+use crate::search::ResultSetChange;
 use gpui_kit::gpui::{Context, Window};
 
 /// Maximum number of navigation history states preserved in memory.
@@ -260,8 +261,7 @@ impl CairnApp {
         // search whose rows nobody can see.
         if !is_visualization {
             self.clear_block_listing();
-            self.begin_table_replacement();
-            self.trigger_search(cx);
+            self.request_result_set(ResultSetChange::Replace, cx);
         }
         cx.notify();
     }

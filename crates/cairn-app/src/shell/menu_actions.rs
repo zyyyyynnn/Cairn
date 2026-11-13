@@ -8,6 +8,7 @@
 
 use crate::app::{join_row_path, layout, CairnApp};
 use crate::search::filters::FilterCategory;
+use crate::search::ResultSetChange;
 use crate::shell::command_groups::{group_spec, GroupCommand, MenuGroup, ZoomPreset};
 use crate::shell::commands::*;
 use crate::shell::dialogs;
@@ -369,8 +370,7 @@ impl CairnApp {
         self.query.scope_drive = None;
         self.query.active_filter = FilterCategory::All;
         self.record_nav_state();
-        self.begin_table_replacement();
-        self.trigger_search(cx);
+        self.request_result_set(ResultSetChange::Replace, cx);
         self.query.search_focus.focus(window, cx);
         cx.notify();
     }
@@ -1433,7 +1433,7 @@ mod visibility_tests {
                         // empty box never leaves a stopped band behind. Clearing
                         // the text is an explicit trigger that clears the stop.
                         this.query.search_input.clear();
-                        this.trigger_search(cx);
+                        this.request_result_set(ResultSetChange::Replace, cx);
                         assert!(!this.query.cancelled);
                         this.query.is_searching = true;
                         this.escape_query(&EscapeQuery, window, cx);

@@ -6,6 +6,7 @@
 //! configuration submission.
 
 use crate::app::CairnApp;
+use crate::search::ResultSetChange;
 use crate::service::config_submission::{
     self, IndexScopeChange, SubmissionOutcome, SubmissionState,
 };
@@ -296,9 +297,15 @@ impl CairnApp {
         self.service.status.update_volumes(volumes);
         self.start_status_refresh(cx);
         // A connection probe must not replace the location the person is reading;
-        // the bin does not need the index.
+        // the bin does not need the index. An empty table shows the first page
+        // with its entrance; a table with rows refreshes in place, silently.
         if !self.recycle_bin.is_open() {
-            self.trigger_search(cx);
+            let change = if self.results.table.total_rows() == 0 {
+                ResultSetChange::Replace
+            } else {
+                ResultSetChange::Background
+            };
+            self.request_result_set(change, cx);
         }
         self.refresh_content_status(cx);
     }

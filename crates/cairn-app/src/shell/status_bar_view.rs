@@ -6,6 +6,7 @@
 //! or selected node information in drive visualization mode.
 
 use crate::app::{layout, CairnApp};
+use crate::search::ResultSetChange;
 use crate::shell::accessibility::{self, ControlElement};
 use crate::shell::status_bar::format_count;
 use crate::shell::theme::{self, ShellTokens};
@@ -410,8 +411,7 @@ impl CairnApp {
             self.check_service_connection(cx);
             return;
         }
-        self.begin_table_session();
-        self.trigger_search(cx);
+        self.request_result_set(ResultSetChange::Replace, cx);
         cx.notify();
     }
 }

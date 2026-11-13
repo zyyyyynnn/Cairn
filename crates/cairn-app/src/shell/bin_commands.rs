@@ -8,6 +8,7 @@
 
 use crate::app::CairnApp;
 use crate::search::filters::FilterCategory;
+use crate::search::ResultSetChange;
 use crate::shell::commands::{DeleteSelected, RestoreAll, RestoreSelected};
 use crate::shell::dialogs;
 use crate::shell::menu_actions::{style_confirmation_alert, style_confirmation_alert_with_variant};
@@ -562,8 +563,7 @@ impl CairnApp {
                     } else if this.block_listing.is_some() {
                         this.remove_block_listing_paths(&deleted_paths, cx);
                     } else {
-                        this.begin_table_replacement();
-                        this.trigger_search(cx);
+                        this.request_result_set(ResultSetChange::Replace, cx);
                     }
                 }
                 cx.notify();

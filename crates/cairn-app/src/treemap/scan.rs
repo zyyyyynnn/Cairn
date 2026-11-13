@@ -7,6 +7,7 @@
 
 use crate::app::CairnApp;
 use crate::search::filters::FilterCategory;
+use crate::search::ResultSetChange;
 use crate::service::ipc_tasks::get_tokio_runtime;
 use crate::shell::os::open_file;
 use crate::treemap::state::{tree_unavailable_from_code, TreemapUnavailable, TreemapViewState};
@@ -270,7 +271,7 @@ impl CairnApp {
         self.query.active_filter = FilterCategory::All;
         self.query.search_input.set_text(&Self::parent_query(path));
         self.record_nav_state();
-        self.trigger_search(cx);
+        self.request_result_set(ResultSetChange::Replace, cx);
         self.query.search_focus.focus(window, cx);
         cx.notify();
     }

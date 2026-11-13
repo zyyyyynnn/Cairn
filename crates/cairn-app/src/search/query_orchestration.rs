@@ -11,6 +11,22 @@ use crate::service::service_issue::ServiceIssue;
 use gpui_kit::gpui::{AsyncApp, Context, Pixels, Point};
 use std::ops::Range;
 
+/// What an immediate query does to the rows already on screen. The entrance
+/// policy (clear, keep, fade) lives in one place; call sites only name their
+/// intent. Typed edits are debounced separately and never open an entrance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ResultSetChange {
+    /// The reader moved to another place, or asked to refresh it. The old rows
+    /// leave at once, the scroll returns to the top, and the first new page
+    /// fades in.
+    Replace,
+    /// A background index refresh. Rows and scroll stay, and nothing fades.
+    Background,
+    /// A sort or search-flag change. Rows stay visible, the new order starts
+    /// at the top, and nothing fades.
+    InPlace,
+}
+
 #[derive(Default)]
 struct QueuedTransport {
     cancels: Vec<u64>,
@@ -371,14 +387,18 @@ impl CairnApp {
         }
     }
 
-    pub fn trigger_search(&mut self, cx: &mut Context<Self>) {
-        // An explicit search leaves the row the rename editor was opened on.
+    pub(crate) fn request_result_set(&mut self, change: ResultSetChange, cx: &mut Context<Self>) {
+        // An explicit result-set request leaves the row the rename editor was opened on.
         self.discard_rename(cx);
+        if change == ResultSetChange::Replace {
+            self.begin_table_replacement();
+        }
         // The all-files view can only be final once the index has settled. Querying a growing
         // index would publish a partial total that climbs in steps as batches land, and each query
         // is a full index scan; the status poll asks for the one result set of the completed index
         // instead. A query the user typed still runs immediately against what is indexed so far.
-        if !self.has_query()
+        if change != ResultSetChange::Background
+            && !self.has_query()
             && self.results.table.total_rows() == 0
             && self.service.status.is_any_loading()
         {
@@ -392,7 +412,7 @@ impl CairnApp {
             cx.notify();
             return;
         }
-        self.run_query(cx, true);
+        self.run_query(cx, change);
     }
 
     /// Cancels the in-flight query without changing the text or the rows already shown. The local
@@ -437,7 +457,7 @@ impl CairnApp {
         {
             return;
         }
-        self.run_query(cx, false);
+        self.run_query(cx, ResultSetChange::Background);
     }
 
     fn build_search_command(&self, reset_scroll_on_apply: bool) -> SearchCommand {
@@ -470,7 +490,7 @@ impl CairnApp {
         }
     }
 
-    fn run_query(&mut self, cx: &mut Context<Self>, reset_scroll_on_apply: bool) {
+    fn run_query(&mut self, cx: &mut Context<Self>, change: ResultSetChange) {
         // While the bin is open the search box is an in-place filter over the
         // shell listing, not a request for an index page. Typing, paste, undo
         // and IME commit all arrive here, so this one branch keeps the location
@@ -485,7 +505,7 @@ impl CairnApp {
             self.filter_block_listing(cx);
             return;
         }
-        let command = self.build_search_command(reset_scroll_on_apply);
+        let command = self.build_search_command(change != ResultSetChange::Background);
         let mut transport = QueuedTransport::default();
         self.query
             .coordinator
@@ -513,9 +533,6 @@ impl CairnApp {
         self.query.cancelled = self.query.coordinator.is_cancelled();
         self.query.is_searching = self.query.coordinator.is_searching();
         self.recycle_bin.leave();
-        if self.results.table.total_rows() == 0 {
-            self.begin_table_session();
-        }
         self.spawn_queued_cancels(transport.cancels);
 
         let Some((qid, cmd)) = transport.query else {
