@@ -921,13 +921,13 @@ fn render_nested_node(
             let show_header_size = budget.size;
             let header_tooltip = SharedString::from(format!("{full_path_drill}\n{size_str}"));
             // A chip the canvas clips must not stay a tab stop: keyboard focus
-            // would land on a control no one can see. The handle is attached
-            // only while the header band is fully inside the canvas; the
-            // pointer still works on whatever part of the chip is visible.
-            let header_focusable = paint.x >= 0.0
-                && paint.x + paint.width <= canvas.0
-                && paint.y >= 0.0
-                && paint.y + header_height <= canvas.1;
+            // would land on a control no one can see. The chip sits at the
+            // header's right end, so it is reachable by keyboard while that
+            // end is on canvas and the header band intersects it; the pointer
+            // keeps the visible part either way.
+            let header_focusable = paint.x + paint.width <= canvas.0 + 1.0
+                && paint.y < canvas.1
+                && paint.y + header_height > 0.0;
 
             // A tail too small for its own tile lives in the header instead of
             // painting a sliver. It keeps the count, the size and the member
