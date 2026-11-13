@@ -29,6 +29,9 @@ pub(crate) struct ResultSurfaceInputs {
     pub(crate) query_in_flight: bool,
     pub(crate) index_catching_up: bool,
     pub(crate) service_connected: bool,
+    /// The last exchange failed with a service condition (a timeout or protocol
+    /// refusal) even though the connection may still be alive.
+    pub(crate) service_issue: bool,
     pub(crate) probing_service: bool,
     pub(crate) has_query: bool,
 }
@@ -44,6 +47,7 @@ impl Default for ResultSurfaceInputs {
             query_in_flight: false,
             index_catching_up: false,
             service_connected: true,
+            service_issue: false,
             probing_service: false,
             has_query: false,
         }
@@ -66,8 +70,10 @@ pub(crate) fn result_surface(inputs: ResultSurfaceInputs) -> ResultSurface {
         !local_listing && !inputs.has_query && inputs.index_catching_up && inputs.total_rows == 0;
     // The bin and a block listing are shell/tree data, not index data: a stopped service
     // must not replace them with the offline band, and an empty location is its own state,
-    // not an offline one.
-    let local_location = local_listing || inputs.service_connected;
+    // not an offline one. A timeout leaves the connection alive and any rows already in
+    // hand valid; with no rows it still needs the service band rather than an empty result.
+    let local_location = local_listing
+        || (inputs.service_connected && (!inputs.service_issue || inputs.total_rows > 0));
     // An unreadable bin is authoritative over any rows still in the table. The state band owns the
     // retry path; stale rows must never become actionable again.
     let has_content = !inputs.recycle_bin_error && local_location && inputs.total_rows > 0;
@@ -96,6 +102,23 @@ mod tests {
         assert_eq!(
             result_surface(ResultSurfaceInputs::default()),
             ResultSurface::Empty
+        );
+        assert_eq!(
+            result_surface(ResultSurfaceInputs {
+                service_issue: true,
+                ..Default::default()
+            }),
+            ResultSurface::Offline,
+            "an empty table with a timed-out answer owns the service band"
+        );
+        assert_eq!(
+            result_surface(ResultSurfaceInputs {
+                service_issue: true,
+                total_rows: 1,
+                ..Default::default()
+            }),
+            ResultSurface::Rows,
+            "rows already in hand survive a timed-out refresh"
         );
         assert_eq!(
             result_surface(ResultSurfaceInputs {

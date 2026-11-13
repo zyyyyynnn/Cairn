@@ -76,6 +76,7 @@ impl WorkerProcessPort for SubprocessWorkerPort<'_> {
 
 impl MultiVolumeEngine {
     fn worker_path(&self) -> Result<PathBuf, String> {
+        #[cfg(test)]
         if let Some(worker) = &self.worker_binary {
             return Ok(worker.clone());
         }

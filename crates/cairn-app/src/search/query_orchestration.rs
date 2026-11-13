@@ -240,8 +240,6 @@ fn rows_page_ready(
     service_connected && !searching && !probing && !fetching_more && has_session
 }
 
-/// A slow query is not a missing service. Only failures that close the channel or prevent the
-/// connection from being established should move the window into its offline recovery band.
 impl CairnApp {
     /// `true` when there is something the service can answer: typed text, or a drive the sidebar
     /// scoped. A bare flag with no query is not a search, and running one would show an empty table
@@ -402,59 +400,83 @@ impl CairnApp {
         // A block listing and the recycle bin own their rows; an index request
         // must neither clear them nor take the index-loading shortcut.
         let local_surface = self.recycle_bin.is_open() || self.block_listing.is_some();
-        if change == ResultSetChange::Replace && !local_surface {
-            self.begin_table_replacement();
-        }
         // The all-files view can only be final once the index has settled. Querying a growing
         // index would publish a partial total that climbs in steps as batches land, and each query
         // is a full index scan; the status poll asks for the one result set of the completed index
         // instead. A query the user typed still runs immediately against what is indexed so far.
-        if !local_surface
-            && change != ResultSetChange::Background
-            && !self.has_query()
-            && self.results.table.total_rows() == 0
-            && self.service.status.is_any_loading()
+        let index_loading =
+            !local_surface && !self.has_query() && self.service.status.is_any_loading();
+        if index_loading
+            && change == ResultSetChange::Replace
+            && self.results.table.total_rows() > 0
         {
-            // The index poll supersedes any answer still on its way for the
-            // text that was just replaced; otherwise that answer installs rows
-            // for a query the empty box no longer shows.
-            if self.query.is_searching {
-                let mut transport = QueuedTransport::default();
-                self.query.coordinator.cancel_in_flight(&mut transport);
-                self.query.query_id = self.query.coordinator.current_query_id();
-                self.query.is_searching = false;
-                self.query.is_fetching_more = false;
-                self.spawn_queued_cancels(transport.cancels);
-            }
-            // An empty query is never refused, so a refusal of the cleared text must not
-            // outlive it and block the all-files view once the index settles.
-            self.query.rejection = None;
-            // An explicit trigger is a new state: a stop belongs to the query it stopped.
-            self.query.cancelled = false;
-            self.query.coordinator.set_cancelled(false);
-            self.start_status_refresh(cx);
-            cx.notify();
+            // The existing rows still describe a real place. Keep them until
+            // the index poll can answer the all-files view, instead of
+            // blanking the table for the whole catch-up.
+            self.await_index_refresh(cx);
+            return;
+        }
+        if change == ResultSetChange::Replace && !local_surface {
+            self.begin_table_replacement();
+        }
+        if index_loading && change != ResultSetChange::Background {
+            // The index poll will own the first answer; supersede any answer
+            // still on its way for the text that was just replaced.
+            self.await_index_refresh(cx);
             return;
         }
         self.run_query(cx, change);
     }
 
-    /// Cancels the in-flight query without changing the text or the rows already shown. The local
-    /// id moves first, so the answer the service is about to finish is dropped by the same guard
-    /// that ignores a superseded query.
-    pub fn cancel_in_flight_query(&mut self, cx: &mut Context<Self>) {
+    /// Releases the index request in flight or waiting in the debounce, so an
+    /// answer for superseded text cannot land later and the status poll can
+    /// refresh the current place.
+    pub(crate) fn supersede_index_query(&mut self) -> bool {
         if !self.query.is_searching {
-            return;
+            return false;
         }
         let mut transport = QueuedTransport::default();
         self.query.coordinator.cancel_in_flight(&mut transport);
         self.query.query_id = self.query.coordinator.current_query_id();
         self.query.is_searching = false;
         self.query.is_fetching_more = false;
+        self.spawn_queued_cancels(transport.cancels);
+        true
+    }
+
+    /// Waits for the index poll instead of issuing a partial query: releases
+    /// the superseded request and clears the stopped/refused state that would
+    /// otherwise block the poll.
+    fn await_index_refresh(&mut self, cx: &mut Context<Self>) {
+        self.supersede_index_query();
+        // An empty query is never refused, so a refusal of the cleared text must not
+        // outlive it and block the all-files view once the index settles.
+        self.query.rejection = None;
+        // An explicit trigger is a new state: a stop belongs to the query it stopped.
+        self.query.cancelled = false;
+        self.query.coordinator.set_cancelled(false);
+        self.start_status_refresh(cx);
+        cx.notify();
+    }
+
+    /// Records a failed exchange. A timeout keeps the connection (and the rows
+    /// already in hand) usable; every other failure marks the service down.
+    fn note_service_error(&mut self, error: &cairn_client::client::ClientError) {
+        self.service.is_service_connected =
+            !matches!(error, cairn_client::client::ClientError::Timeout);
+        self.service.service_issue = Some(ServiceIssue::from_client_error(error));
+    }
+
+    /// Cancels the in-flight query without changing the text or the rows already shown. The local
+    /// id moves first, so the answer the service is about to finish is dropped by the same guard
+    /// that ignores a superseded query.
+    pub fn cancel_in_flight_query(&mut self, cx: &mut Context<Self>) {
+        if !self.supersede_index_query() {
+            return;
+        }
         self.query.cancelled = true;
         // A stopped first page reveals the band through the same entrance an empty answer uses.
         self.note_table_empty(cx);
-        self.spawn_queued_cancels(transport.cancels);
         cx.notify();
     }
 
@@ -660,11 +682,7 @@ impl CairnApp {
                         this.query.coordinator.abort_waiting_on_error(qid);
                         this.query.is_searching = this.query.coordinator.is_searching();
                         tracing::warn!("Cairn IPC query error: {}", e);
-                        // A refused, timed-out or dropped answer is a service state the
-                        // result band must name; rows cleared for a replacement must not
-                        // fall through to the empty band.
-                        this.service.is_service_connected = false;
-                        this.service.service_issue = Some(ServiceIssue::from_client_error(&e));
+                        this.note_service_error(&e);
                     }
                 }
                 cx.notify();
@@ -722,8 +740,7 @@ impl CairnApp {
                     },
                     Ok(Err(e)) => {
                         tracing::warn!("Cairn page fetch error: {e}");
-                        this.service.is_service_connected = false;
-                        this.service.service_issue = Some(ServiceIssue::from_client_error(&e));
+                        this.note_service_error(&e);
                     }
                     Err(e) => {
                         tracing::warn!("Cairn page fetch task lost: {e}");

@@ -562,6 +562,9 @@ impl CairnApp {
     /// a result that arrives after the person has left or reloaded the location.
     pub(crate) fn begin_recycle_bin_load(&mut self, cx: &mut Context<Self>) {
         let generation = self.recycle_bin.begin_load();
+        // The bin owns the table; an index answer still in flight must not
+        // land on top of its rows.
+        self.supersede_index_query();
         self.begin_table_replacement();
         cx.notify();
 

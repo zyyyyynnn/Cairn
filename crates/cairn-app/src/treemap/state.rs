@@ -377,9 +377,10 @@ impl TreemapViewState {
         }
         // A resize or detail change can fold the selected block into a tail or
         // remove it; the canvas must not stay dimmed around a node it can no
-        // longer resolve.
+        // longer resolve. A tail is an entry in a header, not a tile body, and
+        // cannot own the focus the dimming expresses.
         if let Some(ref selected) = self.selected_path {
-            if self.layout_node(selected).is_none() && self.tail_by_path(selected).is_none() {
+            if self.layout_node(selected).is_none() {
                 self.selected_path = None;
             }
         }

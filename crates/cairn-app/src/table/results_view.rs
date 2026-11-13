@@ -287,6 +287,7 @@ impl CairnApp {
             query_in_flight: self.query.is_searching,
             index_catching_up: self.service.status.is_any_loading(),
             service_connected: self.service.is_service_connected,
+            service_issue: self.service.service_issue.is_some(),
             probing_service: self.service.is_probing_service,
             has_query: self.has_query(),
         });

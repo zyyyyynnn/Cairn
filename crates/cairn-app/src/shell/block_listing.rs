@@ -147,6 +147,9 @@ impl CairnApp {
         cx: &mut Context<Self>,
     ) {
         self.discard_rename(cx);
+        // The listing replaces the table with in-memory members; an index
+        // answer still in flight must not land on top of it later.
+        self.supersede_index_query();
         let (parent, count, rows) = {
             let Some(state) = self.treemap_state.as_ref() else {
                 return;

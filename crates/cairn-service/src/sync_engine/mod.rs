@@ -63,8 +63,10 @@ pub struct MultiVolumeEngine {
     /// Reused across 50ms USN journal polls so cold/hot polling avoids repeated 512 KiB heap churn.
     #[cfg_attr(not(windows), allow(dead_code))]
     usn_read_buf: Mutex<Vec<u8>>,
-    /// A worker binary injected by tests. Production leaves this empty and
-    /// resolves the worker beside the service executable only.
+    /// A worker binary injected by the backfill test. The production build has
+    /// no such field: it always resolves the worker beside the service
+    /// executable.
+    #[cfg(test)]
     worker_binary: Option<std::path::PathBuf>,
     /// Whether the configuration on disk was authenticated at startup. A rejected file must not
     /// become trusted merely because a later reload reads it again.
@@ -409,6 +411,7 @@ impl MultiVolumeEngine {
             content_commands: Mutex::new(None),
             summary_cache: Mutex::new(Vec::new()),
             usn_read_buf: Mutex::new(Vec::new()),
+            #[cfg(test)]
             worker_binary: None,
             config_trusted: AtomicBool::new(true),
         }
