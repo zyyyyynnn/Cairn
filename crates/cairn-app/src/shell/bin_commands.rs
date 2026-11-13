@@ -562,6 +562,7 @@ impl CairnApp {
                     } else if this.block_listing.is_some() {
                         this.remove_block_listing_paths(&deleted_paths, cx);
                     } else {
+                        this.begin_table_replacement();
                         this.trigger_search(cx);
                     }
                 }

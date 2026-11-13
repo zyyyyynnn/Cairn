@@ -260,6 +260,7 @@ impl CairnApp {
         // search whose rows nobody can see.
         if !is_visualization {
             self.clear_block_listing();
+            self.begin_table_replacement();
             self.trigger_search(cx);
         }
         cx.notify();

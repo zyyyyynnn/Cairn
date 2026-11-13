@@ -691,6 +691,19 @@ impl CairnApp {
         self.table_reveal_pending = true;
     }
 
+    /// Replaces the visible result set as a new location. The old rows leave at
+    /// once so a category or history switch never shows the previous place's
+    /// rows while the new query runs; the first new content then fades in.
+    /// Typed edits keep their rows and do not call this.
+    pub(crate) fn begin_table_replacement(&mut self) {
+        self.begin_table_session();
+        self.results.rows_scroll.set_offset(Point::default());
+        self.results.table.scroll_top = 0.0;
+        self.results.table.set_rows(Vec::new(), 0);
+        self.query.active_session_id = None;
+        self.service.status.clear_objects_count();
+    }
+
     /// Starts the results panel's entrance and closes the pending session.
     pub(crate) fn bump_table_reveal(&mut self, cx: &mut Context<Self>) {
         self.table_reveal_generation = self.table_reveal_generation.wrapping_add(1);
@@ -955,6 +968,71 @@ mod tests {
     fn row_paths_join_without_doubling_the_separator() {
         assert_eq!(join_row_path("C:\\dir", "a.rs"), "C:\\dir\\a.rs");
         assert_eq!(join_row_path("C:\\dir\\", "a.rs"), "C:\\dir\\a.rs");
+    }
+
+    /// A location switch replaces the old result set at once and opens a fresh
+    /// entrance; the fade begins only when the new page actually arrives.
+    #[test]
+    fn a_category_switch_starts_a_replacement_entrance() {
+        use crate::search::filters::FilterCategory;
+        use cairn_protocol::message::FileRowData;
+
+        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
+            gpui_kit::init(cx);
+            let _ = gpui_kit::open_window(
+                gpui_kit::gpui::WindowOptions {
+                    show: false,
+                    focus: false,
+                    ..gpui_kit::gpui::WindowOptions::default()
+                },
+                cx,
+                |window, cx| {
+                    let app = cx.new(|cx| CairnApp::new(window, cx));
+                    app.update(cx, |this, cx| {
+                        let row = |name: &str| FileRowData {
+                            frn: 1,
+                            name: name.to_string(),
+                            path: r"C:\".to_string(),
+                            size: 1,
+                            modified_ts: 0,
+                            created_ts: 0,
+                            is_dir: false,
+                            flags: 0,
+                            name_highlights: Vec::new(),
+                            path_highlights: Vec::new(),
+                            snippet: None,
+                        };
+                        this.results.table.set_rows(vec![row("old.txt")], 1);
+                        let generation = this.table_reveal_generation;
+
+                        this.set_filter(FilterCategory::Document, cx);
+                        assert!(
+                            this.table_reveal_pending,
+                            "a new location opens a table session"
+                        );
+                        assert_eq!(
+                            this.results.table.total_rows(),
+                            0,
+                            "the previous location's rows leave at once"
+                        );
+                        assert_eq!(
+                            this.table_reveal_generation, generation,
+                            "no fade runs before the new content exists"
+                        );
+
+                        this.results.table.set_rows(vec![row("new.docx")], 1);
+                        this.note_table_content(cx);
+                        assert_eq!(
+                            this.table_reveal_fade_epoch,
+                            generation + 1,
+                            "the new page fades in"
+                        );
+                    });
+                    cx.quit();
+                    app
+                },
+            );
+        });
     }
 
     #[test]

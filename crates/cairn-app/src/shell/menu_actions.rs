@@ -369,6 +369,7 @@ impl CairnApp {
         self.query.scope_drive = None;
         self.query.active_filter = FilterCategory::All;
         self.record_nav_state();
+        self.begin_table_replacement();
         self.trigger_search(cx);
         self.query.search_focus.focus(window, cx);
         cx.notify();

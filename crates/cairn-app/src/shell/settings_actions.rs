@@ -180,8 +180,7 @@ impl CairnApp {
         self.recycle_bin.leave();
         self.query.active_filter = category;
         self.record_nav_state();
-        self.results.rows_scroll.set_offset(Point::default());
-        self.results.table.scroll_top = 0.0;
+        self.begin_table_replacement();
         self.trigger_search(cx);
         cx.notify();
     }
