@@ -1048,8 +1048,8 @@ mod tests {
         });
     }
 
-    /// Re-clicking the active location or the status-bar icon is the same
-    /// replacement: the rows leave at once and the refreshed page fades in.
+    /// The status-bar refresh of a settled index is a replacement: the rows leave
+    /// at once and the refreshed page fades in.
     #[test]
     fn a_table_refresh_replaces_the_result_set_at_once() {
         with_app(|this, cx| {
@@ -1131,6 +1131,76 @@ mod tests {
             assert!(
                 this.results.table.total_rows() >= 1,
                 "the listing's rows survive the refresh"
+            );
+        });
+    }
+
+    /// A refresh keeps the rows that already describe this place until the index
+    /// poll can answer it; a place change clears them at once even mid catch-up.
+    #[test]
+    fn a_refresh_keeps_the_rows_while_a_place_change_does_not() {
+        fn catching_up(this: &mut CairnApp) {
+            this.service
+                .status
+                .update_volumes(vec![VolumeStatusSummary {
+                    drive_letter: 'C',
+                    volume_guid: r"\\?\Volume{test}\".to_string(),
+                    status: VolumeState::CatchingUp(50),
+                    indexed_count: 1,
+                    usn_enabled: true,
+                }]);
+        }
+
+        with_app(|this, cx| {
+            this.results.table.set_rows(vec![test_row("old.txt")], 1);
+            this.table_reveal_pending = false;
+            catching_up(this);
+
+            this.request_result_set(ResultSetChange::Refresh, cx);
+            assert_eq!(
+                this.results.table.total_rows(),
+                1,
+                "a refresh keeps rows that already describe this place"
+            );
+            assert!(
+                !this.table_reveal_pending,
+                "the poll answers the refresh without an entrance"
+            );
+
+            this.request_result_set(ResultSetChange::Replace, cx);
+            assert_eq!(
+                this.results.table.total_rows(),
+                0,
+                "another place's rows never wait for the index"
+            );
+            assert!(
+                this.table_reveal_pending,
+                "the place change owes its own first page"
+            );
+        });
+    }
+
+    /// A local surface can clear the window's search mirror before it takes
+    /// the table; the cancellation authority is the coordinator, so the answer
+    /// still on the wire is released anyway.
+    #[test]
+    fn a_local_takeover_supersedes_an_answer_the_mirror_no_longer_tracks() {
+        with_app(|this, cx| {
+            this.request_result_set(ResultSetChange::InPlace, cx);
+            let stale_id = this.query.query_id;
+            this.query.is_searching = false;
+            this.query.active_session_id = Some(7);
+
+            this.take_table_for_local_rows();
+
+            assert_ne!(this.query.query_id, stale_id, "the answer is superseded");
+            assert!(
+                this.query.active_session_id.is_none(),
+                "the old session can no longer page the new rows"
+            );
+            assert!(
+                !this.query.coordinator.is_searching(),
+                "the coordinator holds no stale in-flight query"
             );
         });
     }

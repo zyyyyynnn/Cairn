@@ -1424,7 +1424,8 @@ mod visibility_tests {
 
                     app.update(cx, |this, cx| {
                         this.query.search_input.set_text("report");
-                        this.query.is_searching = true;
+                        this.request_result_set(ResultSetChange::InPlace, cx);
+                        assert!(this.query.is_searching, "the narrowed query is running");
                         this.escape_query(&EscapeQuery, window, cx);
                         assert!(!this.query.is_searching);
                         assert!(this.query.cancelled);

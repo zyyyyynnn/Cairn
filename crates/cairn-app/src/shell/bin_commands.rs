@@ -85,11 +85,8 @@ impl CairnApp {
         }
         // Invalidate any in-flight query: its answer belongs to the table and
         // must not replace the listing that is about to be shown.
-        self.query.query_id += 1;
-        self.query.is_searching = false;
-        self.query.is_fetching_more = false;
+        self.take_table_for_local_rows();
         self.query.cancelled = false;
-        self.query.active_session_id = None;
         // The bin is a location, not a search scope. The search box starts
         // empty and filters this listing in place; it must not run an index
         // query that would replace the location.

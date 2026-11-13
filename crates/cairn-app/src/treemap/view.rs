@@ -920,6 +920,14 @@ fn render_nested_node(
             let budget = header_content(inner_width, size_width, tail_width);
             let show_header_size = budget.size;
             let header_tooltip = SharedString::from(format!("{full_path_drill}\n{size_str}"));
+            // A chip the canvas clips must not stay a tab stop: keyboard focus
+            // would land on a control no one can see. The handle is attached
+            // only while the header band is fully inside the canvas; the
+            // pointer still works on whatever part of the chip is visible.
+            let header_focusable = paint.x >= 0.0
+                && paint.x + paint.width <= canvas.0
+                && paint.y >= 0.0
+                && paint.y + header_height <= canvas.1;
 
             // A tail too small for its own tile lives in the header instead of
             // painting a sliver. It keeps the count, the size and the member
@@ -943,65 +951,67 @@ fn render_nested_node(
                 } else {
                     rcx.palette.body_fill()
                 };
-                Some(
-                    accessibility::element_at_key(tail_control, &tail.path)
-                        .relative()
-                        .flex_shrink_0()
-                        .flex()
-                        .items_center()
-                        .gap_x(px(TREEMAP_BLOCK_GAP))
-                        .pl(px(3.0))
-                        .pr(px(5.0))
-                        .h(px(16.0))
-                        .rounded(px(TREEMAP_RADIUS))
-                        .bg(chip_fill)
-                        .text_color(rcx.palette.ink_secondary())
-                        .cursor_pointer()
-                        .track_focus(&focus)
-                        .aria_label(SharedString::from(format!("{label} {tail_size}")))
-                        .when(!rcx.panning && !rcx.suppress_tooltip, move |this| {
-                            this.tooltip(move |window, cx| {
-                                Tooltip::new(chip_tooltip.clone()).build(window, cx)
-                            })
+                let chip = accessibility::element_at_key(tail_control, &tail.path)
+                    .relative()
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .gap_x(px(TREEMAP_BLOCK_GAP))
+                    .pl(px(3.0))
+                    .pr(px(5.0))
+                    .h(px(16.0))
+                    .rounded(px(TREEMAP_RADIUS))
+                    .bg(chip_fill)
+                    .text_color(rcx.palette.ink_secondary())
+                    .cursor_pointer()
+                    .when(header_focusable, |this| this.track_focus(&focus))
+                    .aria_label(SharedString::from(format!("{label} {tail_size}")))
+                    .when(!rcx.panning && !rcx.suppress_tooltip, move |this| {
+                        this.tooltip(move |window, cx| {
+                            Tooltip::new(chip_tooltip.clone()).build(window, cx)
                         })
-                        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                            let path = chip_path.clone();
-                            chip_view.update(cx, |this, cx| {
+                    })
+                    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                        let path = chip_path.clone();
+                        chip_view.update(cx, |this, cx| {
+                            this.open_tail_listing(&path, window, cx);
+                        });
+                        cx.stop_propagation();
+                    })
+                    .on_action(
+                        move |_: &crate::shell::commands::OpenSelected,
+                              window: &mut Window,
+                              cx: &mut App| {
+                            cx.stop_propagation();
+                            let path = key_path.clone();
+                            key_view.update(cx, |this, cx| {
                                 this.open_tail_listing(&path, window, cx);
                             });
+                        },
+                    )
+                    .on_key_down(move |event: &KeyDownEvent, window, cx| {
+                        if event.keystroke.key.as_str() == "space" {
                             cx.stop_propagation();
-                        })
-                        .on_action(
-                            move |_: &crate::shell::commands::OpenSelected,
-                                  window: &mut Window,
-                                  cx: &mut App| {
-                                cx.stop_propagation();
-                                let path = key_path.clone();
-                                key_view.update(cx, |this, cx| {
-                                    this.open_tail_listing(&path, window, cx);
-                                });
-                            },
-                        )
-                        .on_key_down(move |event: &KeyDownEvent, window, cx| {
-                            if event.keystroke.key.as_str() == "space" {
-                                cx.stop_propagation();
-                                let path = space_path.clone();
-                                space_view.update(cx, |this, cx| {
-                                    this.open_tail_listing(&path, window, cx);
-                                });
-                            }
-                        })
-                        .child(Icon::new(IconName::FileStack).xsmall())
-                        .child(div().whitespace_nowrap().text_sm().child(label.clone()))
-                        .children(cairn_ui::focus::edge(
-                            &focus,
-                            rcx.ring,
-                            px(TREEMAP_RADIUS),
-                            rcx.keyboard_navigation,
-                            rcx.window,
-                            rcx.app,
-                        )),
-                )
+                            let path = space_path.clone();
+                            space_view.update(cx, |this, cx| {
+                                this.open_tail_listing(&path, window, cx);
+                            });
+                        }
+                    })
+                    .child(Icon::new(IconName::FileStack).xsmall())
+                    .child(div().whitespace_nowrap().text_sm().child(label.clone()));
+                Some(if header_focusable {
+                    chip.children(cairn_ui::focus::edge(
+                        &focus,
+                        rcx.ring,
+                        px(TREEMAP_RADIUS),
+                        rcx.keyboard_navigation,
+                        rcx.window,
+                        rcx.app,
+                    ))
+                } else {
+                    chip
+                })
             });
 
             // A container body is a low-share plate of the same tone, so nesting reads as tonal

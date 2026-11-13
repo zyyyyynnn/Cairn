@@ -411,7 +411,7 @@ impl CairnApp {
             self.check_service_connection(cx);
             return;
         }
-        self.request_result_set(ResultSetChange::Replace, cx);
+        self.request_result_set(ResultSetChange::Refresh, cx);
         cx.notify();
     }
 }

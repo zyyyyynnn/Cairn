@@ -147,9 +147,6 @@ impl CairnApp {
         cx: &mut Context<Self>,
     ) {
         self.discard_rename(cx);
-        // The listing replaces the table with in-memory members; an index
-        // answer still in flight must not land on top of it later.
-        self.supersede_index_query();
         let (parent, count, rows) = {
             let Some(state) = self.treemap_state.as_ref() else {
                 return;
@@ -208,10 +205,9 @@ impl CairnApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // A late answer to an earlier query must not replace the listing rows.
-        self.query.query_id += 1;
-        self.query.is_searching = false;
-        self.query.is_fetching_more = false;
+        // The listing owns the table now: an index answer in flight is
+        // cancelled and its session released before these rows are installed.
+        self.take_table_for_local_rows();
         // A refusal or stop of the query that preceded the block does not
         // describe these rows.
         self.query.rejection = None;

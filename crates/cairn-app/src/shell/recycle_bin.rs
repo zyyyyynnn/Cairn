@@ -564,7 +564,7 @@ impl CairnApp {
         let generation = self.recycle_bin.begin_load();
         // The bin owns the table; an index answer still in flight must not
         // land on top of its rows.
-        self.supersede_index_query();
+        self.take_table_for_local_rows();
         self.begin_table_replacement();
         cx.notify();
 

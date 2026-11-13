@@ -16,10 +16,13 @@ use std::ops::Range;
 /// intent. Typed edits are debounced separately and never open an entrance.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ResultSetChange {
-    /// The reader moved to another place, or asked to refresh it. The old rows
-    /// leave at once, the scroll returns to the top, and the first new page
-    /// fades in.
+    /// The reader moved to another place. The old rows leave at once, the
+    /// scroll returns to the top, and the first new page fades in.
     Replace,
+    /// The reader re-asked the place already on screen. Rows leave for a fresh
+    /// entrance, except during an index catch-up: the rows still describe this
+    /// place, so they stay until the status poll can answer it.
+    Refresh,
     /// A background index refresh. Rows and scroll stay, and nothing fades.
     Background,
     /// A sort or search-flag change. Rows stay visible, the new order starts
@@ -406,20 +409,17 @@ impl CairnApp {
         // instead. A query the user typed still runs immediately against what is indexed so far.
         let index_loading =
             !local_surface && !self.has_query() && self.service.status.is_any_loading();
-        if index_loading
-            && change == ResultSetChange::Replace
-            && self.results.table.total_rows() > 0
-        {
-            // The existing rows still describe a real place. Keep them until
-            // the index poll can answer the all-files view, instead of
-            // blanking the table for the whole catch-up.
+        if index_loading && change == ResultSetChange::Refresh {
+            // The rows already describe the place being refreshed; keep them
+            // until the index poll can answer it, instead of blanking the
+            // table for the whole catch-up.
             self.await_index_refresh(cx);
             return;
         }
-        if change == ResultSetChange::Replace && !local_surface {
+        if matches!(change, ResultSetChange::Replace | ResultSetChange::Refresh) && !local_surface {
             self.begin_table_replacement();
         }
-        if index_loading && change != ResultSetChange::Background {
+        if index_loading && change == ResultSetChange::Replace {
             // The index poll will own the first answer; supersede any answer
             // still on its way for the text that was just replaced.
             self.await_index_refresh(cx);
@@ -430,9 +430,11 @@ impl CairnApp {
 
     /// Releases the index request in flight or waiting in the debounce, so an
     /// answer for superseded text cannot land later and the status poll can
-    /// refresh the current place.
+    /// refresh the current place. The coordinator is the authority: a local
+    /// surface may have cleared the window's mirror while an answer was still
+    /// on its way.
     pub(crate) fn supersede_index_query(&mut self) -> bool {
-        if !self.query.is_searching {
+        if !self.query.coordinator.is_searching() {
             return false;
         }
         let mut transport = QueuedTransport::default();
@@ -442,6 +444,14 @@ impl CairnApp {
         self.query.is_fetching_more = false;
         self.spawn_queued_cancels(transport.cancels);
         true
+    }
+
+    /// Hands the table to rows that do not come from the index (a block listing
+    /// or the recycle bin): an index answer still in flight is cancelled and the
+    /// active session released, so it cannot splice into the new rows.
+    pub(crate) fn take_table_for_local_rows(&mut self) {
+        self.supersede_index_query();
+        self.query.active_session_id = None;
     }
 
     /// Waits for the index poll instead of issuing a partial query: releases
@@ -1002,7 +1012,8 @@ mod tests {
 
                     app.update(cx, |this, cx| {
                         this.query.search_input.set_text("report");
-                        this.query.is_searching = true;
+                        this.request_result_set(ResultSetChange::InPlace, cx);
+                        assert!(this.query.is_searching);
                         let before = this.query.query_id;
                         this.cancel_in_flight_query(cx);
                         assert!(!this.query.is_searching);
