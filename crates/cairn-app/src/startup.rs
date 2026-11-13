@@ -166,12 +166,12 @@ mod tests {
         assert_eq!(ports.dark_calls.get(), 1);
         assert!(bundle.is_dark());
         assert_eq!(bundle.plan.initial_query.as_deref(), Some("*.rs"));
-        assert!(!bundle.i18n.is_locale_loaded("zh-CN"));
-        assert!(!bundle.i18n.is_locale_loaded("en-US"));
+        assert!(!bundle.i18n.messages.is_loaded("zh-CN"));
+        assert!(!bundle.i18n.messages.is_loaded("en-US"));
 
         let tray_show = bundle.i18n.get_text("tray_show");
         assert!(!tray_show.is_empty());
-        assert!(bundle.i18n.is_locale_loaded("zh-CN"));
-        assert!(!bundle.i18n.is_locale_loaded("en-US"));
+        assert!(bundle.i18n.messages.is_loaded("zh-CN"));
+        assert!(!bundle.i18n.messages.is_loaded("en-US"));
     }
 }

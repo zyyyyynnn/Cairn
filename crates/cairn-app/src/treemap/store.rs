@@ -33,20 +33,21 @@ impl<K: Eq + Hash + Clone, V> TreemapLru<K, V> {
         }
     }
 
-    pub(crate) fn get(&mut self, key: &K) -> Option<&V> {
-        if !self.entries.contains_key(key) {
-            return None;
-        }
-        self.touch(key);
-        self.entries.get(key)
-    }
-
+    /// Read-only observation for tests in other modules; does not touch recency.
     #[cfg(test)]
     pub(crate) fn peek<Q>(&self, key: &Q) -> Option<&V>
     where
         K: Borrow<Q>,
         Q: Eq + Hash + ?Sized,
     {
+        self.entries.get(key)
+    }
+
+    pub(crate) fn get(&mut self, key: &K) -> Option<&V> {
+        if !self.entries.contains_key(key) {
+            return None;
+        }
+        self.touch(key);
         self.entries.get(key)
     }
 
@@ -95,6 +96,7 @@ impl<K: Eq + Hash + Clone, V> TreemapLru<K, V> {
         self.order.clear();
     }
 
+    /// Read-only observation for tests in other modules.
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.entries.len()
@@ -110,15 +112,15 @@ mod tests {
         let mut lru = TreemapLru::with_capacity(2);
         lru.insert("a".to_string(), 1usize);
         lru.insert("b".to_string(), 2usize);
-        assert_eq!(lru.len(), 2);
+        assert_eq!(lru.entries.len(), 2);
 
         // Touch `"a"` so `"b"` becomes least recently used.
         assert_eq!(lru.get(&"a".to_string()).copied(), Some(1));
 
         lru.insert("c".to_string(), 3usize);
-        assert_eq!(lru.len(), 2);
-        assert_eq!(lru.peek("a").copied(), Some(1));
-        assert_eq!(lru.peek("b").copied(), None);
-        assert_eq!(lru.peek("c").copied(), Some(3));
+        assert_eq!(lru.entries.len(), 2);
+        assert_eq!(lru.entries.get("a").copied(), Some(1));
+        assert_eq!(lru.entries.get("b").copied(), None);
+        assert_eq!(lru.entries.get("c").copied(), Some(3));
     }
 }

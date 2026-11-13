@@ -55,9 +55,9 @@ async fn write_response(server: &mut NamedPipeServer, payload: ResponsePayload) 
 }
 
 #[tokio::test]
-async fn session_reuses_one_connection_and_single_hello_across_rpcs() {
+async fn session_reuses_one_connection_per_slot_across_rpcs() {
     let pipe = unique_pipe_name("reuse");
-    let mut server = ServerOptions::new()
+    let server = ServerOptions::new()
         .first_pipe_instance(true)
         .create(&pipe)
         .expect("create server");
@@ -69,45 +69,57 @@ async fn session_reuses_one_connection_and_single_hello_across_rpcs() {
     let pipe_srv = pipe.clone();
 
     let server_task = tokio::spawn(async move {
-        server.connect().await.expect("accept conn");
-        accepts_srv.fetch_add(1, Ordering::SeqCst);
-        let _next_idle = ServerOptions::new()
-            .first_pipe_instance(false)
-            .create(&pipe_srv)
-            .expect("spare pipe");
-
-        let mut buf = Vec::new();
-        while let Some(req) = read_one_request(&mut server, &mut buf).await {
-            let reply = match req {
-                ClientRequest::Hello { .. } => {
-                    hellos_srv.fetch_add(1, Ordering::SeqCst);
-                    ResponsePayload::HelloAck {
-                        server_version: WIRE_GUARD as u32,
-                        caller_is_admin: false,
-                    }
+        let mut server = server;
+        let mut handlers = Vec::new();
+        // The session keeps a control connection beside the query connection, so accept two
+        // clients and serve them concurrently.
+        for _ in 0..2 {
+            server.connect().await.expect("accept conn");
+            accepts_srv.fetch_add(1, Ordering::SeqCst);
+            let next = ServerOptions::new()
+                .first_pipe_instance(false)
+                .create(&pipe_srv)
+                .expect("spare pipe");
+            let hellos = hellos_srv.clone();
+            handlers.push(tokio::spawn(async move {
+                let mut buf = Vec::new();
+                while let Some(req) = read_one_request(&mut server, &mut buf).await {
+                    let reply = match req {
+                        ClientRequest::Hello { .. } => {
+                            hellos.fetch_add(1, Ordering::SeqCst);
+                            ResponsePayload::HelloAck {
+                                server_version: WIRE_GUARD as u32,
+                                caller_is_admin: false,
+                            }
+                        }
+                        ClientRequest::GetStatus => ResponsePayload::StatusAck,
+                        ClientRequest::Query { query_id, .. } => ResponsePayload::QueryResult {
+                            query_id,
+                            session_id: 77,
+                            total_matches: 1,
+                            total_bytes: 128,
+                            first_page: Vec::new(),
+                        },
+                        ClientRequest::GetRows {
+                            session_id, offset, ..
+                        } => ResponsePayload::RowsResult {
+                            session_id,
+                            offset,
+                            rows: Vec::new(),
+                        },
+                        ClientRequest::GetTree { path, .. } => ResponsePayload::TreeResult {
+                            path,
+                            entries: Vec::new(),
+                        },
+                        other => panic!("unexpected request: {other:?}"),
+                    };
+                    write_response(&mut server, reply).await;
                 }
-                ClientRequest::GetStatus => ResponsePayload::StatusAck,
-                ClientRequest::Query { query_id, .. } => ResponsePayload::QueryResult {
-                    query_id,
-                    session_id: 77,
-                    total_matches: 1,
-                    total_bytes: 128,
-                    first_page: Vec::new(),
-                },
-                ClientRequest::GetRows {
-                    session_id, offset, ..
-                } => ResponsePayload::RowsResult {
-                    session_id,
-                    offset,
-                    rows: Vec::new(),
-                },
-                ClientRequest::GetTree { path, .. } => ResponsePayload::TreeResult {
-                    path,
-                    entries: Vec::new(),
-                },
-                other => panic!("unexpected request: {other:?}"),
-            };
-            write_response(&mut server, reply).await;
+            }));
+            server = next;
+        }
+        for handler in handlers {
+            let _ = handler.await;
         }
     });
 
@@ -129,8 +141,16 @@ async fn session_reuses_one_connection_and_single_hello_across_rpcs() {
     drop(session);
 
     server_task.await.expect("server finish");
-    assert_eq!(accepts.load(Ordering::SeqCst), 1);
-    assert_eq!(hellos.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        accepts.load(Ordering::SeqCst),
+        2,
+        "one query slot and one control slot"
+    );
+    assert_eq!(
+        hellos.load(Ordering::SeqCst),
+        2,
+        "each slot greets its connection once and reuses it"
+    );
 }
 
 #[tokio::test]

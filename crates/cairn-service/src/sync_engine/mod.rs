@@ -560,11 +560,16 @@ impl MultiVolumeEngine {
 
     /// Aggregates resident heap allocations across all indexed volumes.
     pub fn memory_footprint(&self) -> IndexMemoryFootprint {
-        let lock = self.volumes.read().unwrap();
         let mut total = IndexMemoryFootprint::default();
-        for vol in lock.values() {
-            total.accumulate(&vol.memory_footprint());
+        {
+            let lock = self.volumes.read().unwrap();
+            for vol in lock.values() {
+                total.accumulate(&vol.memory_footprint());
+            }
         }
+        // The journal buffer is resident for the engine, not for one volume, and is
+        // read before the volume lock is taken again.
+        total.scratch_bytes += self.usn_read_buf.lock().unwrap().capacity();
         total
     }
 }

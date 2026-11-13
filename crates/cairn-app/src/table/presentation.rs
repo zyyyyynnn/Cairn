@@ -114,6 +114,8 @@ fn civil_from_days(days_since_1970: i64) -> (i64, u32, u32) {
 }
 
 /// Bounded minute-bucket timestamp formatter cache for per-frame row rendering.
+/// The converter applies each timestamp's own DST rule, so a DST transition does not
+/// invalidate cached minutes; a runtime timezone configuration change shows on the next start.
 pub(crate) struct RowPresentationCache<P: LocalTimePort> {
     port: P,
     capacity: usize,
@@ -158,11 +160,6 @@ impl<P: LocalTimePort> RowPresentationCache<P> {
         self.order.push_back(minute_bucket);
         self.entries.insert(minute_bucket, formatted.clone());
         formatted
-    }
-
-    #[cfg(test)]
-    pub fn len(&self) -> usize {
-        self.entries.len()
     }
 }
 
@@ -229,7 +226,7 @@ mod tests {
         // Third distinct minute evicts the oldest bucket because capacity is 2.
         let third_min = cache.format_timestamp(base + 120 * 10_000_000);
         assert_eq!(third_min.as_ref(), "1970.01.01 00:02");
-        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.entries.len(), 2);
         assert_eq!(calls.get(), 3);
     }
 

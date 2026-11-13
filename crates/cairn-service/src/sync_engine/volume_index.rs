@@ -370,11 +370,16 @@ impl VolumeIndex {
         (!order.is_empty()).then_some(order.as_slice())
     }
 
-    /// Ensures a specific presorted column is up-to-date, lazily building only the requested column.
+    /// Ensures a specific presorted column is up-to-date, building only the requested column.
+    /// Only one column is retained: the memory budget covers the lazy single-column state, so
+    /// switching the sort column releases the previous order instead of accumulating columns.
     pub fn ensure_presorted_column(&mut self, col: SortColumn) {
         if self.presorted_dirty {
             self.presorted.clear_and_shrink();
             self.presorted_dirty = false;
+        }
+        if !self.presorted_has(col) {
+            self.presorted.clear_and_shrink();
         }
         self.presorted.ensure_column(
             col,
@@ -383,6 +388,16 @@ impl VolumeIndex {
             &self.path_cache,
             self.drive_letter,
         );
+    }
+
+    fn presorted_has(&self, col: SortColumn) -> bool {
+        match col {
+            SortColumn::Name => !self.presorted.by_name.is_empty(),
+            SortColumn::Size => !self.presorted.by_size.is_empty(),
+            SortColumn::DateModified => !self.presorted.by_date_modified.is_empty(),
+            SortColumn::Path => !self.presorted.by_path.is_empty(),
+            SortColumn::DateCreated | SortColumn::Extension => false,
+        }
     }
 
     /// Full heap-allocation ledger of this volume's resident structures.

@@ -60,10 +60,12 @@ impl MultiVolumeEngine {
             .strip_content_queries()
             .unwrap_or_else(|| QueryExpr::Term(cairn_core::syntax::SearchTerm::default()));
 
-        // Only the all-files query can consume a presorted order. A filtered query scans the
-        // records and sorts just its matches, so rebuilding the volume's whole name/path/size
-        // array first is pure latency: measured 0.65-0.9 s per filtered query on the live index.
-        if content_queries.is_empty() && query_expr.is_empty() {
+        // Only the single-volume all-files query can consume a presorted order: the
+        // multi-volume path merges per-volume matches and sorts them itself. A filtered query
+        // scans the records and sorts just its matches, so rebuilding the volume's whole
+        // name/path/size array first is pure latency.
+        let single_volume = self.volumes.read().unwrap().len() == 1;
+        if single_volume && content_queries.is_empty() && query_expr.is_empty() {
             self.ensure_presorted_indices(sort_by);
         }
 

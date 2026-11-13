@@ -43,6 +43,8 @@ impl Messages {
     }
 
     /// Returns whether the target locale bundle has been parsed into memory.
+    /// Read-only diagnostic: whether the locale bundle has been built on demand. Used by the
+    /// lazy-loading regression tests.
     pub fn is_loaded(&self, language: &str) -> bool {
         if language.starts_with("zh") {
             self.zh.get().is_some()

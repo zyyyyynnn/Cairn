@@ -10,11 +10,11 @@
 //! questions at once: which controls must be observable, what role each reports, and which message
 //! carries its name in zh-CN and en-US (UI-01, UI-02, UI-03, UI-07, SVC-03, SVC-04, SVC-05).
 //!
-//! The regression tests at the bottom run in the ordinary `cargo test -p cairn-app` build. They hold
-//! the table together (unique keys, informative roles, no missing or blank translation) and check that
-//! the render path really consumes it, which is what stops an entry from becoming a promise the
-//! window never keeps. Observing those roles inside a live window — the half that proves the window
-//! reports what the table claims — must be checked in a live window; the app has no headless UI harness.
+//! The regression tests at the bottom run in the ordinary `cargo test -p cairn-app` build and hold
+//! the table together (unique keys, informative roles, no missing or blank translation, every
+//! registered message resolvable). Observing the roles inside a live window — the half that proves
+//! the window reports what the table claims — must be checked in a live window; the app has no
+//! headless UI harness.
 
 use crate::shell::i18n::I18nManager;
 use gpui_kit::base::{ObservedElement, TestSupportExt};

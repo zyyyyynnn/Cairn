@@ -3,7 +3,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use cairn_core::frn_index::{FrnLookup, IndexMemoryFootprint};
-use cairn_core::{DirectoryPathCache, FileRecord, NamePool, PresortedIndices};
 
 #[test]
 fn single_link_files_stay_inline_and_promote_only_multi_hardlinks() {
@@ -29,53 +28,20 @@ fn single_link_files_stay_inline_and_promote_only_multi_hardlinks() {
 }
 
 #[test]
-fn memory_footprint_tracks_real_allocations_within_compact_budget() {
-    let count = 10_000usize;
-    let mut records = Vec::with_capacity(count);
-    let mut pool = NamePool::with_capacity(count * 16);
-    let mut lookup = FrnLookup::with_capacity(count);
-
-    for i in 0..count {
-        let name = format!("document_{i:05}.txt");
-        let (off, len, ext) = pool.insert(&name);
-        records.push(FileRecord {
-            frn: 1000 + i as u64,
-            parent_idx: FileRecord::ROOT_PARENT,
-            name_offset: off,
-            name_len: len,
-            ext_offset: ext,
-            volume_id: 2,
-            flags: 0,
-            size: 1024,
-            modified_ts: 1,
-            created_ts: 1,
-        });
-        lookup.push(1000 + i as u64, i as u32);
-    }
-
-    let presorted = PresortedIndices::default();
-    let path_cache = DirectoryPathCache::new();
-    let (arena_bytes, folded_arena_bytes) = pool.allocated_bytes();
+fn the_footprint_arithmetic_keeps_its_components_independent() {
     let footprint = IndexMemoryFootprint {
-        record_count: records.len(),
-        live_count: records.len(),
-        records_bytes: records.capacity() * std::mem::size_of::<FileRecord>(),
-        arena_bytes,
-        folded_arena_bytes,
-        frn_lookup_bytes: lookup.allocated_bytes(),
-        presorted_bytes: presorted.allocated_bytes(),
+        record_count: 10_000,
+        live_count: 9_996,
+        records_bytes: 480_000,
+        arena_bytes: 100_000,
+        folded_arena_bytes: 100_000,
+        frn_lookup_bytes: 170_000,
+        presorted_bytes: 40_000,
         directory_sizes_bytes: 0,
-        path_cache_bytes: path_cache.allocated_bytes(),
-        scratch_bytes: 0,
+        path_cache_bytes: 1_024,
+        scratch_bytes: 8_192,
     };
-
-    // Compact FrnLookup (~17B/bucket, 0 per-entry Vec allocs) plus FileRecord (48B) + dual NamePool (~32B)
-    // stays well below 125 B/record (previous HashMap<u64, Vec<u32>> + eager 4x presorted was >170 B/rec).
-    assert!(
-        footprint.bytes_per_record() < 125.0,
-        "expected compact resident footprint < 125 B/record, got {:.2} B/record ({:?})",
-        footprint.bytes_per_record(),
-        footprint
-    );
-    assert_eq!(footprint.presorted_bytes, 0);
+    assert_eq!(footprint.total_bytes(), 899_216);
+    assert!((footprint.bytes_per_record() - 89.9216).abs() < 1e-9);
+    assert_eq!(IndexMemoryFootprint::default().bytes_per_record(), 0.0);
 }

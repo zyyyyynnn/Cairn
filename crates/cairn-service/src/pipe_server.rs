@@ -23,6 +23,7 @@ use cairn_protocol::message::{
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
+use tokio::sync::Semaphore;
 use tracing::{error, info, warn};
 
 const WRITE_BUF_SHRINK_THRESHOLD_BYTES: usize = 256 * 1024;
@@ -48,6 +49,15 @@ pub struct PipeServer {
     sessions: Arc<SessionManager>,
     pipe_name: String,
     protocol_version: u16,
+    /// Caps record-scanning requests. Connections are unbounded and a broad query holds
+    /// O(records) memory and the volume read lock, so the blocking-pool size is not a budget.
+    heavy_tasks: Arc<Semaphore>,
+}
+
+fn heavy_task_limit() -> usize {
+    std::thread::available_parallelism()
+        .map(|parallelism| parallelism.get().clamp(2, 8))
+        .unwrap_or(4)
 }
 
 impl PipeServer {
@@ -58,6 +68,7 @@ impl PipeServer {
             sessions,
             pipe_name: PIPE_NAME.to_string(),
             protocol_version: WIRE_GUARD,
+            heavy_tasks: Arc::new(Semaphore::new(heavy_task_limit())),
         }
     }
 
@@ -88,10 +99,17 @@ impl PipeServer {
             let sessions = self.sessions.clone();
             let protocol_version = self.protocol_version;
             let pipe_name = self.pipe_name.clone();
+            let heavy_tasks = Arc::clone(&self.heavy_tasks);
 
             tokio::spawn(async move {
-                if let Err(e) =
-                    handle_client(connected_server, engine, sessions, protocol_version).await
+                if let Err(e) = handle_client(
+                    connected_server,
+                    engine,
+                    sessions,
+                    protocol_version,
+                    heavy_tasks,
+                )
+                .await
                 {
                     if let Some(io_err) = e.downcast_ref::<std::io::Error>() {
                         if is_pipe_closed_error(io_err) {
@@ -167,6 +185,7 @@ async fn handle_client(
     engine: Arc<MultiVolumeEngine>,
     sessions: Arc<SessionManager>,
     protocol_version: u16,
+    heavy_tasks: Arc<Semaphore>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Identity comes from the OS token of the connected process, once per connection: the client
     // cannot change it while the pipe instance is alive. The call is synchronous and performs no
@@ -240,58 +259,68 @@ async fn handle_client(
                     read_buf.shrink_to(65536);
                 }
 
-                let (resp_payload, volumes) = if !hello_done
-                    && !matches!(req, ClientRequest::Hello { .. })
-                {
-                    // Version negotiation is explicit (SVC-03): nothing is served before it.
-                    (
-                        ResponsePayload::Error {
-                            code: ERROR_CODE_HANDSHAKE_REQUIRED,
-                            message: "protocol negotiation missing: send Hello first".to_string(),
-                        },
-                        Vec::new(),
-                    )
-                } else {
-                    if matches!(req, ClientRequest::Hello { .. }) {
-                        hello_done = true;
-                    }
-                    let admin_only_query = engine.admin_only_query();
-                    let engine_blocking = Arc::clone(&engine);
-                    let sessions_blocking = Arc::clone(&sessions);
-                    let owner_blocking = owner.clone();
-                    tokio::task::spawn_blocking(move || {
-                        let resp_payload = process_request(
-                            req,
-                            &engine_blocking,
-                            &sessions_blocking,
-                            caller,
-                            &owner_blocking,
-                            admin_only_query,
-                        );
-                        let omit_volumes = matches!(
-                            resp_payload,
+                let (resp_payload, volumes) =
+                    if !hello_done && !matches!(req, ClientRequest::Hello { .. }) {
+                        // Version negotiation is explicit (SVC-03): nothing is served before it.
+                        (
                             ResponsePayload::Error {
-                                code: ERROR_CODE_HANDSHAKE_REQUIRED
-                                    | ERROR_CODE_PROTOCOL_VERSION_MISMATCH
-                                    | cairn_protocol::message::ERROR_CODE_UNAUTHORIZED
-                                    | cairn_protocol::message::ERROR_CODE_ADMIN_ONLY_QUERY,
-                                ..
-                            }
-                        );
-                        // A query answer decides whether the table is still loading, so its
-                        // envelope reads the volume state after the query released the index.
-                        let volumes = if omit_volumes {
-                            Vec::new()
-                        } else if matches!(&resp_payload, ResponsePayload::QueryResult { .. }) {
-                            engine_blocking.get_volume_summaries_fresh()
+                                code: ERROR_CODE_HANDSHAKE_REQUIRED,
+                                message: "protocol negotiation missing: send Hello first"
+                                    .to_string(),
+                            },
+                            Vec::new(),
+                        )
+                    } else {
+                        if matches!(req, ClientRequest::Hello { .. }) {
+                            hello_done = true;
+                        }
+                        let _heavy_permit = if matches!(
+                            req,
+                            ClientRequest::Query { .. } | ClientRequest::GetTree { .. }
+                        ) {
+                            Some(heavy_tasks.clone().acquire_owned().await.map_err(|_| {
+                                std::io::Error::other("heavy request limiter closed")
+                            })?)
                         } else {
-                            engine_blocking.get_volume_summaries()
+                            None
                         };
-                        (resp_payload, volumes)
-                    })
-                    .await
-                    .map_err(|err| format!("blocking request task failed: {err}"))?
-                };
+                        let admin_only_query = engine.admin_only_query();
+                        let engine_blocking = Arc::clone(&engine);
+                        let sessions_blocking = Arc::clone(&sessions);
+                        let owner_blocking = owner.clone();
+                        tokio::task::spawn_blocking(move || {
+                            let resp_payload = process_request(
+                                req,
+                                &engine_blocking,
+                                &sessions_blocking,
+                                caller,
+                                &owner_blocking,
+                                admin_only_query,
+                            );
+                            let omit_volumes = matches!(
+                                resp_payload,
+                                ResponsePayload::Error {
+                                    code: ERROR_CODE_HANDSHAKE_REQUIRED
+                                        | ERROR_CODE_PROTOCOL_VERSION_MISMATCH
+                                        | cairn_protocol::message::ERROR_CODE_UNAUTHORIZED
+                                        | cairn_protocol::message::ERROR_CODE_ADMIN_ONLY_QUERY,
+                                    ..
+                                }
+                            );
+                            // A query answer decides whether the table is still loading, so its
+                            // envelope reads the volume state after the query released the index.
+                            let volumes = if omit_volumes {
+                                Vec::new()
+                            } else if matches!(&resp_payload, ResponsePayload::QueryResult { .. }) {
+                                engine_blocking.get_volume_summaries_fresh()
+                            } else {
+                                engine_blocking.get_volume_summaries()
+                            };
+                            (resp_payload, volumes)
+                        })
+                        .await
+                        .map_err(|err| format!("blocking request task failed: {err}"))?
+                    };
                 let envelope = Envelope {
                     volumes,
                     payload: resp_payload,

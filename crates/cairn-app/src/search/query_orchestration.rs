@@ -172,9 +172,6 @@ pub enum QueryRejection {
 
 impl QueryRejection {
     /// Every refusal the service can report, for the checks that walk the vocabulary.
-    #[cfg(test)]
-    pub const ALL: &[Self] = &[Self::TooManyContentTerms];
-
     /// The rejection a service error code names, if any.
     pub fn from_error_code(code: u32) -> Option<Self> {
         match code {
@@ -398,12 +395,6 @@ impl CairnApp {
         self.run_query(cx, true);
     }
 
-    /// Re-asks the active query while a growing index adds rows, keeping what the table already
-    /// shows on screen. Used by the local scan's status refresh: a refresh that cleared the table
-    /// would flicker once the query takes longer than the poll
-    /// interval, which is how a progressive index turns into a loading animation that never ends.
-    /// Skipped while a query is already in flight; that answer is newer than the request would be.
-    /// A hidden table (Treemap or Recycle Bin) is never refreshed in the background.
     /// Cancels the in-flight query without changing the text or the rows already shown. The local
     /// id moves first, so the answer the service is about to finish is dropped by the same guard
     /// that ignores a superseded query.
@@ -423,6 +414,12 @@ impl CairnApp {
         cx.notify();
     }
 
+    /// Re-asks the active query while a growing index adds rows, keeping what the table already
+    /// shows on screen. Used by the local scan's status refresh: a refresh that cleared the table
+    /// would flicker once the query takes longer than the poll interval, which is how a
+    /// progressive index turns into a loading animation that never ends. Skipped while a query is
+    /// already in flight; that answer is newer than the request would be. A hidden table (Treemap
+    /// or Recycle Bin) is never refreshed in the background.
     pub fn refresh_results(&mut self, cx: &mut Context<Self>) {
         // A block listing owns the table rows; a status refresh must not
         // replace them with a filtered first page.
@@ -882,13 +879,12 @@ mod tests {
             .iter()
             .find(|entry| entry.key == "result-state")
             .expect("the result band is a registered control");
-        for rejection in QueryRejection::ALL {
-            assert!(
-                result_state.messages.contains(&rejection.message_key()),
-                "{rejection:?} states {:?}, which the result band does not register",
-                rejection.message_key()
-            );
-        }
+        let rejection = QueryRejection::TooManyContentTerms;
+        assert!(
+            result_state.messages.contains(&rejection.message_key()),
+            "{rejection:?} states {:?}, which the result band does not register",
+            rejection.message_key()
+        );
     }
 
     #[test]

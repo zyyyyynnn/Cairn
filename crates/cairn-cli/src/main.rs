@@ -228,14 +228,18 @@ where
         emitted += 1;
     }
 
+    // The service pages over the match list by offset, which can be wider than the rows it can
+    // materialize; advancing by the requested limit keeps a sparse page from being re-read.
+    let mut offset = first_page.len();
     while emitted < target {
         let limit = (target - emitted).min(CLI_PAGE_SIZE);
         let env = transport
-            .get_rows(session_id, emitted, limit)
+            .get_rows(session_id, offset, limit)
             .map_err(|error| CliStreamError::Transport {
                 context: "Query failed",
                 error,
             })?;
+        offset = offset.saturating_add(limit);
         match env.payload {
             ResponsePayload::RowsResult { rows, .. } => {
                 if rows.is_empty() {
@@ -267,6 +271,17 @@ fn execute_cli(
             Ok(env) => env,
             Err(error) => return write_transport_error(err, "Error querying status", error),
         };
+        match &env.payload {
+            ResponsePayload::StatusAck => {}
+            ResponsePayload::Error { code, message } => {
+                let _ = writeln!(err, "Status error {code}: {message}");
+                return ExitCode::from(1);
+            }
+            _ => {
+                let _ = writeln!(err, "Unexpected service response.");
+                return ExitCode::from(1);
+            }
+        }
         let mut buf = BufWriter::new(out);
         let write_result = (|| -> std::io::Result<()> {
             writeln!(
@@ -759,7 +774,7 @@ mod tests {
                     first_page: page1.clone(),
                 },
             }),
-            pages: vec![(2, page2.clone()), (4, page3.clone())],
+            pages: vec![(2, page2.clone()), (5, page3.clone())],
             recorded_offsets: std::cell::RefCell::new(vec![]),
         };
 
@@ -776,7 +791,7 @@ mod tests {
         assert_eq!(decoded.len(), 5);
         assert_eq!(decoded[1].name, "报告, \"第一版\".docx");
         assert_eq!(decoded[4].frn, 5);
-        assert_eq!(*transport.recorded_offsets.borrow(), vec![(2, 3), (4, 1)]);
+        assert_eq!(*transport.recorded_offsets.borrow(), vec![(2, 3), (5, 1)]);
 
         // 2. Paginated streaming CSV export with CJK, commas, and quotes
         let temp = tempfile::tempdir().unwrap();

@@ -379,7 +379,7 @@ impl CairnClient {
         encode_frame_into(&mut self.write_buf, WIRE_GUARD, req)?;
         let write_result = self.pipe.write_all(&self.write_buf).await;
         self.write_buf.clear();
-        if self.write_buf.capacity() > READ_BUF_BASELINE {
+        if self.write_buf.capacity() > WRITE_BUF_BASELINE {
             self.write_buf.shrink_to(WRITE_BUF_BASELINE);
         }
         write_result?;

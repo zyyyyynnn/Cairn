@@ -135,13 +135,13 @@ pub fn save_volume_index_atomic(
     Ok(target_path)
 }
 
-/// Loads and validates an index file from disk.
 /// Loads and validates a volume index from an arbitrary stream using bounded chunked decoding and
 /// incremental CRC32 verification.
 pub fn load_volume_index_from<R: Read>(reader: R) -> Result<LoadedIndexData, PersistenceError> {
     load_volume_index_with_len(reader, None)
 }
 
+/// Loads and validates an index file from disk.
 pub fn load_volume_index(path: &Path) -> Result<LoadedIndexData, PersistenceError> {
     let file = File::open(path)?;
     let actual_file_len = usize::try_from(file.metadata()?.len())

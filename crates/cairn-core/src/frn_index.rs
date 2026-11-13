@@ -178,7 +178,8 @@ impl FrnLookup {
     }
 }
 
-/// Complete heap-allocation ledger of a volume or multi-volume index.
+/// Resident heap-allocation ledger of a volume or multi-volume index. Transient build
+/// buffers (sort entries, per-request directory indexes) are deliberately excluded.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct IndexMemoryFootprint {
     pub record_count: usize,

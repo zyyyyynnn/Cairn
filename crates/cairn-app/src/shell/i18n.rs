@@ -17,7 +17,7 @@ const EN_US_SOURCE: &str = include_str!("../../locales/en-US.ftl");
 pub struct I18nManager {
     is_zh: AtomicBool,
     revision: AtomicU64,
-    messages: Messages,
+    pub(crate) messages: Messages,
 }
 
 impl Default for I18nManager {
@@ -45,11 +45,6 @@ impl I18nManager {
 
     pub fn revision(&self) -> u64 {
         self.revision.load(Ordering::Acquire)
-    }
-
-    #[cfg(test)]
-    pub fn is_locale_loaded(&self, language: &str) -> bool {
-        self.messages.is_loaded(language)
     }
 
     fn language(&self) -> &'static str {
@@ -141,12 +136,12 @@ mod tests {
     #[test]
     fn switching_language_parses_secondary_locale_lazily_and_bumps_revision_once() {
         let i18n = I18nManager::new("zh-CN");
-        assert!(!i18n.is_locale_loaded("zh-CN"));
-        assert!(!i18n.is_locale_loaded("en-US"));
+        assert!(!i18n.messages.is_loaded("zh-CN"));
+        assert!(!i18n.messages.is_loaded("en-US"));
 
         let _ = i18n.get_text("app_title");
-        assert!(i18n.is_locale_loaded("zh-CN"));
-        assert!(!i18n.is_locale_loaded("en-US"));
+        assert!(i18n.messages.is_loaded("zh-CN"));
+        assert!(!i18n.messages.is_loaded("en-US"));
         let rev0 = i18n.revision();
 
         i18n.set_language("zh-TW");
@@ -154,9 +149,9 @@ mod tests {
 
         i18n.set_language("en-US");
         assert_eq!(i18n.revision(), rev0 + 1);
-        assert!(!i18n.is_locale_loaded("en-US"));
+        assert!(!i18n.messages.is_loaded("en-US"));
         let _ = i18n.get_text("app_title");
-        assert!(i18n.is_locale_loaded("en-US"));
+        assert!(i18n.messages.is_loaded("en-US"));
     }
 
     #[test]

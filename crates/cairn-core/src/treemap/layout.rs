@@ -400,6 +400,31 @@ fn plan_with_tail(
         break;
     }
 
+    // The floor escalates by doubling, so the first plan that fits can leave a summary block far
+    // larger than the minimum readable cell. Search back down over the same kept/tail set: a block
+    // may take the area it needs to be readable, not a column.
+    if aggregate_floor > 0 && !tail.is_empty() {
+        let mut low = 0u64;
+        let mut high = aggregate_floor;
+        for _ in 0..12 {
+            let mid = low + (high - low) / 2;
+            if mid == low {
+                break;
+            }
+            let candidate = assemble(&kept, &tail, mid, collapse);
+            let (slivers, dropped) = candidate.offenders();
+            if slivers.is_empty() && dropped.is_empty() {
+                high = mid;
+            } else {
+                low = mid;
+            }
+        }
+        if high < aggregate_floor {
+            aggregate_floor = high;
+            plan = assemble(&kept, &tail, aggregate_floor, collapse);
+        }
+    }
+
     // The loop has a hard budget; a pathological canvas may still carry an
     // offending cell. Fold it away rather than painting a strip.
     let (slivers, dropped) = plan.offenders();
@@ -1663,6 +1688,66 @@ mod tests {
             "a body that cannot tile its children stays a compact leaf"
         );
         assert!(laid.header_rect.is_none());
+    }
+
+    /// The live C:\Users shape: two dominant directories beside a handful of tiny
+    /// categories. A readable summary block may take the minimum area it needs, not a
+    /// full-height column far beyond its byte share.
+    #[test]
+    fn tiny_summary_blocks_do_not_take_giant_columns() {
+        let mut nodes = Vec::new();
+        nodes.push(TreemapTreeNode::new_dir(0, "ZYN".to_string(), 0));
+        nodes[0].size = 138_170_000_000;
+        nodes.push(TreemapTreeNode::new_dir(1, ".gemini".to_string(), 0));
+        nodes[1].size = 48_720_000_000;
+        let rest: [(&str, u64); 12] = [
+            ("rest-doc1.txt", 10_000_000),
+            ("rest-doc2.md", 8_000_000),
+            ("rest-doc3.pdf", 6_800_000),
+            ("rest-doc4.docx", 3_000_000),
+            ("rest-exe1.bin", 1_500_000),
+            ("rest-exe2.exe", 1_200_000),
+            ("rest-exe3.dll", 800_000),
+            ("rest-exe4.sys", 500_000),
+            ("rest-video.mp4", 1_000_000),
+            ("rest-archive.zip", 900_000),
+            ("rest-image.png", 3_600),
+            ("rest-audio.mp3", 2_000),
+        ];
+        for (index, (name, size)) in rest.iter().enumerate() {
+            nodes.push(TreemapTreeNode::new_file(
+                index as u64 + 2,
+                (*name).to_string(),
+                *size,
+                0,
+            ));
+        }
+        let options = NestedTreemapOptions::from_detail_level(5);
+        let bounds = TreemapRect::new(0.0, 0.0, 1272.0, 654.0);
+        let layout = layout_nested_treemap(&nodes, r"C:\Users", bounds, &options, 0);
+        for node in &layout {
+            assert!(
+                tile_fits(node.rect),
+                "{:?} painted a {:.1}x{:.1} cell",
+                node.item.name,
+                node.rect.width,
+                node.rect.height
+            );
+            if node.aggregate_count > 0 {
+                assert!(
+                    node.rect.width <= 60.0,
+                    "summary block took a {:.1}px-wide column for {} bytes",
+                    node.rect.width,
+                    node.item.size
+                );
+                assert!(
+                    node.rect.area() <= 6_000.0,
+                    "summary block took {:.0}px2 for {} bytes",
+                    node.rect.area(),
+                    node.item.size
+                );
+            }
+        }
     }
 
     /// No child is painted or folded twice at any body size.

@@ -88,7 +88,16 @@ impl TokenStream for CjkBigramLatinTokenStream<'_> {
                 self.token.text.clear();
                 for c in rest.chars() {
                     if c.is_alphanumeric() && !is_cjk(c) {
-                        if c.is_ascii() {
+                        // Unicode only lowercases the Greek capital sigma by position: a
+                        // word-final sigma becomes the final form. Peek one character so the
+                        // stream matches a whole-word lowercase without buffering the word.
+                        let word_final = rest[consumed + c.len_utf8()..]
+                            .chars()
+                            .next()
+                            .is_none_or(|next| !next.is_alphanumeric() || is_cjk(next));
+                        if c == '\u{03A3}' && word_final {
+                            self.token.text.push('\u{03C2}');
+                        } else if c.is_ascii() {
                             self.token.text.push(c.to_ascii_lowercase());
                         } else {
                             for lc in c.to_lowercase() {
@@ -188,6 +197,19 @@ mod tests {
         assert!(texts.contains(&"构设".to_string()));
         assert!(texts.contains(&"设计".to_string()));
         assert!(texts.contains(&"v1".to_string()));
+    }
+
+    #[test]
+    fn a_word_final_sigma_uses_the_final_form() {
+        assert_eq!(collect_tokens("ΑΣ"), vec![("ας".to_string(), 0, 4, 0, 1)]);
+        assert_eq!(collect_tokens("ΑΣΑ"), vec![("ασα".to_string(), 0, 6, 0, 1)]);
+        assert_eq!(
+            collect_tokens("ΑΣ_ΑΣ"),
+            vec![
+                ("ας".to_string(), 0, 4, 0, 1),
+                ("ας".to_string(), 5, 9, 1, 1),
+            ]
+        );
     }
 
     #[test]

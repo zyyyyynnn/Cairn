@@ -9,6 +9,7 @@ use crate::sync_engine::volume_index::BitSet;
 use crate::sync_engine::{MultiVolumeEngine, TreeUnavailable, VolumeIndex};
 use cairn_core::engine::CancellationToken;
 use cairn_core::model::FileRecord;
+use cairn_core::sort::SortColumn;
 use cairn_core::syntax::parse_query;
 use cairn_ntfs::mft::ExtractedItem;
 use cairn_ntfs::usn::UsnChange;
@@ -947,5 +948,63 @@ fn compaction_triggers_on_arena_rename_bloat_and_shrinks_capacity() {
         "compaction must shrink over-allocated arena: before={} after={}",
         bloated.arena_bytes,
         shrunk.arena_bytes
+    );
+}
+
+#[test]
+fn switching_the_presorted_column_releases_the_previous_order() {
+    let mut vol = VolumeIndex::new('C');
+    vol.ingest_items(vec![
+        index_item(1, 0, "C:", true),
+        sized_item(3, 1, "a.bin", false, 100),
+        sized_item(4, 1, "b.bin", false, 50),
+    ]);
+
+    vol.ensure_presorted_column(SortColumn::Name);
+    assert!(vol.has_presorted_column(SortColumn::Name));
+    vol.ensure_presorted_column(SortColumn::Size);
+    assert!(vol.has_presorted_column(SortColumn::Size));
+    assert!(
+        !vol.has_presorted_column(SortColumn::Name),
+        "only the requested presorted column may stay resident"
+    );
+}
+
+#[test]
+fn the_public_ledger_covers_an_ingested_volume_and_its_single_column() {
+    let mut vol = VolumeIndex::new('C');
+    let mut items = vec![index_item(1, 0, "C:", true)];
+    for i in 0..2_000u64 {
+        items.push(sized_item(
+            10 + i,
+            1,
+            &format!("file_{i:05}.txt"),
+            false,
+            64,
+        ));
+    }
+    vol.ingest_items(items);
+
+    let idle = vol.memory_footprint();
+    assert_eq!(idle.record_count, 2_001);
+    assert_eq!(idle.live_count, 2_001);
+    assert!(
+        idle.frn_lookup_bytes > 0,
+        "the compact FRN lookup is part of the ledger"
+    );
+    assert_eq!(idle.presorted_bytes, 0);
+    assert!(idle.bytes_per_record() < 125.0);
+
+    vol.ensure_presorted_column(SortColumn::Name);
+    let warm = vol.memory_footprint();
+    assert!(warm.presorted_bytes >= 2_001 * 4);
+    assert!(warm.bytes_per_record() < 125.0);
+    assert!(warm.total_bytes() > idle.total_bytes());
+
+    vol.ensure_presorted_column(SortColumn::Size);
+    let switched = vol.memory_footprint();
+    assert_eq!(
+        switched.presorted_bytes, warm.presorted_bytes,
+        "the column swap stays within the single-column budget"
     );
 }
