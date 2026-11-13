@@ -42,11 +42,11 @@ pub fn generate_synthetic_corpus<P: AsRef<Path>>(
         let name = format!("{}_{:07}.{}", prefix, i, ext);
         let size = (i as u64 * 1024) % (10 * 1024 * 1024);
         let parent = match i % 5 {
-            0 => r"C:\Windows\System32",
-            1 => r"C:\Users\User\Documents",
-            2 => r"C:\Workspace\Projects",
-            3 => r"C:\Program Files\Common",
-            _ => r"C:\Data\Archives",
+            0 => r"C:\Windows\System32\drivers",
+            1 => r"C:\Users\User\Documents\Work\2026",
+            2 => r"C:\Workspace\Projects\Cairn\crates",
+            3 => r"C:\Program Files\Common Files\System",
+            _ => r"C:\Data\Archives\Logs\Monthly",
         };
 
         writeln!(

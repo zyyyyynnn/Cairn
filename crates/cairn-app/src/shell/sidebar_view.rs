@@ -10,14 +10,15 @@ use crate::shell::accessibility::{self, ControlElement};
 use crate::shell::commands::OpenSelected;
 use crate::shell::theme::{self, ShellTokens};
 use fluent_bundle::FluentArgs;
-use gpui_kit::assets::{AllAssets, IconName};
+use gpui_kit::assets::IconName;
 use gpui_kit::base::StyledExt;
 use gpui_kit::component::{h_flex, v_flex, Icon};
 use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::{AssetSource as _, *};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
 #[derive(Clone, Copy)]
 struct SidebarIconMetrics {
@@ -37,20 +38,28 @@ fn text_ink_offset(line_ascent: Pixels, line_descent: Pixels, ink_center: Pixels
 /// variant whose 1.75-unit stroke returns the optical weight the glyph had at
 /// 0.875rem without touching the same icons elsewhere in the shell.
 fn sidebar_icon_svg(icon: IconName) -> Option<Arc<[u8]>> {
-    type SvgCache = Mutex<HashMap<String, Option<Arc<[u8]>>>>;
-    static CACHE: OnceLock<SvgCache> = OnceLock::new();
-    let path = icon.path().to_string();
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut cache = cache.lock().ok()?;
-    let bytes = cache.entry(path.clone()).or_insert_with(|| {
-        let bytes = AllAssets.load(&path).ok().flatten()?;
-        let svg = String::from_utf8_lossy(&bytes);
-        Some(Arc::from(
-            svg.replace("stroke-width=\"2\"", "stroke-width=\"1.75\"")
-                .into_bytes(),
-        ))
-    });
-    bytes.clone()
+    thread_local! {
+        static CACHE: RefCell<HashMap<SharedString, Option<Arc<[u8]>>>> =
+            RefCell::new(HashMap::new());
+    }
+    let path = icon.path();
+    CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        cache
+            .entry(path.clone())
+            .or_insert_with(|| {
+                let bytes = crate::shell::assets::CairnAssets
+                    .load(path.as_ref())
+                    .ok()
+                    .flatten()?;
+                let svg = String::from_utf8_lossy(&bytes);
+                Some(Arc::from(
+                    svg.replace("stroke-width=\"2\"", "stroke-width=\"1.75\"")
+                        .into_bytes(),
+                ))
+            })
+            .clone()
+    })
 }
 
 /// How far the sample glyph's ink centre sits below the centre of a line box at
@@ -60,6 +69,15 @@ fn glyph_ink_offset(window: &Window, sample: &str) -> Pixels {
     let Some(glyph) = sample.chars().next() else {
         return Pixels::ZERO;
     };
+    let rem_bits = f32::from(window.rem_size()).to_bits();
+    thread_local! {
+        static OFFSET_CACHE: RefCell<HashMap<(u32, char), Pixels>> =
+            RefCell::new(HashMap::new());
+    }
+    if let Some(cached) = OFFSET_CACHE.with(|cache| cache.borrow().get(&(rem_bits, glyph)).copied())
+    {
+        return cached;
+    }
     let style = window.text_style();
     let font = style.font();
     let font_size = window.rem_size() * theme::SMALL_TEXT_SIZE;
@@ -84,7 +102,15 @@ fn glyph_ink_offset(window: &Window, sample: &str) -> Pixels {
         return Pixels::ZERO;
     };
     let ink_center = bounds.origin.y + bounds.size.height / 2.0;
-    text_ink_offset(layout.ascent, layout.descent, ink_center)
+    let offset = text_ink_offset(layout.ascent, layout.descent, ink_center);
+    OFFSET_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.len() >= 32 {
+            cache.clear();
+        }
+        cache.insert((rem_bits, glyph), offset);
+    });
+    offset
 }
 
 /// The 24-grid Lucide stroke is scaled by the larger icon box and reads heavier
@@ -171,11 +197,11 @@ fn sidebar_row(
 /// optical centre on the query box's centreline and the first row on the table heading.
 fn sidebar_caption(
     control: &'static accessibility::KeyControl,
-    title: String,
+    title: SharedString,
     window: &Window,
     tokens: &ShellTokens,
 ) -> impl IntoElement {
-    let ink_offset = sidebar_caption_ink_offset(window, &title);
+    let ink_offset = sidebar_caption_ink_offset(window, title.as_ref());
     accessibility::element(control)
         .aria_label(title.clone())
         .px(rems(layout::INNER_SPACING))
@@ -277,8 +303,8 @@ impl CairnApp {
 
         let locations = accessibility::control("sidebar-locations");
         let drives = accessibility::control("sidebar-drives");
-        let locations_title = accessibility::name(locations, &self.i18n);
-        let drives_title = accessibility::name(drives, &self.i18n);
+        let locations_title = self.cached_control_name(locations);
+        let drives_title = self.cached_control_name(drives);
         let icon_metrics = sidebar_icon_metrics(window);
 
         let quick_access: Vec<AnyElement> = FilterCategory::menu_order()
@@ -291,7 +317,7 @@ impl CairnApp {
                     && self.block_listing.is_none();
                 let control =
                     accessibility::control_at(&element_id("sidebar-location", category.key()));
-                let name = accessibility::name(control, &self.i18n);
+                let name = self.cached_control_name(control);
                 let focus = window
                     .use_keyed_state(
                         element_id("sidebar-location-focus", category.key()),
@@ -304,7 +330,7 @@ impl CairnApp {
                     focus.contains_focused(window, cx) && self.results.keyboard_navigation;
                 let item = sidebar_row(
                     category_icon(category),
-                    self.i18n.get_text(category.label_key()),
+                    self.cached_text(category.label_key()),
                     is_active,
                     tokens,
                     icon_metrics,
@@ -312,7 +338,7 @@ impl CairnApp {
 
                 keyboard_row(
                     accessibility::element(control)
-                        .aria_label(name.clone())
+                        .aria_label(name)
                         .aria_selected(is_active),
                     focus,
                     is_focused,
@@ -328,7 +354,7 @@ impl CairnApp {
         // has binned and restores from there, so it closes the 位置 section.
         let bin_active = self.recycle_bin.is_open() && self.drive_view.is_none();
         let bin_control = accessibility::control("sidebar-recycle-bin");
-        let bin_name = accessibility::name(bin_control, &self.i18n);
+        let bin_name = self.cached_control_name(bin_control);
         let bin_focus = window
             .use_keyed_state("sidebar-recycle-bin-focus", cx, |_, cx| {
                 cx.focus_handle().tab_stop(true)
@@ -339,14 +365,14 @@ impl CairnApp {
             bin_focus.contains_focused(window, cx) && self.results.keyboard_navigation;
         let bin_row = sidebar_row(
             IconName::Recycle,
-            self.i18n.get_text("sidebar_recycle_bin"),
+            self.cached_text("sidebar_recycle_bin"),
             bin_active,
             tokens,
             icon_metrics,
         );
         let recycle_entry = keyboard_row(
             accessibility::element(bin_control)
-                .aria_label(bin_name.clone())
+                .aria_label(bin_name)
                 .aria_selected(bin_active),
             bin_focus,
             bin_is_focused,
@@ -405,7 +431,7 @@ impl CairnApp {
         let drive_elements = if awaiting_index {
             Vec::new()
         } else if drive_rows.is_empty() {
-            let message = self.i18n.get_text("sidebar_no_drives");
+            let message = self.cached_text("sidebar_no_drives");
             vec![h_flex()
                 .w_full()
                 .min_h(rems(layout::ROW_HEIGHT))

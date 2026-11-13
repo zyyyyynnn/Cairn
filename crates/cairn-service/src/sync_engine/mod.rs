@@ -5,7 +5,7 @@
 //! Multi-volume synchronization engine and index lifecycle manager.
 
 use cairn_content::ContentSearcher;
-use cairn_core::sort::PresortedIndices;
+use cairn_core::IndexMemoryFootprint;
 use cairn_ntfs::volume::enumerate_fixed_drives;
 use cairn_protocol::status::{
     ContentIndexState, ContentIndexStatus, VolumeState, VolumeStatusSummary,
@@ -34,7 +34,7 @@ pub use journal_reconciliation::*;
 pub use post_scan::*;
 pub use search::{MultiSearchResult, SearchResultItem};
 pub use treemap_build::TreeUnavailable;
-pub use volume_index::VolumeIndex;
+pub use volume_index::{CompactPolicy, CompactionReport, VolumeIndex};
 
 #[cfg(test)]
 mod tests;
@@ -60,8 +60,14 @@ pub struct MultiVolumeEngine {
     /// read lock for seconds; serving the response envelope from this cache keeps new connections
     /// (handshake, status probes) from waiting behind it. Refreshed on every uncontended read.
     summary_cache: Mutex<Vec<VolumeStatusSummary>>,
-    /// Service data is owned by SYSTEM, so its configuration is written with the restricted
-    /// descriptor.
+    /// Reused across 50ms USN journal polls so cold/hot polling avoids repeated 512 KiB heap churn.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    usn_read_buf: Mutex<Vec<u8>>,
+    /// A worker binary injected by the backfill test. The production build has
+    /// no such field: it always resolves the worker beside the service
+    /// executable.
+    #[cfg(test)]
+    worker_binary: Option<std::path::PathBuf>,
     /// Whether the configuration on disk was authenticated at startup. A rejected file must not
     /// become trusted merely because a later reload reads it again.
     config_trusted: AtomicBool,
@@ -76,6 +82,13 @@ impl Default for MultiVolumeEngine {
 impl MultiVolumeEngine {
     pub fn new() -> Self {
         Self::with_config(ServiceConfig::default())
+    }
+
+    /// Test seam for the content worker: the test supplies the workspace-built
+    /// binary directly instead of placing a copy beside the harness.
+    #[cfg(test)]
+    pub(crate) fn set_worker_binary(&mut self, worker: std::path::PathBuf) {
+        self.worker_binary = Some(worker);
     }
 
     pub fn with_config(config: ServiceConfig) -> Self {
@@ -171,29 +184,12 @@ impl MultiVolumeEngine {
             if cache_file.exists() {
                 match persistence::load_volume_index(&cache_file) {
                     Ok(loaded) => {
-                        let directory_sizes_valid = loaded.directory_sizes_valid;
-                        vol.records = loaded.records;
-                        vol.live_count = vol
-                            .records
-                            .iter()
-                            .filter(|record| !record.is_tombstone())
-                            .count() as u64;
-                        vol.arena = loaded.arena;
-                        vol.last_usn = loaded.last_usn;
-                        vol.journal_id = loaded.journal_id;
-                        vol.volume_serial = loaded.volume_serial;
-                        vol.directory_sizes_valid = directory_sizes_valid;
-
-                        for (idx, r) in vol.records.iter().enumerate() {
-                            if !r.is_tombstone() {
-                                vol.frn_to_idx.entry(r.frn).or_default().push(idx as u32);
-                            }
-                        }
+                        vol.restore_from_loaded(loaded);
 
                         // Caches written before folder sizes were persisted still store zeroes for
                         // every directory. Aggregate once and immediately rewrite the flag, so only
                         // the first launch after the upgrade pays for it.
-                        if !vol.directory_sizes_valid {
+                        if !vol.directory_sizes_valid() {
                             vol.recompute_directory_sizes();
                             match vol.save_to_dir(index_dir) {
                                 Ok(_) => tracing::info!(
@@ -207,15 +203,6 @@ impl MultiVolumeEngine {
                                 ),
                             }
                         }
-                        // The presorted size array is built from whatever the records now hold, so
-                        // the first page and size sort agree with the table.
-                        vol.presorted = PresortedIndices::build(
-                            &vol.records,
-                            &vol.arena,
-                            &vol.path_cache,
-                            vol.drive_letter,
-                        );
-                        vol.presorted_dirty = false;
 
                         // Validate against live volume if accessible and catch up USN (IDX-04, IDX-05, IDX-07)
                         #[cfg(windows)]
@@ -276,7 +263,7 @@ impl MultiVolumeEngine {
                                                     tracing::info!(
                                                         "Loaded cached index for {}: {} records, state {:?}",
                                                         d,
-                                                        vol.records.len(),
+                                                        vol.records().len(),
                                                         vol.status
                                                     );
                                                 }
@@ -385,14 +372,14 @@ impl MultiVolumeEngine {
 
             // Caches written before the service data root was excluded still hold its files and an
             // unbounded tombstone history. Reclaim both before the volume serves queries.
-            let before_compact = vol.records.len();
+            let before_compact = vol.records().len();
             if vol.compact_if_needed() {
                 tracing::info!(
                     "Volume {}: compacted index from {} to {} records ({} dropped)",
                     d,
                     before_compact,
-                    vol.records.len(),
-                    before_compact.saturating_sub(vol.records.len())
+                    vol.records().len(),
+                    before_compact.saturating_sub(vol.records().len())
                 );
             }
 
@@ -423,6 +410,9 @@ impl MultiVolumeEngine {
             content_cancel: Arc::new(AtomicBool::new(false)),
             content_commands: Mutex::new(None),
             summary_cache: Mutex::new(Vec::new()),
+            usn_read_buf: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            worker_binary: None,
             config_trusted: AtomicBool::new(true),
         }
     }
@@ -582,27 +572,18 @@ impl MultiVolumeEngine {
         f(&lock)
     }
 
-    #[cfg(test)]
-    pub fn with_primary_volume<F, R>(&self, f: F) -> Option<R>
-    where
-        F: FnOnce(&VolumeIndex) -> R,
-    {
-        let lock = self.volumes.read().unwrap();
-        let vol = lock.get(&'C').or_else(|| lock.values().next())?;
-        Some(f(vol))
-    }
-
-    #[cfg(test)]
-    pub fn with_primary_volume_mut<F, R>(&self, f: F) -> Option<R>
-    where
-        F: FnOnce(&mut VolumeIndex) -> R,
-    {
-        let mut lock = self.volumes.write().unwrap();
-        let vol = if lock.contains_key(&'C') {
-            lock.get_mut(&'C')?
-        } else {
-            lock.values_mut().next()?
-        };
-        Some(f(vol))
+    /// Aggregates resident heap allocations across all indexed volumes.
+    pub fn memory_footprint(&self) -> IndexMemoryFootprint {
+        let mut total = IndexMemoryFootprint::default();
+        {
+            let lock = self.volumes.read().unwrap();
+            for vol in lock.values() {
+                total.accumulate(&vol.memory_footprint());
+            }
+        }
+        // The journal buffer is resident for the engine, not for one volume, and is
+        // read before the volume lock is taken again.
+        total.scratch_bytes += self.usn_read_buf.lock().unwrap().capacity();
+        total
     }
 }

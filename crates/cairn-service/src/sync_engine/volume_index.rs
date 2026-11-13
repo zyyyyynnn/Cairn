@@ -5,16 +5,19 @@
 //! Indexed record table of one volume: ingestion, journal changes, folder totals and compaction.
 
 use super::volume_status::VolumeStatus;
+use crate::persistence::{headroom_for_arena, headroom_for_records, LoadedIndexData};
 use cairn_core::arena::NamePool;
+use cairn_core::frn_index::{FrnLookup, IndexMemoryFootprint};
 use cairn_core::model::FileRecord;
 use cairn_core::path_cache::DirectoryPathCache;
-use cairn_core::sort::PresortedIndices;
+use cairn_core::sort::{PresortedIndices, SortColumn};
 use cairn_core::treemap::DirectorySizeIndex;
 use cairn_ntfs::mft::ExtractedItem;
 use cairn_ntfs::usn::{file_record_flags, UsnChange};
 use cairn_protocol::message::FileRowData;
 use cairn_protocol::status::{VolumeState, VolumeStatusSummary};
 use std::collections::{HashMap, HashSet};
+use std::mem::size_of;
 
 pub(super) struct BitSet {
     pub(super) words: Vec<u64>,
@@ -65,12 +68,49 @@ const COMPACT_MIN_RECORDS: usize = 100_000;
 /// Compaction only pays off once at least this percentage of the table is dead weight.
 const COMPACT_MIN_DROPPABLE_PERCENT: usize = 25;
 
+/// Compaction also reclaims arena rename/delete bloat once dead name bytes pass this share.
+const COMPACT_MIN_ARENA_WASTE_PERCENT: usize = 25;
+
+/// Policy governing whether a volume index should be compacted to drop dead records and arena slack.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CompactPolicy {
+    pub min_records: usize,
+    pub min_droppable_percent: usize,
+    pub min_arena_waste_percent: usize,
+}
+
+impl CompactPolicy {
+    pub const PRODUCTION: Self = Self {
+        min_records: COMPACT_MIN_RECORDS,
+        min_droppable_percent: COMPACT_MIN_DROPPABLE_PERCENT,
+        min_arena_waste_percent: COMPACT_MIN_ARENA_WASTE_PERCENT,
+    };
+}
+
+/// Summary returned when [`VolumeIndex::compact_with_policy`] rewrites the index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CompactionReport {
+    pub dropped_records: usize,
+    pub reclaimed_arena_bytes: usize,
+}
+
+/// Incremental metadata refresh outcome applied inside [`VolumeIndex::apply_refreshed_metadata`].
+pub(crate) struct RefreshedRecordMetadata {
+    pub(crate) index: u32,
+    pub(crate) frn: u64,
+    pub(crate) size: u64,
+    pub(crate) created_ts: i64,
+    pub(crate) modified_ts: i64,
+    pub(crate) is_dir: bool,
+    pub(crate) is_reparse: bool,
+}
+
 /// Compaction verdict for a record's ancestor chain. A tombstone is not part of it: a dead parent
 /// does not make a live child service data, but a tombstoned directory can still sit below an
 /// excluded root, so the walk has to continue through it.
 const SUBTREE_UNKNOWN: u8 = 0;
 const SUBTREE_KEPT: u8 = 1;
-const SUBTREE_EXCLUDED: u8 = 2;
+pub(super) const SUBTREE_EXCLUDED: u8 = 2;
 const SUBTREE_IN_PROGRESS: u8 = 3;
 
 /// Applies a signed byte delta to an unsigned aggregate. Saturating keeps a corrupt journal from
@@ -87,18 +127,18 @@ pub struct VolumeIndex {
     pub drive_letter: char,
     pub volume_guid: String,
     pub(super) status: VolumeStatus,
-    pub(crate) records: Vec<FileRecord>,
-    pub(crate) arena: NamePool,
-    pub(crate) path_cache: DirectoryPathCache,
-    pub(crate) presorted: PresortedIndices,
-    pub(crate) presorted_dirty: bool,
-    pub(crate) frn_to_idx: HashMap<u64, Vec<u32>>,
-    pub(crate) pending_renames: HashMap<u64, (u64, String)>,
-    pub(crate) pending_data_changes: HashSet<u64>,
-    pub(crate) pending_content_deletions: HashSet<(u64, u64)>,
+    records: Vec<FileRecord>,
+    arena: NamePool,
+    path_cache: DirectoryPathCache,
+    presorted: PresortedIndices,
+    presorted_dirty: bool,
+    frn_to_idx: FrnLookup,
+    pending_renames: HashMap<u64, (u64, String)>,
+    pending_data_changes: HashSet<u64>,
+    pending_content_deletions: HashSet<(u64, u64)>,
     /// FRNs of service-owned directories and everything indexed below them. They are filtered out
     /// of scans, journal events and loaded caches so the index never describes its own writes.
-    pub(crate) excluded_frns: HashSet<u64>,
+    excluded_frns: HashSet<u64>,
     pub last_usn: i64,
     pub journal_id: u64,
     pub volume_serial: u64,
@@ -106,13 +146,13 @@ pub struct VolumeIndex {
     /// Monotonic version of the record table. Every operation that rebuilds or reorders the
     /// table (`clear`, `ingest_items`, compaction) increments it, so a query session can refuse
     /// record indices that no longer describe the same rows.
-    pub(crate) generation: u64,
+    generation: u64,
     /// Live records (tombstones excluded), maintained incrementally so status summaries stay O(1).
-    pub(super) live_count: u64,
+    live_count: u64,
     /// Whether `FileRecord.size` on directory rows is the recursive aggregate of their indexed
     /// descendants. A cache written before folder sizes existed cannot prove this, so a load
     /// aggregates once and rewrites the flag; every later update maintains the totals in place.
-    pub(crate) directory_sizes_valid: bool,
+    directory_sizes_valid: bool,
 }
 
 impl VolumeIndex {
@@ -126,7 +166,7 @@ impl VolumeIndex {
             path_cache: DirectoryPathCache::new(),
             presorted: PresortedIndices::default(),
             presorted_dirty: false,
-            frn_to_idx: HashMap::new(),
+            frn_to_idx: FrnLookup::new(),
             pending_renames: HashMap::new(),
             pending_data_changes: HashSet::new(),
             pending_content_deletions: HashSet::new(),
@@ -146,13 +186,13 @@ impl VolumeIndex {
     /// they are configuration derived from the data layout, not index data, so a rebuild must keep
     /// filtering the same subtree.
     pub fn clear(&mut self) {
-        self.records.clear();
+        self.records = Vec::new();
         self.live_count = 0;
-        self.arena.clear();
+        self.arena.clear_and_shrink();
         self.path_cache.clear();
-        self.presorted = PresortedIndices::default();
+        self.presorted.clear_and_shrink();
         self.presorted_dirty = false;
-        self.frn_to_idx.clear();
+        self.frn_to_idx.clear_and_shrink();
         self.pending_renames.clear();
         self.pending_data_changes.clear();
         self.pending_content_deletions.clear();
@@ -163,6 +203,36 @@ impl VolumeIndex {
         // that now belongs to another file.
         self.generation = self.generation.wrapping_add(1);
         self.directory_sizes_valid = true;
+    }
+
+    /// Populates this volume from persisted index data, building a compact FRN map without
+    /// eagerly constructing any presorted index columns.
+    pub fn restore_from_loaded(&mut self, loaded: LoadedIndexData) {
+        self.path_cache.clear();
+        self.presorted.clear_and_shrink();
+        self.presorted_dirty = false;
+        self.pending_renames.clear();
+        self.pending_data_changes.clear();
+        self.pending_content_deletions.clear();
+
+        self.records = loaded.records;
+        self.arena = loaded.arena;
+        self.last_usn = loaded.last_usn;
+        self.journal_id = loaded.journal_id;
+        self.volume_serial = loaded.volume_serial;
+        self.directory_sizes_valid = loaded.directory_sizes_valid;
+
+        let mut live_count = 0u64;
+        let mut frn_to_idx = FrnLookup::with_capacity(self.records.len());
+        for (idx, record) in self.records.iter().enumerate() {
+            if !record.is_tombstone() {
+                live_count = live_count.saturating_add(1);
+                frn_to_idx.push(record.frn, idx as u32);
+            }
+        }
+        self.live_count = live_count;
+        self.frn_to_idx = frn_to_idx;
+        self.generation = self.generation.wrapping_add(1);
     }
 
     /// Registers directory FRNs whose whole subtree must stay out of this volume's index. Adding a
@@ -212,6 +282,183 @@ impl VolumeIndex {
     /// Retrieves the original name of a record.
     pub fn record_name(&self, rec: &FileRecord) -> &str {
         self.arena.get_name(rec.name_offset, rec.name_len)
+    }
+
+    pub fn arena(&self) -> &NamePool {
+        &self.arena
+    }
+
+    pub fn path_cache(&self) -> &DirectoryPathCache {
+        &self.path_cache
+    }
+
+    pub fn clear_path_cache(&self) {
+        self.path_cache.clear();
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub(crate) fn set_generation(&mut self, generation: u64) {
+        self.generation = generation;
+    }
+
+    pub fn live_count(&self) -> u64 {
+        self.live_count
+    }
+
+    pub fn directory_sizes_valid(&self) -> bool {
+        self.directory_sizes_valid
+    }
+
+    #[inline]
+    pub fn record_indices_for_frn(&self, frn: u64) -> Option<&[u32]> {
+        self.frn_to_idx.get(frn)
+    }
+
+    #[inline]
+    pub fn first_record_index_for_frn(&self, frn: u64) -> Option<u32> {
+        self.frn_to_idx.first(frn)
+    }
+
+    #[inline]
+    pub fn contains_frn(&self, frn: u64) -> bool {
+        self.frn_to_idx.contains_key(frn)
+    }
+
+    pub fn is_excluded_frn(&self, frn: u64) -> bool {
+        self.excluded_frns.contains(&frn)
+    }
+
+    pub fn has_pending_data_change(&self, frn: u64) -> bool {
+        self.pending_data_changes.contains(&frn)
+    }
+
+    pub fn has_pending_rename(&self, frn: u64) -> bool {
+        self.pending_renames.contains_key(&frn)
+    }
+
+    pub fn has_pending_content_deletion(&self, volume_id: u64, frn: u64) -> bool {
+        self.pending_content_deletions.contains(&(volume_id, frn))
+    }
+
+    pub fn is_presorted_dirty(&self) -> bool {
+        self.presorted_dirty
+    }
+
+    pub fn mark_presorted_dirty(&mut self) {
+        self.presorted_dirty = true;
+        self.presorted.clear_and_shrink();
+    }
+
+    pub fn has_presorted_column(&self, col: SortColumn) -> bool {
+        !self.presorted_dirty && self.presorted_order(col).is_some()
+    }
+
+    pub fn presorted_order(&self, sort_by: SortColumn) -> Option<&[u32]> {
+        if self.presorted_dirty {
+            return None;
+        }
+        let order = match sort_by {
+            SortColumn::Name => &self.presorted.by_name,
+            SortColumn::Size => &self.presorted.by_size,
+            SortColumn::DateModified => &self.presorted.by_date_modified,
+            SortColumn::Path => &self.presorted.by_path,
+            SortColumn::DateCreated | SortColumn::Extension => return None,
+        };
+        (!order.is_empty()).then_some(order.as_slice())
+    }
+
+    /// Ensures a specific presorted column is up-to-date, building only the requested column.
+    /// Only one column is retained: the memory budget covers the lazy single-column state, so
+    /// switching the sort column releases the previous order instead of accumulating columns.
+    pub fn ensure_presorted_column(&mut self, col: SortColumn) {
+        if self.presorted_dirty {
+            self.presorted.clear_and_shrink();
+            self.presorted_dirty = false;
+        }
+        if !self.presorted_has(col) {
+            self.presorted.clear_and_shrink();
+        }
+        self.presorted.ensure_column(
+            col,
+            &self.records,
+            &self.arena,
+            &self.path_cache,
+            self.drive_letter,
+        );
+    }
+
+    fn presorted_has(&self, col: SortColumn) -> bool {
+        match col {
+            SortColumn::Name => !self.presorted.by_name.is_empty(),
+            SortColumn::Size => !self.presorted.by_size.is_empty(),
+            SortColumn::DateModified => !self.presorted.by_date_modified.is_empty(),
+            SortColumn::Path => !self.presorted.by_path.is_empty(),
+            SortColumn::DateCreated | SortColumn::Extension => false,
+        }
+    }
+
+    /// Full heap-allocation ledger of this volume's resident structures.
+    pub fn memory_footprint(&self) -> IndexMemoryFootprint {
+        let (arena_bytes, folded_arena_bytes) = self.arena.allocated_bytes();
+        IndexMemoryFootprint {
+            record_count: self.records.len(),
+            live_count: self.live_count as usize,
+            records_bytes: self.records.capacity() * size_of::<FileRecord>(),
+            arena_bytes,
+            folded_arena_bytes,
+            frn_lookup_bytes: self.frn_to_idx.allocated_bytes(),
+            presorted_bytes: self.presorted.allocated_bytes(),
+            directory_sizes_bytes: 0,
+            path_cache_bytes: self.path_cache.allocated_bytes(),
+            scratch_bytes: 0,
+        }
+    }
+
+    fn push_record_bounded(&mut self, record: FileRecord) {
+        if self.records.len() == self.records.capacity() && self.records.len() >= 1_024 {
+            let step = (self.records.len() / 16).max(64);
+            self.records.reserve_exact(step);
+        }
+        self.records.push(record);
+    }
+
+    pub(crate) fn apply_refreshed_metadata(&mut self, update: RefreshedRecordMetadata) {
+        let Some(record) = self.records.get_mut(update.index as usize) else {
+            return;
+        };
+        if record.frn != update.frn || record.is_tombstone() {
+            return;
+        }
+        let was_dir = record.is_dir();
+        let mut flags =
+            record.flags & !(cairn_core::FLAG_DIRECTORY | cairn_core::FLAG_REPARSE_POINT);
+        if update.is_dir {
+            flags |= cairn_core::FLAG_DIRECTORY;
+        }
+        if update.is_reparse {
+            flags |= cairn_core::FLAG_REPARSE_POINT;
+        }
+        let metadata_changed = record.flags != flags
+            || record.created_ts != update.created_ts
+            || record.modified_ts != update.modified_ts;
+        record.flags = flags;
+        record.created_ts = update.created_ts;
+        record.modified_ts = update.modified_ts;
+        let kind_changed = was_dir != update.is_dir;
+        if kind_changed {
+            record.size = if update.is_dir { 0 } else { update.size };
+        }
+        if metadata_changed {
+            self.mark_presorted_dirty();
+        }
+        if kind_changed {
+            self.mark_directory_sizes_dirty();
+        } else if !update.is_dir {
+            self.update_file_size(update.index, update.size);
+        }
     }
 
     /// Reconstructs full row data and highlights for a matched record index, encapsulating
@@ -302,12 +549,8 @@ impl VolumeIndex {
         self.append_items(items);
         self.recompute_directory_sizes();
 
-        self.presorted = PresortedIndices::build(
-            &self.records,
-            &self.arena,
-            &self.path_cache,
-            self.drive_letter,
-        );
+        // Keep presorted arrays empty until an all-files query actually requests a column.
+        self.presorted.clear_and_shrink();
         self.presorted_dirty = false;
         // A snapshot by itself proves nothing about freshness: the journal position is only known
         // once the scan has been reconciled with the change journal. Until then the volume is
@@ -323,8 +566,22 @@ impl VolumeIndex {
     /// Parents must arrive before their children, which is the order the scanner walks a tree in.
     /// A parent that is not present stays `ROOT_PARENT`, exactly as in [`Self::ingest_items`].
     pub fn append_items(&mut self, items: Vec<ExtractedItem>) {
-        self.records.reserve(items.len());
-        self.arena.reserve(items.len() * 24);
+        let name_bytes: usize = items
+            .iter()
+            .map(|item| item.name.len().min(u16::MAX as usize))
+            .sum();
+        if self.records.is_empty() {
+            self.records.reserve_exact(
+                items
+                    .len()
+                    .saturating_add(headroom_for_records(items.len())),
+            );
+            self.arena
+                .reserve(name_bytes.saturating_add(headroom_for_arena(name_bytes)));
+        } else {
+            self.records.reserve(items.len());
+            self.arena.reserve(name_bytes);
+        }
         self.frn_to_idx.reserve(items.len());
         let first_new = self.records.len();
         let mut parent_frns: Vec<u64> = Vec::with_capacity(items.len());
@@ -362,18 +619,14 @@ impl VolumeIndex {
             });
             self.live_count = self.live_count.saturating_add(1);
 
-            self.frn_to_idx.entry(item.frn).or_default().push(idx);
+            self.frn_to_idx.push(item.frn, idx);
             parent_frns.push(item.parent_frn);
         }
 
         // Link after the whole batch is inserted, so an MFT scan whose children precede their
         // parents still resolves. A parent from an earlier batch is found in the same map.
         for (offset, &parent_frn) in parent_frns.iter().enumerate() {
-            if let Some(parent_idx) = self
-                .frn_to_idx
-                .get(&parent_frn)
-                .and_then(|indices| indices.first().copied())
-            {
+            if let Some(parent_idx) = self.frn_to_idx.first(parent_frn) {
                 self.records[first_new + offset].parent_idx = parent_idx;
             }
         }
@@ -394,7 +647,7 @@ impl VolumeIndex {
             }
         }
 
-        self.presorted_dirty = true;
+        self.mark_presorted_dirty();
     }
 
     /// Aggregates the indexed descendants of every directory into `FileRecord.size`. The record's
@@ -403,14 +656,14 @@ impl VolumeIndex {
     pub(crate) fn recompute_directory_sizes(&mut self) {
         DirectorySizeIndex::apply_directory_sizes(&mut self.records, &self.arena);
         self.directory_sizes_valid = true;
-        self.presorted_dirty = true;
+        self.mark_presorted_dirty();
     }
 
     /// Flags the totals as stale without paying for a rebuild per event. Callers that can change a
     /// record's kind in a batch mark here and run [`Self::ensure_directory_sizes`] once at the end.
     pub(crate) fn mark_directory_sizes_dirty(&mut self) {
         self.directory_sizes_valid = false;
-        self.presorted_dirty = true;
+        self.mark_presorted_dirty();
     }
 
     /// Rebuilds the folder totals only when an event invalidated them.
@@ -488,12 +741,12 @@ impl VolumeIndex {
         let delta = new_size as i128 - record.size as i128;
         self.records[index as usize].size = new_size;
         self.adjust_record_ancestors(index, delta);
-        self.presorted_dirty = true;
+        self.mark_presorted_dirty();
     }
 
     /// `true` when a live record for this `(frn, parent, name)` triple is already indexed.
     fn has_live_record_at(&self, frn: u64, parent_frn: u64, name: &str) -> bool {
-        self.frn_to_idx.get(&frn).is_some_and(|indices| {
+        self.frn_to_idx.get(frn).is_some_and(|indices| {
             indices.iter().copied().any(|idx| {
                 let rec = &self.records[idx as usize];
                 if rec.is_tombstone() || self.arena.get_name(rec.name_offset, rec.name_len) != name
@@ -512,14 +765,6 @@ impl VolumeIndex {
         })
     }
 
-    /// Applies one USN change, rebuilding folder sizes immediately. Test entry points use this;
-    /// production paths apply batches so `k` kind changes cost one rebuild, not `k`.
-    #[cfg(test)]
-    pub fn apply_usn_change(&mut self, change: UsnChange) {
-        self.apply_usn_change_inner(change);
-        self.ensure_directory_sizes();
-    }
-
     /// Applies a journal batch, aggregating folder sizes at most once for the whole batch. Live
     /// polling and cold-start replay use this so `k` kind changes cost one rebuild, not `k`.
     pub fn apply_usn_changes(&mut self, changes: impl IntoIterator<Item = UsnChange>) {
@@ -530,7 +775,7 @@ impl VolumeIndex {
     }
 
     fn apply_usn_change_inner(&mut self, change: UsnChange) {
-        self.presorted_dirty = true;
+        self.mark_presorted_dirty();
         match change {
             UsnChange::Deleted { frn } => {
                 self.pending_renames.remove(&frn);
@@ -539,26 +784,17 @@ impl VolumeIndex {
                 if self.excluded_frns.remove(&frn) {
                     return;
                 }
-                if !self.frn_to_idx.contains_key(&frn) {
+                let Some(indices) = self.frn_to_idx.get(frn) else {
                     return;
-                }
+                };
                 self.pending_content_deletions
                     .insert((self.content_volume_id(), frn));
-                if let Some(indices) = self.frn_to_idx.get(&frn).cloned() {
+                if indices.len() == 1 {
+                    self.tombstone_record_at(indices[0]);
+                } else {
+                    let indices = indices.to_vec();
                     for idx in indices {
-                        let parent_idx = self.records[idx as usize].parent_idx;
-                        let size = self.records[idx as usize].size as i128;
-                        // A descendant of an already deleted directory has already left the
-                        // ancestor totals with that directory's recursive size.
-                        if !self.records[idx as usize].is_tombstone()
-                            && !self.has_tombstone_ancestor(parent_idx)
-                        {
-                            self.adjust_parent_sizes(parent_idx, -size);
-                        }
-                        if !self.records[idx as usize].is_tombstone() {
-                            self.live_count = self.live_count.saturating_sub(1);
-                        }
-                        self.records[idx as usize].mark_tombstone();
+                        self.tombstone_record_at(idx);
                     }
                 }
             }
@@ -599,12 +835,11 @@ impl VolumeIndex {
                 let (name_offset, name_len, ext_offset) = self.arena.insert(&name);
                 let parent_idx = self
                     .frn_to_idx
-                    .get(&parent_frn)
-                    .and_then(|v| v.first().copied())
+                    .first(parent_frn)
                     .unwrap_or(FileRecord::ROOT_PARENT);
 
                 let new_idx = self.records.len() as u32;
-                self.records.push(FileRecord {
+                self.push_record_bounded(FileRecord {
                     frn,
                     parent_idx,
                     name_offset,
@@ -618,7 +853,7 @@ impl VolumeIndex {
                     created_ts: ts,
                 });
                 self.live_count = self.live_count.saturating_add(1);
-                self.frn_to_idx.entry(frn).or_default().push(new_idx);
+                self.frn_to_idx.push(frn, new_idx);
                 // The journal record carries no size, and its timestamp is the event time rather
                 // than the file's. Read the file once on the next debounce pass, or every file
                 // created during a catch-up would be displayed as 0 B.
@@ -651,8 +886,8 @@ impl VolumeIndex {
                     self.pending_renames.insert(frn, (parent_frn, name));
                 } else {
                     let old_info = self.pending_renames.remove(&frn);
-                    if let Some(indices) = self.frn_to_idx.get(&frn).cloned() {
-                        let target_idx = if let Some((_old_parent, old_name)) = old_info {
+                    let target_idx = self.frn_to_idx.get(frn).and_then(|indices| {
+                        if let Some((_old_parent, old_name)) = old_info {
                             indices
                                 .iter()
                                 .copied()
@@ -665,42 +900,39 @@ impl VolumeIndex {
                                 .or_else(|| indices.first().copied())
                         } else {
                             indices.first().copied()
-                        };
-
-                        if let Some(idx) = target_idx {
-                            let (name_offset, name_len, ext_offset) = self.arena.insert(&name);
-                            let parent_idx = self
-                                .frn_to_idx
-                                .get(&parent_frn)
-                                .and_then(|v| v.first().copied())
-                                .unwrap_or(FileRecord::ROOT_PARENT);
-
-                            let (old_parent, moved_size) = {
-                                let rec = &self.records[idx as usize];
-                                (rec.parent_idx, rec.size as i128)
-                            };
-                            if old_parent != parent_idx
-                                && !self.records[idx as usize].is_tombstone()
-                            {
-                                if !self.has_tombstone_ancestor(old_parent) {
-                                    self.adjust_parent_sizes(old_parent, -moved_size);
-                                }
-                                if !self.has_tombstone_ancestor(parent_idx) {
-                                    self.adjust_parent_sizes(parent_idx, moved_size);
-                                }
-                            }
-
-                            let rec = &mut self.records[idx as usize];
-                            rec.name_offset = name_offset;
-                            rec.name_len = name_len;
-                            rec.ext_offset = ext_offset;
-                            rec.parent_idx = parent_idx;
-
-                            self.path_cache.clear();
-                            // The content document stores the path; a rename has to replace it,
-                            // and a rename out of the extension whitelist has to delete it.
-                            self.pending_data_changes.insert(frn);
                         }
+                    });
+
+                    if let Some(idx) = target_idx {
+                        let (name_offset, name_len, ext_offset) = self.arena.insert(&name);
+                        let parent_idx = self
+                            .frn_to_idx
+                            .first(parent_frn)
+                            .unwrap_or(FileRecord::ROOT_PARENT);
+
+                        let (old_parent, moved_size) = {
+                            let rec = &self.records[idx as usize];
+                            (rec.parent_idx, rec.size as i128)
+                        };
+                        if old_parent != parent_idx && !self.records[idx as usize].is_tombstone() {
+                            if !self.has_tombstone_ancestor(old_parent) {
+                                self.adjust_parent_sizes(old_parent, -moved_size);
+                            }
+                            if !self.has_tombstone_ancestor(parent_idx) {
+                                self.adjust_parent_sizes(parent_idx, moved_size);
+                            }
+                        }
+
+                        let rec = &mut self.records[idx as usize];
+                        rec.name_offset = name_offset;
+                        rec.name_len = name_len;
+                        rec.ext_offset = ext_offset;
+                        rec.parent_idx = parent_idx;
+
+                        self.path_cache.clear();
+                        // The content document stores the path; a rename has to replace it,
+                        // and a rename out of the extension whitelist has to delete it.
+                        self.pending_data_changes.insert(frn);
                     }
                 }
             }
@@ -714,7 +946,7 @@ impl VolumeIndex {
                 }
                 let mapped = file_record_flags(attributes);
                 let mut kind_changed = false;
-                if let Some(indices) = self.frn_to_idx.get(&frn) {
+                if let Some(indices) = self.frn_to_idx.get(frn) {
                     for &idx in indices {
                         let record = &mut self.records[idx as usize];
                         record.modified_ts = ts;
@@ -749,6 +981,22 @@ impl VolumeIndex {
                 self.pending_data_changes.insert(frn);
             }
         }
+    }
+
+    fn tombstone_record_at(&mut self, idx: u32) {
+        let rec = &self.records[idx as usize];
+        if rec.is_tombstone() {
+            return;
+        }
+        let parent_idx = rec.parent_idx;
+        let size = rec.size as i128;
+        // A descendant of an already deleted directory has already left the ancestor totals with
+        // that directory's recursive size.
+        if !self.has_tombstone_ancestor(parent_idx) {
+            self.adjust_parent_sizes(parent_idx, -size);
+        }
+        self.live_count = self.live_count.saturating_sub(1);
+        self.records[idx as usize].mark_tombstone();
     }
 
     /// Classifies every record by whether it belongs to an excluded subtree: its own FRN is an
@@ -819,32 +1067,33 @@ impl VolumeIndex {
     /// so one memoized pass produces an O(1) lookup table. Rules with globs, embedded separators,
     /// or a drive-qualified path never reach this method; `PathExclusions` answers those from the
     /// parsed rule set against the full path.
-    pub(crate) fn excluded_record_mask(&self, segments: &[String]) -> Vec<bool> {
-        let states = self.subtree_states_by(|_, record| {
+    /// Per-record exclusion state table built from segment-only exclusion rules.
+    ///
+    /// Path exclusions are tested against every match after query evaluation. For a broad query
+    /// returning most of the volume, calling `get_full_path` + glob evaluation against the parsed
+    /// rules is O(records × path). For a bare directory/file segment such as `$Recycle.Bin` or
+    /// `System Volume Information` the same verdict is a name comparison along the parent chain,
+    /// so one memoized pass produces an O(1) lookup table. Rules with globs, embedded separators,
+    /// or a drive-qualified path never reach this method; `PathExclusions` answers those from the
+    /// parsed rule set against the full path.
+    pub(crate) fn segment_excluded_states(&self, segments: &[String]) -> Vec<u8> {
+        self.subtree_states_by(|_, record| {
             let name = self.arena.get_name(record.name_offset, record.name_len);
             segments
                 .iter()
                 .any(|segment| name.eq_ignore_ascii_case(segment))
-        });
-        states
-            .into_iter()
-            .map(|state| state == SUBTREE_EXCLUDED)
-            .collect()
+        })
     }
 
-    /// Rewrites the table without tombstones or excluded subtrees, returning how many records were
-    /// dropped. Names are re-packed and every parent reference is remapped; a record whose parent
-    /// was dropped becomes a root instead of pointing at a slot that no longer exists.
-    // Production goes through [`Self::compact_if_needed`] so the classification that decides
-    // whether to compact is not thrown away; this direct entry point is for tests.
-    #[cfg(test)]
-    pub(crate) fn compact(&mut self) -> usize {
-        let states = self.excluded_subtree_states();
-        self.compact_with_states(states)
-    }
-
-    fn compact_with_states(&mut self, excluded: Vec<u8>) -> usize {
+    /// Rewrites the table without tombstones or excluded subtrees and repacks the name arena with
+    /// controlled growth headroom.
+    fn compact_with_states(
+        &mut self,
+        excluded: Vec<u8>,
+        kept_name_bytes: usize,
+    ) -> CompactionReport {
         let old_len = self.records.len();
+        let old_arena_len = self.arena.len();
         let mut remap = vec![u32::MAX; old_len];
         let mut kept = 0usize;
         for (idx, &state) in excluded.iter().enumerate() {
@@ -854,13 +1103,19 @@ impl VolumeIndex {
             }
         }
 
-        let dropped = old_len - kept;
-        if dropped == 0 {
-            return 0;
+        let dropped_records = old_len - kept;
+        let arena_waste = old_arena_len.saturating_sub(kept_name_bytes);
+        if dropped_records == 0 && arena_waste == 0 {
+            return CompactionReport {
+                dropped_records: 0,
+                reclaimed_arena_bytes: 0,
+            };
         }
 
-        let mut records = Vec::with_capacity(kept);
-        let mut arena = NamePool::default();
+        let mut records = Vec::with_capacity(kept.saturating_add(headroom_for_records(kept)));
+        let mut arena = NamePool::with_capacity(
+            kept_name_bytes.saturating_add(headroom_for_arena(kept_name_bytes)),
+        );
         for (old_idx, record) in self.records.iter().enumerate() {
             if remap[old_idx] == u32::MAX {
                 continue;
@@ -881,11 +1136,12 @@ impl VolumeIndex {
             records.push(record);
         }
 
-        let mut frn_to_idx: HashMap<u64, Vec<u32>> = HashMap::with_capacity(records.len());
+        let mut frn_to_idx = FrnLookup::with_capacity(records.len());
         for (idx, record) in records.iter().enumerate() {
-            frn_to_idx.entry(record.frn).or_default().push(idx as u32);
+            frn_to_idx.push(record.frn, idx as u32);
         }
 
+        let new_arena_len = arena.len();
         self.records = records;
         self.live_count = self.records.len() as u64;
         self.arena = arena;
@@ -898,36 +1154,52 @@ impl VolumeIndex {
         // Entries whose records were dropped are skipped safely by the later drain paths.
         self.generation = self.generation.wrapping_add(1);
         // Dropping tombstones and excluded subtrees can leave ancestor totals from an older
-        // session; one linear aggregation restores the invariant before sorting is rebuilt.
+        // session; one linear aggregation restores the invariant while leaving presorted indices
+        // lazy until an all-files query requests a column.
         self.recompute_directory_sizes();
-        self.presorted = PresortedIndices::build(
-            &self.records,
-            &self.arena,
-            &self.path_cache,
-            self.drive_letter,
-        );
+        self.presorted.clear_and_shrink();
         self.presorted_dirty = false;
-        dropped
+        CompactionReport {
+            dropped_records,
+            reclaimed_arena_bytes: old_arena_len.saturating_sub(new_arena_len),
+        }
     }
 
-    /// Compacts large volumes once enough of the table is dead weight. A small volume, or one whose
-    /// tombstones are still a small fraction, is left untouched so a normal start pays nothing.
-    pub(crate) fn compact_if_needed(&mut self) -> bool {
+    /// Evaluates compaction against `policy` using the same classification and rewrite pipeline
+    /// across production and tests. Compacts if either dead records or arena rename bloat exceeds
+    /// the policy threshold.
+    pub fn compact_with_policy(&mut self, policy: CompactPolicy) -> Option<CompactionReport> {
         let len = self.records.len();
-        if len < COMPACT_MIN_RECORDS {
-            return false;
+        if len < policy.min_records {
+            return None;
         }
         let states = self.excluded_subtree_states();
-        let droppable = states
-            .iter()
-            .enumerate()
-            .filter(|&(idx, &state)| state == SUBTREE_EXCLUDED || self.records[idx].is_tombstone())
-            .count();
-        if droppable * 100 < len * COMPACT_MIN_DROPPABLE_PERCENT {
-            return false;
+        let mut droppable = 0usize;
+        let mut kept_name_bytes = 0usize;
+        for (idx, &state) in states.iter().enumerate() {
+            let rec = &self.records[idx];
+            if state == SUBTREE_EXCLUDED || rec.is_tombstone() {
+                droppable += 1;
+            } else {
+                kept_name_bytes += rec.name_len as usize;
+            }
         }
-        self.compact_with_states(states);
-        true
+        let records_over_limit = droppable * 100 >= len * policy.min_droppable_percent;
+        let arena_len = self.arena.len();
+        let arena_waste = arena_len.saturating_sub(kept_name_bytes);
+        let arena_over_limit =
+            arena_len > 0 && arena_waste * 100 >= arena_len * policy.min_arena_waste_percent;
+        if !records_over_limit && !arena_over_limit {
+            return None;
+        }
+        Some(self.compact_with_states(states, kept_name_bytes))
+    }
+
+    /// Compacts large volumes once dead weight or arena rename bloat crosses the production
+    /// threshold.
+    pub(crate) fn compact_if_needed(&mut self) -> bool {
+        self.compact_with_policy(CompactPolicy::PRODUCTION)
+            .is_some()
     }
 
     pub fn to_summary(&self) -> VolumeStatusSummary {
@@ -980,6 +1252,19 @@ impl VolumeIndex {
             }
         }
 
+        total
+    }
+
+    /// Sums file sizes across unique matched record indices without allocating a dedup bitset.
+    pub(crate) fn sum_unique_matched_bytes(&self, matched_indices: &[u32]) -> u64 {
+        let mut total: u64 = 0;
+        for &idx in matched_indices {
+            if let Some(record) = self.records.get(idx as usize) {
+                if record.is_file() && !record.is_tombstone() {
+                    total = total.saturating_add(record.size);
+                }
+            }
+        }
         total
     }
 }

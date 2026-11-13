@@ -6,6 +6,7 @@
 //! configuration submission.
 
 use crate::app::CairnApp;
+use crate::search::ResultSetChange;
 use crate::service::config_submission::{
     self, IndexScopeChange, SubmissionOutcome, SubmissionState,
 };
@@ -118,16 +119,14 @@ impl CairnApp {
     /// startup check.
     pub fn check_service_connection(&mut self, cx: &mut Context<Self>) {
         let runtime = get_tokio_runtime();
+        let session = self.service.session.clone();
         self.service.is_probing_service = true;
         cx.spawn(async move |this, cx: &mut AsyncApp| {
             let (tx, rx) = tokio::sync::oneshot::channel();
             crate::shell::perf::mark("probe start");
             runtime.spawn(async move {
                 let started = std::time::Instant::now();
-                let res = match cairn_client::client::CairnClient::connect().await {
-                    Ok(mut client) => client.get_status().await,
-                    Err(e) => Err(e),
-                };
+                let res = session.get_status().await;
                 let outcome = match &res {
                     Ok(_) => "ok",
                     Err(_) => "failed",
@@ -298,40 +297,55 @@ impl CairnApp {
         self.service.status.update_volumes(volumes);
         self.start_status_refresh(cx);
         // A connection probe must not replace the location the person is reading;
-        // the bin does not need the index.
+        // the bin does not need the index. The request owner decides whether the
+        // table is empty enough to need an entrance.
         if !self.recycle_bin.is_open() {
-            self.trigger_search(cx);
+            self.request_result_set(ResultSetChange::Probe, cx);
         }
         self.refresh_content_status(cx);
     }
 
-    fn service_issue_after_probe(&mut self) -> ServiceIssue {
-        self.service.service_installed = crate::service::service_control::service_is_installed();
-        if self.service.service_installed {
-            ServiceIssue::NotRunning
-        } else {
-            ServiceIssue::NotInstalled
-        }
-    }
-
-    /// Records a failed probe. When the service is installed but stopped, one silent SCM start is
-    /// attempted first so a normal non-administrator launch recovers without a UAC prompt. If the
-    /// pipe still does not answer, the window shows the service issue and its recovery.
+    /// Records a failed probe. Checks SCM registration off the main UI thread, and when the
+    /// service is installed but stopped, attempts one silent SCM start before showing recovery UI.
     fn handle_probe_failure(&mut self, issue: ServiceIssue, cx: &mut Context<Self>) {
-        let issue = if issue == ServiceIssue::NotRunning {
-            self.service_issue_after_probe()
-        } else {
-            issue
-        };
-        if should_try_silent_start(issue, self.service.has_attempted_silent_start) {
-            self.service.has_attempted_silent_start = true;
-            if crate::service::service_control::try_start_installed_service().is_ok() {
-                self.poll_service_after_start(cx, false);
-                return;
-            }
+        if issue != ServiceIssue::NotRunning {
+            self.service.service_issue = Some(issue);
+            cx.notify();
+            return;
         }
-        self.service.service_issue = Some(issue);
-        cx.notify();
+        let try_silent = !self.service.has_attempted_silent_start;
+        self.service.has_attempted_silent_start = true;
+        self.service.is_probing_service = true;
+        cx.spawn(async move |this, cx: &mut AsyncApp| {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            get_tokio_runtime().spawn_blocking(move || {
+                let installed = crate::service::service_control::service_is_installed();
+                let resolved_issue = if installed {
+                    ServiceIssue::NotRunning
+                } else {
+                    ServiceIssue::NotInstalled
+                };
+                let silent_started = should_try_silent_start(resolved_issue, !try_silent)
+                    && crate::service::service_control::try_start_installed_service().is_ok();
+                let _ = tx.send((installed, silent_started));
+            });
+            let (installed, silent_started) = rx.await.unwrap_or((false, false));
+            let _ = this.update(cx, |this: &mut CairnApp, cx| {
+                this.service.is_probing_service = false;
+                this.service.service_installed = installed;
+                if silent_started {
+                    this.poll_service_after_start(cx, false);
+                    return;
+                }
+                this.service.service_issue = Some(if installed {
+                    ServiceIssue::NotRunning
+                } else {
+                    ServiceIssue::NotInstalled
+                });
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// The retry path the service-issue band offers (SVC-03). While a probe is already in flight the
@@ -352,13 +366,26 @@ impl CairnApp {
         if self.service.is_probing_service {
             return;
         }
-        self.service.service_installed = crate::service::service_control::service_is_installed();
-        if !self.service.service_installed {
-            self.service.service_issue = Some(ServiceIssue::NotInstalled);
-            cx.notify();
-            return;
-        }
-        self.poll_service_after_start(cx, true);
+        self.service.is_probing_service = true;
+        cx.notify();
+        cx.spawn(async move |this, cx: &mut AsyncApp| {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            get_tokio_runtime().spawn_blocking(move || {
+                let _ = tx.send(crate::service::service_control::service_is_installed());
+            });
+            let installed = rx.await.unwrap_or(false);
+            let _ = this.update(cx, |this: &mut CairnApp, cx| {
+                this.service.is_probing_service = false;
+                this.service.service_installed = installed;
+                if !installed {
+                    this.service.service_issue = Some(ServiceIssue::NotInstalled);
+                    cx.notify();
+                    return;
+                }
+                this.poll_service_after_start(cx, true);
+            });
+        })
+        .detach();
     }
 
     /// Polls the pipe after an explicit elevation or a silent SCM start. `elevate` is the only
@@ -369,6 +396,7 @@ impl CairnApp {
         cx.notify();
 
         let runtime = get_tokio_runtime();
+        let session = self.service.session.clone();
         cx.spawn(async move |this, cx: &mut AsyncApp| {
             let (tx, rx) = tokio::sync::oneshot::channel();
             runtime.spawn(async move {
@@ -380,12 +408,20 @@ impl CairnApp {
                     )
                     .await;
                     if !matches!(launched, Ok(Ok(()))) {
-                        let _ = tx.send(Err(cairn_client::client::ClientError::ConnectFailed(
-                            std::io::Error::new(
-                                std::io::ErrorKind::PermissionDenied,
-                                "Service start was cancelled or refused",
-                            ),
-                        )));
+                        let installed = tokio::task::spawn_blocking(
+                            crate::service::service_control::service_is_installed,
+                        )
+                        .await
+                        .unwrap_or(false);
+                        let _ = tx.send((
+                            Err(cairn_client::client::ClientError::ConnectFailed(
+                                std::io::Error::new(
+                                    std::io::ErrorKind::PermissionDenied,
+                                    "Service start was cancelled or refused",
+                                ),
+                            )),
+                            installed,
+                        ));
                         return;
                     }
                 }
@@ -395,28 +431,47 @@ impl CairnApp {
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
                 while std::time::Instant::now() < deadline {
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                    if let Ok(mut client) = cairn_client::client::CairnClient::connect().await {
-                        let status = client.get_status().await;
-                        let _ = tx.send(status);
+                    if let Ok(status) = session.get_status().await {
+                        let _ = tx.send((Ok(status), true));
                         return;
                     }
                 }
-                let _ = tx.send(Err(cairn_client::client::ClientError::ConnectFailed(
-                    std::io::Error::new(
-                        std::io::ErrorKind::NotConnected,
-                        "Service did not answer after starting",
-                    ),
-                )));
+                let installed = tokio::task::spawn_blocking(
+                    crate::service::service_control::service_is_installed,
+                )
+                .await
+                .unwrap_or(false);
+                let _ = tx.send((
+                    Err(cairn_client::client::ClientError::ConnectFailed(
+                        std::io::Error::new(
+                            std::io::ErrorKind::NotConnected,
+                            "Service did not answer after starting",
+                        ),
+                    )),
+                    installed,
+                ));
             });
 
             let outcome = rx.await;
             let _ = this.update(cx, |this: &mut CairnApp, cx| {
                 this.service.is_probing_service = false;
-                if let Ok(Ok(envelope)) = outcome {
-                    this.apply_service_connected(envelope.volumes, cx);
-                } else {
-                    this.service.is_service_connected = false;
-                    this.service.service_issue = Some(this.service_issue_after_probe());
+                match outcome {
+                    Ok((Ok(envelope), _)) => {
+                        this.apply_service_connected(envelope.volumes, cx);
+                    }
+                    Ok((Err(_), installed)) => {
+                        this.service.is_service_connected = false;
+                        this.service.service_installed = installed;
+                        this.service.service_issue = Some(if installed {
+                            ServiceIssue::NotRunning
+                        } else {
+                            ServiceIssue::NotInstalled
+                        });
+                    }
+                    Err(_) => {
+                        this.service.is_service_connected = false;
+                        this.service.service_issue = Some(ServiceIssue::NotRunning);
+                    }
                 }
                 cx.notify();
             });
@@ -431,14 +486,11 @@ impl CairnApp {
             return;
         }
         self.service.content_status_loading = true;
+        let session = self.service.session.clone();
         cx.spawn(async move |this, cx: &mut AsyncApp| {
             let (tx, rx) = tokio::sync::oneshot::channel();
             get_tokio_runtime().spawn(async move {
-                let result = match cairn_client::client::CairnClient::connect().await {
-                    Ok(mut client) => client.get_content_index_status().await,
-                    Err(err) => Err(err),
-                };
-                let _ = tx.send(result);
+                let _ = tx.send(session.get_content_index_status().await);
             });
 
             let result = rx.await;
@@ -515,6 +567,7 @@ impl CairnApp {
         self.service.content_action_error = None;
         self.repaint_shell_and_overlays(cx);
 
+        let session = self.service.session.clone();
         cx.spawn(async move |this, cx: &mut AsyncApp| {
             let (tx, rx) = tokio::sync::oneshot::channel();
             get_tokio_runtime().spawn(async move {
@@ -522,6 +575,7 @@ impl CairnApp {
                     match action {
                         ContentAction::Set(enabled) => {
                             let state = config_submission::submit_index_scope(
+                                &session,
                                 IndexScopeChange::SetContentIndex { enabled },
                             )
                             .await;
@@ -536,20 +590,15 @@ impl CairnApp {
                                     })),
                             }
                         }
-                        ContentAction::Clear => {
-                            let mut client = cairn_client::client::CairnClient::connect()
-                                .await
-                                .map_err(|err| err.to_string())?;
-                            match client.clear_content_index().await {
-                                Ok(envelope) => match envelope.payload {
-                                    cairn_protocol::message::ResponsePayload::ClearContentIndexAck {
-                                        success: true,
-                                    } => Ok(()),
-                                    _ => Err("the service did not accept the clear".to_string()),
-                                },
-                                Err(err) => Err(err.to_string()),
-                            }
-                        }
+                        ContentAction::Clear => match session.clear_content_index().await {
+                            Ok(envelope) => match envelope.payload {
+                                cairn_protocol::message::ResponsePayload::ClearContentIndexAck {
+                                    success: true,
+                                } => Ok(()),
+                                _ => Err("the service did not accept the clear".to_string()),
+                            },
+                            Err(err) => Err(err.to_string()),
+                        },
                     }
                 }
                 .await;

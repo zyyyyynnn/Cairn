@@ -17,16 +17,6 @@ const EXIT_OK: i32 = 0;
 const EXIT_ERROR: i32 = 1;
 const EXIT_REBOOT: i32 = 3010;
 
-/// Handles the cleanup-helper mode before GPUI, the mutex, or any MSI work starts.
-pub fn handle_cleanup_helper(args: &[String]) -> bool {
-    let Some(dir) = platform::cleanup_dir_from_args(args) else {
-        return false;
-    };
-    let wait_pid = platform::wait_pid_from_args(args).unwrap_or(0);
-    platform::run_install_dir_cleanup(&dir, wait_pid);
-    true
-}
-
 pub fn quiet_setup(restart_app: bool, expected_sha256: Option<String>) -> i32 {
     let installed = installed::installed_product();
     let legacy = installed::legacy_burn_uninstallers();
@@ -99,13 +89,12 @@ pub fn quiet_uninstall() -> i32 {
         Ok(log) => log,
         Err(_) => return EXIT_ERROR,
     };
-    let cleanup_helper = platform::prepare_install_dir_cleanup();
     let product_codes = match installed::find_product_codes_checked() {
         Ok(codes) => codes,
         Err(_) => return EXIT_ERROR,
     };
     if product_codes.is_empty() {
-        return finish_with_cleanup(&product.install_dir, &[], cleanup_helper, &log);
+        return finish_with_cleanup(&product.install_dir, &[], &log);
     }
 
     let result = msi::uninstall_blocking(&product_codes, &log);
@@ -114,14 +103,12 @@ pub fn quiet_uninstall() -> i32 {
         // cleanup is the useful result. A damaged cached package is not a reason to delete files
         // unattended: the quiet path reports the failure and leaves the choice to the person.
         if failure.kind == msi::FailureKind::NotInstalled {
-            return finish_with_cleanup(&product.install_dir, &product_codes, cleanup_helper, &log);
+            return finish_with_cleanup(&product.install_dir, &product_codes, &log);
         }
     }
     if result.is_ok() {
         let mut failures = platform::remove_product_data();
-        if let Err(error) =
-            platform::spawn_install_dir_cleanup(&product.install_dir, cleanup_helper)
-        {
+        if let Err(error) = platform::spawn_install_dir_cleanup(&product.install_dir) {
             failures.push(format!("install folder: {error}"));
         }
         if !failures.is_empty() {
@@ -137,7 +124,6 @@ pub fn quiet_uninstall() -> i32 {
 fn finish_with_cleanup(
     install_dir: &std::path::Path,
     expected: &[String],
-    cleanup_helper: Option<PathBuf>,
     log: &std::path::Path,
 ) -> i32 {
     let cleaned = (|| {
@@ -148,7 +134,7 @@ fn finish_with_cleanup(
         if !installed::all_products_are_expected(&current, expected) {
             return Err("Cairn was installed while the uninstaller was running.".to_string());
         }
-        platform::remove_orphan_registration(install_dir, cleanup_helper)
+        platform::remove_orphan_registration(install_dir)
     })();
     match cleaned {
         Ok(warnings) => {

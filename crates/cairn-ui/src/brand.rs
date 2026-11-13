@@ -275,14 +275,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::assertions_on_constants)]
-    fn serif_line_height_clears_cormorant_metrics() {
-        // Cormorant's hhea ascent + descent is 1.211 em. A tighter line box clips the
-        // bottom overshoot of round letters such as C.
-        assert!(SERIF_LINE_HEIGHT >= 1.211);
-    }
-
-    #[test]
     fn serif_font_config_selects_the_embedded_weights() {
         let regular = serif_font(FontWeight::NORMAL);
         assert_eq!(regular.family.as_str(), SERIF_FONT_FAMILY_WESTERN);

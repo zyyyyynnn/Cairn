@@ -108,7 +108,7 @@ impl MultiVolumeEngine {
                     finalize_scanned_volume(&mut *vol, &self.index_dir, scan_start)?;
                     tracing::info!(
                         "Volume {drive}: rescanned {} records, state {:?}",
-                        vol.records.len(),
+                        vol.records().len(),
                         vol.status
                     );
                     Ok(count)
@@ -158,11 +158,11 @@ impl MultiVolumeEngine {
         let mut lock = self.volumes.write().unwrap();
         let generation = lock
             .get(&vol.drive_letter)
-            .map(|previous| previous.generation.wrapping_add(1));
+            .map(|previous| previous.generation().wrapping_add(1));
         match generation {
             Some(generation) => {
                 let mut vol = vol;
-                vol.generation = generation;
+                vol.set_generation(generation);
                 lock.insert(vol.drive_letter, vol);
             }
             None => {
@@ -175,12 +175,12 @@ impl MultiVolumeEngine {
     pub fn save_all_indexes(&self) -> Result<(), persistence::PersistenceError> {
         let vols = self.volumes.read().unwrap();
         for vol in vols.values() {
-            if !vol.records.is_empty() {
+            if !vol.records().is_empty() {
                 vol.save_to_dir(&self.index_dir)?;
                 tracing::info!(
                     "Atomically saved volume index for {}: ({} records, last_usn: {})",
                     vol.drive_letter,
-                    vol.records.len(),
+                    vol.records().len(),
                     vol.last_usn
                 );
             }
@@ -220,9 +220,11 @@ impl MultiVolumeEngine {
     pub fn poll_usn_changes(&self) {
         #[cfg(windows)]
         {
-            // Larger reads mean fewer 50ms rounds during a cold catch-up; 512 KiB is still a
-            // transient allocation, not part of the steady-state memory budget.
-            let mut buf = vec![0u8; 512 * 1024];
+            const USN_READ_BUF_BYTES: usize = 512 * 1024;
+            let mut buf = self.usn_read_buf.lock().unwrap();
+            if buf.len() < USN_READ_BUF_BYTES {
+                buf.resize(USN_READ_BUF_BYTES, 0);
+            }
             let present: HashSet<char> = enumerate_fixed_drives().into_iter().collect();
             let drives: Vec<char> = {
                 let lock = self.volumes.read().unwrap();
@@ -320,9 +322,7 @@ impl MultiVolumeEngine {
                             vol.last_usn = next_usn;
                             if !changes.is_empty() {
                                 vol.apply_usn_changes(changes);
-                                vol.path_cache.clear();
-                                // Mark dirty; do NOT synchronously rebuild PresortedIndices under write lock (SPEC SM-4, QRY-05)
-                                vol.presorted_dirty = true;
+                                vol.clear_path_cache();
                             }
                             if is_live_poll_trackable(vol.status.state()) {
                                 vol.status.reconcile_poll(previous_usn, next_usn, tail_usn);

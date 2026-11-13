@@ -8,7 +8,6 @@ use crate::tokenizer::{CjkBigramLatinTokenizer, CJK_BIGRAM_LATIN_TOKENIZER};
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::thread::available_parallelism;
 use tantivy::collector::{Collector, Count, SegmentCollector, TopDocs};
 use tantivy::fastfield::Column;
 use tantivy::query::{BooleanQuery, Occur, QueryParser, TermQuery};
@@ -55,8 +54,6 @@ pub struct ContentSearcher {
     reader: IndexReader,
     f_volume_id: Field,
     f_frn: Field,
-    f_file_size: Field,
-    f_modified_ts: Field,
     f_path: Field,
     f_body: Field,
 }
@@ -78,13 +75,7 @@ impl ContentSearcher {
 
         // Resolve the fields from the on-disk schema: a searcher must never invent a schema that
         // disagrees with the segments it is about to read.
-        let schema = index.schema();
-        let f_volume_id = schema.get_field("volume_id")?;
-        let f_frn = schema.get_field("frn")?;
-        let f_file_size = schema.get_field("file_size")?;
-        let f_modified_ts = schema.get_field("modified_ts")?;
-        let f_path = schema.get_field("path")?;
-        let f_body = schema.get_field("body")?;
+        let fields = ContentFields::from_schema(&index.schema())?;
 
         let reader = index
             .reader_builder()
@@ -95,12 +86,10 @@ impl ContentSearcher {
             index,
             index_dir: index_dir.to_path_buf(),
             reader,
-            f_volume_id,
-            f_frn,
-            f_file_size,
-            f_modified_ts,
-            f_path,
-            f_body,
+            f_volume_id: fields.volume_id,
+            f_frn: fields.frn,
+            f_path: fields.path,
+            f_body: fields.body,
         })
     }
 
@@ -327,11 +316,6 @@ impl ContentSearcher {
 
         Ok(hits)
     }
-
-    #[cfg(test)]
-    pub(crate) fn segment_count(&self) -> Result<usize, ContentIndexError> {
-        Ok(self.index.searchable_segment_ids()?.len())
-    }
 }
 
 /// Collects every matching document and reads `(volume_id, frn)` from the FAST fields, so a full
@@ -392,68 +376,89 @@ impl SegmentCollector for FrnSetChild {
     }
 }
 
-/// Full-text search index backed by Tantivy.
-pub struct ContentIndex {
-    searcher: ContentSearcher,
+/// Field handles shared across reader and writer entry points.
+#[derive(Clone, Copy)]
+struct ContentFields {
+    volume_id: Field,
+    frn: Field,
+    file_size: Field,
+    modified_ts: Field,
+    path: Field,
+    body: Field,
+}
+
+impl ContentFields {
+    fn from_schema(schema: &Schema) -> Result<Self, ContentIndexError> {
+        Ok(Self {
+            volume_id: schema.get_field("volume_id")?,
+            frn: schema.get_field("frn")?,
+            file_size: schema.get_field("file_size")?,
+            modified_ts: schema.get_field("modified_ts")?,
+            path: schema.get_field("path")?,
+            body: schema.get_field("body")?,
+        })
+    }
+}
+
+/// Write paths feed documents serially from a single thread, so a single writer thread near
+/// Tantivy's per-thread arena floor prevents multi-thread over-allocation.
+const CONTENT_WRITER_THREADS: usize = 1;
+const CONTENT_WRITER_MEMORY_BUDGET: usize = 16 * 1024 * 1024;
+
+fn build_content_schema() -> Schema {
+    let mut schema_builder = Schema::builder();
+    schema_builder.add_u64_field("volume_id", INDEXED | FAST | STORED);
+    schema_builder.add_u64_field("frn", INDEXED | FAST | STORED);
+    schema_builder.add_u64_field("file_size", FAST);
+    schema_builder.add_i64_field("modified_ts", FAST);
+    schema_builder.add_text_field("path", STRING | STORED);
+
+    let body_indexing = TextFieldIndexing::default()
+        .set_tokenizer(CJK_BIGRAM_LATIN_TOKENIZER)
+        .set_index_option(IndexRecordOption::WithFreqsAndPositions);
+    let body_options = TextOptions::default()
+        .set_indexing_options(body_indexing)
+        .set_stored();
+    schema_builder.add_text_field("body", body_options);
+
+    schema_builder.build()
+}
+
+fn open_or_create_tantivy_index(dir_path: &Path) -> Result<Index, ContentIndexError> {
+    fs::create_dir_all(dir_path)?;
+    let schema = build_content_schema();
+    let index = match Index::open_in_dir(dir_path) {
+        Ok(idx) => idx,
+        Err(_) => Index::create_in_dir(dir_path, schema)?,
+    };
+    index
+        .tokenizers()
+        .register(CJK_BIGRAM_LATIN_TOKENIZER, CjkBigramLatinTokenizer);
+    Ok(index)
+}
+
+/// Write-only handle onto a Tantivy content index. Never opens a reader or segment mmaps.
+pub struct ContentWriter {
+    fields: ContentFields,
     writer: Arc<Mutex<IndexWriter>>,
 }
 
-/// Content indexing is a background job; never let it take more than a quarter of the machine's
-/// workers. Tantivy itself caps its default writer at eight threads, so the quota is bounded there
-/// as well.
-fn content_writer_threads(available_parallelism: usize) -> usize {
-    (available_parallelism / 4).clamp(1, 8)
-}
-
-/// Tantivy requires a minimum arena per writer thread. Keep the total budget above that floor
-/// instead of failing on a many-core machine.
-fn content_writer_memory_budget(threads: usize) -> usize {
-    const MIN_PER_THREAD: usize = 16 * 1024 * 1024;
-    50_000_000usize.max(threads.saturating_mul(MIN_PER_THREAD))
-}
-
-impl ContentIndex {
-    /// Opens or creates a Tantivy index in `index_dir`.
+impl ContentWriter {
+    /// Opens or creates a write-only Tantivy handle in `index_dir`.
     pub fn open_or_create<P: AsRef<Path>>(index_dir: P) -> Result<Self, ContentIndexError> {
-        let dir_path = index_dir.as_ref();
-        fs::create_dir_all(dir_path)?;
+        let index = open_or_create_tantivy_index(index_dir.as_ref())?;
+        Self::from_index(&index)
+    }
 
-        let mut schema_builder = Schema::builder();
-        schema_builder.add_u64_field("volume_id", INDEXED | FAST | STORED);
-        schema_builder.add_u64_field("frn", INDEXED | FAST | STORED);
-        schema_builder.add_u64_field("file_size", FAST);
-        schema_builder.add_i64_field("modified_ts", FAST);
-        schema_builder.add_text_field("path", STRING | STORED);
-
-        let body_indexing = TextFieldIndexing::default()
-            .set_tokenizer(CJK_BIGRAM_LATIN_TOKENIZER)
-            .set_index_option(IndexRecordOption::WithFreqsAndPositions);
-        let body_options = TextOptions::default()
-            .set_indexing_options(body_indexing)
-            .set_stored();
-        schema_builder.add_text_field("body", body_options);
-
-        let schema = schema_builder.build();
-
-        let index = match Index::open_in_dir(dir_path) {
-            Ok(idx) => idx,
-            Err(_) => Index::create_in_dir(dir_path, schema)?,
-        };
-
-        let searcher = ContentSearcher::from_index(index.clone(), dir_path)?;
-        let threads = content_writer_threads(
-            available_parallelism()
-                .map(|parallelism| parallelism.get())
-                .unwrap_or(1),
-        );
+    fn from_index(index: &Index) -> Result<Self, ContentIndexError> {
+        let fields = ContentFields::from_schema(&index.schema())?;
         let writer = Arc::new(Mutex::new(
             index.writer_with_num_threads::<TantivyDocument>(
-                threads,
-                content_writer_memory_budget(threads),
+                CONTENT_WRITER_THREADS,
+                CONTENT_WRITER_MEMORY_BUDGET,
             )?,
         ));
-
-        Ok(Self { searcher, writer })
+        Ok(Self { fields, writer })
     }
 
     /// Adds or replaces one document without committing. A backfill batch uses this for every
@@ -474,19 +479,19 @@ impl ContentIndex {
         // remove a same-numbered record on another volume, whose IDs are only unique per volume.
         Self::delete_from(
             &mut writer,
-            self.searcher.f_volume_id,
-            self.searcher.f_frn,
+            self.fields.volume_id,
+            self.fields.frn,
             volume_id,
             frn,
         )?;
 
         writer.add_document(doc!(
-            self.searcher.f_volume_id => volume_id,
-            self.searcher.f_frn => frn,
-            self.searcher.f_file_size => size,
-            self.searcher.f_modified_ts => modified_ts,
-            self.searcher.f_path => path,
-            self.searcher.f_body => body,
+            self.fields.volume_id => volume_id,
+            self.fields.frn => frn,
+            self.fields.file_size => size,
+            self.fields.modified_ts => modified_ts,
+            self.fields.path => path,
+            self.fields.body => body,
         ))?;
         Ok(())
     }
@@ -504,8 +509,8 @@ impl ContentIndex {
         for &(volume_id, frn) in documents {
             Self::delete_from(
                 &mut writer,
-                self.searcher.f_volume_id,
-                self.searcher.f_frn,
+                self.fields.volume_id,
+                self.fields.frn,
                 volume_id,
                 frn,
             )?;
@@ -542,6 +547,79 @@ impl ContentIndex {
         Ok(())
     }
 
+    /// Removes every document without committing. The worker issues one clear, one delete batch
+    /// and one document batch per process and commits them together.
+    pub fn clear_deferred(&self) -> Result<(), ContentIndexError> {
+        let writer = self.writer.lock().unwrap();
+        writer.delete_all_documents()?;
+        Ok(())
+    }
+
+    /// Clears the entire content index (CNT-07).
+    pub fn clear(&self) -> Result<(), ContentIndexError> {
+        self.clear_deferred()?;
+        self.commit()
+    }
+
+    /// Consumes the writer and waits until Tantivy has finished every pending merge. A process
+    /// that exits right after `commit` aborts its merge threads and leaves one segment per commit.
+    pub fn finish(self) -> Result<(), ContentIndexError> {
+        let writer = Arc::try_unwrap(self.writer).map_err(|_| ContentIndexError::WriterInUse)?;
+        let writer = writer
+            .into_inner()
+            .map_err(|_| ContentIndexError::WriterPoisoned)?;
+        writer.wait_merging_threads()?;
+        Ok(())
+    }
+}
+
+/// Full-text search index backed by Tantivy.
+pub struct ContentIndex {
+    searcher: ContentSearcher,
+    writer: ContentWriter,
+}
+
+impl ContentIndex {
+    /// Opens or creates a Tantivy index in `index_dir`.
+    pub fn open_or_create<P: AsRef<Path>>(index_dir: P) -> Result<Self, ContentIndexError> {
+        let dir_path = index_dir.as_ref();
+        let index = open_or_create_tantivy_index(dir_path)?;
+        let searcher = ContentSearcher::from_index(index.clone(), dir_path)?;
+        let writer = ContentWriter::from_index(&index)?;
+
+        Ok(Self { searcher, writer })
+    }
+
+    /// Adds or replaces one document without committing. A backfill batch uses this for every
+    /// file and commits once at the end; committing per document turns a large batch into an
+    /// fsync storm.
+    pub fn index_document_deferred(
+        &self,
+        volume_id: u64,
+        frn: u64,
+        size: u64,
+        modified_ts: i64,
+        path: &str,
+        body: &str,
+    ) -> Result<(), ContentIndexError> {
+        self.writer
+            .index_document_deferred(volume_id, frn, size, modified_ts, path, body)
+    }
+
+    /// Removes documents for deleted or no-longer-eligible `(volume_id, frn)` pairs without
+    /// committing. A debounced batch deletes all of them and commits once.
+    pub fn delete_documents_deferred(
+        &self,
+        documents: &[(u64, u64)],
+    ) -> Result<(), ContentIndexError> {
+        self.writer.delete_documents_deferred(documents)
+    }
+
+    /// Commits everything added since the previous commit.
+    pub fn commit(&self) -> Result<(), ContentIndexError> {
+        self.writer.commit()
+    }
+
     /// Number of committed documents in the index.
     pub fn document_count(&self) -> Result<u64, ContentIndexError> {
         self.searcher.document_count()
@@ -564,15 +642,12 @@ impl ContentIndex {
     /// Removes every document without committing. The worker issues one clear, one delete batch
     /// and one document batch per process and commits them together.
     pub fn clear_deferred(&self) -> Result<(), ContentIndexError> {
-        let writer = self.writer.lock().unwrap();
-        writer.delete_all_documents()?;
-        Ok(())
+        self.writer.clear_deferred()
     }
 
     /// Clears the entire content index (CNT-07).
     pub fn clear(&self) -> Result<(), ContentIndexError> {
-        self.clear_deferred()?;
-        self.commit()
+        self.writer.clear()
     }
 
     /// Consumes the writer and waits until Tantivy has finished every pending merge. A process
@@ -581,17 +656,7 @@ impl ContentIndex {
         let ContentIndex { searcher, writer } = self;
         // The reader's segment mappings are not needed once the writer is about to finish.
         drop(searcher);
-        let writer = Arc::try_unwrap(writer).map_err(|_| ContentIndexError::WriterInUse)?;
-        let writer = writer
-            .into_inner()
-            .map_err(|_| ContentIndexError::WriterPoisoned)?;
-        writer.wait_merging_threads()?;
-        Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn segment_count(&self) -> Result<usize, ContentIndexError> {
-        self.searcher.segment_count()
+        writer.finish()
     }
 }
 
@@ -659,24 +724,6 @@ mod tests {
     ) -> Result<(), ContentIndexError> {
         index.index_document_deferred(volume_id, frn, size, modified_ts, path, body)?;
         index.commit()
-    }
-
-    #[test]
-    fn content_writer_threads_follow_the_quarter_machine_quota() {
-        assert_eq!(content_writer_threads(1), 1);
-        assert_eq!(content_writer_threads(4), 1);
-        assert_eq!(content_writer_threads(16), 4);
-        assert_eq!(
-            content_writer_threads(128),
-            8,
-            "Tantivy's writer caps at eight threads"
-        );
-    }
-
-    #[test]
-    fn content_writer_budget_keeps_each_thread_above_the_tantivy_floor() {
-        assert_eq!(content_writer_memory_budget(1), 50_000_000);
-        assert!(content_writer_memory_budget(8) >= 8 * 16 * 1024 * 1024);
     }
 
     #[test]
@@ -998,17 +1045,31 @@ mod tests {
         );
     }
 
+    fn store_segment_file_count(dir: &Path) -> usize {
+        fs::read_dir(dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| ext == "store")
+            })
+            .count()
+    }
+
     #[test]
     fn finishing_the_writer_merges_segments_from_many_commits() {
         let temp = tempdir().unwrap();
-        let index = ContentIndex::open_or_create(temp.path()).expect("open failed");
+        let writer = ContentWriter::open_or_create(temp.path()).expect("open writer failed");
         let commits = 12u64;
         let docs_per_commit = 20u64;
 
         for commit in 0..commits {
             for doc in 0..docs_per_commit {
                 let frn = commit * docs_per_commit + doc + 1;
-                index
+                writer
                     .index_document_deferred(
                         0,
                         frn,
@@ -1019,24 +1080,68 @@ mod tests {
                     )
                     .unwrap();
             }
-            index.commit().unwrap();
+            writer.commit().unwrap();
         }
 
-        assert_eq!(index.document_count().unwrap(), commits * docs_per_commit);
-        assert!(index.segment_count().unwrap() > 0);
-        index.finish().expect("finish failed");
+        assert!(store_segment_file_count(temp.path()) > 0);
+        writer.finish().expect("finish failed");
 
         let searcher = ContentSearcher::open(temp.path()).expect("read-only open failed");
-        let segments = searcher.segment_count().unwrap();
+        let segments = store_segment_file_count(temp.path());
         assert!(segments > 0);
         assert!(
             segments < commits as usize,
             "waiting for merges must leave fewer segments than commits, got {segments}"
         );
         assert_eq!(
+            searcher.document_count().unwrap(),
+            commits * docs_per_commit
+        );
+        assert_eq!(
             searcher.search("mergeable", 1000).unwrap().len(),
             (commits * docs_per_commit) as usize
         );
+    }
+
+    #[test]
+    fn content_writer_updates_deletes_and_clears_for_subsequent_searcher() {
+        let temp = tempdir().unwrap();
+
+        // First write pass creates the index, registers the CJK tokenizer, and writes two volumes
+        // sharing the same FRN.
+        let writer = ContentWriter::open_or_create(temp.path()).expect("open content writer");
+        writer
+            .index_document_deferred(1, 42, 10, 100, r"C:\notes.md", "架构设计 文档")
+            .unwrap();
+        writer
+            .index_document_deferred(2, 42, 20, 200, r"D:\notes.md", "架构设计 副本")
+            .unwrap();
+        writer.commit().unwrap();
+        writer.finish().unwrap();
+
+        // Update volume 1's FRN 42 and delete volume 2's FRN 42 using a fresh ContentWriter.
+        let writer = ContentWriter::open_or_create(temp.path()).expect("reopen content writer");
+        writer
+            .index_document_deferred(1, 42, 30, 300, r"C:\notes.md", "新版 索引架构")
+            .unwrap();
+        writer.delete_documents_deferred(&[(2, 42)]).unwrap();
+        writer.commit().unwrap();
+        writer.finish().unwrap();
+
+        let searcher = ContentSearcher::open(temp.path()).expect("open searcher");
+        assert_eq!(searcher.document_count().unwrap(), 1);
+        let cjk_hits = searcher.search("索引架构", 10).unwrap();
+        assert_eq!(cjk_hits.len(), 1);
+        assert_eq!((cjk_hits[0].volume_id, cjk_hits[0].frn), (1, 42));
+        assert!(searcher.search("副本", 10).unwrap().is_empty());
+
+        // Clear via ContentWriter leaves zero documents on reopen.
+        drop(searcher);
+        let writer = ContentWriter::open_or_create(temp.path()).expect("open for clear");
+        writer.clear().unwrap();
+        writer.finish().unwrap();
+        let searcher = ContentSearcher::open(temp.path()).expect("reopen searcher");
+        assert_eq!(searcher.document_count().unwrap(), 0);
     }
 
     #[test]

@@ -8,6 +8,7 @@
 
 use crate::app::CairnApp;
 use crate::search::filters::FilterCategory;
+use crate::search::ResultSetChange;
 use crate::shell::commands::{DeleteSelected, RestoreAll, RestoreSelected};
 use crate::shell::dialogs;
 use crate::shell::menu_actions::{style_confirmation_alert, style_confirmation_alert_with_variant};
@@ -84,11 +85,8 @@ impl CairnApp {
         }
         // Invalidate any in-flight query: its answer belongs to the table and
         // must not replace the listing that is about to be shown.
-        self.query.query_id += 1;
-        self.query.is_searching = false;
-        self.query.is_fetching_more = false;
+        self.take_table_for_local_rows();
         self.query.cancelled = false;
-        self.query.active_session_id = None;
         // The bin is a location, not a search scope. The search box starts
         // empty and filters this listing in place; it must not run an index
         // query that would replace the location.
@@ -562,7 +560,7 @@ impl CairnApp {
                     } else if this.block_listing.is_some() {
                         this.remove_block_listing_paths(&deleted_paths, cx);
                     } else {
-                        this.trigger_search(cx);
+                        this.request_result_set(ResultSetChange::Replace, cx);
                     }
                 }
                 cx.notify();
@@ -626,7 +624,11 @@ mod bin_command_tests {
         gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
             gpui_kit::init(cx);
             let _ = gpui_kit::open_window(
-                gpui_kit::gpui::WindowOptions::default(),
+                gpui_kit::gpui::WindowOptions {
+                    show: false,
+                    focus: false,
+                    ..gpui_kit::gpui::WindowOptions::default()
+                },
                 cx,
                 |window, cx| {
                     let app = cx.new(|cx| CairnApp::new(window, cx));

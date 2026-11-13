@@ -7,9 +7,12 @@
 
 use crate::app::{element_id, layout, CairnApp};
 use crate::shell::accessibility;
+use crate::shell::status_bar::format_count;
 use crate::shell::theme::{self, ShellTokens};
+use crate::treemap::dir_menu::{list_menu_directories, PATH_MENU_LIMIT};
 use crate::treemap::paint::text_width;
 use crate::treemap::path_input::normalize_treemap_path;
+use cairn_core::format_size_bytes;
 use cairn_core::treemap::path_segments;
 use fluent_bundle::FluentArgs;
 use gpui_kit::assets::IconName;
@@ -23,9 +26,6 @@ use gpui_kit::gpui::*;
 /// One breadcrumb label never takes more than a readable share of the path band; the
 /// full path remains in the band's tooltip.
 const PATH_SEGMENT_MAX_WIDTH: f32 = 24.0;
-/// One dropdown row never builds an unbounded menu; the Treemap remains the
-/// route to folders past this cap.
-const PATH_MENU_LIMIT: usize = 100;
 /// A path menu is as wide as its longest readable name, inside this band: the
 /// floor keeps a short list from collapsing, the ceiling keeps one long folder
 /// from stretching the menu across the window.
@@ -40,60 +40,6 @@ const MENU_LABEL_MAX_WIDTH: f32 = 20.0;
 /// One screen-half cap for every path menu, so a long list scrolls instead of
 /// running past the window.
 const MENU_MAX_HEIGHT: f32 = 20.0;
-
-/// Child folders of `directory` as the filesystem holds them now. The Treemap tree can lag
-/// deletions and a breadcrumb segment can name an ancestor the current tree does not hold, so
-/// the menu reads the directory itself.
-///
-/// The scan stops once the menu holds more than its cap: a directory can carry tens of
-/// thousands of children, and enumerating, stat-ing and sorting all of them to display a
-/// hundred costs about a second on the UI thread. The listed set is therefore the eligible
-/// folders found first in directory order, sorted for display afterwards.
-fn path_menu_directories(directory: &str) -> Vec<(String, String)> {
-    let Ok(entries) = std::fs::read_dir(directory) else {
-        return Vec::new();
-    };
-    let base = directory.trim_end_matches(['\\', '/']);
-    let mut directories = Vec::with_capacity(PATH_MENU_LIMIT + 1);
-    for entry in entries.flatten() {
-        if directories.len() > PATH_MENU_LIMIT {
-            break;
-        }
-        if !menu_directory(&entry) {
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy().into_owned();
-        directories.push((name.clone(), format!("{base}\\{name}")));
-    }
-    directories.sort_by(|a, b| cairn_core::sort::natural_cmp(&a.0, &b.0));
-    directories
-}
-
-/// A path menu offers real switch destinations only: the entry must be a directory, and
-/// Explorer's default hides the system attribute pair. The attributes come from the
-/// enumeration's own find data, so no second filesystem call is made and the link itself is
-/// read — a junction such as "Documents and Settings" points at an ordinary directory but is
-/// still a system entry.
-#[cfg(windows)]
-fn menu_directory(entry: &std::fs::DirEntry) -> bool {
-    use std::os::windows::fs::MetadataExt;
-    const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
-    const FILE_ATTRIBUTE_SYSTEM: u32 = 0x4;
-    const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
-    entry
-        .metadata()
-        .map(|metadata| {
-            let attributes = metadata.file_attributes();
-            attributes & FILE_ATTRIBUTE_DIRECTORY != 0
-                && attributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM) == 0
-        })
-        .unwrap_or(false)
-}
-
-#[cfg(not(windows))]
-fn menu_directory(entry: &std::fs::DirEntry) -> bool {
-    entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false)
-}
 
 /// One folder option built here rather than by the menu component's intrinsic
 /// row because the name has to ellipsize at the menu's width and carry the
@@ -219,15 +165,15 @@ impl CairnApp {
     }
 
     pub(crate) fn clear_treemap_path_menu(&mut self) {
+        self.treemap_dir_loader.cancel();
         self.treemap_path_menu_dismiss = None;
         self.treemap_path_menu = None;
         self.treemap_path_menu_for = None;
         self.treemap_path_menu_focus = None;
     }
 
-    /// Opens the child-folder menu under one breadcrumb segment. The menu
-    /// belongs to the segment it was opened from; asking for it again closes
-    /// it, and asking for another segment replaces it.
+    /// Opens the child-folder menu under one breadcrumb segment. The filesystem scan runs off the
+    /// UI thread behind an epoch guard so toggling or navigating drops stale results cleanly.
     pub(crate) fn toggle_treemap_path_menu(
         &mut self,
         segment: &str,
@@ -235,14 +181,54 @@ impl CairnApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let same_segment = self.treemap_path_menu_for.as_deref() == Some(segment);
+        let same_segment = self.treemap_path_menu_for.as_deref() == Some(segment)
+            || self.treemap_dir_loader.is_pending_for(segment);
         if same_segment {
             self.clear_treemap_path_menu();
             cx.notify();
             return;
         }
         self.clear_treemap_path_menu();
-        let directories = path_menu_directories(segment);
+        let epoch = self.treemap_dir_loader.begin(segment);
+        let segment_for_io = segment.to_string();
+        let segment_for_ui = segment_for_io.clone();
+        let window_handle = window.window_handle();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        crate::service::ipc_tasks::get_tokio_runtime().spawn_blocking(move || {
+            let _ = tx.send(list_menu_directories(&segment_for_io));
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(directories) = rx.await else {
+                return;
+            };
+            let _ = cx.update_window(window_handle, |_, window, cx| {
+                if let Some(view) = this.upgrade() {
+                    view.update(cx, |this, cx| {
+                        if !this.treemap_dir_loader.accept(epoch) {
+                            return;
+                        }
+                        this.install_treemap_path_menu(
+                            &segment_for_ui,
+                            directories,
+                            trigger_focus,
+                            window,
+                            cx,
+                        );
+                    });
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn install_treemap_path_menu(
+        &mut self,
+        segment: &str,
+        directories: Vec<(String, String)>,
+        trigger_focus: FocusHandle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let view = cx.entity();
         let empty_label = self.i18n.get_text("treemap_path_menu_empty");
         let truncated = directories.len() > PATH_MENU_LIMIT;
@@ -393,6 +379,91 @@ impl CairnApp {
         let error = self.treemap_path.error;
         let show_clear = editing && !self.treemap_path.input.read(cx).value().is_empty();
         let snap_margin = window.rem_size() * layout::SPACE_8;
+        // A canvas root whose folded tail cannot carry a tile label hosts it
+        // here instead of painting a sliver in the body.
+        let root_tail = self
+            .treemap_state
+            .as_ref()
+            .and_then(|state| state.root_tail.as_ref());
+        let tail_control = accessibility::control("treemap-tail");
+        let root_tail_chip = root_tail.map(|tail| {
+            let mut args = FluentArgs::new();
+            args.set("count", tail.count as i64);
+            args.set("count_text", format_count(tail.count));
+            let label = self.i18n.get_text_with_args("treemap_aggregate", &args);
+            let tail_size = format_size_bytes(tail.size);
+            let tooltip = SharedString::from(format!("{label}\n{tail_size}"));
+            let chip_focus = window
+                .use_keyed_state(
+                    element_id("treemap-root-tail-focus", &tail.path),
+                    cx,
+                    |_, cx| cx.focus_handle().tab_stop(true),
+                )
+                .read(cx)
+                .clone();
+            let keyboard_navigation = cairn_ui::focus::keyboard_navigation(cx);
+            let chip_path = tail.path.clone();
+            let key_path = tail.path.clone();
+            let space_path = tail.path.clone();
+            let chip_view = view.clone();
+            let key_view = view.clone();
+            let space_view = view.clone();
+            accessibility::element_at_key(tail_control, &tail.path)
+                .flex_shrink_0()
+                .items_center()
+                .gap_x(rems(layout::SPACE_8))
+                .h(rems(layout::SPACE_24))
+                .px(rems(layout::SPACE_8))
+                .rounded(tokens.radius)
+                .bg(tokens.background)
+                .text_color(tokens.muted_foreground)
+                .text_sm()
+                .cursor_pointer()
+                .aria_label(SharedString::from(format!("{label} {tail_size}")))
+                .track_focus(&chip_focus)
+                .hover(|this| this.bg(tokens.row_hover).text_color(tokens.foreground))
+                .when(!editing, move |this| {
+                    this.tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+                })
+                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                    let path = chip_path.clone();
+                    chip_view.update(cx, |this, cx| {
+                        this.open_tail_listing(&path, window, cx);
+                    });
+                    cx.stop_propagation();
+                })
+                .on_action(
+                    move |_: &crate::shell::commands::OpenSelected,
+                          window: &mut Window,
+                          cx: &mut App| {
+                        cx.stop_propagation();
+                        let path = key_path.clone();
+                        key_view.update(cx, |this, cx| {
+                            this.open_tail_listing(&path, window, cx);
+                        });
+                    },
+                )
+                .on_key_down(move |event: &KeyDownEvent, window, cx| {
+                    if event.keystroke.key.as_str() == "space" {
+                        cx.stop_propagation();
+                        let path = space_path.clone();
+                        space_view.update(cx, |this, cx| {
+                            this.open_tail_listing(&path, window, cx);
+                        });
+                    }
+                })
+                .child(Icon::new(IconName::FileStack).xsmall())
+                .child(div().whitespace_nowrap().child(label))
+                .children(cairn_ui::focus::edge(
+                    &chip_focus,
+                    tokens.ring,
+                    tokens.radius,
+                    keyboard_navigation,
+                    window,
+                    cx,
+                ))
+                .into_any_element()
+        });
 
         let content = if editing {
             Input::new(&self.treemap_path.input)
@@ -744,6 +815,7 @@ impl CairnApp {
                             .justify_start()
                             .child(content),
                     )
+                    .when_some(root_tail_chip, |this, chip| this.child(chip))
                     .when(show_clear, |this| {
                         this.child(crate::view::treemap_path_clear_button(
                             &self.i18n,
@@ -782,7 +854,7 @@ mod tests {
             .trim_end_matches(['\\', '/'])
             .to_string();
         assert_eq!(
-            path_menu_directories(&base),
+            list_menu_directories(&base),
             vec![
                 (
                     "Program Files".to_string(),
@@ -811,7 +883,7 @@ mod tests {
             .to_string_lossy()
             .trim_end_matches(['\\', '/'])
             .to_string();
-        let listed = path_menu_directories(&base);
+        let listed = list_menu_directories(&base);
         assert_eq!(listed.len(), PATH_MENU_LIMIT + 1);
         assert!(listed.windows(2).all(|pair| pair[0].0 <= pair[1].0));
     }

@@ -52,6 +52,19 @@ impl DirectoryPathCache {
         }
     }
 
+    /// Returns estimated heap bytes held by the map table and cached `Arc<str>` payloads.
+    pub fn allocated_bytes(&self) -> usize {
+        let Ok(lock) = self.cache.read() else {
+            return 0;
+        };
+        let table = crate::frn_index::hashmap_table_bytes::<u32, Arc<str>>(lock.capacity());
+        let strings: usize = lock
+            .values()
+            .map(|s| 2 * std::mem::size_of::<usize>() + s.len())
+            .sum();
+        table + strings
+    }
+
     /// Reconstructs the full parent directory path for `record_idx`.
     /// E.g. `C:\Windows\System32\`
     pub fn get_parent_path(

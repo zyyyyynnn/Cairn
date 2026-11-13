@@ -6,5 +6,6 @@
 //! results view that renders heading, rows and placeholders.
 
 pub(crate) mod model;
+pub(crate) mod presentation;
 pub(crate) mod results_view;
 pub(crate) mod surface;

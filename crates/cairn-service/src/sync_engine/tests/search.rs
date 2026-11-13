@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::sync_engine::search::presorted_order;
+use super::{index_item, sized_item};
 use crate::sync_engine::{MultiVolumeEngine, VolumeIndex};
 use cairn_core::engine::CancellationToken;
 use cairn_core::sort::SortColumn;
@@ -48,7 +48,7 @@ fn result_names(engine: &MultiVolumeEngine, sort_by: SortColumn, sort_asc: bool)
         results
             .iter()
             .map(|r| {
-                vol.record_name(&vol.records[r.record_idx as usize])
+                vol.record_name(&vol.records()[r.record_idx as usize])
                     .to_string()
             })
             .collect()
@@ -58,9 +58,7 @@ fn result_names(engine: &MultiVolumeEngine, sort_by: SortColumn, sort_asc: bool)
 #[test]
 fn a_filtered_query_does_not_rebuild_the_whole_volume_sort() {
     let (_temp_dir, engine) = engine_with_sorting_fixture();
-    engine
-        .with_primary_volume_mut(|volume| volume.presorted_dirty = true)
-        .expect("primary volume");
+    engine.update_volume('C', |volume| volume.mark_presorted_dirty());
 
     let cancel = CancellationToken::new();
     let (results, total, ..) = engine.execute_search_multi(
@@ -73,7 +71,7 @@ fn a_filtered_query_does_not_rebuild_the_whole_volume_sort() {
     assert_eq!(total, 1);
     assert_eq!(results.len(), 1);
     assert!(
-        engine.with_volumes(|volumes| volumes[&'C'].presorted_dirty),
+        engine.with_volumes(|volumes| volumes[&'C'].is_presorted_dirty()),
         "a filtered query has no use for the volume-wide presorted order"
     );
 
@@ -86,7 +84,7 @@ fn a_filtered_query_does_not_rebuild_the_whole_volume_sort() {
     );
     assert_eq!(total, 3);
     assert!(
-        !engine.with_volumes(|volumes| volumes[&'C'].presorted_dirty),
+        !engine.with_volumes(|volumes| volumes[&'C'].is_presorted_dirty()),
         "the all-files query does need the order and must rebuild it"
     );
 }
@@ -118,9 +116,7 @@ fn test_single_volume_query_sorts_columns_without_presorted_arrays() {
 #[test]
 fn test_single_volume_name_query_falls_back_when_presorted_index_is_empty() {
     let (_temp_dir, engine) = engine_with_sorting_fixture();
-    engine
-        .with_primary_volume_mut(|vol| vol.presorted.by_name.clear())
-        .expect("primary volume");
+    engine.update_volume('C', |vol| vol.mark_presorted_dirty());
 
     assert_eq!(
         result_names(&engine, SortColumn::Name, true),
@@ -137,16 +133,15 @@ fn test_presorted_order_rejects_dirty_or_missing_columns() {
     let mut vol = VolumeIndex::new('C');
     vol.ingest_items(vec![sorted_test_item(1, "a.txt", 1)]);
 
-    assert!(presorted_order(&vol, SortColumn::Name).is_some());
-    assert!(presorted_order(&vol, SortColumn::DateCreated).is_none());
-    assert!(presorted_order(&vol, SortColumn::Extension).is_none());
+    assert!(vol.presorted_order(SortColumn::Name).is_none());
+    vol.ensure_presorted_column(SortColumn::Name);
+    assert!(vol.presorted_order(SortColumn::Name).is_some());
+    assert!(vol.presorted_order(SortColumn::DateCreated).is_none());
+    assert!(vol.presorted_order(SortColumn::Extension).is_none());
 
-    vol.presorted.by_name.clear();
-    assert!(presorted_order(&vol, SortColumn::Name).is_none());
-
-    vol.presorted_dirty = true;
+    vol.mark_presorted_dirty();
     assert!(
-        presorted_order(&vol, SortColumn::Size).is_none(),
+        vol.presorted_order(SortColumn::Name).is_none(),
         "a dirty presorted index is not a valid order"
     );
 }
@@ -268,7 +263,7 @@ fn test_multi_volume_schwartzian_transform_sort() {
             .iter()
             .map(|r| {
                 let vol = &vols[&r.drive_letter];
-                vol.record_name(&vol.records[r.record_idx as usize])
+                vol.record_name(&vol.records()[r.record_idx as usize])
                     .to_string()
             })
             .collect()
@@ -291,7 +286,7 @@ fn test_multi_volume_schwartzian_transform_sort() {
             .iter()
             .map(|r| {
                 let vol = &vols[&r.drive_letter];
-                vol.record_name(&vol.records[r.record_idx as usize])
+                vol.record_name(&vol.records()[r.record_idx as usize])
                     .to_string()
             })
             .collect()
@@ -314,7 +309,7 @@ fn test_multi_volume_schwartzian_transform_sort() {
             .iter()
             .map(|r| {
                 let vol = &vols[&r.drive_letter];
-                vol.records[r.record_idx as usize].size
+                vol.records()[r.record_idx as usize].size
             })
             .collect()
     });
@@ -333,7 +328,7 @@ fn test_multi_volume_schwartzian_transform_sort() {
             .iter()
             .map(|r| {
                 let vol = &vols[&r.drive_letter];
-                vol.records[r.record_idx as usize].modified_ts
+                vol.records()[r.record_idx as usize].modified_ts
             })
             .collect()
     });
@@ -389,12 +384,80 @@ fn test_multi_volume_schwartzian_transform_sort() {
             .iter()
             .map(|r| {
                 let vol = &vols[&r.drive_letter];
-                let rec = &vol.records[r.record_idx as usize];
-                vol.arena
+                let rec = &vol.records()[r.record_idx as usize];
+                vol.arena()
                     .get_ext(rec.name_offset, rec.name_len, rec.ext_offset)
                     .to_ascii_lowercase()
             })
             .collect()
     });
     assert_eq!(exts, ["bin", "txt", "txt", "txt", "txt", "txt", "zip"]);
+}
+
+#[test]
+fn single_volume_filtered_sort_and_exclusions_keep_presorted_unbuilt() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let cfg = crate::config::ServiceConfig {
+        excluded_paths: vec!["ExcludedDir".to_string()],
+        ..Default::default()
+    };
+    let engine = MultiVolumeEngine::with_index_dir_drives_and_config(temp.path(), vec![], cfg);
+
+    let mut vol = VolumeIndex::new('C');
+    vol.ingest_items(vec![
+        index_item(1, 0, "C:", true),
+        index_item(2, 1, "ExcludedDir", true),
+        sized_item(3, 2, "hidden_big.bin", false, 3 * 1024 * 1024),
+        sized_item(4, 1, "zeta.bin", false, 2 * 1024 * 1024),
+        sized_item(5, 1, "alpha.bin", false, 4 * 1024 * 1024),
+        sized_item(6, 1, "small.bin", false, 512),
+    ]);
+    engine.add_volume(vol);
+
+    let cancel = CancellationToken::new();
+    // Recursive directory size makes `"C:"` > 1 MB as well, while `sum_unique_matched_bytes`
+    // sums only matching files (alpha.bin + zeta.bin = 6 MiB) and excludes `ExcludedDir`.
+    let (results, total, _, _, total_bytes) = engine.execute_search_multi(
+        "size:>1mb",
+        &QueryDefaults::default(),
+        SortColumn::Name,
+        true,
+        &cancel,
+    );
+    assert_eq!(total, 3);
+    assert_eq!(total_bytes, 6 * 1024 * 1024);
+    let names = engine.with_volumes(|vols| {
+        let v = &vols[&'C'];
+        assert_eq!(v.memory_footprint().presorted_bytes, 0);
+        results
+            .iter()
+            .map(|r| {
+                v.record_name(&v.records()[r.record_idx as usize])
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(names, vec!["alpha.bin", "C:", "zeta.bin"]);
+
+    let (file_results, file_total, _, _, file_bytes) = engine.execute_search_multi(
+        "file: size:>1mb",
+        &QueryDefaults::default(),
+        SortColumn::Name,
+        true,
+        &cancel,
+    );
+    assert_eq!(file_total, 2);
+    assert_eq!(file_bytes, 6 * 1024 * 1024);
+    let file_names = engine.with_volumes(|vols| {
+        let v = &vols[&'C'];
+        assert_eq!(v.memory_footprint().presorted_bytes, 0);
+        file_results
+            .iter()
+            .map(|r| {
+                v.record_name(&v.records()[r.record_idx as usize])
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(file_names, vec!["alpha.bin", "zeta.bin"]);
 }

@@ -8,6 +8,7 @@
 
 use crate::app::{layout, CairnApp};
 use crate::search::filters::FilterCategory;
+use crate::search::ResultSetChange;
 use crate::shell::commands::{
     CycleFilterCategory, ToggleCaseSensitive, ToggleMatchPath, ToggleRegex, ToggleWholeWord,
 };
@@ -42,7 +43,7 @@ impl CairnApp {
             // A summary block listing is in memory too: sort it locally.
             self.sort_block_listing(cx);
         } else {
-            self.trigger_search(cx);
+            self.request_result_set(ResultSetChange::InPlace, cx);
         }
         cx.notify();
     }
@@ -97,7 +98,7 @@ impl CairnApp {
         } else if self.block_listing.is_some() {
             self.sort_block_listing(cx);
         } else {
-            self.trigger_search(cx);
+            self.request_result_set(ResultSetChange::InPlace, cx);
         }
         cx.notify();
     }
@@ -115,7 +116,7 @@ impl CairnApp {
             ToggleFlag::MatchPath => self.query.match_path = !self.query.match_path,
             ToggleFlag::Regex => self.query.use_regex = !self.query.use_regex,
         }
-        self.trigger_search(cx);
+        self.request_result_set(ResultSetChange::InPlace, cx);
         cx.notify();
     }
 
@@ -158,8 +159,7 @@ impl CairnApp {
         {
             // Re-selecting the active location refreshes it, matching the
             // recycle-bin and drive entries.
-            self.begin_table_session();
-            self.trigger_search(cx);
+            self.request_result_set(ResultSetChange::Refresh, cx);
             cx.notify();
             return;
         }
@@ -180,9 +180,7 @@ impl CairnApp {
         self.recycle_bin.leave();
         self.query.active_filter = category;
         self.record_nav_state();
-        self.results.rows_scroll.set_offset(Point::default());
-        self.results.table.scroll_top = 0.0;
-        self.trigger_search(cx);
+        self.request_result_set(ResultSetChange::Replace, cx);
         cx.notify();
     }
 
@@ -219,7 +217,7 @@ impl CairnApp {
         let effective = crate::shell::settings::effective_language(language);
         self.i18n.set_language(&effective);
         #[cfg(windows)]
-        crate::shell::tray::set_language(&effective);
+        crate::shell::tray::set_language_with_i18n(&self.i18n);
         self.save_settings();
         self.repaint_shell_and_overlays(cx);
     }
@@ -268,7 +266,11 @@ mod tests {
         gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
             gpui_kit::init(cx);
             let _ = gpui_kit::open_window(
-                gpui_kit::gpui::WindowOptions::default(),
+                gpui_kit::gpui::WindowOptions {
+                    show: false,
+                    focus: false,
+                    ..gpui_kit::gpui::WindowOptions::default()
+                },
                 cx,
                 |window, cx| {
                     let app = cx.new(|cx| CairnApp::new(window, cx));
@@ -298,7 +300,11 @@ mod tests {
         gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
             gpui_kit::init(cx);
             let _ = gpui_kit::open_window(
-                gpui_kit::gpui::WindowOptions::default(),
+                gpui_kit::gpui::WindowOptions {
+                    show: false,
+                    focus: false,
+                    ..gpui_kit::gpui::WindowOptions::default()
+                },
                 cx,
                 |window, cx| {
                     let app = cx.new(|cx| CairnApp::new(window, cx));

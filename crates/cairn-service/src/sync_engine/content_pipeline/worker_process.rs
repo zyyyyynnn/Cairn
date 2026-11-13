@@ -35,25 +35,63 @@ fn lower_worker_priority(child: &std::process::Child) {
     let _ = unsafe { CloseHandle(handle) };
 }
 
+/// Port abstracting child-process execution and retry backoff for one `CairnWorker` batch.
+pub(super) trait WorkerProcessPort {
+    fn run_batch(
+        &self,
+        tasks: &[ContentIndexTask],
+        deletions: &[(u64, u64)],
+        clear: bool,
+    ) -> BatchOutcome;
+
+    /// Waits before retrying a transient sharing conflict; returns `false` if cancelled.
+    fn wait_before_retry(&self) -> bool;
+}
+
+pub(super) struct SubprocessWorkerPort<'a> {
+    engine: &'a MultiVolumeEngine,
+}
+
+impl<'a> SubprocessWorkerPort<'a> {
+    pub(super) fn new(engine: &'a MultiVolumeEngine) -> Self {
+        Self { engine }
+    }
+}
+
+impl WorkerProcessPort for SubprocessWorkerPort<'_> {
+    fn run_batch(
+        &self,
+        tasks: &[ContentIndexTask],
+        deletions: &[(u64, u64)],
+        clear: bool,
+    ) -> BatchOutcome {
+        self.engine.run_worker_process(tasks, deletions, clear)
+    }
+
+    fn wait_before_retry(&self) -> bool {
+        std::thread::sleep(Duration::from_millis(250));
+        !self.engine.content_cancel.load(Ordering::SeqCst)
+    }
+}
+
 impl MultiVolumeEngine {
-    fn worker_path() -> Result<PathBuf, String> {
+    fn worker_path(&self) -> Result<PathBuf, String> {
+        #[cfg(test)]
+        if let Some(worker) = &self.worker_binary {
+            return Ok(worker.clone());
+        }
         let exe = std::env::current_exe()
             .map_err(|err| format!("could not locate the service executable: {err}"))?;
         let dir = exe
             .parent()
             .ok_or_else(|| "service executable has no parent directory".to_string())?;
-        // Production keeps both binaries side by side. Unit tests run from target/debug/deps, so
-        // the parent directory is the cargo target directory that holds CairnWorker.exe.
-        let mut search_dirs = vec![dir.to_path_buf()];
-        if let Some(parent) = dir.parent() {
-            search_dirs.push(parent.to_path_buf());
-        }
-        for base in search_dirs {
-            for name in ["CairnWorker.exe", "CairnWorker"] {
-                let candidate = base.join(name);
-                if candidate.exists() {
-                    return Ok(candidate);
-                }
+        // Production ships both binaries side by side; that is the only place the
+        // service looks, so a copy in a parent directory can never shadow the
+        // packaged worker.
+        for name in ["CairnWorker.exe", "CairnWorker"] {
+            let candidate = dir.join(name);
+            if candidate.exists() {
+                return Ok(candidate);
             }
         }
         Err(format!(
@@ -72,7 +110,17 @@ impl MultiVolumeEngine {
         deletions: &[(u64, u64)],
         clear: bool,
     ) -> BatchOutcome {
-        let first = self.run_worker_process(tasks, deletions, clear);
+        self.run_worker_batch_with(&SubprocessWorkerPort::new(self), tasks, deletions, clear)
+    }
+
+    pub(super) fn run_worker_batch_with(
+        &self,
+        port: &dyn WorkerProcessPort,
+        tasks: &[ContentIndexTask],
+        deletions: &[(u64, u64)],
+        clear: bool,
+    ) -> BatchOutcome {
+        let first = port.run_batch(tasks, deletions, clear);
         let err = match &first {
             BatchOutcome::Failed(failure) if failure.transient => failure.message.clone(),
             _ => return first,
@@ -81,11 +129,10 @@ impl MultiVolumeEngine {
             "CairnWorker hit a transient sharing error; releasing the searcher and retrying once: {err}"
         );
         self.drop_content_searcher();
-        std::thread::sleep(Duration::from_millis(250));
-        if self.content_cancel.load(Ordering::SeqCst) {
+        if !port.wait_before_retry() || self.content_cancel.load(Ordering::SeqCst) {
             return BatchOutcome::Cancelled;
         }
-        self.run_worker_process(tasks, deletions, clear)
+        port.run_batch(tasks, deletions, clear)
     }
 
     fn run_worker_process(
@@ -94,7 +141,7 @@ impl MultiVolumeEngine {
         deletions: &[(u64, u64)],
         clear: bool,
     ) -> BatchOutcome {
-        let worker = match Self::worker_path() {
+        let worker = match self.worker_path() {
             Ok(path) => path,
             Err(err) => return BatchOutcome::failed(err),
         };

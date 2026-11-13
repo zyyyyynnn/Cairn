@@ -163,7 +163,7 @@ mod tests {
             "a snapshot with an open backlog is the exact IDX-07 violation this state machine forbids"
         );
         assert!(matches!(vol.status.state(), VolumeState::CatchingUp(_)));
-        assert_eq!(vol.records.len(), 1, "the partial index is still served");
+        assert_eq!(vol.records().len(), 1, "the partial index is still served");
         assert_eq!(
             vol.last_usn, 1500,
             "the saved position must stay the real replay offset"

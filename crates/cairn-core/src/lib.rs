@@ -13,6 +13,7 @@ pub mod arena;
 pub mod engine;
 pub mod filter;
 pub mod format;
+pub mod frn_index;
 pub mod index_file;
 pub mod model;
 pub mod path_cache;
@@ -25,6 +26,7 @@ pub use arena::NamePool;
 pub use engine::{execute_query, execute_query_ordered, glob_match, CancellationToken};
 pub use filter::{DateFilter, DateOp, SizeFilter, SizeOp};
 pub use format::format_size_bytes;
+pub use frn_index::{FrnLookup, IndexMemoryFootprint};
 pub use model::{
     FileRecord, FLAG_ARCHIVE, FLAG_COMPRESSED, FLAG_DIRECTORY, FLAG_HIDDEN, FLAG_REPARSE_POINT,
     FLAG_SPARSE, FLAG_SYSTEM, FLAG_TOMBSTONE,

@@ -23,6 +23,7 @@ serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
 rayon.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 
 [dependencies.windows]
@@ -32,9 +33,6 @@ features = [
     "Win32_Storage_FileSystem",
     "Win32_System_Ioctl",
 ]
-
-[dev-dependencies]
-tempfile.workspace = true
 
 [build-dependencies]
 winresource.workspace = true

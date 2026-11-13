@@ -43,6 +43,29 @@ pub struct LoadedIndexData {
     pub directory_sizes_valid: bool,
 }
 
+/// Streaming chunk size for decoding records without holding a full parallel byte buffer (384 KiB).
+const DECODE_CHUNK_RECORDS: usize = 8_192;
+const STREAM_CHUNK_BYTES: usize = DECODE_CHUNK_RECORDS * RECORD_SIZE;
+
+/// Controlled growth headroom (~3.1%) reserved on loaded/compacted record tables so small USN
+/// bursts do not trigger immediate 2x `Vec` reallocations.
+pub(crate) fn headroom_for_records(len: usize) -> usize {
+    if len == 0 {
+        0
+    } else {
+        (len / 32).max(64)
+    }
+}
+
+/// Controlled growth headroom (~3.1%) reserved on loaded/compacted string arenas.
+pub(crate) fn headroom_for_arena(len: usize) -> usize {
+    if len == 0 {
+        0
+    } else {
+        (len / 32).max(2_048)
+    }
+}
+
 /// Atomically saves volume index records and arena to `vol_<drive>.idx`.
 #[allow(clippy::too_many_arguments)]
 pub fn save_volume_index_atomic(
@@ -112,11 +135,74 @@ pub fn save_volume_index_atomic(
     Ok(target_path)
 }
 
+/// Loads and validates a volume index from an arbitrary stream using bounded chunked decoding and
+/// incremental CRC32 verification.
+pub fn load_volume_index_from<R: Read>(reader: R) -> Result<LoadedIndexData, PersistenceError> {
+    load_volume_index_with_len(reader, None)
+}
+
 /// Loads and validates an index file from disk.
 pub fn load_volume_index(path: &Path) -> Result<LoadedIndexData, PersistenceError> {
-    let mut file = File::open(path)?;
+    let file = File::open(path)?;
+    let actual_file_len = usize::try_from(file.metadata()?.len())
+        .map_err(|_| PersistenceError::InvalidPayloadLength)?;
+    load_volume_index_with_len(file, Some(actual_file_len))
+}
+
+fn read_exact_or_payload_err<R: Read>(
+    reader: &mut R,
+    buf: &mut [u8],
+) -> Result<(), PersistenceError> {
+    match reader.read_exact(buf) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
+            Err(PersistenceError::InvalidPayloadLength)
+        }
+        Err(err) => Err(PersistenceError::Io(err)),
+    }
+}
+
+fn read_stream_vec<R: Read>(
+    reader: &mut R,
+    hasher: &mut Hasher,
+    total_len: usize,
+    headroom: usize,
+    known_file_len: bool,
+) -> Result<Vec<u8>, PersistenceError> {
+    if known_file_len {
+        let mut buf = Vec::with_capacity(total_len.saturating_add(headroom));
+        buf.resize(total_len, 0);
+        read_exact_or_payload_err(reader, &mut buf)?;
+        hasher.update(&buf);
+        return Ok(buf);
+    }
+
+    let mut out = Vec::with_capacity(total_len.min(STREAM_CHUNK_BYTES));
+    let mut chunk = vec![0u8; total_len.min(STREAM_CHUNK_BYTES)];
+    let mut remaining = total_len;
+    while remaining > 0 {
+        let to_read = remaining.min(chunk.len());
+        read_exact_or_payload_err(reader, &mut chunk[..to_read])?;
+        hasher.update(&chunk[..to_read]);
+        out.extend_from_slice(&chunk[..to_read]);
+        remaining -= to_read;
+    }
+    if headroom > 0 && out.capacity().saturating_sub(out.len()) < headroom {
+        out.reserve_exact(headroom);
+    }
+    let target_cap = out.len().saturating_add(headroom);
+    if out.capacity() > target_cap {
+        out.shrink_to(target_cap);
+    }
+    Ok(out)
+}
+
+fn load_volume_index_with_len<R: Read>(
+    mut reader: R,
+    actual_file_len: Option<usize>,
+) -> Result<LoadedIndexData, PersistenceError> {
     let mut header_bytes = [0u8; HEADER_SIZE];
-    file.read_exact(&mut header_bytes)?;
+    read_exact_or_payload_err(&mut reader, &mut header_bytes)?;
     let header = IndexHeader::decode(&header_bytes).map_err(|error| match error {
         IndexFileError::InvalidMagic => PersistenceError::InvalidMagic,
         IndexFileError::UnsupportedVersion(version) => {
@@ -124,48 +210,92 @@ pub fn load_volume_index(path: &Path) -> Result<LoadedIndexData, PersistenceErro
         }
     })?;
 
-    let records_byte_len = (header.record_count as usize)
+    let record_count = header.record_count as usize;
+    let records_byte_len = record_count
         .checked_mul(RECORD_SIZE)
         .ok_or(PersistenceError::InvalidPayloadLength)?;
+    let arena_len = header.arena_len as usize;
+    let folded_len = header.folded_len as usize;
     let expected_file_len = HEADER_SIZE
         .checked_add(records_byte_len)
-        .and_then(|n| n.checked_add(header.arena_len as usize))
-        .and_then(|n| n.checked_add(header.folded_len as usize))
+        .and_then(|n| n.checked_add(arena_len))
+        .and_then(|n| n.checked_add(folded_len))
         .ok_or(PersistenceError::InvalidPayloadLength)?;
-    let actual_file_len = usize::try_from(file.metadata()?.len())
-        .map_err(|_| PersistenceError::InvalidPayloadLength)?;
-    if actual_file_len != expected_file_len {
+    if let Some(actual_len) = actual_file_len {
+        if actual_len != expected_file_len {
+            return Err(PersistenceError::InvalidPayloadLength);
+        }
+    }
+    if arena_len != folded_len {
         return Err(PersistenceError::InvalidPayloadLength);
     }
-    if header.arena_len != header.folded_len {
-        return Err(PersistenceError::InvalidPayloadLength);
-    }
-
-    let mut records_buf = vec![0u8; records_byte_len];
-    file.read_exact(&mut records_buf)?;
-
-    let mut arena_buf = vec![0u8; header.arena_len as usize];
-    file.read_exact(&mut arena_buf)?;
-
-    let mut folded_buf = vec![0u8; header.folded_len as usize];
-    file.read_exact(&mut folded_buf)?;
 
     let mut hasher = Hasher::new();
-    hasher.update(&records_buf);
-    hasher.update(&arena_buf);
-    hasher.update(&folded_buf);
-    if hasher.finalize() != header.checksum {
-        return Err(PersistenceError::ChecksumMismatch);
+    let rec_headroom = headroom_for_records(record_count);
+    let known_file_len = actual_file_len.is_some();
+    let initial_rec_cap = if known_file_len {
+        record_count.saturating_add(rec_headroom)
+    } else {
+        record_count.min(DECODE_CHUNK_RECORDS)
+    };
+    let mut records = Vec::with_capacity(initial_rec_cap);
+
+    let chunk_cap = record_count.min(DECODE_CHUNK_RECORDS);
+    let mut chunk_buf = vec![0u8; chunk_cap * RECORD_SIZE];
+    let mut remaining_records = record_count;
+    while remaining_records > 0 {
+        let batch = remaining_records.min(DECODE_CHUNK_RECORDS);
+        let batch_bytes = batch * RECORD_SIZE;
+        read_exact_or_payload_err(&mut reader, &mut chunk_buf[..batch_bytes])?;
+        hasher.update(&chunk_buf[..batch_bytes]);
+        records.reserve(batch);
+        let (chunks, remainder) = chunk_buf[..batch_bytes].as_chunks::<RECORD_SIZE>();
+        debug_assert!(
+            remainder.is_empty(),
+            "record chunk buffer is a whole number of records"
+        );
+        for chunk in chunks {
+            records.push(decode_record(chunk));
+        }
+        remaining_records -= batch;
+    }
+    drop(chunk_buf);
+
+    if !known_file_len {
+        if rec_headroom > 0 && records.capacity().saturating_sub(records.len()) < rec_headroom {
+            records.reserve_exact(rec_headroom);
+        }
+        let target_cap = records.len().saturating_add(rec_headroom);
+        if records.capacity() > target_cap {
+            records.shrink_to(target_cap);
+        }
     }
 
-    let (chunks, remainder) = records_buf.as_chunks::<RECORD_SIZE>();
-    debug_assert!(
-        remainder.is_empty(),
-        "record buffer is a whole number of records"
-    );
-    let mut records = Vec::with_capacity(chunks.len());
-    for chunk in chunks {
-        records.push(decode_record(chunk));
+    let arena_headroom = headroom_for_arena(arena_len);
+    let arena_buf = read_stream_vec(
+        &mut reader,
+        &mut hasher,
+        arena_len,
+        arena_headroom,
+        known_file_len,
+    )?;
+    let folded_buf = read_stream_vec(
+        &mut reader,
+        &mut hasher,
+        folded_len,
+        arena_headroom,
+        known_file_len,
+    )?;
+
+    if !known_file_len {
+        let mut trailing = [0u8; 1];
+        if reader.read(&mut trailing)? != 0 {
+            return Err(PersistenceError::InvalidPayloadLength);
+        }
+    }
+
+    if hasher.finalize() != header.checksum {
+        return Err(PersistenceError::ChecksumMismatch);
     }
 
     Ok(LoadedIndexData {
@@ -356,5 +486,63 @@ mod tests {
             matches!(err, PersistenceError::InvalidPayloadLength),
             "expected InvalidPayloadLength, got {err:?}"
         );
+    }
+
+    #[test]
+    fn streaming_reader_roundtrips_and_guards_checksum_truncation_and_headroom() {
+        let temp = tempdir().unwrap();
+        let mut pool = NamePool::default();
+        let mut records = Vec::new();
+        for i in 0..1_000u64 {
+            let (off, len, ext) = pool.insert(&format!("entry_{i:04}.dat"));
+            records.push(FileRecord {
+                frn: 100 + i,
+                parent_idx: FileRecord::ROOT_PARENT,
+                name_offset: off,
+                name_len: len,
+                ext_offset: ext,
+                volume_id: 2,
+                flags: 0,
+                size: 512,
+                modified_ts: 10,
+                created_ts: 10,
+            });
+        }
+
+        let saved_path =
+            save_volume_index_atomic(temp.path(), 'C', 42, 88, 1234, &records, &pool, true)
+                .expect("save should succeed");
+        let raw = fs::read(&saved_path).expect("read saved index");
+
+        let loaded = load_volume_index_from(std::io::Cursor::new(&raw)).expect("stream load");
+        assert_eq!(loaded.records.len(), 1_000);
+        assert!(
+            loaded.records.capacity() > 1_000 && loaded.records.capacity() <= 1_100,
+            "loaded records must retain controlled ~3% headroom, got {}",
+            loaded.records.capacity()
+        );
+        let (arena_cap, folded_cap) = loaded.arena.allocated_bytes();
+        assert!(
+            arena_cap > loaded.arena.len() && folded_cap > loaded.arena.len(),
+            "loaded NamePool must retain controlled headroom"
+        );
+
+        let mut bad_crc = raw.clone();
+        let last = bad_crc.len() - 1;
+        bad_crc[last] ^= 0xff;
+        assert!(matches!(
+            load_volume_index_from(std::io::Cursor::new(&bad_crc)),
+            Err(PersistenceError::ChecksumMismatch)
+        ));
+
+        let mut with_trailing = raw.clone();
+        with_trailing.push(0);
+        assert!(matches!(
+            load_volume_index_from(std::io::Cursor::new(&with_trailing)),
+            Err(PersistenceError::InvalidPayloadLength)
+        ));
+
+        let truncated = &raw[..raw.len() - 5];
+        assert!(load_volume_index_from(std::io::Cursor::new(truncated)).is_err());
     }
 }

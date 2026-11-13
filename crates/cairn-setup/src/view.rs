@@ -565,6 +565,9 @@ impl SetupApp {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let Some(path_input) = &self.path_input else {
+            return div().into_any_element();
+        };
         let path_error = self
             .path_error
             .map(|problem| self.i18n.get(problem.message_key()));
@@ -572,7 +575,7 @@ impl SetupApp {
         // name instead of repeating a visible "Install folder" label under the heading.
         let accessible_label =
             path_accessible_label(&self.i18n.get("location_title"), path_error.as_deref());
-        let path_focus = self.path_input.read(cx).focus_handle(cx);
+        let path_focus = path_input.read(cx).focus_handle(cx);
         let path_focused = path_focus.is_focused(window);
         v_flex()
             .gap(MAIN_GAP)
@@ -588,7 +591,7 @@ impl SetupApp {
                             .items_center()
                             .child(
                                 div().flex_1().min_w_0().child(
-                                    Input::new(&self.path_input)
+                                    Input::new(path_input)
                                         .aria_label(accessible_label)
                                         // The field carries its own resting, focused and error
                                         // strokes, so the component's focus border would paint a

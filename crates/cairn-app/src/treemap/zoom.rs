@@ -430,6 +430,7 @@ mod tests {
             depth: 0,
             aggregate_count,
             aggregate_member_indices: Vec::new(),
+            tail: None,
         }
     }
 

@@ -10,6 +10,7 @@
 //! and viewport zoom (`zoom`).
 
 pub(crate) mod context_menu;
+pub(crate) mod dir_menu;
 pub(crate) mod navigation;
 pub(crate) mod paint;
 pub(crate) mod palette;
@@ -17,5 +18,6 @@ pub(crate) mod path_band;
 pub(crate) mod path_input;
 pub(crate) mod scan;
 pub(crate) mod state;
+pub(crate) mod store;
 pub(crate) mod view;
 pub(crate) mod zoom;

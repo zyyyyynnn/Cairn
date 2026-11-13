@@ -94,7 +94,7 @@ fn volume_summary_counts_live_records_not_tombstones() {
         index_item(2, 1, "live.txt", false),
         index_item(3, 1, "deleted.txt", false),
     ]);
-    vol.apply_usn_change(UsnChange::Deleted { frn: 3 });
+    vol.apply_usn_changes([UsnChange::Deleted { frn: 3 }]);
 
     assert_eq!(
         vol.to_summary().indexed_count,
@@ -135,11 +135,15 @@ fn the_exclusion_mask_matches_the_full_path_reference() {
         .single_segments()
         .expect("bare segment rules must use the memoized mask");
 
-    let mask = vol.excluded_record_mask(&segments);
+    let states = vol.segment_excluded_states(&segments);
+    let mask: Vec<bool> = states
+        .iter()
+        .map(|&state| state == crate::sync_engine::volume_index::SUBTREE_EXCLUDED)
+        .collect();
     for (idx, excluded) in mask.iter().enumerate() {
         let path = vol
-            .path_cache
-            .get_full_path(&vol.records, &vol.arena, 'C', idx as u32);
+            .path_cache()
+            .get_full_path(vol.records(), vol.arena(), 'C', idx as u32);
         assert_eq!(
             *excluded,
             parsed.excludes(&crate::exclusion::ExclusionPath::new(&path)),
@@ -323,9 +327,9 @@ fn test_volume_cache_invalidation_does_not_silently_return_stale_data() {
         vol_z.volume_serial,
         vol_z.journal_id,
         vol_z.last_usn,
-        &vol_z.records,
-        &vol_z.arena,
-        vol_z.directory_sizes_valid,
+        vol_z.records(),
+        vol_z.arena(),
+        vol_z.directory_sizes_valid(),
     )
     .expect("save_volume_index_atomic");
 
@@ -380,7 +384,7 @@ fn test_journal_id_mismatch_and_usn_out_of_range_invalidates_volume() {
     }]);
     vol.journal_id = 500;
     vol.last_usn = 1000;
-    assert_eq!(vol.records.len(), 1);
+    assert_eq!(vol.records().len(), 1);
 
     // A journal recreated under a snapshot leaves it on no valid timeline (IDX-05), and the
     // rebuild verdict comes from the same function the full-scan paths run through.
@@ -395,8 +399,8 @@ fn test_journal_id_mismatch_and_usn_out_of_range_invalidates_volume() {
 
     // Must be marked Rebuilding with records wiped (never Synced with stale data)
     assert_eq!(vol.status.state(), VolumeState::Rebuilding);
-    assert_eq!(vol.records.len(), 0);
-    assert_eq!(vol.arena.len(), 0);
+    assert_eq!(vol.records().len(), 0);
+    assert_eq!(vol.arena().len(), 0);
 }
 
 #[test]
@@ -413,37 +417,38 @@ fn test_usn_create_already_captured_by_the_snapshot_is_not_duplicated() {
         flags: 0,
         is_reparse_point: false,
     }]);
-    assert_eq!(vol.records.len(), 1);
+    assert_eq!(vol.records().len(), 1);
 
     // `[T0, T1)` overlaps the scan itself, so the create for a captured file arrives again.
-    vol.apply_usn_change(UsnChange::Created {
+    vol.apply_usn_changes([UsnChange::Created {
         frn: 20,
         parent_frn: 5,
         name: "mid_scan.txt".to_string(),
         is_dir: false,
         attributes: 0,
         ts: 300,
-    });
+    }]);
     assert_eq!(
-        vol.records.len(),
+        vol.records().len(),
         1,
         "replaying a create the snapshot already holds must not double the row"
     );
     assert_eq!(
-        vol.records[0].size, 7,
+        vol.records()[0].size,
+        7,
         "the real size beats the journal's zero"
     );
 
     // A different name for the same FRN is a hard link and stays a record of its own (IDX-06).
-    vol.apply_usn_change(UsnChange::Created {
+    vol.apply_usn_changes([UsnChange::Created {
         frn: 20,
         parent_frn: 9,
         name: "hard_link.txt".to_string(),
         is_dir: false,
         attributes: 0,
         ts: 300,
-    });
-    assert_eq!(vol.records.len(), 2);
+    }]);
+    assert_eq!(vol.records().len(), 2);
 }
 
 #[test]
@@ -857,4 +862,113 @@ fn a_rebuild_is_visible_in_the_cached_summary() {
 
     engine.restore_volume_status('C', previous);
     assert_eq!(engine.get_volume_summaries()[0].status, VolumeState::Synced);
+}
+
+#[test]
+fn hard_link_rename_updates_only_target_and_keeps_sibling() {
+    let mut vol = VolumeIndex::new('C');
+    vol.ingest_items(vec![
+        index_item(1001, 5, "target.txt", false),
+        index_item(1001, 6, "link_to_target.txt", false),
+    ]);
+    assert_eq!(vol.records().len(), 2);
+
+    vol.apply_usn_changes([UsnChange::Renamed {
+        frn: 1001,
+        parent_frn: 10,
+        name: "renamed_target.txt".to_string(),
+        is_dir: false,
+        is_new_name: true,
+    }]);
+
+    assert_eq!(vol.record_name(&vol.records()[0]), "renamed_target.txt");
+    assert_eq!(vol.record_name(&vol.records()[1]), "link_to_target.txt");
+}
+
+#[test]
+fn sm5_10000_usn_operations_match_full_rebuild_with_zero_difference() {
+    use cairn_ntfs::usn::FILE_ATTRIBUTE_DIRECTORY;
+    use std::collections::BTreeMap;
+
+    let mut incremental = VolumeIndex::new('C');
+    let mut truth: BTreeMap<u64, (u64, String, bool)> = BTreeMap::new();
+
+    for i in 0..10_000u64 {
+        match i % 4 {
+            0 | 1 => {
+                let frn = 1000 + i;
+                let parent_frn = 5 + (i % 10);
+                let is_dir = i % 5 == 0;
+                let name = format!("file_{i}_{}.dat", if is_dir { "dir" } else { "file" });
+
+                truth.insert(frn, (parent_frn, name.clone(), is_dir));
+                incremental.apply_usn_changes([UsnChange::Created {
+                    frn,
+                    parent_frn,
+                    name,
+                    is_dir,
+                    attributes: if is_dir { FILE_ATTRIBUTE_DIRECTORY } else { 0 },
+                    ts: 1_600_000_000 + i as i64,
+                }]);
+            }
+            2 => {
+                if let Some((&frn, entry)) = truth.iter_mut().next() {
+                    let new_name = format!("renamed_item_{i}.dat");
+                    let new_parent = entry.0 + 1;
+                    entry.0 = new_parent;
+                    entry.1 = new_name.clone();
+
+                    incremental.apply_usn_changes([UsnChange::Renamed {
+                        frn,
+                        parent_frn: new_parent,
+                        name: new_name,
+                        is_dir: entry.2,
+                        is_new_name: true,
+                    }]);
+                }
+            }
+            _ => {
+                if let Some(&frn) = truth.keys().next() {
+                    truth.remove(&frn);
+                    incremental.apply_usn_changes([UsnChange::Deleted { frn }]);
+                }
+            }
+        }
+    }
+
+    let mut rebuilt = VolumeIndex::new('C');
+    let rebuild_items: Vec<ExtractedItem> = truth
+        .iter()
+        .map(|(&frn, (parent_frn, name, is_dir))| ExtractedItem {
+            frn,
+            parent_frn: *parent_frn,
+            name: name.clone(),
+            is_dir: *is_dir,
+            size: 1024,
+            created_ts: 1_600_000_000,
+            modified_ts: 1_600_000_000,
+            flags: if *is_dir {
+                cairn_core::FLAG_DIRECTORY
+            } else {
+                0
+            },
+            is_reparse_point: false,
+        })
+        .collect();
+    rebuilt.ingest_items(rebuild_items);
+
+    let inc_active: BTreeMap<u64, String> = incremental
+        .records()
+        .iter()
+        .filter(|r| !r.is_tombstone())
+        .map(|r| (r.frn, incremental.record_name(r).to_string()))
+        .collect();
+    let rebuilt_active: BTreeMap<u64, String> = rebuilt
+        .records()
+        .iter()
+        .map(|r| (r.frn, rebuilt.record_name(r).to_string()))
+        .collect();
+
+    assert_eq!(incremental.live_count(), rebuilt.live_count());
+    assert_eq!(inc_active, rebuilt_active);
 }

@@ -11,9 +11,8 @@
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Mutex;
-
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::System::ApplicationInstallationAndServicing::{
     MsiConfigureProductW, MsiEnableLogW, MsiInstallProductW, MsiRecordGetInteger,
@@ -128,12 +127,12 @@ pub struct InstallRequest {
 }
 
 pub struct MsiSession {
-    pub events: UnboundedReceiver<MsiEvent>,
+    pub events: Receiver<MsiEvent>,
 }
 
 /// Starts an elevated MSI install on a worker thread. Events arrive in order, ending with `Done`.
 pub fn start_install(request: InstallRequest) -> MsiSession {
-    let (sender, events) = unbounded_channel();
+    let (sender, events) = mpsc::channel();
     std::thread::spawn(move || {
         let result = run_install(&request, Some(&sender));
         let _ = sender.send(MsiEvent::Done(result));
@@ -151,7 +150,7 @@ pub fn start_uninstall_with(
     log: PathBuf,
     after_success: impl FnOnce() -> Vec<String> + Send + 'static,
 ) -> MsiSession {
-    let (sender, events) = unbounded_channel();
+    let (sender, events) = mpsc::channel();
     std::thread::spawn(move || {
         let result = run_uninstall_all(&product_codes, &log, Some(&sender));
         if result.is_ok() {
@@ -188,7 +187,7 @@ pub fn start_cleanup(
     cleanup: impl FnOnce() -> Result<Vec<String>, String> + Send + 'static,
     log: PathBuf,
 ) -> MsiSession {
-    let (sender, events) = unbounded_channel();
+    let (sender, events) = mpsc::channel();
     std::thread::spawn(move || {
         use std::io::Write as _;
         if let Ok(mut file) = std::fs::OpenOptions::new()
@@ -232,7 +231,7 @@ pub fn uninstall_blocking(product_codes: &[String], log: &Path) -> Result<MsiSuc
 
 fn run_install(
     request: &InstallRequest,
-    sender: Option<&UnboundedSender<MsiEvent>>,
+    sender: Option<&Sender<MsiEvent>>,
 ) -> Result<MsiSuccess, MsiFailure> {
     let mut legacy_restart = false;
     for legacy in &request.legacy {
@@ -280,7 +279,7 @@ fn run_install(
 fn run_uninstall_all(
     product_codes: &[String],
     log: &Path,
-    sender: Option<&UnboundedSender<MsiEvent>>,
+    sender: Option<&Sender<MsiEvent>>,
 ) -> Result<MsiSuccess, MsiFailure> {
     let log_wide = wide(log.as_os_str());
     unsafe {
@@ -297,7 +296,7 @@ fn run_uninstall_all(
 fn run_uninstall(
     product_code: &str,
     log: &Path,
-    sender: Option<&UnboundedSender<MsiEvent>>,
+    sender: Option<&Sender<MsiEvent>>,
 ) -> Result<MsiSuccess, MsiFailure> {
     let product_wide = wide(std::ffi::OsStr::new(product_code));
     let callback_context = sender.map(|sender| CallbackContext {
@@ -325,7 +324,7 @@ fn run_msi(
     msi: &Path,
     command_line: &str,
     log: &Path,
-    sender: Option<&UnboundedSender<MsiEvent>>,
+    sender: Option<&Sender<MsiEvent>>,
 ) -> Result<MsiSuccess, MsiFailure> {
     let package_wide = wide(msi.as_os_str());
     let command_wide = wide(std::ffi::OsStr::new(command_line));
@@ -369,14 +368,14 @@ fn log_filter() -> windows::Win32::System::ApplicationInstallationAndServicing::
     )
 }
 
-fn emit(sender: Option<&UnboundedSender<MsiEvent>>, event: MsiEvent) {
+fn emit(sender: Option<&Sender<MsiEvent>>, event: MsiEvent) {
     if let Some(sender) = sender {
         let _ = sender.send(event);
     }
 }
 
 struct CallbackContext {
-    sender: UnboundedSender<MsiEvent>,
+    sender: Sender<MsiEvent>,
     progress: Mutex<ProgressState>,
 }
 
@@ -540,9 +539,9 @@ mod tests {
     #[test]
     fn orphan_cleanup_creates_the_log_even_without_warnings() {
         let log = unique_log("orphan-success");
-        let mut session = super::start_cleanup(|| Ok(Vec::new()), log.clone());
+        let session = super::start_cleanup(|| Ok(Vec::new()), log.clone());
         assert!(matches!(
-            session.events.blocking_recv(),
+            session.events.recv().ok(),
             Some(super::MsiEvent::Done(Ok(_)))
         ));
         let text = std::fs::read_to_string(&log).expect("read cleanup log");
@@ -553,13 +552,13 @@ mod tests {
     #[test]
     fn orphan_cleanup_reports_warnings_before_success() {
         let log = unique_log("orphan-warning");
-        let mut session = super::start_cleanup(|| Ok(vec!["locked data".to_string()]), log.clone());
+        let session = super::start_cleanup(|| Ok(vec!["locked data".to_string()]), log.clone());
         assert!(matches!(
-            session.events.blocking_recv(),
+            session.events.recv().ok(),
             Some(super::MsiEvent::CleanupFailed)
         ));
         assert!(matches!(
-            session.events.blocking_recv(),
+            session.events.recv().ok(),
             Some(super::MsiEvent::Done(Ok(_)))
         ));
         let text = std::fs::read_to_string(&log).expect("read cleanup log");
@@ -570,12 +569,12 @@ mod tests {
     #[test]
     fn orphan_cleanup_treats_an_arp_failure_as_an_uninstall_failure() {
         let log = unique_log("orphan-critical");
-        let mut session = super::start_cleanup(
+        let session = super::start_cleanup(
             || Err("Apps & features entry: access denied".to_string()),
             log.clone(),
         );
         assert!(matches!(
-            session.events.blocking_recv(),
+            session.events.recv().ok(),
             Some(super::MsiEvent::Done(Err(_)))
         ));
         let text = std::fs::read_to_string(&log).expect("read cleanup log");

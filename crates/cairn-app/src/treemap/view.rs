@@ -31,6 +31,7 @@ use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{h_flex, v_flex, Icon, Sizable as _};
 use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::*;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Instant;
@@ -51,6 +52,34 @@ const TREEMAP_BLOCK_GAP: f32 = 2.0;
 const TREEMAP_ICON_SPACE: f32 = 14.0;
 /// The header hides its size rather than squeezing the name below this width.
 const TREEMAP_MIN_HEADER_NAME_WIDTH: f32 = 28.0;
+/// The leading icon, its gap and the padding of a header tail chip.
+const TREEMAP_TAIL_CHIP_CHROME: f32 = 26.0;
+
+/// What a directory header has room to show beside its name. The name keeps a
+/// readable minimum; the size yields first, then the folded tail's count chip.
+/// The chip is one unit — icon, count and padding — so it never appears as an
+/// icon with no count to read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HeaderContent {
+    size: bool,
+    tail: bool,
+}
+
+fn header_content(inner_width: f32, size_width: f32, tail_width: Option<f32>) -> HeaderContent {
+    let name = TREEMAP_ICON_SPACE + TREEMAP_MIN_HEADER_NAME_WIDTH + 2.0;
+    let size = inner_width >= name + size_width;
+    let tail = tail_width.is_some_and(|chip| {
+        inner_width
+            >= name
+                + if size {
+                    size_width + TREEMAP_BLOCK_GAP
+                } else {
+                    0.0
+                }
+                + chip
+    });
+    HeaderContent { size, tail }
+}
 
 /// The device scale the canvas paints at, clamped once at the read: every gutter, snap
 /// and hit test divides by it, so the helpers take it as given.
@@ -159,6 +188,9 @@ impl CairnApp {
         // Scan progress is reported by the status bar, not here.
         let is_scanning = state.is_scanning;
 
+        let mut tail_focus = HashMap::new();
+        tail_focus_handles(&state.layout_nodes, window, cx, &mut tail_focus);
+        let keyboard_navigation = cairn_ui::focus::keyboard_navigation(cx);
         let render_cx = TreemapRenderContext {
             palette: TreemapPalette::for_mode(is_dark),
             selected_path: state.selected_path.as_deref(),
@@ -169,6 +201,10 @@ impl CairnApp {
             panning,
             suppress_tooltip: state.suppress_tooltip,
             selection_active: state.selected_path.is_some(),
+            tail_focus: &tail_focus,
+            keyboard_navigation,
+            ring: tokens.ring,
+            app: cx,
         };
 
         // An empty directory is content, not a separate surface: it must keep
@@ -522,6 +558,37 @@ struct TreemapRenderContext<'a> {
     panning: bool,
     suppress_tooltip: bool,
     selection_active: bool,
+    /// The focus handle of every folded tail entry, keyed by its path. Built at
+    /// the render boundary because the tile renderer holds the window and
+    /// context immutably.
+    tail_focus: &'a HashMap<String, FocusHandle>,
+    /// Focus rings are drawn only while the keyboard drives focus.
+    keyboard_navigation: bool,
+    ring: Hsla,
+    app: &'a App,
+}
+
+/// Registers one tab stop per folded tail in the current layout. A tail entry is
+/// an interactive control like any other, so its handle must exist before the
+/// render context takes its immutable window borrow.
+fn tail_focus_handles(
+    nodes: &[NestedTreemapLayoutNode],
+    window: &mut Window,
+    cx: &mut Context<CairnApp>,
+    map: &mut HashMap<String, FocusHandle>,
+) {
+    for node in nodes {
+        if let Some(ref tail) = node.tail {
+            let focus = window
+                .use_keyed_state(element_id("treemap-tail-focus", &tail.path), cx, |_, cx| {
+                    cx.focus_handle().tab_stop(true)
+                })
+                .read(cx)
+                .clone();
+            map.insert(tail.path.clone(), focus);
+        }
+        tail_focus_handles(&node.children, window, cx, map);
+    }
 }
 
 /// Places a rendered node at its exact projected layout rect. Blocks appear
@@ -731,9 +798,9 @@ fn render_nested_node(
     let has_header = is_dir && node.header_rect.is_some();
     let is_label_sized =
         stable.width >= TREEMAP_LABEL_MIN_WIDTH && stable.height >= TREEMAP_LABEL_MIN_HEIGHT;
-    if !has_header && !is_label_sized {
-        // Sub-label cells are texture, not blocks with missing content. The
-        // core keeps these rare by folding anything this small into a summary.
+    if !has_header && !is_label_sized && !node.is_aggregate() {
+        // Sub-label real cells are texture: the core folds anything this small
+        // into the directory's summary block, which keeps its byte share.
         push_flat_fill(elements, display, texture_fill, rcx.palette, dimmed);
         return;
     }
@@ -752,15 +819,23 @@ fn render_nested_node(
             "{label}
 {size_str}"
         ));
-        let content = compact_block_content(
-            IconName::FileStack,
-            label,
-            &size_str,
-            stable,
-            rcx.window,
-            rcx.palette.ink(),
-            rcx.palette.ink_secondary(),
-        );
+        // A summary block keeps its byte share whatever shape that is, so it
+        // can be too small for text. It still paints, stays selectable and
+        // opens its member list on double click; only the label is dropped.
+        let content: AnyElement = if is_label_sized {
+            compact_block_content(
+                IconName::FileStack,
+                label,
+                &size_str,
+                stable,
+                rcx.window,
+                rcx.palette.ink(),
+                rcx.palette.ink_secondary(),
+            )
+            .into_any_element()
+        } else {
+            div().size_full().into_any_element()
+        };
         let aggregate_view = rcx.view.clone();
         let aggregate_path = full_path.clone();
         let block_bg = header_bg;
@@ -827,12 +902,119 @@ fn render_nested_node(
             let header_size_label = size_str.clone();
             let inner_width = (stable.width - TREEMAP_TEXT_PADDING).max(0.0);
             let size_width = text_width(rcx.window, &header_size_label, FontWeight::NORMAL);
-            // The name is the header's identity; the size yields instead of
-            // squeezing the name below a readable width. The name ellipsizes
-            // at the end rather than disappearing.
-            let show_header_size = inner_width
-                >= TREEMAP_ICON_SPACE + TREEMAP_MIN_HEADER_NAME_WIDTH + 2.0 + size_width;
+            // The name is the header's identity: the aggregate chip yields
+            // first, then the size, and the name only ellipsizes at its
+            // readable minimum instead of disappearing.
+            let tail_label = node.tail.as_ref().map(|tail| {
+                let mut args = FluentArgs::new();
+                args.set("count", tail.count as i64);
+                args.set("count_text", format_count(tail.count));
+                rcx.i18n.get_text_with_args("treemap_aggregate", &args)
+            });
+            let tail_width = tail_label.as_ref().map(|label| {
+                TREEMAP_TAIL_CHIP_CHROME
+                    + TREEMAP_BLOCK_GAP
+                    + text_width(rcx.window, label, FontWeight::NORMAL)
+                    + 6.0
+            });
+            let budget = header_content(inner_width, size_width, tail_width);
+            let show_header_size = budget.size;
             let header_tooltip = SharedString::from(format!("{full_path_drill}\n{size_str}"));
+            // A chip the canvas clips must not stay a tab stop: keyboard focus
+            // would land on a control no one can see. The chip sits at the
+            // header's right end and is one 16px pill centered in the band, so
+            // its own band decides: the header's visible height can exceed the
+            // band while the pill itself is above the canvas. The pointer
+            // keeps the visible part either way.
+            let pill_top = paint.y + (header_height - 16.0) * 0.5;
+            let header_focusable = paint.x + paint.width <= canvas.0 + 1.0
+                && pill_top < canvas.1
+                && pill_top + 16.0 > 0.0;
+
+            // A tail too small for its own tile lives in the header instead of
+            // painting a sliver. It keeps the count, the size and the member
+            // list one click away while the body stays label-sized. A header
+            // too narrow for the full count chip drops it instead of showing an
+            // unlabeled icon; the directory itself stays the way in.
+            let tail_control = accessibility::control("treemap-tail");
+            let tail_chip = node.tail.as_ref().and_then(|tail| {
+                let label = tail_label.as_ref().filter(|_| budget.tail)?;
+                let tail_size = format_size_bytes(tail.size);
+                let chip_tooltip = SharedString::from(format!("{label}\n{tail_size}"));
+                let focus = rcx.tail_focus.get(&tail.path)?.clone();
+                let chip_view = header_view.clone();
+                let chip_path = tail.path.clone();
+                let key_view = header_view.clone();
+                let key_path = tail.path.clone();
+                let space_view = header_view.clone();
+                let space_path = tail.path.clone();
+                let chip_fill = if dimmed {
+                    rcx.palette.dimmed_fill(rcx.palette.body_fill())
+                } else {
+                    rcx.palette.body_fill()
+                };
+                let chip = accessibility::element_at_key(tail_control, &tail.path)
+                    .relative()
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .gap_x(px(TREEMAP_BLOCK_GAP))
+                    .pl(px(3.0))
+                    .pr(px(5.0))
+                    .h(px(16.0))
+                    .rounded(px(TREEMAP_RADIUS))
+                    .bg(chip_fill)
+                    .text_color(rcx.palette.ink_secondary())
+                    .cursor_pointer()
+                    .when(header_focusable, |this| this.track_focus(&focus))
+                    .aria_label(SharedString::from(format!("{label} {tail_size}")))
+                    .when(!rcx.panning && !rcx.suppress_tooltip, move |this| {
+                        this.tooltip(move |window, cx| {
+                            Tooltip::new(chip_tooltip.clone()).build(window, cx)
+                        })
+                    })
+                    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                        let path = chip_path.clone();
+                        chip_view.update(cx, |this, cx| {
+                            this.open_tail_listing(&path, window, cx);
+                        });
+                        cx.stop_propagation();
+                    })
+                    .on_action(
+                        move |_: &crate::shell::commands::OpenSelected,
+                              window: &mut Window,
+                              cx: &mut App| {
+                            cx.stop_propagation();
+                            let path = key_path.clone();
+                            key_view.update(cx, |this, cx| {
+                                this.open_tail_listing(&path, window, cx);
+                            });
+                        },
+                    )
+                    .on_key_down(move |event: &KeyDownEvent, window, cx| {
+                        if event.keystroke.key.as_str() == "space" {
+                            cx.stop_propagation();
+                            let path = space_path.clone();
+                            space_view.update(cx, |this, cx| {
+                                this.open_tail_listing(&path, window, cx);
+                            });
+                        }
+                    })
+                    .child(Icon::new(IconName::FileStack).xsmall())
+                    .child(div().whitespace_nowrap().text_sm().child(label.clone()));
+                Some(if header_focusable {
+                    chip.children(cairn_ui::focus::edge(
+                        &focus,
+                        rcx.ring,
+                        px(TREEMAP_RADIUS),
+                        rcx.keyboard_navigation,
+                        rcx.window,
+                        rcx.app,
+                    ))
+                } else {
+                    chip
+                })
+            });
 
             // A container body is a low-share plate of the same tone, so nesting reads as tonal
             // plates instead of white boxes; it dims with its header when the node is out of focus.
@@ -926,7 +1108,8 @@ fn render_nested_node(
                             .text_color(rcx.palette.ink_secondary())
                             .child(header_size_label),
                     )
-                });
+                })
+                .when_some(tail_chip, |this, chip| this.child(chip));
             // The container owns the press: it selects, drills on double click,
             // and stops propagation so the canvas does not clear the selection.
             // The header tints itself on hover/press; no ancestor frame reacts.
@@ -1075,6 +1258,49 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The header budget never buys the aggregate chip at the price of the
+    /// name's readable minimum, and the chip is never granted without the
+    /// count text that names it.
+    #[test]
+    fn header_content_yields_the_chip_before_the_size_and_the_name() {
+        let roomy = header_content(400.0, 60.0, Some(90.0));
+        assert_eq!(
+            roomy,
+            HeaderContent {
+                size: true,
+                tail: true
+            }
+        );
+
+        let chip_flush = header_content(150.0, 60.0, Some(90.0));
+        assert_eq!(
+            chip_flush,
+            HeaderContent {
+                size: true,
+                tail: false
+            },
+            "the chip drops before the directory's own size"
+        );
+
+        let narrow = header_content(70.0, 60.0, Some(90.0));
+        assert_eq!(
+            narrow,
+            HeaderContent {
+                size: false,
+                tail: false
+            }
+        );
+
+        assert_eq!(
+            header_content(400.0, 60.0, None),
+            HeaderContent {
+                size: true,
+                tail: false
+            },
+            "a directory without a folded tail never rents its space"
+        );
     }
 
     #[test]

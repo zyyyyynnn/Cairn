@@ -5,7 +5,6 @@
 //! Content task construction, eligibility rules and backfill/incremental scheduling.
 
 use super::{BatchOutcome, ContentCommand};
-use cairn_core::{FLAG_DIRECTORY, FLAG_REPARSE_POINT};
 use cairn_protocol::status::{ContentIndexState, ContentIndexTask};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -13,6 +12,7 @@ use std::sync::atomic::Ordering;
 
 use crate::config::ServiceConfig;
 use crate::exclusion::{ExclusionPath, ExclusionRules};
+use crate::sync_engine::volume_index::RefreshedRecordMetadata;
 use crate::sync_engine::{MultiVolumeEngine, VolumeIndex};
 
 /// Files handed to one worker process. A worker restart is cheap; a batch small enough to finish
@@ -56,7 +56,7 @@ impl MultiVolumeEngine {
         volumes
             .values()
             .map(|volume| {
-                (0..volume.records.len())
+                (0..volume.records().len())
                     .filter(|&index| self.content_task(volume, index, rules).is_some())
                     .count() as u64
             })
@@ -64,7 +64,7 @@ impl MultiVolumeEngine {
     }
 
     fn content_eligible(volume: &VolumeIndex, index: usize, cfg: &ServiceConfig) -> bool {
-        let Some(rec) = volume.records.get(index) else {
+        let Some(rec) = volume.records().get(index) else {
             return false;
         };
         if rec.is_tombstone()
@@ -77,7 +77,7 @@ impl MultiVolumeEngine {
             return false;
         }
         let ext = volume
-            .arena
+            .arena()
             .get_ext(rec.name_offset, rec.name_len, rec.ext_offset);
         let ext = ext.trim_start_matches('.').to_ascii_lowercase();
         cfg.content_index_extensions
@@ -86,9 +86,9 @@ impl MultiVolumeEngine {
     }
 
     fn record_path(volume: &VolumeIndex, index: usize) -> String {
-        volume.path_cache.get_full_path(
-            &volume.records,
-            &volume.arena,
+        volume.path_cache().get_full_path(
+            volume.records(),
+            volume.arena(),
             volume.drive_letter,
             index as u32,
         )
@@ -109,7 +109,7 @@ impl MultiVolumeEngine {
         if !Self::content_eligible(volume, index, rules.cfg) {
             return None;
         }
-        let rec = &volume.records[index];
+        let rec = &volume.records()[index];
         let path = Self::record_path(volume, index);
         if self.is_self_data_path(&path) || rules.excludes(&path) {
             return None;
@@ -135,7 +135,7 @@ impl MultiVolumeEngine {
         let Some(volume) = volumes.get(&drive) else {
             return (Vec::new(), start);
         };
-        let end = (start + CONTENT_SCAN_CHUNK).min(volume.records.len());
+        let end = (start + CONTENT_SCAN_CHUNK).min(volume.records().len());
         let mut tasks = Vec::new();
         let mut cursor = start;
         while cursor < end && tasks.len() < CONTENT_BATCH_SIZE {
@@ -162,7 +162,7 @@ impl MultiVolumeEngine {
                 continue;
             };
             for frn in frns {
-                let Some(indices) = volume.frn_to_idx.get(frn) else {
+                let Some(indices) = volume.record_indices_for_frn(*frn) else {
                     continue;
                 };
                 for &index in indices {
@@ -211,14 +211,14 @@ impl MultiVolumeEngine {
                 };
                 // A deleted batch file, log or index segment never had a document worth committing
                 // a deletion for; replaying that churn would rewrite the index it belongs to.
-                if volume.frn_to_idx.get(frn).is_some_and(|indices| {
+                if volume.record_indices_for_frn(*frn).is_some_and(|indices| {
                     indices.iter().all(|&index| {
                         self.is_self_data_path(&Self::record_path(volume, index as usize))
                     })
                 }) {
                     return false;
                 }
-                !volume.frn_to_idx.get(frn).is_some_and(|indices| {
+                !volume.record_indices_for_frn(*frn).is_some_and(|indices| {
                     indices
                         .iter()
                         .any(|&index| self.content_task(volume, index as usize, rules).is_some())
@@ -261,17 +261,17 @@ impl MultiVolumeEngine {
                     continue;
                 };
                 for frn in frns {
-                    let Some(indices) = volume.frn_to_idx.get(frn) else {
+                    let Some(indices) = volume.record_indices_for_frn(*frn) else {
                         continue;
                     };
                     for &index in indices {
-                        let record = &volume.records[index as usize];
+                        let record = &volume.records()[index as usize];
                         if record.is_tombstone() {
                             continue;
                         }
-                        let path = volume.path_cache.get_full_path(
-                            &volume.records,
-                            &volume.arena,
+                        let path = volume.path_cache().get_full_path(
+                            volume.records(),
+                            volume.arena(),
                             *drive,
                             index,
                         );
@@ -286,13 +286,7 @@ impl MultiVolumeEngine {
 
         struct RefreshedMetadata {
             drive: char,
-            index: u32,
-            frn: u64,
-            size: u64,
-            created_ts: i64,
-            modified_ts: i64,
-            is_dir: bool,
-            is_reparse: bool,
+            metadata: RefreshedRecordMetadata,
         }
 
         let updates: Vec<RefreshedMetadata> = pending
@@ -302,13 +296,15 @@ impl MultiVolumeEngine {
                 let (is_dir, is_reparse) = directory_and_reparse(&metadata);
                 Some(RefreshedMetadata {
                     drive,
-                    index,
-                    frn,
-                    size: if is_dir { 0 } else { metadata.len() },
-                    created_ts: crate::filetime::system_time_to_filetime(metadata.created()),
-                    modified_ts: crate::filetime::system_time_to_filetime(metadata.modified()),
-                    is_dir,
-                    is_reparse,
+                    metadata: RefreshedRecordMetadata {
+                        index,
+                        frn,
+                        size: if is_dir { 0 } else { metadata.len() },
+                        created_ts: crate::filetime::system_time_to_filetime(metadata.created()),
+                        modified_ts: crate::filetime::system_time_to_filetime(metadata.modified()),
+                        is_dir,
+                        is_reparse,
+                    },
                 })
             })
             .collect();
@@ -318,44 +314,7 @@ impl MultiVolumeEngine {
             let Some(volume) = lock.get_mut(&update.drive) else {
                 continue;
             };
-            let Some(record) = volume.records.get_mut(update.index as usize) else {
-                continue;
-            };
-            if record.frn != update.frn || record.is_tombstone() {
-                continue;
-            }
-            let was_dir = record.is_dir();
-            // Only the bits the filesystem owns are replaced; tombstone and the other record flags
-            // keep their current value.
-            let mut flags = record.flags & !(FLAG_DIRECTORY | FLAG_REPARSE_POINT);
-            if update.is_dir {
-                flags |= FLAG_DIRECTORY;
-            }
-            if update.is_reparse {
-                flags |= FLAG_REPARSE_POINT;
-            }
-            let metadata_changed = record.flags != flags
-                || record.created_ts != update.created_ts
-                || record.modified_ts != update.modified_ts;
-            record.flags = flags;
-            record.created_ts = update.created_ts;
-            record.modified_ts = update.modified_ts;
-            let kind_changed = was_dir != update.is_dir;
-            if kind_changed {
-                // The size now means the other thing. Recompute after this record is updated; the
-                // metadata pass cannot describe a directory's aggregate.
-                record.size = if update.is_dir { 0 } else { update.size };
-            }
-            if metadata_changed {
-                volume.presorted_dirty = true;
-            }
-            if kind_changed {
-                // The whole batch shares one write lock; marking here lets the loop finish and the
-                // aggregation run once below instead of once per converted record.
-                volume.mark_directory_sizes_dirty();
-            } else if !update.is_dir {
-                volume.update_file_size(update.index, update.size);
-            }
+            volume.apply_refreshed_metadata(update.metadata);
         }
         for volume in lock.values_mut() {
             volume.ensure_directory_sizes();
@@ -401,6 +360,13 @@ impl MultiVolumeEngine {
 
 impl MultiVolumeEngine {
     pub(super) fn run_full_backfill(&self) {
+        self.run_full_backfill_with(&super::worker_process::SubprocessWorkerPort::new(self));
+    }
+
+    pub(super) fn run_full_backfill_with(
+        &self,
+        port: &dyn super::worker_process::WorkerProcessPort,
+    ) {
         self.content_cancel.store(false, Ordering::SeqCst);
         self.drop_content_searcher();
         // A new backfill invalidates any previous completion until it reaches Ready again; a
@@ -438,7 +404,7 @@ impl MultiVolumeEngine {
                     continue;
                 }
                 let clear = !cleared;
-                match self.run_worker_batch(&tasks, &[], clear) {
+                match self.run_worker_batch_with(port, &tasks, &[], clear) {
                     BatchOutcome::Completed => {
                         cleared = true;
                         processed += tasks.len() as u64;
@@ -459,7 +425,7 @@ impl MultiVolumeEngine {
 
         // An empty eligible set still has to clear a previous index through the worker.
         if !cleared {
-            match self.run_worker_batch(&[], &[], true) {
+            match self.run_worker_batch_with(port, &[], &[], true) {
                 BatchOutcome::Completed => {}
                 BatchOutcome::Cancelled => {
                     self.set_content_state(ContentIndexState::Disabled);

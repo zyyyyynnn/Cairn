@@ -181,12 +181,80 @@ pub struct PresortedIndices {
     pub by_path: Vec<u32>,
 }
 
+#[derive(Clone, Copy)]
+struct NameSortEntry {
+    idx: u32,
+    name_offset: u32,
+    name_len: u16,
+    safe_len: u8,
+    prefix: [u8; 7],
+}
+
+#[inline]
+fn make_name_entry(rec: &FileRecord, idx: u32, arena: &NamePool) -> NameSortEntry {
+    let raw = arena.get_name(rec.name_offset, rec.name_len).as_bytes();
+    let mut prefix = [0u8; 7];
+    let mut safe_len = 0usize;
+    let limit = raw.len().min(7);
+    while safe_len < limit {
+        let b = raw[safe_len];
+        if b >= 0x80 || b.is_ascii_digit() {
+            break;
+        }
+        prefix[safe_len] = b.to_ascii_lowercase();
+        safe_len += 1;
+    }
+    NameSortEntry {
+        idx,
+        name_offset: rec.name_offset,
+        name_len: rec.name_len,
+        safe_len: safe_len as u8,
+        prefix,
+    }
+}
+
+#[inline]
+fn cmp_name_entries(a: &NameSortEntry, b: &NameSortEntry, arena: &NamePool) -> Ordering {
+    let k = a.safe_len.min(b.safe_len) as usize;
+    if k > 0 {
+        let ord = a.prefix[..k].cmp(&b.prefix[..k]);
+        if ord != Ordering::Equal {
+            return ord;
+        }
+    }
+    let na = arena.get_name(a.name_offset, a.name_len);
+    let nb = arena.get_name(b.name_offset, b.name_len);
+    natural_cmp(na, nb)
+}
+
+#[inline]
+fn apply_sort_dir(ord: Ordering, dir: SortDirection) -> Ordering {
+    if dir == SortDirection::Descending {
+        ord.reverse()
+    } else {
+        ord
+    }
+}
+
+const PACKED_SORT_THRESHOLD: usize = 1024;
+
 impl PresortedIndices {
     pub fn clear(&mut self) {
-        self.by_name.clear();
-        self.by_size.clear();
-        self.by_date_modified.clear();
-        self.by_path.clear();
+        *self = Self::default();
+    }
+
+    /// Clears all columns and releases backing buffers immediately.
+    pub fn clear_and_shrink(&mut self) {
+        self.clear();
+    }
+
+    /// Returns allocated backing bytes across all built presorted columns.
+    pub fn allocated_bytes(&self) -> usize {
+        (self.by_name.capacity()
+            + self.by_size.capacity()
+            + self.by_date_modified.capacity()
+            + self.by_path.capacity())
+            * std::mem::size_of::<u32>()
     }
 
     /// Ensures a single requested column's presorted index is built on-demand. Only the name,
@@ -207,47 +275,50 @@ impl PresortedIndices {
 
         match col {
             SortColumn::Name if self.by_name.is_empty() => {
-                let mut by_name: Vec<u32> = (0..count).collect();
-                by_name.par_sort_unstable_by(|&a, &b| {
-                    let ra = &records[a as usize];
-                    let rb = &records[b as usize];
-                    let na = arena.get_name(ra.name_offset, ra.name_len);
-                    let nb = arena.get_name(rb.name_offset, rb.name_len);
-                    natural_cmp(na, nb).then_with(|| a.cmp(&b))
+                let mut entries: Vec<NameSortEntry> = (0..count)
+                    .into_par_iter()
+                    .map(|idx| make_name_entry(&records[idx as usize], idx, arena))
+                    .collect();
+                entries.par_sort_unstable_by(|a, b| {
+                    cmp_name_entries(a, b, arena).then_with(|| a.idx.cmp(&b.idx))
                 });
+                let mut by_name: Vec<u32> = Vec::with_capacity(count as usize);
+                by_name.extend(entries.into_iter().map(|e| e.idx));
                 self.by_name = by_name;
             }
             SortColumn::Size if self.by_size.is_empty() => {
-                let mut by_size: Vec<u32> = (0..count).collect();
-                by_size.par_sort_unstable_by(|&a, &b| {
-                    let ra = &records[a as usize];
-                    let rb = &records[b as usize];
-                    ra.size
-                        .cmp(&rb.size)
-                        .then_with(|| {
-                            let na = arena.get_name(ra.name_offset, ra.name_len);
-                            let nb = arena.get_name(rb.name_offset, rb.name_len);
-                            natural_cmp(na, nb)
-                        })
-                        .then_with(|| a.cmp(&b))
+                let mut entries: Vec<(u64, NameSortEntry)> = (0..count)
+                    .into_par_iter()
+                    .map(|idx| {
+                        let rec = &records[idx as usize];
+                        (rec.size, make_name_entry(rec, idx, arena))
+                    })
+                    .collect();
+                entries.par_sort_unstable_by(|(sa, na), (sb, nb)| {
+                    sa.cmp(sb)
+                        .then_with(|| cmp_name_entries(na, nb, arena))
+                        .then_with(|| na.idx.cmp(&nb.idx))
                 });
+                let mut by_size: Vec<u32> = Vec::with_capacity(count as usize);
+                by_size.extend(entries.into_iter().map(|(_, n)| n.idx));
                 self.by_size = by_size;
             }
             SortColumn::DateModified if self.by_date_modified.is_empty() => {
-                let mut by_date_modified: Vec<u32> = (0..count).collect();
-                by_date_modified.par_sort_unstable_by(|&a, &b| {
-                    let ra = &records[a as usize];
-                    let rb = &records[b as usize];
-                    ra.modified_ts
-                        .cmp(&rb.modified_ts)
-                        .then_with(|| {
-                            let na = arena.get_name(ra.name_offset, ra.name_len);
-                            let nb = arena.get_name(rb.name_offset, rb.name_len);
-                            natural_cmp(na, nb)
-                        })
-                        .then_with(|| a.cmp(&b))
+                let mut entries: Vec<(i64, NameSortEntry)> = (0..count)
+                    .into_par_iter()
+                    .map(|idx| {
+                        let rec = &records[idx as usize];
+                        (rec.modified_ts, make_name_entry(rec, idx, arena))
+                    })
+                    .collect();
+                entries.par_sort_unstable_by(|(ma, na), (mb, nb)| {
+                    ma.cmp(mb)
+                        .then_with(|| cmp_name_entries(na, nb, arena))
+                        .then_with(|| na.idx.cmp(&nb.idx))
                 });
-                self.by_date_modified = by_date_modified;
+                let mut by_date: Vec<u32> = Vec::with_capacity(count as usize);
+                by_date.extend(entries.into_iter().map(|(_, n)| n.idx));
+                self.by_date_modified = by_date;
             }
             SortColumn::Path if self.by_path.is_empty() => {
                 let mut by_path: Vec<u32> = (0..count).collect();
@@ -307,6 +378,127 @@ pub fn sort_indices(
 ) {
     if indices.len() <= 1 || cancel.is_cancelled() {
         return;
+    }
+
+    if indices.len() >= PACKED_SORT_THRESHOLD {
+        match col {
+            SortColumn::Name => {
+                let mut entries: Vec<NameSortEntry> = indices
+                    .par_iter()
+                    .map(|&idx| make_name_entry(&records[idx as usize], idx, arena))
+                    .collect();
+                entries.par_sort_unstable_by(|a, b| {
+                    apply_sort_dir(cmp_name_entries(a, b, arena), dir)
+                        .then_with(|| a.idx.cmp(&b.idx))
+                });
+                for (dst, entry) in indices.iter_mut().zip(entries) {
+                    *dst = entry.idx;
+                }
+                return;
+            }
+            SortColumn::Path => {
+                let mut entries: Vec<(std::sync::Arc<str>, NameSortEntry)> = indices
+                    .par_iter()
+                    .map(|&idx| {
+                        let parent = path_cache.get_parent_path(records, arena, drive_letter, idx);
+                        (parent, make_name_entry(&records[idx as usize], idx, arena))
+                    })
+                    .collect();
+                entries.par_sort_unstable_by(|(pa, na), (pb, nb)| {
+                    apply_sort_dir(
+                        pa.cmp(pb).then_with(|| cmp_name_entries(na, nb, arena)),
+                        dir,
+                    )
+                    .then_with(|| na.idx.cmp(&nb.idx))
+                });
+                for (dst, (_, n)) in indices.iter_mut().zip(entries) {
+                    *dst = n.idx;
+                }
+                return;
+            }
+            SortColumn::Size => {
+                let mut entries: Vec<(u64, NameSortEntry)> = indices
+                    .par_iter()
+                    .map(|&idx| {
+                        let rec = &records[idx as usize];
+                        (rec.size, make_name_entry(rec, idx, arena))
+                    })
+                    .collect();
+                entries.par_sort_unstable_by(|(sa, na), (sb, nb)| {
+                    apply_sort_dir(
+                        sa.cmp(sb).then_with(|| cmp_name_entries(na, nb, arena)),
+                        dir,
+                    )
+                    .then_with(|| na.idx.cmp(&nb.idx))
+                });
+                for (dst, (_, n)) in indices.iter_mut().zip(entries) {
+                    *dst = n.idx;
+                }
+                return;
+            }
+            SortColumn::DateModified => {
+                let mut entries: Vec<(i64, NameSortEntry)> = indices
+                    .par_iter()
+                    .map(|&idx| {
+                        let rec = &records[idx as usize];
+                        (rec.modified_ts, make_name_entry(rec, idx, arena))
+                    })
+                    .collect();
+                entries.par_sort_unstable_by(|(ma, na), (mb, nb)| {
+                    apply_sort_dir(
+                        ma.cmp(mb).then_with(|| cmp_name_entries(na, nb, arena)),
+                        dir,
+                    )
+                    .then_with(|| na.idx.cmp(&nb.idx))
+                });
+                for (dst, (_, n)) in indices.iter_mut().zip(entries) {
+                    *dst = n.idx;
+                }
+                return;
+            }
+            SortColumn::DateCreated => {
+                let mut entries: Vec<(i64, NameSortEntry)> = indices
+                    .par_iter()
+                    .map(|&idx| {
+                        let rec = &records[idx as usize];
+                        (rec.created_ts, make_name_entry(rec, idx, arena))
+                    })
+                    .collect();
+                entries.par_sort_unstable_by(|(ca, na), (cb, nb)| {
+                    apply_sort_dir(
+                        ca.cmp(cb).then_with(|| cmp_name_entries(na, nb, arena)),
+                        dir,
+                    )
+                    .then_with(|| na.idx.cmp(&nb.idx))
+                });
+                for (dst, (_, n)) in indices.iter_mut().zip(entries) {
+                    *dst = n.idx;
+                }
+                return;
+            }
+            SortColumn::Extension => {
+                let mut entries: Vec<(u16, NameSortEntry)> = indices
+                    .par_iter()
+                    .map(|&idx| {
+                        let rec = &records[idx as usize];
+                        (rec.ext_offset, make_name_entry(rec, idx, arena))
+                    })
+                    .collect();
+                entries.par_sort_unstable_by(|(ea_off, na), (eb_off, nb)| {
+                    let ea = arena.get_ext(na.name_offset, na.name_len, *ea_off);
+                    let eb = arena.get_ext(nb.name_offset, nb.name_len, *eb_off);
+                    apply_sort_dir(
+                        cmp_ascii_ignore_case(ea, eb).then_with(|| cmp_name_entries(na, nb, arena)),
+                        dir,
+                    )
+                    .then_with(|| na.idx.cmp(&nb.idx))
+                });
+                for (dst, (_, n)) in indices.iter_mut().zip(entries) {
+                    *dst = n.idx;
+                }
+                return;
+            }
+        }
     }
 
     indices.par_sort_unstable_by(|&a, &b| {
@@ -498,5 +690,137 @@ mod tests {
         assert_eq!(cmp_ascii_ignore_case("c++", "C++"), Ordering::Equal);
         assert_eq!(cmp_ascii_ignore_case("7z", "zip"), Ordering::Less);
         assert_eq!(cmp_ascii_ignore_case("file", "FILE"), Ordering::Equal);
+    }
+
+    #[test]
+    fn presorted_clear_releases_backing_buffers() {
+        let mut arena = NamePool::default();
+        let mut records = Vec::new();
+        for i in 0..2_000u64 {
+            let (name_offset, name_len, ext_offset) = arena.insert(&format!("item_{i:04}.txt"));
+            records.push(FileRecord {
+                frn: i + 1,
+                parent_idx: FileRecord::ROOT_PARENT,
+                name_offset,
+                name_len,
+                ext_offset,
+                volume_id: 0,
+                flags: 0,
+                size: i,
+                modified_ts: i as i64,
+                created_ts: i as i64,
+            });
+        }
+        let cache = DirectoryPathCache::new();
+        let mut presorted = PresortedIndices::default();
+        presorted.ensure_column(SortColumn::Name, &records, &arena, &cache, 'C');
+        assert!(presorted.allocated_bytes() >= 2_000 * std::mem::size_of::<u32>());
+
+        presorted.clear();
+        assert_eq!(
+            presorted.allocated_bytes(),
+            0,
+            "PresortedIndices::clear must drop backing allocations instead of keeping empty Vec shells"
+        );
+    }
+
+    #[test]
+    fn sort_indices_large_slice_matches_reference_order() {
+        let samples = [
+            "alpha.txt",
+            "Alpha.TXT",
+            "alpha1.txt",
+            "alpha2.txt",
+            "alpha10.txt",
+            "alpha01.txt",
+            "beta_core.rs",
+            "Beta_Core2.rs",
+            "beta_core10.rs",
+            "00start.log",
+            "1start.log",
+            "10start.log",
+            "文档2.docx",
+            "文档10.docx",
+            "a",
+            "a0",
+            "a1",
+            "a\x01",
+            "",
+        ];
+        let mut arena = NamePool::default();
+        let mut records = Vec::with_capacity(1_600);
+        for i in 0..1_600usize {
+            let base = samples[i % samples.len()];
+            let name = if base.is_empty() {
+                String::new()
+            } else {
+                format!("{base}_{}", i / samples.len())
+            };
+            let (name_offset, name_len, ext_offset) = arena.insert(&name);
+            records.push(FileRecord {
+                frn: i as u64 + 1,
+                parent_idx: FileRecord::ROOT_PARENT,
+                name_offset,
+                name_len,
+                ext_offset,
+                volume_id: 0,
+                flags: 0,
+                size: ((i * 7919) % 500) as u64,
+                modified_ts: ((i * 101) % 300) as i64,
+                created_ts: ((i * 37) % 200) as i64,
+            });
+        }
+        let cache = DirectoryPathCache::new();
+        let cancel = CancellationToken::new();
+
+        for col in [
+            SortColumn::Name,
+            SortColumn::Size,
+            SortColumn::DateModified,
+            SortColumn::DateCreated,
+            SortColumn::Extension,
+            SortColumn::Path,
+        ] {
+            for dir in [SortDirection::Ascending, SortDirection::Descending] {
+                let mut got: Vec<u32> = (0..records.len() as u32).collect();
+                sort_indices(&mut got, &records, &arena, &cache, 'C', col, dir, &cancel);
+
+                let mut expected: Vec<u32> = (0..records.len() as u32).collect();
+                expected.sort_by(|&a, &b| {
+                    let ra = &records[a as usize];
+                    let rb = &records[b as usize];
+                    let na = arena.get_name(ra.name_offset, ra.name_len);
+                    let nb = arena.get_name(rb.name_offset, rb.name_len);
+                    let ord = match col {
+                        SortColumn::Name => natural_cmp(na, nb),
+                        SortColumn::Size => ra.size.cmp(&rb.size).then_with(|| natural_cmp(na, nb)),
+                        SortColumn::DateModified => ra
+                            .modified_ts
+                            .cmp(&rb.modified_ts)
+                            .then_with(|| natural_cmp(na, nb)),
+                        SortColumn::DateCreated => ra
+                            .created_ts
+                            .cmp(&rb.created_ts)
+                            .then_with(|| natural_cmp(na, nb)),
+                        SortColumn::Extension => cmp_ascii_ignore_case(
+                            arena.get_ext(ra.name_offset, ra.name_len, ra.ext_offset),
+                            arena.get_ext(rb.name_offset, rb.name_len, rb.ext_offset),
+                        )
+                        .then_with(|| natural_cmp(na, nb)),
+                        SortColumn::Path => cache
+                            .get_parent_path(&records, &arena, 'C', a)
+                            .cmp(&cache.get_parent_path(&records, &arena, 'C', b))
+                            .then_with(|| natural_cmp(na, nb)),
+                    };
+                    let primary = if dir == SortDirection::Descending {
+                        ord.reverse()
+                    } else {
+                        ord
+                    };
+                    primary.then_with(|| a.cmp(&b))
+                });
+                assert_eq!(got, expected, "mismatch for col={col:?} dir={dir:?}");
+            }
+        }
     }
 }

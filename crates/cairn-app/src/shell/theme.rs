@@ -4,12 +4,11 @@
 
 //! The search window's view of the shared Cairn theme.
 //!
-//! Palette policy lives in `cairn-ui`, which the installer also uses. This module adds the two
-//! things only the search window needs: the persisted [`AppSettings`] entry point and
+//! Palette policy lives in `cairn-ui`, which the installer also uses. This module adds
 //! [`ShellTokens`], the semantic role snapshot a shell view reads once per frame.
 
-use gpui_kit::component::ActiveTheme;
-use gpui_kit::gpui::{App, Hsla, Pixels, Window};
+use gpui_kit::component::{ActiveTheme, Theme};
+use gpui_kit::gpui::{App, Global, Hsla, Pixels, Window};
 
 pub use cairn_ui::brand::{
     serif_font, tabular_figures, BASE_FONT_PX, BRAND_TITLE_SIZE, HAIRLINE, RADIUS,
@@ -18,27 +17,26 @@ pub use cairn_ui::brand::{
 pub use cairn_ui::locale::system_prefers_dark;
 pub use cairn_ui::theme::{clamp_zoom, control_stroke, warning_ink};
 
-use crate::shell::settings::AppSettings;
-
-/// Installs the appearance the user persisted. Call once during bootstrap, before the window opens,
-/// and again whenever [`set_dark_mode`] or [`set_zoom`] changes a preference.
-pub fn apply(settings: &AppSettings, cx: &mut App) {
-    cairn_ui::theme::apply_appearance(
-        settings.is_dark(system_prefers_dark()),
-        clamp_zoom(settings.zoom_level),
-        cx,
-    );
+/// Installs the resolved appearance before the window opens. Call once during bootstrap and update
+/// via [`set_dark_mode`] or [`set_zoom`] when preferences change.
+pub fn apply_resolved(is_dark: bool, zoom_level: f32, cx: &mut App) {
+    cairn_ui::theme::apply_appearance(is_dark, clamp_zoom(zoom_level), cx);
+    refresh_shell_tokens(cx);
 }
 
 /// Switches the light or dark palette and returns the value to persist.
 pub fn set_dark_mode(dark: bool, cx: &mut App) -> bool {
-    cairn_ui::theme::set_dark_mode(dark, cx)
+    let resolved = cairn_ui::theme::set_dark_mode(dark, cx);
+    refresh_shell_tokens(cx);
+    resolved
 }
 
 /// Rescales the whole shell by moving the theme's base font, so type, spacing, control frames and
 /// icons keep the relationships they had at 1.0. Returns the value to persist.
 pub fn set_zoom(zoom: f32, cx: &mut App) -> f32 {
-    cairn_ui::theme::set_zoom(zoom, cx)
+    let resolved = cairn_ui::theme::set_zoom(zoom, cx);
+    refresh_shell_tokens(cx);
+    resolved
 }
 
 /// The window's current `rem`, in pixels: the length every helper in [`crate::app::layout`] is a
@@ -83,8 +81,19 @@ pub struct ShellTokens {
 }
 
 impl ShellTokens {
-    /// Reads every role the shell uses out of the active theme. Call once per rendered frame.
+    /// Reads every role the shell uses out of the cached global when the theme key matches, or
+    /// computes once as a fallback when no global cache has been primed yet.
     pub fn current(cx: &App) -> Self {
+        let key = ThemeKey::from_theme(cx.theme());
+        if let Some(cached) = cx.try_global::<CachedShellTokens>() {
+            if cached.key == key {
+                return cached.tokens;
+            }
+        }
+        Self::compute(cx)
+    }
+
+    fn compute(cx: &App) -> Self {
         let theme = cx.theme();
         Self {
             background: theme.background,
@@ -121,5 +130,102 @@ impl ShellTokens {
         } else {
             self.background
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ThemeKey {
+    is_dark: bool,
+    background: Hsla,
+    muted: Hsla,
+    warning: Hsla,
+    border: Hsla,
+}
+
+impl ThemeKey {
+    fn from_theme(theme: &Theme) -> Self {
+        Self {
+            is_dark: theme.mode.is_dark(),
+            background: theme.background,
+            muted: theme.muted,
+            warning: theme.warning,
+            border: theme.border,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct CachedShellTokens {
+    key: ThemeKey,
+    tokens: ShellTokens,
+}
+
+impl Global for CachedShellTokens {}
+
+fn resolve_cached_tokens<K: PartialEq + Copy, V: Copy>(
+    cached: &mut Option<(K, V)>,
+    key: K,
+    compute: impl FnOnce() -> V,
+) -> V {
+    if let Some((cached_key, cached_value)) = *cached {
+        if cached_key == key {
+            return cached_value;
+        }
+    }
+    let value = compute();
+    *cached = Some((key, value));
+    value
+}
+
+/// Refreshes the cached frame tokens after any appearance/palette change so `render` never runs
+/// `contrast_ratio` searches per frame.
+pub fn refresh_shell_tokens(cx: &mut App) {
+    let key = ThemeKey::from_theme(cx.theme());
+    let mut slot = cx
+        .try_global::<CachedShellTokens>()
+        .map(|cached| (cached.key, cached.tokens));
+    let tokens = resolve_cached_tokens(&mut slot, key, || ShellTokens::compute(cx));
+    cx.set_global(CachedShellTokens { key, tokens });
+}
+
+/// Primes the cached frame tokens once if no global snapshot exists yet.
+pub fn ensure_shell_tokens(cx: &mut App) {
+    let key = ThemeKey::from_theme(cx.theme());
+    let already_valid = cx
+        .try_global::<CachedShellTokens>()
+        .is_some_and(|cached| cached.key == key);
+    if !already_valid {
+        let tokens = ShellTokens::compute(cx);
+        cx.set_global(CachedShellTokens { key, tokens });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cached_tokens_recompute_only_when_theme_key_changes() {
+        let mut slot: Option<(u8, u32)> = None;
+        let mut computes = 0usize;
+
+        let first = resolve_cached_tokens(&mut slot, 1, || {
+            computes += 1;
+            100
+        });
+        let second = resolve_cached_tokens(&mut slot, 1, || {
+            computes += 1;
+            200
+        });
+        assert_eq!(first, 100);
+        assert_eq!(second, 100);
+        assert_eq!(computes, 1);
+
+        let third = resolve_cached_tokens(&mut slot, 2, || {
+            computes += 1;
+            300
+        });
+        assert_eq!(third, 300);
+        assert_eq!(computes, 2);
     }
 }

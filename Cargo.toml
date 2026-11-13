@@ -54,10 +54,10 @@ windows = { version = "0.62.2" }
 windows-service = "0.8.1"
 
 # Content Search & Text
-tantivy = "0.27.0"
+tantivy = { version = "0.27.0", default-features = false, features = ["mmap", "lz4-compression", "columnar-zstd-compression"] }
 chardetng = "1.0.0"
 encoding_rs = "0.8.42"
-zip = { version = "9.0", default-features = false, features = ["deflate"] }
+zip = { version = "9.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 quick-xml = "0.42"
 lopdf = { version = "0.47", default-features = false }
 

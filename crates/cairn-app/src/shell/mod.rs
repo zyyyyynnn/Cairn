@@ -8,6 +8,7 @@
 //! bar views.
 
 pub(crate) mod accessibility;
+pub(crate) mod assets;
 pub(crate) mod bin_commands;
 pub(crate) mod block_listing;
 pub(crate) mod command_groups;

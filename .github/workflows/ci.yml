@@ -204,15 +204,28 @@ jobs:
           cache-bin: false
           save-if: false
       - name: Run tests
-        run: cargo test -p cairn-cli -p cairn-worker -p cairn-setup -p xtask
+        run: cargo test -p cairn-cli -p cairn-worker -p cairn-setup -p cairn-setup-bin -p xtask
+      - name: Query memory and latency regression check
+        run: cargo run --release -p xtask -- bench-query --check
       - name: Locate installer test binary
         shell: pwsh
         run: |
-          $binary = Get-ChildItem -Path target\debug\deps -Filter "xtask-*.exe" |
-            Sort-Object LastWriteTime -Descending |
-            Select-Object -First 1
+          $artifacts = cargo test -p xtask --no-run --message-format=json |
+            ForEach-Object { $_ | ConvertFrom-Json }
+          $binary = $artifacts |
+            Where-Object {
+              $_.reason -eq 'compiler-artifact' -and
+              $_.executable -and
+              $_.target.name -eq 'xtask' -and
+              $_.target.test -eq $true
+            } |
+            Select-Object -Last 1
           if (-not $binary) { throw "The installer test binary was not produced." }
-          Copy-Item -LiteralPath $binary.FullName -Destination package-test.exe
+          $tests = & $binary.executable --list
+          if (-not ($tests -match 'real_package_builds_msi_and_setup')) {
+            throw "The installer test binary does not carry the package test."
+          }
+          Copy-Item -LiteralPath $binary.executable -Destination package-test.exe
       - name: Upload installer test binary
         uses: actions/upload-artifact@v7
         with:

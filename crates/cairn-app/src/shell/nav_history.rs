@@ -6,6 +6,7 @@
 
 use crate::app::CairnApp;
 use crate::search::filters::FilterCategory;
+use crate::search::ResultSetChange;
 use gpui_kit::gpui::{Context, Window};
 
 /// Maximum number of navigation history states preserved in memory.
@@ -260,7 +261,7 @@ impl CairnApp {
         // search whose rows nobody can see.
         if !is_visualization {
             self.clear_block_listing();
-            self.trigger_search(cx);
+            self.request_result_set(ResultSetChange::Replace, cx);
         }
         cx.notify();
     }
@@ -276,7 +277,11 @@ mod tests {
         gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
             gpui_kit::init(cx);
             let _ = gpui_kit::open_window(
-                gpui_kit::gpui::WindowOptions::default(),
+                gpui_kit::gpui::WindowOptions {
+                    show: false,
+                    focus: false,
+                    ..gpui_kit::gpui::WindowOptions::default()
+                },
                 cx,
                 |window, cx| {
                     let app = cx.new(|cx| CairnApp::new(window, cx));
@@ -367,7 +372,11 @@ mod tests {
         gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
             gpui_kit::init(cx);
             let _ = gpui_kit::open_window(
-                gpui_kit::gpui::WindowOptions::default(),
+                gpui_kit::gpui::WindowOptions {
+                    show: false,
+                    focus: false,
+                    ..gpui_kit::gpui::WindowOptions::default()
+                },
                 cx,
                 |window, cx| {
                     let app = cx.new(|cx| CairnApp::new(window, cx));
@@ -444,7 +453,11 @@ mod tests {
         gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
             gpui_kit::init(cx);
             let _ = gpui_kit::open_window(
-                gpui_kit::gpui::WindowOptions::default(),
+                gpui_kit::gpui::WindowOptions {
+                    show: false,
+                    focus: false,
+                    ..gpui_kit::gpui::WindowOptions::default()
+                },
                 cx,
                 |window, cx| {
                     let app = cx.new(|cx| CairnApp::new(window, cx));
@@ -480,7 +493,11 @@ mod tests {
         gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
             gpui_kit::init(cx);
             let _ = gpui_kit::open_window(
-                gpui_kit::gpui::WindowOptions::default(),
+                gpui_kit::gpui::WindowOptions {
+                    show: false,
+                    focus: false,
+                    ..gpui_kit::gpui::WindowOptions::default()
+                },
                 cx,
                 |window, cx| {
                     let app = cx.new(|cx| CairnApp::new(window, cx));
@@ -513,7 +530,11 @@ mod tests {
         gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
             gpui_kit::init(cx);
             let _ = gpui_kit::open_window(
-                gpui_kit::gpui::WindowOptions::default(),
+                gpui_kit::gpui::WindowOptions {
+                    show: false,
+                    focus: false,
+                    ..gpui_kit::gpui::WindowOptions::default()
+                },
                 cx,
                 |window, cx| {
                     let app = cx.new(|cx| CairnApp::new(window, cx));

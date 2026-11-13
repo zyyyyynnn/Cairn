@@ -7,6 +7,7 @@
 use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::mpsc::Receiver;
 
 use cairn_ui::brand::heading_text;
 use cairn_ui::theme::dialog_surface;
@@ -17,7 +18,6 @@ use gpui_kit::gpui::{
     ParentElement as _, Styled as _, Subscription, WeakEntity, Window,
 };
 use gpui_kit::Focusable;
-use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::i18n::I18n;
 use crate::installed;
@@ -120,7 +120,7 @@ pub struct SetupApp {
     pub(crate) screen: Screen,
     pub(crate) dark: bool,
     pub(crate) accepted: bool,
-    pub(crate) path_input: Entity<InputState>,
+    pub(crate) path_input: Option<Entity<InputState>>,
     pub(crate) path_error: Option<PathProblem>,
     pub(crate) installing: Rc<Cell<bool>>,
     pub(crate) progress: Option<f32>,
@@ -162,24 +162,19 @@ pub struct SetupApp {
     payload_dir: Option<PathBuf>,
     _activation: Subscription,
     _focus_lost: Subscription,
-    _path_change: Subscription,
+    _path_change: Option<Subscription>,
     _keyboard_modality: Subscription,
 }
 
 impl SetupApp {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>, launch: Launch) -> Self {
-        let preview = Preview::from_env();
-        let language = preview
-            .as_ref()
-            .and_then(|preview| preview.language.clone())
-            .unwrap_or_else(|| cairn_ui::locale::system_language().to_string());
-        let i18n = I18n::new(&language);
-        let dark = preview
-            .as_ref()
-            .and_then(|preview| preview.dark)
-            .unwrap_or_else(cairn_ui::locale::system_prefers_dark);
-        cairn_ui::theme::apply_appearance(dark, 1.0, cx);
-
+    pub(crate) fn new(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        launch: Launch,
+        i18n: I18n,
+        preview: Option<Preview>,
+        dark: bool,
+    ) -> Self {
         let live_installed = installed::installed_product();
         // A preview must render the scene it names, independent of what this machine happens to
         // have installed. Falling back to the live product made a clean-install scene show the
@@ -200,14 +195,32 @@ impl SetupApp {
             .map(|preview| preview.launch)
             .unwrap_or(launch);
 
-        let initial_dir = installed
-            .as_ref()
-            .map(|product| product.install_dir.clone())
-            .filter(|path| validate_install_path(&path.to_string_lossy()).is_ok())
-            .unwrap_or_else(default_install_dir);
-        let path_input = cx.new(|cx| {
-            InputState::new(window, cx).default_value(initial_dir.to_string_lossy().to_string())
-        });
+        let (path_input, path_change) = if launch == Launch::Setup {
+            let initial_dir = installed
+                .as_ref()
+                .map(|product| product.install_dir.clone())
+                .filter(|path| validate_install_path(&path.to_string_lossy()).is_ok())
+                .unwrap_or_else(default_install_dir);
+            let input = cx.new(|cx| {
+                InputState::new(window, cx).default_value(initial_dir.to_string_lossy().to_string())
+            });
+            let subscription = cx.subscribe_in(
+                &input,
+                window,
+                |this, _input, event: &InputEvent, _window, cx| {
+                    if matches!(event, InputEvent::Change) && this.path_error.is_some() {
+                        if let Some(input) = &this.path_input {
+                            let raw = input.read(cx).value().to_string();
+                            this.path_error = validate_install_path(&raw).err();
+                            cx.notify();
+                        }
+                    }
+                },
+            );
+            (Some(input), Some(subscription))
+        } else {
+            (None, None)
+        };
 
         let preview_theme = preview.as_ref().and_then(|preview| preview.dark);
         let installing = Rc::new(Cell::new(preview.as_ref().is_some_and(Preview::is_busy)));
@@ -240,17 +253,6 @@ impl SetupApp {
         // Tab is consumed by the focus walk before an element listener runs, so the keyboard
         // modality is recorded at the app level.
         let keyboard_modality = cairn_ui::focus::observe_keyboard(cx);
-        let path_change = cx.subscribe_in(
-            &path_input,
-            window,
-            |this, _input, event: &InputEvent, _window, cx| {
-                if matches!(event, InputEvent::Change) && this.path_error.is_some() {
-                    let raw = this.path_input.read(cx).value().to_string();
-                    this.path_error = validate_install_path(&raw).err();
-                    cx.notify();
-                }
-            },
-        );
         window.focus(&root_focus, cx);
 
         let activation = cx.observe_window_activation(window, move |this, _window, cx| {
@@ -356,7 +358,9 @@ impl SetupApp {
         self.screen = Screen::Location;
         self.focused_screen = Some(Screen::Location);
         self.notice = None;
-        self.path_input.read(cx).focus_handle(cx).focus(window, cx);
+        if let Some(input) = &self.path_input {
+            input.read(cx).focus_handle(cx).focus(window, cx);
+        }
         cx.notify();
     }
 
@@ -380,12 +384,15 @@ impl SetupApp {
         if self.is_busy() {
             return;
         }
+        let Some(input) = self.path_input.clone() else {
+            return;
+        };
         let title = self.i18n.get("location_title");
         let Some(path) = platform::browse_for_folder(&title) else {
             return;
         };
         self.path_error = None;
-        self.path_input.update(cx, |state, cx| {
+        input.update(cx, |state, cx| {
             state.set_value(path.to_string_lossy().to_string(), window, cx);
         });
         cx.notify();
@@ -404,14 +411,17 @@ impl SetupApp {
         if self.launch != Launch::Setup || self.is_busy() {
             return;
         }
-        let raw = self.path_input.read(cx).value().to_string();
+        let Some(input) = self.path_input.clone() else {
+            return;
+        };
+        let raw = input.read(cx).value().to_string();
         let install_dir = match validate_install_path(&raw) {
             Ok(path) => path,
             Err(problem) => {
                 self.path_error = Some(problem);
                 self.screen = Screen::Location;
                 self.focused_screen = Some(Screen::Location);
-                self.path_input.read(cx).focus_handle(cx).focus(window, cx);
+                input.read(cx).focus_handle(cx).focus(window, cx);
                 cx.notify();
                 return;
             }
@@ -517,7 +527,6 @@ impl SetupApp {
                 return;
             }
         };
-        let helper = platform::prepare_install_dir_cleanup();
         let install_dir = product.install_dir.clone();
         let cleanup_dir = install_dir.clone();
         let session = msi::start_uninstall_with(product_codes, log.clone(), move || {
@@ -525,7 +534,7 @@ impl SetupApp {
             for failure in &failures {
                 tracing::warn!("uninstall cleanup: {failure}");
             }
-            if let Err(error) = platform::spawn_install_dir_cleanup(&cleanup_dir, helper) {
+            if let Err(error) = platform::spawn_install_dir_cleanup(&cleanup_dir) {
                 failures.push(format!("install folder: {error}"));
             }
             failures
@@ -553,7 +562,6 @@ impl SetupApp {
                 return;
             }
         };
-        let helper = platform::prepare_install_dir_cleanup();
         let install_dir = product.install_dir;
         let cleanup_dir = install_dir.clone();
         let session = msi::start_cleanup(
@@ -563,7 +571,7 @@ impl SetupApp {
                 };
                 match installed::find_product_codes_checked() {
                     Ok(codes) if codes.is_empty() => {
-                        platform::remove_orphan_registration(&cleanup_dir, helper)
+                        platform::remove_orphan_registration(&cleanup_dir)
                     }
                     Ok(_) => Err(
                         "Cairn was installed while the uninstaller was open; close this window and try again."
@@ -622,7 +630,6 @@ impl SetupApp {
                 }
             },
         };
-        let helper = platform::prepare_install_dir_cleanup();
         let expected = self.active_product_codes.clone();
         let session = msi::start_cleanup(
             move || {
@@ -637,7 +644,7 @@ impl SetupApp {
                             .to_string(),
                     );
                 }
-                platform::remove_orphan_registration(&install_dir, helper)
+                platform::remove_orphan_registration(&install_dir)
             },
             log.clone(),
         );
@@ -656,11 +663,24 @@ impl SetupApp {
         cx.notify();
     }
 
-    fn pump(&mut self, mut events: UnboundedReceiver<MsiEvent>, cx: &mut Context<Self>) {
+    fn pump(&mut self, events: Receiver<MsiEvent>, cx: &mut Context<Self>) {
         let weak: WeakEntity<Self> = cx.entity().downgrade();
         cx.spawn(async move |_this, cx| {
+            let mut events = Some(events);
             let mut completed = false;
-            while let Some(event) = events.recv().await {
+            loop {
+                let rx = events.take().expect("msi event receiver");
+                let (event, rx) = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let event = rx.recv().ok();
+                        (event, rx)
+                    })
+                    .await;
+                events = Some(rx);
+                let Some(event) = event else {
+                    break;
+                };
                 let done = matches!(&event, MsiEvent::Done(_));
                 weak.update(cx, |this, cx| this.handle_msi_event(event, cx))
                     .ok();

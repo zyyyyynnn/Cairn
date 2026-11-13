@@ -35,8 +35,6 @@ fn sized_item(frn: u64, parent_frn: u64, name: &str, is_dir: bool, size: u64) ->
 }
 
 fn record_index(vol: &VolumeIndex, frn: u64) -> u32 {
-    vol.frn_to_idx
-        .get(&frn)
-        .and_then(|indices| indices.first().copied())
+    vol.first_record_index_for_frn(frn)
         .expect("fixture record must exist")
 }

@@ -9,8 +9,6 @@ mod corpus;
 mod docs_check;
 mod i18n_check;
 mod size_check;
-mod test_security;
-mod test_vhd;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -62,11 +60,10 @@ enum Commands {
         corpus: PathBuf,
         #[arg(short, long, default_value_t = 6)]
         runs: usize,
+        /// Run deterministic multi-level fixture with strict SM-1/SM-2 ledger gates for CI
+        #[arg(long, default_value_t = false)]
+        check: bool,
     },
-    /// Run security, IPC DACL, and remote client rejection integration tests (SPEC SVC-02, SET-02)
-    TestSecurity,
-    /// Run NTFS/USN integration tests including SM-5 zero-difference verification
-    TestNtfsVhd,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -90,14 +87,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             corpus::generate_synthetic_corpus(&output, count)?;
             println!("Done.");
         }
-        Commands::BenchQuery { corpus, runs } => {
-            bench::run_benchmark(&corpus, runs)?;
-        }
-        Commands::TestSecurity => {
-            test_security::run_security_tests()?;
-        }
-        Commands::TestNtfsVhd => {
-            test_vhd::run_vhd_tests()?;
+        Commands::BenchQuery {
+            corpus,
+            runs,
+            check,
+        } => {
+            bench::run_benchmark(&corpus, runs, check)?;
         }
     }
 

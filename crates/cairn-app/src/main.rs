@@ -10,6 +10,7 @@ mod app;
 mod search;
 mod service;
 mod shell;
+mod startup;
 mod table;
 mod treemap;
 mod view;
@@ -55,10 +56,10 @@ fn main() {
     // The elevated copy of this image has one job and no window. It answers before the single
     // instance mutex is taken: a copy that found the mutex already held would otherwise return
     // here and exit as though it had started the service.
-    let request: Vec<String> = std::env::args().skip(1).collect();
+    let raw_args: Vec<String> = std::env::args().skip(1).collect();
     // The exit code is the Win32 code, bit-for-bit: `GetExitCodeProcess` hands it back to the
     // waiting window as `u32`, which is what decides success there.
-    if let Some(code) = service::service_control::elevated_start_reply(&request) {
+    if let Some(code) = service::service_control::elevated_start_reply(&raw_args) {
         std::process::exit(code as i32);
     }
 
@@ -71,15 +72,19 @@ fn main() {
         None => return,
     };
 
-    // The persisted settings are read before the tray and the window exist, so both open in the
-    // language the user left the app in.
-    let settings = shell::settings::AppSettings::load();
+    // Prepare settings, OS theme preference, CLI launch flags and shared locale state once before
+    // building the tray or window.
+    let startup = startup::StartupCoordinator::prepare(raw_args, &startup::SystemBootstrapPorts);
 
     #[cfg(windows)]
-    let _tray = shell::tray::init(&settings.effective_language());
+    let _tray = shell::tray::init_with_i18n(&startup.i18n);
+
+    let initial_dark = startup.is_dark();
+    let initial_zoom = startup.settings.zoom_level;
+    let mut startup_slot = Some(startup);
 
     gpui_kit::application()
-        .with_assets(gpui_kit::assets::AllAssets)
+        .with_assets(shell::assets::CairnAssets)
         .run(move |cx: &mut App| {
             // Bootstrap order is fixed by the Coding Guides: initialize the Kit once, install the
             // keymap before any window or menu reads it, then open the window through
@@ -91,7 +96,7 @@ fn main() {
 
             // The persisted appearance is installed before the first frame, so the window opens at
             // the palette and density the user left it in rather than repainting after the fact.
-            shell::theme::apply(&settings, cx);
+            shell::theme::apply_resolved(initial_dark, initial_zoom, cx);
 
             // `TitleBar` draws the window's own chrome, owns its drag region and paints the platform
             // controls, so the options start from the set the component is built to work with. The
@@ -128,27 +133,22 @@ fn main() {
                 ..base
             };
 
-            let args: Vec<String> = std::env::args().skip(1).collect();
-            let mut initial_query: Option<String> = None;
-            let mut sidebar_collapsed = false;
-            let mut open_match = false;
-
-            for arg in &args {
-                if arg == "--collapsed" || arg == "--sidebar-collapsed" {
-                    sidebar_collapsed = true;
-                } else if arg == "--open-match" {
-                    open_match = true;
-                } else if !arg.starts_with('-') && initial_query.is_none() {
-                    initial_query = Some(arg.clone());
-                }
-            }
+            let startup = startup_slot
+                .take()
+                .expect("startup bundle consumed once by window launch");
+            let initial_query = startup.plan.initial_query.clone();
+            let sidebar_collapsed = startup.plan.sidebar_collapsed;
+            let open_match = startup.plan.open_match;
+            let mut app_bundle = Some(startup);
 
             let (_handle, _app) = gpui_kit::open_window(window_options, cx, |window, cx| {
                 crate::shell::perf::mark("window factory");
                 window.activate_window();
-                let initial_query = initial_query.clone();
+                let startup = app_bundle
+                    .take()
+                    .expect("window factory runs once per launch");
                 let entity = cx.new(|cx| {
-                    let mut app = CairnApp::new(window, cx);
+                    let mut app = CairnApp::new_with_startup(startup, window, cx);
                     if sidebar_collapsed {
                         app.sidebar_collapsed = true;
                     }

@@ -13,10 +13,41 @@ use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
 /// Idle sessions older than 5 minutes are evicted when a new session is created.
-const SESSION_TTL: Duration = Duration::from_secs(300);
+pub const DEFAULT_SESSION_TTL: Duration = Duration::from_secs(300);
 
 /// Maximum total `SearchResultItem` entries retained across all cached sessions (~256 MiB ceiling).
 const MAX_TOTAL_CACHED_ITEMS: usize = 16 * 1024 * 1024;
+
+/// Monotonic time source injected into [`SessionManager`] for lock-free reads and deterministic TTL tests.
+pub trait Clock: Send + Sync {
+    fn now_nanos(&self) -> u64;
+}
+
+/// Default process-monotonic clock backed by [`Instant`].
+#[derive(Debug)]
+pub struct SystemClock {
+    origin: Instant,
+}
+
+impl SystemClock {
+    pub fn new() -> Self {
+        Self {
+            origin: Instant::now(),
+        }
+    }
+}
+
+impl Default for SystemClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Clock for SystemClock {
+    fn now_nanos(&self) -> u64 {
+        self.origin.elapsed().as_nanos().min(u64::MAX as u128) as u64
+    }
+}
 
 /// Why a row page cannot be served from the cached match list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,8 +62,8 @@ pub struct QuerySession {
     pub pre_folded_terms: Vec<Vec<u8>>,
     pub matched_items: Vec<SearchResultItem>,
     pub snippets: HashMap<(char, u64), String>,
-    pub created_at: Instant,
-    pub last_accessed_at: Instant,
+    pub created_nanos: u64,
+    pub last_accessed_nanos: AtomicU64,
 }
 
 /// The client a query belongs to. Query ids are client-local counters, so the
@@ -51,21 +82,25 @@ pub struct SessionManager {
     active_queries: RwLock<HashMap<(QueryOwner, u64), CancellationToken>>,
     next_session_id: AtomicU64,
     max_sessions: usize,
+    ttl_nanos: u64,
+    clock: Box<dyn Clock>,
 }
 
 impl Default for SessionManager {
     fn default() -> Self {
-        Self::new(8)
+        Self::new(8, DEFAULT_SESSION_TTL, SystemClock::new())
     }
 }
 
 impl SessionManager {
-    pub fn new(max_sessions: usize) -> Self {
+    pub fn new(max_sessions: usize, ttl: Duration, clock: impl Clock + 'static) -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
             active_queries: RwLock::new(HashMap::new()),
             next_session_id: AtomicU64::new(1),
             max_sessions,
+            ttl_nanos: ttl.as_nanos().min(u64::MAX as u128) as u64,
+            clock: Box::new(clock),
         }
     }
 
@@ -113,10 +148,13 @@ impl SessionManager {
     ) -> u64 {
         let session_id = self.next_session_id.fetch_add(1, Ordering::Relaxed);
         let mut lock = self.sessions.write().unwrap();
-        let now = Instant::now();
+        let now = self.clock.now_nanos();
 
         // Evict idle sessions that have exceeded their TTL.
-        lock.retain(|_, s| now.saturating_duration_since(s.last_accessed_at) < SESSION_TTL);
+        lock.retain(|_, s| {
+            let last_accessed = s.last_accessed_nanos.load(Ordering::Relaxed);
+            now.saturating_sub(last_accessed) < self.ttl_nanos
+        });
 
         // LRU eviction if session count or total retained item budget is exceeded.
         let new_items = matched_items.len();
@@ -125,10 +163,13 @@ impl SessionManager {
             lock.len() >= self.max_sessions
                 || total_items.saturating_add(new_items) > MAX_TOTAL_CACHED_ITEMS
         } {
-            if let Some((&oldest_id, _)) = lock
-                .iter()
-                .min_by_key(|(&id, s)| (s.last_accessed_at, s.created_at, id))
-            {
+            if let Some((&oldest_id, _)) = lock.iter().min_by_key(|(&id, s)| {
+                (
+                    s.last_accessed_nanos.load(Ordering::Relaxed),
+                    s.created_nanos,
+                    id,
+                )
+            }) {
                 lock.remove(&oldest_id);
             } else {
                 break;
@@ -147,8 +188,8 @@ impl SessionManager {
                 pre_folded_terms,
                 matched_items,
                 snippets,
-                created_at: now,
-                last_accessed_at: now,
+                created_nanos: now,
+                last_accessed_nanos: AtomicU64::new(now),
             },
         );
 
@@ -174,9 +215,11 @@ impl SessionManager {
         limit: usize,
         volumes: &HashMap<char, VolumeIndex>,
     ) -> Result<Vec<FileRowData>, RowsError> {
-        let mut lock = self.sessions.write().unwrap();
-        let session = lock.get_mut(&session_id).ok_or(RowsError::UnknownSession)?;
-        session.last_accessed_at = Instant::now();
+        let lock = self.sessions.read().unwrap();
+        let session = lock.get(&session_id).ok_or(RowsError::UnknownSession)?;
+        session
+            .last_accessed_nanos
+            .store(self.clock.now_nanos(), Ordering::Relaxed);
 
         rows_for(session, offset, limit, &session.pre_folded_terms, |item| {
             volumes.get(&item.drive_letter)
@@ -206,7 +249,7 @@ fn rows_for<'a>(
         let Some(vol) = volume_of(item) else {
             continue;
         };
-        if vol.generation != item.generation {
+        if vol.generation() != item.generation {
             return Err(RowsError::Stale {
                 drive_letter: item.drive_letter,
             });
@@ -224,28 +267,22 @@ fn rows_for<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cairn_core::model::FileRecord;
+    use cairn_ntfs::mft::ExtractedItem;
     use std::collections::HashMap;
 
     fn volume_with(name: &str) -> VolumeIndex {
         let mut vol = VolumeIndex::new('C');
-        vol.records.push(FileRecord {
+        vol.ingest_items(vec![ExtractedItem {
             frn: 10,
-            parent_idx: FileRecord::ROOT_PARENT,
-            name_offset: 0,
-            name_len: 0,
-            ext_offset: 0,
-            volume_id: 2,
-            flags: 0,
+            parent_frn: 0,
+            name: name.to_string(),
+            is_dir: false,
             size: 1,
-            modified_ts: 1,
             created_ts: 1,
-        });
-        let (name_offset, name_len, ext_offset) = vol.arena.insert(name);
-        vol.records[0].name_offset = name_offset;
-        vol.records[0].name_len = name_len;
-        vol.records[0].ext_offset = ext_offset;
-        vol.frn_to_idx.insert(10, vec![0]);
+            modified_ts: 1,
+            flags: 0,
+            is_reparse_point: false,
+        }]);
         vol
     }
 
@@ -264,7 +301,7 @@ mod tests {
         let session_id = sessions.create_session(
             "notes".into(),
             Vec::new(),
-            vec![item(vol.generation)],
+            vec![item(vol.generation())],
             HashMap::new(),
         );
         let volumes = HashMap::from([('C', vol)]);
@@ -283,7 +320,7 @@ mod tests {
         let session_id = sessions.create_session(
             "notes".into(),
             Vec::new(),
-            vec![item(vol.generation)],
+            vec![item(vol.generation())],
             HashMap::new(),
         );
         let mut volumes = HashMap::from([('C', vol)]);
@@ -298,7 +335,7 @@ mod tests {
 
     #[test]
     fn an_evicted_session_is_distinguishable_from_a_stale_one() {
-        let sessions = SessionManager::new(1);
+        let sessions = SessionManager::new(1, DEFAULT_SESSION_TTL, SystemClock::new());
         let vol = volume_with("notes.txt");
         let volumes = HashMap::from([('C', vol)]);
         let first =
@@ -310,22 +347,53 @@ mod tests {
         );
     }
 
+    struct TestClock {
+        now_nanos: std::sync::Arc<AtomicU64>,
+    }
+
+    impl TestClock {
+        fn new() -> Self {
+            Self {
+                now_nanos: std::sync::Arc::new(AtomicU64::new(1_000_000_000)),
+            }
+        }
+
+        fn advance(&self, delta: Duration) {
+            self.now_nanos
+                .fetch_add(delta.as_nanos() as u64, Ordering::SeqCst);
+        }
+    }
+
+    impl Clock for TestClock {
+        fn now_nanos(&self) -> u64 {
+            self.now_nanos.load(Ordering::SeqCst)
+        }
+    }
+
     #[test]
     fn lru_eviction_evicts_least_recently_accessed_session() {
-        let sessions = SessionManager::new(2);
+        let clock = TestClock::new();
+        let sessions = SessionManager::new(
+            2,
+            DEFAULT_SESSION_TTL,
+            TestClock {
+                now_nanos: clock.now_nanos.clone(),
+            },
+        );
         let vol = volume_with("notes.txt");
+        let gen = vol.generation();
         let volumes = HashMap::from([('C', vol)]);
 
-        let s1 = sessions.create_session("s1".into(), Vec::new(), vec![item(0)], HashMap::new());
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        let s2 = sessions.create_session("s2".into(), Vec::new(), vec![item(0)], HashMap::new());
+        let s1 = sessions.create_session("s1".into(), Vec::new(), vec![item(gen)], HashMap::new());
+        clock.advance(Duration::from_millis(20));
+        let s2 = sessions.create_session("s2".into(), Vec::new(), vec![item(gen)], HashMap::new());
 
         // Access s1, making s2 the least recently accessed
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        let _ = sessions.get_rows_multi(s1, 0, 10, &volumes);
+        clock.advance(Duration::from_millis(20));
+        assert!(sessions.get_rows_multi(s1, 0, 10, &volumes).is_ok());
 
         // Create s3: capacity is 2, so s2 should be evicted because s1 was accessed more recently
-        let s3 = sessions.create_session("s3".into(), Vec::new(), vec![item(0)], HashMap::new());
+        let s3 = sessions.create_session("s3".into(), Vec::new(), vec![item(gen)], HashMap::new());
 
         assert!(sessions.get_rows_multi(s1, 0, 10, &volumes).is_ok());
         assert_eq!(
@@ -333,6 +401,76 @@ mod tests {
             Err(RowsError::UnknownSession)
         );
         assert!(sessions.get_rows_multi(s3, 0, 10, &volumes).is_ok());
+    }
+
+    #[test]
+    fn ttl_eviction_respects_injected_clock_boundary() {
+        let clock = TestClock::new();
+        let sessions = SessionManager::new(
+            4,
+            Duration::from_secs(300),
+            TestClock {
+                now_nanos: clock.now_nanos.clone(),
+            },
+        );
+        let vol = volume_with("notes.txt");
+        let gen = vol.generation();
+        let volumes = HashMap::from([('C', vol)]);
+
+        let s1 = sessions.create_session("s1".into(), Vec::new(), vec![item(gen)], HashMap::new());
+        clock.advance(Duration::from_secs(299));
+        let _s2 = sessions.create_session("s2".into(), Vec::new(), vec![item(gen)], HashMap::new());
+        assert!(
+            sessions.get_rows_multi(s1, 0, 10, &volumes).is_ok(),
+            "session accessed before TTL must stay live"
+        );
+
+        // Accessing s1 reset its idle timer; advance full 300s to cross expiry.
+        clock.advance(Duration::from_secs(300));
+        let _s3 = sessions.create_session("s3".into(), Vec::new(), vec![item(gen)], HashMap::new());
+        assert_eq!(
+            sessions.get_rows_multi(s1, 0, 10, &volumes),
+            Err(RowsError::UnknownSession)
+        );
+    }
+
+    #[test]
+    fn concurrent_get_rows_multi_updates_access_timestamp_without_write_starvation() {
+        let clock = TestClock::new();
+        let sessions = std::sync::Arc::new(SessionManager::new(
+            2,
+            DEFAULT_SESSION_TTL,
+            TestClock {
+                now_nanos: clock.now_nanos.clone(),
+            },
+        ));
+        let vol = volume_with("notes.txt");
+        let gen = vol.generation();
+        let volumes = std::sync::Arc::new(HashMap::from([('C', vol)]));
+
+        let s1 = sessions.create_session("s1".into(), Vec::new(), vec![item(gen)], HashMap::new());
+        clock.advance(Duration::from_secs(1));
+        let s2 = sessions.create_session("s2".into(), Vec::new(), vec![item(gen)], HashMap::new());
+        clock.advance(Duration::from_secs(1));
+
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                let s = sessions.clone();
+                let v = volumes.clone();
+                scope.spawn(move || {
+                    for _ in 0..25 {
+                        assert!(s.get_rows_multi(s1, 0, 10, &v).is_ok());
+                    }
+                });
+            }
+        });
+
+        let _s3 = sessions.create_session("s3".into(), Vec::new(), vec![item(gen)], HashMap::new());
+        assert!(sessions.get_rows_multi(s1, 0, 10, &volumes).is_ok());
+        assert_eq!(
+            sessions.get_rows_multi(s2, 0, 10, &volumes),
+            Err(RowsError::UnknownSession)
+        );
     }
 
     #[test]

@@ -4,7 +4,7 @@
 
 //! Named Pipe IPC client for Cairn GUI and CLI applications.
 
-use cairn_protocol::codec::{encode_frame, try_decode_frame, CodecError};
+use cairn_protocol::codec::{encode_frame_into, try_decode_frame, CodecError};
 use cairn_protocol::message::{
     ClientRequest, Envelope, QueryDefaults, ResponsePayload, SortColumn,
     ERROR_CODE_ADMIN_ONLY_QUERY, ERROR_CODE_HANDSHAKE_REQUIRED,
@@ -46,6 +46,9 @@ pub enum ClientError {
 /// `ERROR_PIPE_BUSY`: every instance of the pipe is occupied; the next open may succeed.
 const ERROR_PIPE_BUSY: i32 = 231;
 
+const READ_BUF_BASELINE: usize = 65_536;
+const WRITE_BUF_BASELINE: usize = 4_096;
+
 fn pipe_is_busy(error: &std::io::Error) -> bool {
     error.raw_os_error() == Some(ERROR_PIPE_BUSY)
 }
@@ -66,9 +69,12 @@ impl ClientError {
     }
 }
 
+#[derive(Debug)]
 pub struct CairnClient {
     pipe: NamedPipeClient,
     read_buf: Vec<u8>,
+    write_buf: Vec<u8>,
+    read_timeout: Duration,
     server_protocol_version: u32,
     caller_is_admin: bool,
 }
@@ -94,7 +100,9 @@ impl CairnClient {
                 Ok(pipe) => {
                     let mut client = Self {
                         pipe,
-                        read_buf: Vec::with_capacity(65536),
+                        read_buf: Vec::with_capacity(READ_BUF_BASELINE),
+                        write_buf: Vec::with_capacity(WRITE_BUF_BASELINE),
+                        read_timeout: Self::DEFAULT_READ_TIMEOUT,
                         server_protocol_version: 0,
                         caller_is_admin: false,
                     };
@@ -348,21 +356,59 @@ impl CairnClient {
         Self::unwrap_service_error(payload)
     }
 
+    /// Overrides the per-response read timeout on this client connection.
+    pub fn set_read_timeout(&mut self, timeout: Duration) {
+        self.read_timeout = timeout;
+    }
+
+    /// Current allocated capacity of the inbound frame decode buffer.
+    pub fn read_buf_capacity(&self) -> usize {
+        self.read_buf.capacity()
+    }
+
+    /// Current allocated capacity of the outbound request encode buffer.
+    pub fn write_buf_capacity(&self) -> usize {
+        self.write_buf.capacity()
+    }
+
     async fn send_request(
         &mut self,
         req: &ClientRequest,
     ) -> Result<Envelope<ResponsePayload>, ClientError> {
-        let frame = encode_frame(req)?;
-        self.pipe.write_all(&frame).await?;
+        self.write_buf.clear();
+        encode_frame_into(&mut self.write_buf, WIRE_GUARD, req)?;
+        let write_result = self.pipe.write_all(&self.write_buf).await;
+        self.write_buf.clear();
+        if self.write_buf.capacity() > WRITE_BUF_BASELINE {
+            self.write_buf.shrink_to(WRITE_BUF_BASELINE);
+        }
+        write_result?;
         self.pipe.flush().await?;
 
         self.read_response().await
     }
 
     async fn read_response(&mut self) -> Result<Envelope<ResponsePayload>, ClientError> {
-        tokio::time::timeout(Self::DEFAULT_READ_TIMEOUT, self.read_response_inner())
+        tokio::time::timeout(self.read_timeout, self.read_response_inner())
             .await
-            .map_err(|_| ClientError::Timeout)?
+            .map_err(|_| {
+                self.reset_read_buf();
+                ClientError::Timeout
+            })?
+    }
+
+    fn shrink_read_buf_to_baseline(&mut self) {
+        if self.read_buf.capacity() > READ_BUF_BASELINE && self.read_buf.len() <= READ_BUF_BASELINE
+        {
+            self.read_buf.shrink_to(READ_BUF_BASELINE);
+        }
+    }
+
+    fn reset_read_buf(&mut self) {
+        self.read_buf.clear();
+        if self.read_buf.capacity() > READ_BUF_BASELINE {
+            self.read_buf.shrink_to(READ_BUF_BASELINE);
+        }
     }
 
     async fn read_response_inner(&mut self) -> Result<Envelope<ResponsePayload>, ClientError> {
@@ -375,24 +421,29 @@ impl CairnClient {
                     } else {
                         self.read_buf.drain(0..consumed);
                     }
-                    if self.read_buf.is_empty() && self.read_buf.capacity() > 65536 {
-                        self.read_buf.shrink_to(65536);
-                    }
+                    self.shrink_read_buf_to_baseline();
                     return Ok(envelope);
                 }
                 Ok(None) => {}
                 // A frame whose header declares another version is a protocol mismatch, not a
                 // transport failure: say so, so the GUI can show an update hint (SVC-03).
                 Err(CodecError::IncompatibleVersion { received }) => {
+                    self.reset_read_buf();
                     return Err(ClientError::IncompatibleProtocolVersion {
                         server_guard: received,
-                    })
+                    });
                 }
-                Err(other) => return Err(ClientError::Codec(other)),
+                Err(other) => {
+                    self.reset_read_buf();
+                    return Err(ClientError::Codec(other));
+                }
             }
 
-            let n = self.pipe.read(&mut temp_buf).await?;
+            let n = self.pipe.read(&mut temp_buf).await.inspect_err(|_| {
+                self.reset_read_buf();
+            })?;
             if n == 0 {
+                self.reset_read_buf();
                 return Err(ClientError::ConnectionClosed);
             }
             self.read_buf.extend_from_slice(&temp_buf[..n]);
@@ -403,6 +454,7 @@ impl CairnClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cairn_protocol::codec::encode_frame;
     #[cfg(windows)]
     use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 
@@ -470,6 +522,8 @@ mod tests {
         CairnClient {
             pipe,
             read_buf: Vec::with_capacity(4096),
+            write_buf: Vec::with_capacity(WRITE_BUF_BASELINE),
+            read_timeout: CairnClient::DEFAULT_READ_TIMEOUT,
             server_protocol_version: 0,
             caller_is_admin: false,
         }

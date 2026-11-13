@@ -403,11 +403,18 @@ impl MultiVolumeEngine {
     }
 
     fn run_clear_content(&self) {
+        self.run_clear_content_with(&super::worker_process::SubprocessWorkerPort::new(self));
+    }
+
+    pub(super) fn run_clear_content_with(
+        &self,
+        port: &dyn super::worker_process::WorkerProcessPort,
+    ) {
         self.drop_content_searcher();
         // A cleared index is not a completed backfill; a restart must rebuild instead of resume.
         self.remove_backfill_marker();
         self.set_content_progress(0, 0);
-        match self.run_worker_batch(&[], &[], true) {
+        match self.run_worker_batch_with(port, &[], &[], true) {
             BatchOutcome::Completed => {
                 let mut status = self.content_status.write().unwrap();
                 status.state = ContentIndexState::Disabled;
@@ -420,7 +427,7 @@ impl MultiVolumeEngine {
         }
     }
 
-    pub(super) fn reopen_content_index_ready(&self) {
+    pub(in crate::sync_engine) fn reopen_content_index_ready(&self) {
         // Closing or clearing can land after the last batch finished. Re-check before publishing
         // Ready so a late batch cannot resurrect a switch the user already turned off.
         if self.content_cancel.load(Ordering::SeqCst)
@@ -460,18 +467,6 @@ impl MultiVolumeEngine {
                 self.content_dir.display()
             )),
         }
-    }
-}
-
-impl MultiVolumeEngine {
-    /// Test seam: tests build a writable content index directly, so they mark the state ready.
-    #[cfg(test)]
-    pub fn mark_content_index_ready_for_test(&self) {
-        let documents = self
-            .content_searcher()
-            .map(|searcher| searcher.document_count().unwrap_or(0))
-            .unwrap_or(0);
-        self.set_content_ready(documents, 0);
     }
 }
 

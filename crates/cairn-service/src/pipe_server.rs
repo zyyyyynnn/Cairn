@@ -23,7 +23,18 @@ use cairn_protocol::message::{
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
+use tokio::sync::Semaphore;
 use tracing::{error, info, warn};
+
+const WRITE_BUF_SHRINK_THRESHOLD_BYTES: usize = 256 * 1024;
+const WRITE_BUF_RETAIN_BYTES: usize = 64 * 1024;
+
+/// Releases oversized response buffer capacity after large `GetTree` or `GetRows` frames.
+fn shrink_oversized_write_buf(buf: &mut Vec<u8>) {
+    if buf.is_empty() && buf.capacity() > WRITE_BUF_SHRINK_THRESHOLD_BYTES {
+        buf.shrink_to(WRITE_BUF_RETAIN_BYTES);
+    }
+}
 
 /// The wire form of a tree failure: the code chooses the client's copy.
 fn tree_error_payload(reason: crate::sync_engine::TreeUnavailable) -> ResponsePayload {
@@ -38,6 +49,15 @@ pub struct PipeServer {
     sessions: Arc<SessionManager>,
     pipe_name: String,
     protocol_version: u16,
+    /// Caps record-scanning requests. Connections are unbounded and a broad query holds
+    /// O(records) memory and the volume read lock, so the blocking-pool size is not a budget.
+    heavy_tasks: Arc<Semaphore>,
+}
+
+fn heavy_task_limit() -> usize {
+    std::thread::available_parallelism()
+        .map(|parallelism| parallelism.get().clamp(2, 8))
+        .unwrap_or(4)
 }
 
 impl PipeServer {
@@ -48,6 +68,7 @@ impl PipeServer {
             sessions,
             pipe_name: PIPE_NAME.to_string(),
             protocol_version: WIRE_GUARD,
+            heavy_tasks: Arc::new(Semaphore::new(heavy_task_limit())),
         }
     }
 
@@ -78,10 +99,17 @@ impl PipeServer {
             let sessions = self.sessions.clone();
             let protocol_version = self.protocol_version;
             let pipe_name = self.pipe_name.clone();
+            let heavy_tasks = Arc::clone(&self.heavy_tasks);
 
             tokio::spawn(async move {
-                if let Err(e) =
-                    handle_client(connected_server, engine, sessions, protocol_version).await
+                if let Err(e) = handle_client(
+                    connected_server,
+                    engine,
+                    sessions,
+                    protocol_version,
+                    heavy_tasks,
+                )
+                .await
                 {
                     if let Some(io_err) = e.downcast_ref::<std::io::Error>() {
                         if is_pipe_closed_error(io_err) {
@@ -157,6 +185,7 @@ async fn handle_client(
     engine: Arc<MultiVolumeEngine>,
     sessions: Arc<SessionManager>,
     protocol_version: u16,
+    heavy_tasks: Arc<Semaphore>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Identity comes from the OS token of the connected process, once per connection: the client
     // cannot change it while the pipe instance is alive. The call is synchronous and performs no
@@ -230,40 +259,68 @@ async fn handle_client(
                     read_buf.shrink_to(65536);
                 }
 
-                let resp_payload = if !hello_done && !matches!(req, ClientRequest::Hello { .. }) {
-                    // Version negotiation is explicit (SVC-03): nothing is served before it.
-                    ResponsePayload::Error {
-                        code: ERROR_CODE_HANDSHAKE_REQUIRED,
-                        message: "protocol negotiation missing: send Hello first".to_string(),
-                    }
-                } else {
-                    if matches!(req, ClientRequest::Hello { .. }) {
-                        hello_done = true;
-                    }
-                    let admin_only_query = engine.admin_only_query();
-                    process_request(req, &engine, &sessions, caller, &owner, admin_only_query)
-                };
-
-                let omit_volumes = matches!(
-                    resp_payload,
-                    ResponsePayload::Error {
-                        code: ERROR_CODE_HANDSHAKE_REQUIRED
-                            | ERROR_CODE_PROTOCOL_VERSION_MISMATCH
-                            | cairn_protocol::message::ERROR_CODE_UNAUTHORIZED
-                            | cairn_protocol::message::ERROR_CODE_ADMIN_ONLY_QUERY,
-                        ..
-                    }
-                );
-                // A query answer decides whether the table is still loading, so its envelope
-                // reads the volume state after the query released the index. Every other
-                // envelope may use the cache and keep its connection responsive.
-                let volumes = if omit_volumes {
-                    Vec::new()
-                } else if matches!(&resp_payload, ResponsePayload::QueryResult { .. }) {
-                    engine.get_volume_summaries_fresh()
-                } else {
-                    engine.get_volume_summaries()
-                };
+                let (resp_payload, volumes) =
+                    if !hello_done && !matches!(req, ClientRequest::Hello { .. }) {
+                        // Version negotiation is explicit (SVC-03): nothing is served before it.
+                        (
+                            ResponsePayload::Error {
+                                code: ERROR_CODE_HANDSHAKE_REQUIRED,
+                                message: "protocol negotiation missing: send Hello first"
+                                    .to_string(),
+                            },
+                            Vec::new(),
+                        )
+                    } else {
+                        if matches!(req, ClientRequest::Hello { .. }) {
+                            hello_done = true;
+                        }
+                        let _heavy_permit = if matches!(
+                            req,
+                            ClientRequest::Query { .. } | ClientRequest::GetTree { .. }
+                        ) {
+                            Some(heavy_tasks.clone().acquire_owned().await.map_err(|_| {
+                                std::io::Error::other("heavy request limiter closed")
+                            })?)
+                        } else {
+                            None
+                        };
+                        let admin_only_query = engine.admin_only_query();
+                        let engine_blocking = Arc::clone(&engine);
+                        let sessions_blocking = Arc::clone(&sessions);
+                        let owner_blocking = owner.clone();
+                        tokio::task::spawn_blocking(move || {
+                            let resp_payload = process_request(
+                                req,
+                                &engine_blocking,
+                                &sessions_blocking,
+                                caller,
+                                &owner_blocking,
+                                admin_only_query,
+                            );
+                            let omit_volumes = matches!(
+                                resp_payload,
+                                ResponsePayload::Error {
+                                    code: ERROR_CODE_HANDSHAKE_REQUIRED
+                                        | ERROR_CODE_PROTOCOL_VERSION_MISMATCH
+                                        | cairn_protocol::message::ERROR_CODE_UNAUTHORIZED
+                                        | cairn_protocol::message::ERROR_CODE_ADMIN_ONLY_QUERY,
+                                    ..
+                                }
+                            );
+                            // A query answer decides whether the table is still loading, so its
+                            // envelope reads the volume state after the query released the index.
+                            let volumes = if omit_volumes {
+                                Vec::new()
+                            } else if matches!(&resp_payload, ResponsePayload::QueryResult { .. }) {
+                                engine_blocking.get_volume_summaries_fresh()
+                            } else {
+                                engine_blocking.get_volume_summaries()
+                            };
+                            (resp_payload, volumes)
+                        })
+                        .await
+                        .map_err(|err| format!("blocking request task failed: {err}"))?
+                    };
                 let envelope = Envelope {
                     volumes,
                     payload: resp_payload,
@@ -283,6 +340,8 @@ async fn handle_client(
                     }
                     return Err(e.into());
                 }
+                write_buf.clear();
+                shrink_oversized_write_buf(&mut write_buf);
                 continue;
             }
         }
@@ -1013,8 +1072,13 @@ mod tests {
 
     #[test]
     fn pipe_server_with_pipe_name_sets_custom_name() {
+        use crate::session::{SystemClock, DEFAULT_SESSION_TTL};
         let engine = Arc::new(MultiVolumeEngine::new());
-        let sessions = Arc::new(SessionManager::new(10));
+        let sessions = Arc::new(SessionManager::new(
+            10,
+            DEFAULT_SESSION_TTL,
+            SystemClock::new(),
+        ));
         let custom_pipe = format!(r"\\.\pipe\Cairn.TestSeam.{}", std::process::id());
         let server = PipeServer::with_pipe_name(engine, sessions, &custom_pipe);
         assert_eq!(server.pipe_name, custom_pipe);
@@ -1031,5 +1095,179 @@ mod tests {
                 instance.err()
             );
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn slow_query_does_not_block_concurrent_hello_or_status_on_single_worker_runtime() {
+        use tokio::net::windows::named_pipe::ClientOptions;
+
+        async fn send_and_recv(
+            pipe: &mut tokio::net::windows::named_pipe::NamedPipeClient,
+            req: &ClientRequest,
+        ) -> Envelope<ResponsePayload> {
+            let mut out = Vec::new();
+            encode_frame_into(&mut out, WIRE_GUARD, req).expect("encode frame");
+            pipe.write_all(&out).await.expect("write frame");
+            pipe.flush().await.expect("flush frame");
+
+            let mut read_buf = Vec::new();
+            let mut tmp = [0u8; 4096];
+            loop {
+                if let Some((_consumed, env)) =
+                    try_decode_frame::<Envelope<ResponsePayload>>(&read_buf)
+                        .expect("decode envelope")
+                {
+                    return env;
+                }
+                let n = pipe.read(&mut tmp).await.expect("read envelope");
+                assert!(n > 0, "pipe closed before response");
+                read_buf.extend_from_slice(&tmp[..n]);
+            }
+        }
+
+        let dirs = tempfile::tempdir().expect("tempdir");
+        let engine = Arc::new(MultiVolumeEngine::with_index_dir_and_drives(
+            dirs.path(),
+            vec![],
+        ));
+        engine.add_volume(crate::sync_engine::VolumeIndex::new('C'));
+        let sessions = Arc::new(SessionManager::default());
+        let custom_pipe = format!(r"\\.\pipe\Cairn.TestConcurrency.{}", std::process::id());
+        let server = Arc::new(PipeServer::with_pipe_name(
+            engine.clone(),
+            sessions,
+            &custom_pipe,
+        ));
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("1-worker runtime");
+
+        struct ReleaseOnDrop(Option<std::sync::mpsc::Sender<()>>);
+        impl Drop for ReleaseOnDrop {
+            fn drop(&mut self) {
+                if let Some(tx) = self.0.take() {
+                    let _ = tx.send(());
+                }
+            }
+        }
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let _release_guard = ReleaseOnDrop(Some(release_tx.clone()));
+
+        let server_task = {
+            let server = server.clone();
+            rt.spawn(async move {
+                let _ = server.run().await;
+            })
+        };
+
+        let mut client_a = rt.block_on(async {
+            let mut client = loop {
+                match ClientOptions::new().open(&custom_pipe) {
+                    Ok(c) => break c,
+                    Err(_) => tokio::task::yield_now().await,
+                }
+            };
+            let hello_a = send_and_recv(
+                &mut client,
+                &ClientRequest::Hello {
+                    client_version: WIRE_GUARD as u32,
+                    pid: std::process::id(),
+                },
+            )
+            .await;
+            assert!(matches!(hello_a.payload, ResponsePayload::HelloAck { .. }));
+            client
+        });
+
+        // Block execute_search_multi inside process_request by holding the volumes write lock
+        // on a helper thread via the public update_volume boundary.
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel::<()>();
+        let blocker_engine = engine.clone();
+        let blocker = std::thread::spawn(move || {
+            blocker_engine.update_volume('C', |_| {
+                let _ = locked_tx.send(());
+                let _ = release_rx.recv();
+            });
+        });
+        locked_rx.recv().expect("volumes write lock acquired");
+
+        let query_task = rt.spawn(async move {
+            let env = send_and_recv(
+                &mut client_a,
+                &ClientRequest::Query {
+                    query_id: 1,
+                    raw_query: "notes".to_string(),
+                    defaults: Default::default(),
+                    sort_column: SortColumn::Name,
+                    sort_asc: true,
+                    first_page_limit: 10,
+                },
+            )
+            .await;
+            env.payload
+        });
+
+        // Give the server's worker time to pick up Query and block on volumes.read().
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // Connect a second client from an independent OS thread while client A's synchronous
+        // Query holds the worker thread unless process_request runs via spawn_blocking.
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let pipe_b = custom_pipe.clone();
+        let client_b_thread = std::thread::spawn(move || {
+            let client_rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("client_b runtime");
+            client_rt.block_on(async move {
+                let mut client_b = ClientOptions::new().open(&pipe_b).expect("open client b");
+                let hello_b = send_and_recv(
+                    &mut client_b,
+                    &ClientRequest::Hello {
+                        client_version: WIRE_GUARD as u32,
+                        pid: std::process::id(),
+                    },
+                )
+                .await;
+                assert!(matches!(hello_b.payload, ResponsePayload::HelloAck { .. }));
+
+                let status_b = send_and_recv(&mut client_b, &ClientRequest::GetStatus).await;
+                assert!(matches!(status_b.payload, ResponsePayload::StatusAck));
+                let _ = done_tx.send(());
+            });
+        });
+
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("Hello/GetStatus on client B stalled behind blocked Query");
+        client_b_thread.join().expect("client_b thread joined");
+
+        let _ = release_tx.send(());
+        blocker.join().expect("blocker thread joined");
+        let query_payload = rt
+            .block_on(async {
+                tokio::time::timeout(std::time::Duration::from_secs(2), query_task).await
+            })
+            .expect("Query did not complete after lock release")
+            .expect("query task join");
+        assert!(matches!(query_payload, ResponsePayload::QueryResult { .. }));
+
+        server_task.abort();
+    }
+
+    #[test]
+    fn oversized_write_buffer_shrinks_back_after_large_response() {
+        let mut small = Vec::with_capacity(128 * 1024);
+        shrink_oversized_write_buf(&mut small);
+        assert_eq!(small.capacity(), 128 * 1024);
+
+        let mut large = Vec::with_capacity(2 * 1024 * 1024);
+        shrink_oversized_write_buf(&mut large);
+        assert!(large.capacity() <= WRITE_BUF_RETAIN_BYTES * 2);
+        assert!(large.capacity() >= WRITE_BUF_RETAIN_BYTES);
     }
 }

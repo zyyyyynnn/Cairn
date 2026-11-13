@@ -38,6 +38,16 @@ enum Placement {
 }
 
 impl DirectorySizeIndex {
+    /// Returns allocated backing bytes across all flat hierarchy vectors.
+    pub fn allocated_bytes(&self) -> usize {
+        self.sizes.capacity() * std::mem::size_of::<u64>()
+            + (self.counts.capacity()
+                + self.child_starts.capacity()
+                + self.child_records.capacity()
+                + self.root_children.capacity())
+                * std::mem::size_of::<u32>()
+    }
+
     /// Builds the hierarchy and its totals in linear time.
     ///
     /// Two index shapes are accepted: one with an explicit volume-root record

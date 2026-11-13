@@ -4,40 +4,23 @@
 
 //! Presorted index management and lazy rebuilding (FST-01, FST-02).
 
-use super::{MultiVolumeEngine, VolumeIndex};
+use super::MultiVolumeEngine;
 use cairn_core::sort::SortColumn;
-
-impl VolumeIndex {
-    /// Ensures a specific presorted column is up-to-date, lazily rebuilding if dirty.
-    pub fn ensure_presorted_column(&mut self, col: SortColumn) {
-        if self.presorted_dirty {
-            self.presorted.clear();
-            self.presorted_dirty = false;
-        }
-        self.presorted.ensure_column(
-            col,
-            &self.records,
-            &self.arena,
-            &self.path_cache,
-            self.drive_letter,
-        );
-    }
-}
 
 impl MultiVolumeEngine {
     /// Ensures presorted indices across all volumes are up to date for the requested sort column.
     pub fn ensure_presorted_indices(&self, sort_by: SortColumn) {
+        let column_has_presort = matches!(
+            sort_by,
+            SortColumn::Name | SortColumn::Size | SortColumn::DateModified | SortColumn::Path
+        );
         let needs_rebuild = {
             let read_lock = self.volumes.read().unwrap();
             read_lock.values().any(|v| {
-                v.presorted_dirty
-                    || match sort_by {
-                        SortColumn::Name => v.presorted.by_name.is_empty(),
-                        SortColumn::Size => v.presorted.by_size.is_empty(),
-                        SortColumn::DateModified => v.presorted.by_date_modified.is_empty(),
-                        SortColumn::Path => v.presorted.by_path.is_empty(),
-                        _ => false,
-                    }
+                v.is_presorted_dirty()
+                    || (column_has_presort
+                        && !v.records().is_empty()
+                        && !v.has_presorted_column(sort_by))
             })
         };
         if needs_rebuild {
@@ -76,21 +59,22 @@ mod tests {
             is_reparse_point: false,
         }]);
 
-        // After ingest, presorted is fresh
-        assert!(!vol.presorted_dirty);
+        // After ingest, presorted is clean and lazily unbuilt.
+        assert!(!vol.is_presorted_dirty());
+        assert!(!vol.has_presorted_column(SortColumn::Name));
 
         // Apply a USN change
-        vol.apply_usn_change(UsnChange::Created {
+        vol.apply_usn_changes([UsnChange::Created {
             frn: 11,
             parent_frn: 5,
             name: "new_file.txt".to_string(),
             is_dir: false,
             attributes: 0,
             ts: 200,
-        });
+        }]);
 
         // Dirty flag must be set
-        assert!(vol.presorted_dirty);
+        assert!(vol.is_presorted_dirty());
 
         // Add volume to engine
         engine.add_volume(vol);
@@ -107,16 +91,21 @@ mod tests {
         assert_eq!(total, 2);
         assert_eq!(results.len(), 2);
 
-        // Dirty flag must now be cleared and presorted by_name contains both records
-        engine.with_primary_volume(|v| {
+        // Dirty flag must now be cleared and ONLY the requested Name column is materialized.
+        engine.with_volumes(|volumes| {
+            let v = &volumes[&'C'];
             assert!(
-                !v.presorted_dirty,
+                !v.is_presorted_dirty(),
                 "presorted_dirty must be cleared by the all-files search"
             );
             assert_eq!(
-                v.presorted.by_name.len(),
-                2,
-                "presorted index must be rebuilt"
+                v.presorted_order(SortColumn::Name).map(<[u32]>::len),
+                Some(2),
+                "requested presorted column must be built"
+            );
+            assert!(
+                !v.has_presorted_column(SortColumn::Size),
+                "unrequested presorted columns must stay unbuilt"
             );
         });
     }

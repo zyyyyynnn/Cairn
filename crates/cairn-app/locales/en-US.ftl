@@ -129,6 +129,7 @@ recycle_bin_restore_all_confirm_action = Restore all items
 delete_failed_title = Could not delete the selection
 
 service_not_running_title = The background service is not running; search is unavailable
+service_timeout_title = The background service is not responding; try again
 service_not_installed_title = The background service is not installed; run the Cairn installer again
 service_incompatible_title = The background service is an incompatible build; check for updates in the Help menu and reinstall.
 service_unauthorized_title = This account cannot use the background service; use an authorized account

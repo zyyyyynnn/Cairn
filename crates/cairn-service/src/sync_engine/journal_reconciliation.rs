@@ -81,8 +81,8 @@ pub fn replay_usn_backlog(
     }
 
     if vol.last_usn != start_usn {
-        vol.path_cache.clear();
-        vol.presorted_dirty = true;
+        vol.clear_path_cache();
+        vol.mark_presorted_dirty();
     }
     vol.status.reconcile(start_usn, vol.last_usn, tail_usn);
     Ok(())
@@ -223,7 +223,7 @@ mod tests {
         finalize_scanned_volume(&mut vol, temp_dir.path(), Some(scan_start)).expect("reconciled");
 
         assert!(vol.last_usn >= t0);
-        assert!(!vol.records.is_empty());
+        assert!(!vol.records().is_empty());
         assert!(matches!(
             vol.status.state(),
             VolumeState::Synced | VolumeState::CatchingUp(_)

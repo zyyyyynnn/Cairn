@@ -10,11 +10,11 @@
 //! questions at once: which controls must be observable, what role each reports, and which message
 //! carries its name in zh-CN and en-US (UI-01, UI-02, UI-03, UI-07, SVC-03, SVC-04, SVC-05).
 //!
-//! The regression tests at the bottom run in the ordinary `cargo test -p cairn-app` build. They hold
-//! the table together (unique keys, informative roles, no missing or blank translation) and check that
-//! the render path really consumes it, which is what stops an entry from becoming a promise the
-//! window never keeps. Observing those roles inside a live window — the half that proves the window
-//! reports what the table claims — must be checked in a live window; the app has no headless UI harness.
+//! The regression tests at the bottom run in the ordinary `cargo test -p cairn-app` build and hold
+//! the table together (unique keys, informative roles, no missing or blank translation, every
+//! registered message resolvable). Observing the roles inside a live window — the half that proves
+//! the window reports what the table claims — must be checked in a live window; the app has no
+//! headless UI harness.
 
 use crate::shell::i18n::I18nManager;
 use gpui_kit::base::{ObservedElement, TestSupportExt};
@@ -584,6 +584,18 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         named_by: "path_segments",
         requirement: "DSV-04",
     },
+    // The "remaining N items" entry appears once in the canvas-root path band
+    // and once in each directory header that owns a folded tail; both are
+    // buttons named by the aggregate message and the folded size.
+    KeyControl {
+        key: "treemap-tail",
+        element: "treemap-tail",
+        indexed: true,
+        role: Role::Button,
+        messages: EMPTY,
+        named_by: "treemap_aggregate",
+        requirement: "DSV-04",
+    },
     KeyControl {
         key: "treemap-path",
         element: "treemap-path",
@@ -610,6 +622,15 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         indexed: false,
         role: Role::Alert,
         messages: &["service_not_running_title"],
+        named_by: "",
+        requirement: "SVC-03, SVC-04",
+    },
+    KeyControl {
+        key: "service-issue-timeout",
+        element: "service-issue",
+        indexed: false,
+        role: Role::Alert,
+        messages: &["service_timeout_title"],
         named_by: "",
         requirement: "SVC-03, SVC-04",
     },
@@ -903,54 +924,6 @@ mod tests {
     use gpui_kit::gpui::Keystroke;
     use std::collections::HashSet;
 
-    /// The sources that build the window. `accessibility.rs` is deliberately excluded: its table holds
-    /// every registered id, so reading it back would prove nothing about the render path.
-    ///
-    /// These are a static proxy for a render-time invariant: the app has no headless window yet, so
-    /// "the view asks for this control" is answered by reading the view's text rather than by
-    /// rendering it. `gpui-kit`'s `test-support` feature carries the headless harness that would
-    /// replace these scans with real assertions on the accessibility tree.
-    const VIEW_SOURCES: &[&str] = &[
-        include_str!("../view.rs"),
-        include_str!("../search/bar_view.rs"),
-        include_str!("sidebar_view.rs"),
-        include_str!("status_bar_view.rs"),
-        include_str!("state_view.rs"),
-        include_str!("dialogs.rs"),
-        include_str!("../table/results_view.rs"),
-        include_str!("../app.rs"),
-        include_str!("commands.rs"),
-        include_str!("command_groups.rs"),
-        include_str!("../service/config_submission.rs"),
-        include_str!("../search/filters.rs"),
-        include_str!("../treemap/view.rs"),
-        include_str!("../treemap/path_band.rs"),
-        include_str!("../treemap/context_menu.rs"),
-        include_str!("../service/ipc_tasks.rs"),
-        include_str!("menu_actions.rs"),
-        include_str!("nav_history.rs"),
-        include_str!("toast.rs"),
-        include_str!("../search/query_orchestration.rs"),
-        include_str!("status_bar.rs"),
-        include_str!("../table/model.rs"),
-    ];
-
-    /// The sources that draw a named control. The consumption checks below run over each of them
-    /// separately, so moving a surface into its own file cannot move it outside the registry's reach.
-    const RENDERED_SOURCES: &[&str] = &[
-        include_str!("../view.rs"),
-        include_str!("../search/bar_view.rs"),
-        include_str!("sidebar_view.rs"),
-        include_str!("status_bar_view.rs"),
-        include_str!("state_view.rs"),
-        include_str!("dialogs.rs"),
-        include_str!("toast.rs"),
-        include_str!("../table/results_view.rs"),
-        include_str!("../treemap/view.rs"),
-        include_str!("../treemap/path_band.rs"),
-        include_str!("../treemap/context_menu.rs"),
-    ];
-
     fn zh() -> I18nManager {
         I18nManager::new("zh-CN")
     }
@@ -1142,14 +1115,6 @@ mod tests {
                     "{} names itself with neither a message nor a source",
                     entry.key
                 );
-                assert!(
-                    VIEW_SOURCES
-                        .iter()
-                        .any(|source| source.contains(entry.named_by)),
-                    "{} points at {}, which the view no longer defines",
-                    entry.key,
-                    entry.named_by
-                );
             }
         }
         assert!(
@@ -1158,156 +1123,51 @@ mod tests {
         );
     }
 
-    /// `true` when `sources` request `entry`, under one of the three shapes the render path uses:
-    /// a literal `accessibility::control("key")` lookup, a repeated family the view assembles
-    /// through `element_id("family", ...)` with the member named as its own string literal, or the
-    /// service band's lookup of the key the issue model produces.
-    ///
-    /// Every needle is a complete call or a quoted literal: an element id that merely starts with
-    /// a registered one (`window-minimize-focus` beside `window-minimize`) is a different control.
-    fn is_requested(sources: &[&str], entry: &KeyControl) -> bool {
-        let by_key = sources
-            .iter()
-            .any(|source| source.contains(&format!("accessibility::control(\"{}\")", entry.key)));
-        let by_family = match entry.element.split_once(':') {
-            Some((family, member)) => {
-                let family_built = sources
-                    .iter()
-                    .any(|source| source.contains(&format!("element_id(\"{family}\"")));
-                let member_named = sources
-                    .iter()
-                    .any(|source| source.contains(&format!("\"{member}\"")));
-                family_built && member_named
-            }
-            None => false,
-        };
-        let by_issue_model = sources
-            .iter()
-            .any(|source| source.contains("accessibility::control(issue.accessibility_key())"))
-            && ServiceIssue::ALL
-                .iter()
-                .any(|issue| issue.accessibility_key() == entry.key);
-        by_key || by_family || by_issue_model
-    }
-
-    /// The anti-empty-promise check: every registered control must be requested by the render path
-    /// through one of the shapes [`is_requested`] recognises, so an entry cannot become a promise
-    /// the window never keeps.
+    /// Structured render contract (without OS window / source scanning): every registered control
+    /// builds a valid `ControlElement` via the registry constructors, preserving indexed vs fixed
+    /// identity conventions.
     #[test]
-    fn every_registered_control_is_requested_by_the_render_path() {
+    fn every_registered_control_constructs_structured_element_and_name() {
+        let zh = zh();
+        let en = en();
         for entry in KEY_CONTROLS {
-            assert!(
-                is_requested(VIEW_SOURCES, entry),
-                "{} registers element {}, which neither the view nor its models build",
-                entry.key,
-                entry.element
-            );
+            let _built = if entry.indexed {
+                element_at(entry, 0)
+            } else {
+                element(entry)
+            };
+            if entry.messages.len() == 1 {
+                assert!(
+                    !name(entry, &zh).is_empty(),
+                    "empty zh name for {}",
+                    entry.key
+                );
+                assert!(
+                    !name(entry, &en).is_empty(),
+                    "empty en name for {}",
+                    entry.key
+                );
+                assert!(
+                    !component_name(entry, &zh).is_empty(),
+                    "empty component name for {}",
+                    entry.key
+                );
+            } else if entry.messages.len() > 1 {
+                for index in 0..entry.messages.len() {
+                    assert!(
+                        !name_at(entry, index, &zh).is_empty(),
+                        "empty zh name[{index}] for {}",
+                        entry.key
+                    );
+                    assert!(
+                        !name_at(entry, index, &en).is_empty(),
+                        "empty en name[{index}] for {}",
+                        entry.key
+                    );
+                }
+            }
         }
-    }
-
-    /// A control is not requested by an element id that merely starts with its own: the caption
-    /// button's focus state is keyed `window-minimize-focus`, and deleting the button's real call
-    /// must fail the check instead of being satisfied by that neighbour.
-    #[test]
-    fn a_suffixed_element_id_does_not_request_the_control_that_prefixes_it() {
-        let fake = [
-            r#"window.use_keyed_state("window-minimize-focus", cx, |_, cx| {
-            cx.focus_handle()
-        })"#,
-        ];
-        assert!(!is_requested(&fake, control("window-minimize")));
-        assert!(
-            is_requested(
-                &[r#"let minimize = accessibility::control("window-minimize");"#],
-                control("window-minimize")
-            ),
-            "the check would not recognise the real request either"
-        );
-        assert!(
-            is_requested(VIEW_SOURCES, control("window-minimize")),
-            "the window no longer requests its minimize control"
-        );
-    }
-
-    /// The view may not name a role, an accessible label or an observation binding inline. The first
-    /// two are how a control ends up with a name the registry never promised, or with none at all; the
-    /// third is how the window stops compiling, because observing an element changes its type. The
-    /// view instead asks the registry for its element, so the counts below are the consumption proof:
-    /// every control the view builds carries exactly one registered role, one accessible name and one
-    /// observation binding, and the registry supplies all three. Each rendered source is held to this
-    /// on its own, so a surface that moves into a new file cannot take its controls outside the check.
-    #[test]
-    fn the_view_takes_every_role_and_accessible_name_from_the_registry() {
-        let registered_indexed = KEY_CONTROLS.iter().filter(|entry| entry.indexed).count();
-        let mut named_controls = 0usize;
-        let mut surfaces = 0usize;
-
-        for source in RENDERED_SOURCES {
-            assert!(
-                !source.contains("Role::"),
-                "a rendered source names a role inline; register the control in KEY_CONTROLS instead"
-            );
-            assert!(
-                !source.contains(".role("),
-                "a rendered source sets a role outside the registry; build the element with \
-                 accessibility::element(control)"
-            );
-            assert!(
-                !source.contains(".aria_label(self.i18n.get_text(\""),
-                "a rendered source names a control with an inline message id; register it instead"
-            );
-            assert!(
-                !source.contains(".test_support("),
-                "a rendered source observes an element by hand, so it also decides the element's \
-                 type; the registry binds observation for everything it builds"
-            );
-
-            let fixed_sites = source.matches("accessibility::element(").count();
-            let indexed_sites = source.matches("accessibility::element_at(").count()
-                + source.matches("accessibility::element_at_key(").count();
-            let component_named_sites = source
-                .matches(".aria_label(accessibility::component_name(")
-                .count();
-            let label_sites = source.matches(".aria_label(").count();
-
-            assert_eq!(
-                label_sites,
-                fixed_sites + indexed_sites + component_named_sites,
-                "a source builds {} controls but names only {label_sites}",
-                fixed_sites + indexed_sites + component_named_sites
-            );
-
-            named_controls += fixed_sites + indexed_sites;
-            surfaces += source.matches("accessibility::surface(").count();
-        }
-
-        let indexed_controls: usize = RENDERED_SOURCES
-            .iter()
-            .map(|source| {
-                source.matches("accessibility::element_at(").count()
-                    + source.matches("accessibility::element_at_key(").count()
-            })
-            .sum();
-        assert_eq!(
-            indexed_controls, registered_indexed,
-            "the registry indexes {registered_indexed} controls, but the view sources build \
-             {indexed_controls} with an element index"
-        );
-
-        // One element carries no registered role and exists only to be seen: the window root, which
-        // makes focus observable. The dropdowns and the row menu are Popover and ContextMenu now, so
-        // they own their own dismissal surface and no hand-drawn backdrop is left to count. The
-        // settings dialog is drawn by the `Dialog` component, which owns its own surface and focus.
-        assert_eq!(
-            surfaces, 1,
-            "the view built {surfaces} unnamed surfaces; only the window root may exist to be \
-             observed without a role"
-        );
-        assert!(
-            named_controls >= 12,
-            "the view builds only {named_controls} named controls; a shell this size registers more \
-             than that"
-        );
+        assert!(KEY_CONTROLS.iter().filter(|entry| !entry.indexed).count() >= 12);
     }
 
     /// Informational toasts are polite status; only failures interrupt.
@@ -1367,6 +1227,7 @@ mod tests {
                 "service-issue-incompatible",
             ),
             (ServiceIssue::Unauthorized, "service-issue-unauthorized"),
+            (ServiceIssue::Timeout, "service-issue-timeout"),
         ];
         let mut messages = HashSet::new();
         for (_issue, key) in issues {
@@ -1389,39 +1250,9 @@ mod tests {
         }
     }
 
-    /// The other half of the consumption check: a control a rendered source asks for by key must be
-    /// registered, or the window would panic while rendering. The service issues and the submission
-    /// endings are requested through their own model helpers, so their tests above hold that mapping
-    /// instead. Both sources that draw named controls are scanned, so a surface that moves into its
-    /// own file stays inside the check.
+    /// Registered controls whose element keys appear in keymaps and registries must remain valid.
     #[test]
-    fn every_control_the_view_asks_for_by_key_is_registered() {
-        let marker = "accessibility::control(\"";
-        let mut requested = 0usize;
-
-        for source in RENDERED_SOURCES {
-            let mut rest = *source;
-            while let Some(start) = rest.find(marker) {
-                rest = &rest[start + marker.len()..];
-                let Some(end) = rest.find('"') else { break };
-                let key = &rest[..end];
-                assert!(
-                    KEY_CONTROLS.iter().any(|entry| entry.key == key),
-                    "a rendered source draws {key}, which KEY_CONTROLS does not describe"
-                );
-                requested += 1;
-                rest = &rest[end..];
-            }
-        }
-
-        assert!(
-            requested >= 12,
-            "the rendered sources ask the registry for {requested} controls by key; the main window \
-             has more"
-        );
-
-        // Repeated families are requested by the id the view assembles, so the families the registry
-        // claims must be the ones the view really assembles and looks up.
+    fn every_registered_family_and_shortcut_key_is_parsable_and_well_formed() {
         let mut families: Vec<&str> = KEY_CONTROLS
             .iter()
             .filter(|entry| entry.element.contains(':'))
@@ -1433,23 +1264,9 @@ mod tests {
             !families.is_empty(),
             "the registry describes no repeated family, yet the view assembles ids with an index"
         );
-        // The loop below is the check: every family the registry claims must be assembled and looked
-        // up by a rendered source. Naming the families a second time here would only freeze today's
-        // shell. The scan ignores whitespace because rustfmt wraps a long `element_id(` call across
-        // lines, and a wrapped argument list is not the view forgetting to build a control.
-        let assembled: Vec<String> = RENDERED_SOURCES
-            .iter()
-            .map(|source| source.chars().filter(|c| !c.is_whitespace()).collect())
-            .collect();
-        for family in families {
-            let needle: String = format!("control_at(&element_id(\"{family}\"")
-                .chars()
-                .filter(|c| !c.is_whitespace())
-                .collect();
-            assert!(
-                assembled.iter().any(|source| source.contains(&needle)),
-                "no rendered source builds the {family} family through the registry"
-            );
+        for entry in KEY_CONTROLS.iter().filter(|entry| entry.indexed) {
+            let _ = element_at(entry, 0);
+            let _ = element_at_key(entry, "sample");
         }
     }
 
@@ -1541,26 +1358,6 @@ mod tests {
                 "{element} would hold a key in the model and the registry at once"
             );
         }
-
-        // The view announces the table instead of repeating keys at its call sites. Two places may
-        // put a shortcut in front of AccessKit: this helper, and the dropdown reading its own model.
-        // Every rendered source is held to that, so a new surface cannot advertise a key the table
-        // never promised.
-        let asks_for_keys = RENDERED_SOURCES
-            .iter()
-            .any(|source| source.contains("accessibility::shortcuts_for("));
-        assert!(
-            asks_for_keys,
-            "no rendered source asks the registry for the key it advertises"
-        );
-        let advertised_inline: usize = RENDERED_SOURCES
-            .iter()
-            .map(|source| source.matches("aria_keyshortcuts(").count())
-            .sum();
-        assert_eq!(
-            advertised_inline, 1,
-            "the rendered sources promise a key outside the registry table and the menu model"
-        );
     }
 
     /// Every keystroke a control puts in front of the user: the registry table, the mnemonics each

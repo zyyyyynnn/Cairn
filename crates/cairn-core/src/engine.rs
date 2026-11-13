@@ -11,10 +11,7 @@ use crate::syntax::{QueryExpr, SearchTerm};
 use memchr::memmem::Finder;
 use rayon::prelude::*;
 use regex::Regex;
-use std::collections::{HashMap, HashSet};
 use std::ops::Range;
-#[cfg(test)]
-use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -133,7 +130,7 @@ fn execute_query_inner(
         }
     }
 
-    let regexes = RegexPrograms::compile(query);
+    let compiled = CompiledExpr::compile(query);
     let chunk_size = 16384;
 
     let scan_chunk = |chunk: &[u32]| -> Vec<u32> {
@@ -148,17 +145,19 @@ fn execute_query_inner(
                 continue;
             }
 
-            if evaluate_expr(
+            if evaluate_compiled_expr(
                 rec,
                 idx,
                 records,
                 arena,
                 path_cache,
                 drive_letter,
-                query,
-                &regexes,
+                &compiled,
                 content_hit,
             ) {
+                if matched.is_empty() {
+                    matched.reserve(64);
+                }
                 matched.push(idx);
             }
         }
@@ -177,17 +176,19 @@ fn execute_query_inner(
                 continue;
             }
 
-            if evaluate_expr(
+            if evaluate_compiled_expr(
                 rec,
                 idx,
                 records,
                 arena,
                 path_cache,
                 drive_letter,
-                query,
-                &regexes,
+                &compiled,
                 content_hit,
             ) {
+                if matched.is_empty() {
+                    matched.reserve(64);
+                }
                 matched.push(idx);
             }
         }
@@ -241,30 +242,347 @@ pub enum GlobToken {
     Char(char), // exact or folded char
 }
 
-/// Precomputed query text representations compiled once per query execution to eliminate
-/// inner-loop heap allocations in `match_text` and `evaluate_term`.
 #[derive(Clone, Debug)]
-pub(crate) struct CompiledTerm {
-    pub(crate) ascii_lower: String,
-    pub(crate) lower: String,
-    pub(crate) folded: Vec<u8>,
-    pub(crate) finder: Finder<'static>,
-    pub(crate) glob_tokens: Option<Vec<GlobToken>>,
-    pub(crate) glob_tokens_cs: Option<Vec<GlobToken>>,
+enum AsciiGlobFast {
+    Suffix {
+        bytes: Vec<u8>,
+        forbid_sep: bool,
+    },
+    Prefix {
+        bytes: Vec<u8>,
+        forbid_sep: bool,
+    },
+    Affix {
+        prefix: Vec<u8>,
+        suffix: Vec<u8>,
+    },
+    Contains {
+        finder: Box<Finder<'static>>,
+        forbid_sep: bool,
+    },
+    Exact {
+        bytes: Vec<u8>,
+    },
 }
 
-/// Precompiled query execution state containing the expression, regex programs and precomputed
-/// query term representations.
+#[derive(Clone, Debug)]
+struct CompiledGlob {
+    tokens: Vec<GlobToken>,
+    fast: Option<AsciiGlobFast>,
+}
+
+impl CompiledGlob {
+    fn compile(pattern: &str, case_sensitive: bool) -> Self {
+        let tokens = parse_glob_tokens(pattern, case_sensitive);
+        let fast = if pattern.is_ascii() {
+            Self::build_fast_kind(pattern, &tokens, case_sensitive)
+        } else {
+            None
+        };
+        Self { tokens, fast }
+    }
+
+    fn tokens_to_ascii_bytes(
+        pattern_bytes: &[u8],
+        tokens: &[GlobToken],
+        case_sensitive: bool,
+    ) -> Option<Vec<u8>> {
+        if case_sensitive {
+            let mut out = Vec::with_capacity(tokens.len());
+            for tok in tokens {
+                match *tok {
+                    GlobToken::Char(c) if c.is_ascii() => out.push(c as u8),
+                    _ => return None,
+                }
+            }
+            let _ = pattern_bytes;
+            Some(out)
+        } else {
+            let mut out = Vec::with_capacity(tokens.len());
+            for tok in tokens {
+                match *tok {
+                    GlobToken::Char(c) if c.is_ascii() => out.push((c as u8).to_ascii_lowercase()),
+                    _ => return None,
+                }
+            }
+            Some(out)
+        }
+    }
+
+    fn build_fast_kind(
+        pattern: &str,
+        tokens: &[GlobToken],
+        case_sensitive: bool,
+    ) -> Option<AsciiGlobFast> {
+        let p_bytes = pattern.as_bytes();
+        if tokens.iter().any(|t| matches!(t, GlobToken::Question)) {
+            return None;
+        }
+        if tokens.iter().all(|t| matches!(t, GlobToken::Char(_))) {
+            let bytes = Self::tokens_to_ascii_bytes(p_bytes, tokens, case_sensitive)?;
+            return Some(AsciiGlobFast::Exact { bytes });
+        }
+        if tokens.len() >= 2 && matches!(tokens[0], GlobToken::Star | GlobToken::DoubleStar) {
+            let rest = &tokens[1..];
+            if rest.iter().all(|t| matches!(t, GlobToken::Char(_))) {
+                let bytes = Self::tokens_to_ascii_bytes(p_bytes, rest, case_sensitive)?;
+                return Some(AsciiGlobFast::Suffix {
+                    bytes,
+                    forbid_sep: tokens[0] == GlobToken::Star,
+                });
+            }
+        }
+        if tokens.len() >= 2
+            && matches!(
+                tokens[tokens.len() - 1],
+                GlobToken::Star | GlobToken::DoubleStar
+            )
+        {
+            let head = &tokens[..tokens.len() - 1];
+            if head.iter().all(|t| matches!(t, GlobToken::Char(_))) {
+                let bytes = Self::tokens_to_ascii_bytes(p_bytes, head, case_sensitive)?;
+                return Some(AsciiGlobFast::Prefix {
+                    bytes,
+                    forbid_sep: tokens[tokens.len() - 1] == GlobToken::Star,
+                });
+            }
+        }
+        if tokens.len() >= 3 {
+            let first = tokens[0];
+            let last = tokens[tokens.len() - 1];
+            if (first == GlobToken::Star && last == GlobToken::Star)
+                || (first == GlobToken::DoubleStar && last == GlobToken::DoubleStar)
+            {
+                let mid = &tokens[1..tokens.len() - 1];
+                if mid.iter().all(|t| matches!(t, GlobToken::Char(_))) {
+                    let bytes = Self::tokens_to_ascii_bytes(p_bytes, mid, case_sensitive)?;
+                    if memchr::memchr2(b'\\', b'/', &bytes).is_none() {
+                        return Some(AsciiGlobFast::Contains {
+                            finder: Box::new(Finder::new(&bytes).into_owned()),
+                            forbid_sep: first == GlobToken::Star,
+                        });
+                    }
+                }
+            }
+            if let Some(star_pos) = tokens.iter().position(|&t| t == GlobToken::Star) {
+                if star_pos > 0
+                    && star_pos + 1 < tokens.len()
+                    && tokens[..star_pos]
+                        .iter()
+                        .all(|t| matches!(t, GlobToken::Char(_)))
+                    && tokens[star_pos + 1..]
+                        .iter()
+                        .all(|t| matches!(t, GlobToken::Char(_)))
+                {
+                    let prefix =
+                        Self::tokens_to_ascii_bytes(p_bytes, &tokens[..star_pos], case_sensitive)?;
+                    let suffix = Self::tokens_to_ascii_bytes(
+                        p_bytes,
+                        &tokens[star_pos + 1..],
+                        case_sensitive,
+                    )?;
+                    return Some(AsciiGlobFast::Affix { prefix, suffix });
+                }
+            }
+        }
+        None
+    }
+
+    #[inline]
+    fn matches(&self, target: &str, folded_bytes: Option<&[u8]>, case_sensitive: bool) -> bool {
+        if let Some(fast) = &self.fast {
+            let t_bytes = target.as_bytes();
+            match fast {
+                AsciiGlobFast::Exact { bytes } => {
+                    if target.len() == bytes.len() && t_bytes.is_ascii() {
+                        return match folded_bytes {
+                            Some(folded) if !case_sensitive => folded == bytes.as_slice(),
+                            _ if case_sensitive => t_bytes == bytes.as_slice(),
+                            _ => t_bytes.eq_ignore_ascii_case(bytes),
+                        };
+                    }
+                }
+                AsciiGlobFast::Suffix { bytes, forbid_sep } => {
+                    let lit_len = bytes.len();
+                    if target.len() < lit_len {
+                        return false;
+                    }
+                    let split = target.len() - lit_len;
+                    let tail = &t_bytes[split..];
+                    if tail.is_ascii() {
+                        let suffix_ok = match folded_bytes {
+                            Some(folded) if !case_sensitive => &folded[split..] == bytes.as_slice(),
+                            _ if case_sensitive => tail == bytes.as_slice(),
+                            _ => tail.eq_ignore_ascii_case(bytes),
+                        };
+                        if !suffix_ok {
+                            return false;
+                        }
+                        return !*forbid_sep
+                            || memchr::memchr2(b'\\', b'/', &t_bytes[..split]).is_none();
+                    }
+                }
+                AsciiGlobFast::Prefix { bytes, forbid_sep } => {
+                    let lit_len = bytes.len();
+                    if target.len() < lit_len {
+                        return false;
+                    }
+                    let head = &t_bytes[..lit_len];
+                    if head.is_ascii() {
+                        let prefix_ok = match folded_bytes {
+                            Some(folded) if !case_sensitive => {
+                                &folded[..lit_len] == bytes.as_slice()
+                            }
+                            _ if case_sensitive => head == bytes.as_slice(),
+                            _ => head.eq_ignore_ascii_case(bytes),
+                        };
+                        if !prefix_ok {
+                            return false;
+                        }
+                        return !*forbid_sep
+                            || memchr::memchr2(b'\\', b'/', &t_bytes[lit_len..]).is_none();
+                    }
+                }
+                AsciiGlobFast::Affix { prefix, suffix } => {
+                    let p_len = prefix.len();
+                    let s_len = suffix.len();
+                    if target.len() < p_len + s_len {
+                        return false;
+                    }
+                    let head = &t_bytes[..p_len];
+                    let split = target.len() - s_len;
+                    let tail = &t_bytes[split..];
+                    if head.is_ascii() && tail.is_ascii() {
+                        let ends_ok = match folded_bytes {
+                            Some(folded) if !case_sensitive => {
+                                &folded[..p_len] == prefix.as_slice()
+                                    && &folded[split..] == suffix.as_slice()
+                            }
+                            _ if case_sensitive => {
+                                head == prefix.as_slice() && tail == suffix.as_slice()
+                            }
+                            _ => {
+                                head.eq_ignore_ascii_case(prefix)
+                                    && tail.eq_ignore_ascii_case(suffix)
+                            }
+                        };
+                        if !ends_ok {
+                            return false;
+                        }
+                        return memchr::memchr2(b'\\', b'/', &t_bytes[p_len..split]).is_none();
+                    }
+                }
+                AsciiGlobFast::Contains { finder, forbid_sep } => {
+                    if *forbid_sep && memchr::memchr2(b'\\', b'/', t_bytes).is_some() {
+                        return false;
+                    }
+                    if t_bytes.is_ascii() {
+                        return match folded_bytes {
+                            Some(folded) if !case_sensitive => finder.find(folded).is_some(),
+                            _ if case_sensitive => finder.find(t_bytes).is_some(),
+                            _ => {
+                                if t_bytes.len() <= 256 {
+                                    let mut lower_buf = [0u8; 256];
+                                    for (dst, &src) in lower_buf.iter_mut().zip(t_bytes.iter()) {
+                                        *dst = src.to_ascii_lowercase();
+                                    }
+                                    finder.find(&lower_buf[..t_bytes.len()]).is_some()
+                                } else {
+                                    let lower: Vec<u8> =
+                                        t_bytes.iter().map(u8::to_ascii_lowercase).collect();
+                                    finder.find(&lower).is_some()
+                                }
+                            }
+                        };
+                    }
+                }
+            }
+        }
+        match_glob_tokens_nfa(&self.tokens, target, case_sensitive)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CompiledTermPlan {
+    term: SearchTerm,
+    ext_has_glob: bool,
+    ascii_lower_bytes: Option<Vec<u8>>,
+    lower: String,
+    finder: Finder<'static>,
+    regex: Option<Regex>,
+    glob: Option<CompiledGlob>,
+}
+
+impl CompiledTermPlan {
+    fn compile(term: &SearchTerm) -> Self {
+        let ext_has_glob = term
+            .ext_filter
+            .iter()
+            .any(|pattern| pattern.contains('*') || pattern.contains('?'));
+        let regex = if term.is_regex {
+            Regex::new(&term.text).ok()
+        } else {
+            None
+        };
+        let glob = if term.whole_filename && !term.is_regex {
+            Some(CompiledGlob::compile(&term.text, term.case_sensitive))
+        } else {
+            None
+        };
+        let ascii_lower_bytes = if term.text.is_ascii() {
+            Some(
+                term.text
+                    .as_bytes()
+                    .iter()
+                    .map(u8::to_ascii_lowercase)
+                    .collect(),
+            )
+        } else {
+            None
+        };
+        let lower = term.text.to_lowercase();
+        let folded = NamePool::fold_query_bytes(&term.text);
+        let finder = Finder::new(&folded).into_owned();
+        Self {
+            term: term.clone(),
+            ext_has_glob,
+            ascii_lower_bytes,
+            lower,
+            finder,
+            regex,
+            glob,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+enum CompiledExpr {
+    Term(Box<CompiledTermPlan>),
+    And(Vec<CompiledExpr>),
+    Or(Vec<CompiledExpr>),
+    Not(Box<CompiledExpr>),
+}
+
+impl CompiledExpr {
+    fn compile(query: &QueryExpr) -> Self {
+        match query {
+            QueryExpr::Term(term) => Self::Term(Box::new(CompiledTermPlan::compile(term))),
+            QueryExpr::And(terms) => Self::And(terms.iter().map(Self::compile).collect()),
+            QueryExpr::Or(terms) => Self::Or(terms.iter().map(Self::compile).collect()),
+            QueryExpr::Not(inner) => Self::Not(Box::new(Self::compile(inner))),
+        }
+    }
+}
+
+/// Precompiled query execution state ready to evaluate individual records without reallocations.
 pub struct CompiledQuery {
-    query: QueryExpr,
-    programs: RegexPrograms,
+    plan: CompiledExpr,
 }
 
 impl CompiledQuery {
     pub fn compile(query: &QueryExpr) -> Self {
         Self {
-            query: query.clone(),
-            programs: RegexPrograms::compile(query),
+            plan: CompiledExpr::compile(query),
         }
     }
 
@@ -278,189 +596,43 @@ impl CompiledQuery {
         path_cache: &DirectoryPathCache,
         drive_letter: char,
     ) -> bool {
-        evaluate_expr(
+        evaluate_compiled_expr(
             rec,
             idx,
             records,
             arena,
             path_cache,
             drive_letter,
-            &self.query,
-            &self.programs,
+            &self.plan,
             None,
         )
     }
 }
 
-/// The regex programs and precomputed query representations one query execution needs,
-/// compiled before the first record is read.
-///
-/// Deliberately scoped to a single [`execute_query`] call and immutable once built: it is
-/// shared by the parallel chunks of that query only, never across queries.
-struct RegexPrograms {
-    programs: HashMap<String, Regex>,
-    terms: HashMap<String, CompiledTerm>,
-    /// Test-only witnesses of the per-record recompilation defect: `compiles` must stay at
-    /// the number of distinct patterns however many records are matched, and `lookups` must
-    /// reach one per match attempt, i.e. the record loop really reads this cache.
-    #[cfg(test)]
-    compiles: AtomicUsize,
-    #[cfg(test)]
-    lookups: AtomicUsize,
-    #[cfg(test)]
-    term_compiles: AtomicUsize,
-    #[cfg(test)]
-    term_lookups: AtomicUsize,
-}
-
-impl RegexPrograms {
-    /// Compiles each distinct regex pattern and search term text of `query` exactly once.
-    fn compile(query: &QueryExpr) -> Self {
-        let mut built = Self {
-            programs: HashMap::new(),
-            terms: HashMap::new(),
-            #[cfg(test)]
-            compiles: AtomicUsize::new(0),
-            #[cfg(test)]
-            lookups: AtomicUsize::new(0),
-            #[cfg(test)]
-            term_compiles: AtomicUsize::new(0),
-            #[cfg(test)]
-            term_lookups: AtomicUsize::new(0),
-        };
-        for pattern in query.collect_regex_patterns() {
-            #[cfg(test)]
-            built.compiles.fetch_add(1, Ordering::Relaxed);
-            if let Ok(re) = Regex::new(pattern) {
-                built.programs.insert(pattern.to_string(), re);
-            }
-        }
-        for text in query.collect_search_texts() {
-            #[cfg(test)]
-            built.term_compiles.fetch_add(1, Ordering::Relaxed);
-            let folded = NamePool::fold_query_bytes(text);
-            let finder = Finder::new(&folded).into_owned();
-
-            let (glob_tokens, glob_tokens_cs) = if text.contains('*') || text.contains('?') {
-                (
-                    Some(parse_glob_tokens(text, false)),
-                    Some(parse_glob_tokens(text, true)),
-                )
-            } else {
-                (None, None)
-            };
-
-            built.terms.insert(
-                text.to_string(),
-                CompiledTerm {
-                    ascii_lower: text.to_ascii_lowercase(),
-                    lower: text.to_lowercase(),
-                    folded,
-                    finder,
-                    glob_tokens,
-                    glob_tokens_cs,
-                },
-            );
-        }
-        built
-    }
-
-    /// A program set with nothing in it, for the tests that exercise non-regex matching.
-    #[cfg(test)]
-    fn empty() -> Self {
-        Self {
-            programs: HashMap::new(),
-            terms: HashMap::new(),
-            compiles: AtomicUsize::new(0),
-            lookups: AtomicUsize::new(0),
-            term_compiles: AtomicUsize::new(0),
-            term_lookups: AtomicUsize::new(0),
-        }
-    }
-
-    fn get(&self, pattern: &str) -> Option<&Regex> {
-        #[cfg(test)]
-        self.lookups.fetch_add(1, Ordering::Relaxed);
-        self.programs.get(pattern)
-    }
-
-    fn get_term(&self, text: &str) -> Option<&CompiledTerm> {
-        #[cfg(test)]
-        self.term_lookups.fetch_add(1, Ordering::Relaxed);
-        self.terms.get(text)
-    }
-
-    fn get_ascii_lower<'b>(&'b self, text: &'b str) -> std::borrow::Cow<'b, str> {
-        if let Some(t) = self.get_term(text) {
-            std::borrow::Cow::Borrowed(&t.ascii_lower)
-        } else {
-            std::borrow::Cow::Owned(text.to_ascii_lowercase())
-        }
-    }
-
-    fn get_lower<'b>(&'b self, text: &'b str) -> std::borrow::Cow<'b, str> {
-        if let Some(t) = self.get_term(text) {
-            std::borrow::Cow::Borrowed(&t.lower)
-        } else {
-            std::borrow::Cow::Owned(text.to_lowercase())
-        }
-    }
-
-    fn get_folded<'b>(&'b self, text: &'b str) -> std::borrow::Cow<'b, [u8]> {
-        if let Some(t) = self.get_term(text) {
-            std::borrow::Cow::Borrowed(&t.folded)
-        } else {
-            std::borrow::Cow::Owned(NamePool::fold_query_bytes(text))
-        }
-    }
-
-    #[cfg(test)]
-    fn compiles(&self) -> usize {
-        self.compiles.load(Ordering::Relaxed)
-    }
-
-    #[cfg(test)]
-    fn lookups(&self) -> usize {
-        self.lookups.load(Ordering::Relaxed)
-    }
-
-    #[cfg(test)]
-    fn term_compiles(&self) -> usize {
-        self.term_compiles.load(Ordering::Relaxed)
-    }
-
-    #[cfg(test)]
-    fn term_lookups(&self) -> usize {
-        self.term_lookups.load(Ordering::Relaxed)
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
-fn evaluate_expr(
+fn evaluate_compiled_expr(
     rec: &FileRecord,
     idx: u32,
     records: &[FileRecord],
     arena: &NamePool,
     path_cache: &DirectoryPathCache,
     drive_letter: char,
-    expr: &QueryExpr,
-    regexes: &RegexPrograms,
+    expr: &CompiledExpr,
     content_hit: Option<ContentHitResolver<'_>>,
 ) -> bool {
     match expr {
-        QueryExpr::Term(term) => evaluate_term(
+        CompiledExpr::Term(plan) => evaluate_compiled_term(
             rec,
             idx,
             records,
             arena,
             path_cache,
             drive_letter,
-            term,
-            regexes,
+            plan,
             content_hit,
         ),
-        QueryExpr::And(terms) => terms.iter().all(|sub| {
-            evaluate_expr(
+        CompiledExpr::And(terms) => terms.iter().all(|sub| {
+            evaluate_compiled_expr(
                 rec,
                 idx,
                 records,
@@ -468,12 +640,11 @@ fn evaluate_expr(
                 path_cache,
                 drive_letter,
                 sub,
-                regexes,
                 content_hit,
             )
         }),
-        QueryExpr::Or(terms) => terms.iter().any(|sub| {
-            evaluate_expr(
+        CompiledExpr::Or(terms) => terms.iter().any(|sub| {
+            evaluate_compiled_expr(
                 rec,
                 idx,
                 records,
@@ -481,11 +652,10 @@ fn evaluate_expr(
                 path_cache,
                 drive_letter,
                 sub,
-                regexes,
                 content_hit,
             )
         }),
-        QueryExpr::Not(inner) => !evaluate_expr(
+        CompiledExpr::Not(inner) => !evaluate_compiled_expr(
             rec,
             idx,
             records,
@@ -493,24 +663,24 @@ fn evaluate_expr(
             path_cache,
             drive_letter,
             inner,
-            regexes,
             content_hit,
         ),
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn evaluate_term(
+fn evaluate_compiled_term(
     rec: &FileRecord,
     idx: u32,
     records: &[FileRecord],
     arena: &NamePool,
     path_cache: &DirectoryPathCache,
     drive_letter: char,
-    term: &SearchTerm,
-    regexes: &RegexPrograms,
+    plan: &CompiledTermPlan,
     content_hit: Option<ContentHitResolver<'_>>,
 ) -> bool {
+    let term = &plan.term;
+
     // 0. Unparsable search item (e.g. a lone `size:`): constrain to nothing rather than
     //    silently matching every record.
     if term.match_nothing {
@@ -547,13 +717,19 @@ fn evaluate_term(
         let ext = arena.get_ext(rec.name_offset, rec.name_len, rec.ext_offset);
         // SPEC QRY-04: `ext:` entries support `*` and `?`. Wildcard-free entries keep the exact
         // comparison so the common `ext:md` case does not pay for glob character allocation.
-        let matched = term.ext_filter.iter().any(|pattern| {
-            if pattern.contains('*') || pattern.contains('?') {
-                glob_match(pattern, ext, false)
-            } else {
-                ext.eq_ignore_ascii_case(pattern)
-            }
-        });
+        let matched = if !plan.ext_has_glob {
+            term.ext_filter
+                .iter()
+                .any(|pattern| ext.eq_ignore_ascii_case(pattern))
+        } else {
+            term.ext_filter.iter().any(|pattern| {
+                if pattern.contains('*') || pattern.contains('?') {
+                    glob_match(pattern, ext, false)
+                } else {
+                    ext.eq_ignore_ascii_case(pattern)
+                }
+            })
+        };
         if !matched {
             return false;
         }
@@ -603,9 +779,10 @@ fn evaluate_term(
 
     if term.match_path {
         let full_path = path_cache.get_full_path(records, arena, drive_letter, idx);
-        match_text(&full_path, &term.text, term, regexes)
+        match_compiled_text(&full_path, None, plan)
     } else {
         let name = arena.get_name(rec.name_offset, rec.name_len);
+        let folded_name = arena.get_folded(rec.name_offset, rec.name_len);
         if term.is_regex
             || term.whole_filename
             || term.case_sensitive
@@ -615,19 +792,56 @@ fn evaluate_term(
             || term.start_with
             || term.end_with
         {
-            match_text(name, &term.text, term, regexes)
+            match_compiled_text(name, Some(folded_name), plan)
         } else {
-            // SIMD fast path on folded_arena
-            let folded_name = arena.get_folded(rec.name_offset, rec.name_len);
-            if let Some(pre) = regexes.get_term(&term.text) {
-                pre.finder.find(folded_name).is_some()
-            } else {
-                let folded_query = regexes.get_folded(&term.text);
-                let finder = Finder::new(&folded_query);
-                finder.find(folded_name).is_some()
+            plan.finder.find(folded_name).is_some()
+        }
+    }
+}
+
+#[inline]
+fn starts_with_ignore_case(target: &str, query_lower: &str) -> bool {
+    if query_lower.is_empty() {
+        return true;
+    }
+    // Greek final sigma (U+03A3) is the only context-sensitive lowercase mapping in Rust stdlib.
+    if target.contains('\u{03A3}') {
+        return target.to_lowercase().starts_with(query_lower);
+    }
+    let mut target_chars = target.chars().flat_map(char::to_lowercase);
+    for q in query_lower.chars() {
+        if target_chars.next() != Some(q) {
+            return false;
+        }
+    }
+    true
+}
+
+#[inline]
+fn ends_with_ignore_case(target: &str, query_lower: &str) -> bool {
+    if query_lower.is_empty() {
+        return true;
+    }
+    if target.contains('\u{03A3}') {
+        return target.to_lowercase().ends_with(query_lower);
+    }
+    let mut q_rev = query_lower.chars().rev();
+    for ch in target.chars().rev() {
+        let mut folded = ['\0'; 3];
+        let mut len = 0usize;
+        for lc in ch.to_lowercase() {
+            folded[len] = lc;
+            len += 1;
+        }
+        for i in (0..len).rev() {
+            match q_rev.next() {
+                Some(q) if q == folded[i] => {}
+                Some(_) => return false,
+                None => return true,
             }
         }
     }
+    q_rev.next().is_none()
 }
 
 fn word_starts_with(word: &str, query: &str, query_lower: &str, case_sensitive: bool) -> bool {
@@ -639,15 +853,13 @@ fn word_starts_with(word: &str, query: &str, query_lower: &str, case_sensitive: 
     }
     if case_sensitive {
         word.starts_with(query)
-    } else if word.len() >= query.len()
-        && word.is_char_boundary(query.len())
-        && word[..query.len()].eq_ignore_ascii_case(query)
+    } else if query.is_ascii()
+        && word.len() >= query.len()
+        && word.as_bytes()[..query.len()].is_ascii()
     {
-        true
-    } else if word.is_ascii() && query.is_ascii() {
-        false
+        word.as_bytes()[..query.len()].eq_ignore_ascii_case(query.as_bytes())
     } else {
-        word.to_lowercase().starts_with(query_lower)
+        starts_with_ignore_case(word, query_lower)
     }
 }
 
@@ -660,74 +872,67 @@ fn word_ends_with(word: &str, query: &str, query_lower: &str, case_sensitive: bo
     }
     if case_sensitive {
         word.ends_with(query)
-    } else {
-        let offset = word.len().saturating_sub(query.len());
-        if word.len() >= query.len()
-            && word.is_char_boundary(offset)
-            && word[offset..].eq_ignore_ascii_case(query)
-        {
-            true
-        } else if word.is_ascii() && query.is_ascii() {
-            false
+    } else if query.is_ascii() && word.len() >= query.len() {
+        let offset = word.len() - query.len();
+        if word.as_bytes()[offset..].is_ascii() {
+            word.as_bytes()[offset..].eq_ignore_ascii_case(query.as_bytes())
         } else {
-            word.to_lowercase().ends_with(query_lower)
+            ends_with_ignore_case(word, query_lower)
         }
+    } else {
+        ends_with_ignore_case(word, query_lower)
     }
 }
 
-fn match_text(target: &str, query: &str, term: &SearchTerm, regexes: &RegexPrograms) -> bool {
+fn match_compiled_text(target: &str, folded_bytes: Option<&[u8]>, plan: &CompiledTermPlan) -> bool {
+    let term = &plan.term;
+    let query = term.text.as_str();
+
     if term.is_regex {
-        return regexes.get(query).is_some_and(|re| re.is_match(target));
+        return plan.regex.as_ref().is_some_and(|re| re.is_match(target));
     }
 
-    if term.whole_filename {
-        // Glob wildcard pattern
-        if let Some(pre) = regexes.get_term(query) {
-            let tokens = if term.case_sensitive {
-                pre.glob_tokens_cs.as_deref()
-            } else {
-                pre.glob_tokens.as_deref()
-            };
-            if let Some(tokens) = tokens {
-                return match_glob_tokens(tokens, target, term.case_sensitive);
-            }
-        }
-        return glob_match(query, target, term.case_sensitive);
+    if let Some(glob) = &plan.glob {
+        return glob.matches(target, folded_bytes, term.case_sensitive);
     }
 
     if term.start_with {
         if term.case_sensitive {
             return target.starts_with(query);
-        } else if target.len() >= query.len()
-            && target.is_char_boundary(query.len())
-            && target[..query.len()].eq_ignore_ascii_case(query)
-        {
-            return true;
-        } else if target.is_ascii() && query.is_ascii() {
-            return false;
-        } else {
-            let q_lower = regexes.get_lower(query);
-            return target.to_lowercase().starts_with(q_lower.as_ref());
         }
+        if let Some(q_ascii) = &plan.ascii_lower_bytes {
+            if target.len() < q_ascii.len() {
+                return false;
+            }
+            let head = &target.as_bytes()[..q_ascii.len()];
+            if head.is_ascii() {
+                return match folded_bytes {
+                    Some(folded) => &folded[..q_ascii.len()] == q_ascii.as_slice(),
+                    None => head.eq_ignore_ascii_case(q_ascii),
+                };
+            }
+        }
+        return starts_with_ignore_case(target, &plan.lower);
     }
 
     if term.end_with {
         if term.case_sensitive {
             return target.ends_with(query);
-        } else {
-            let offset = target.len().saturating_sub(query.len());
-            if target.len() >= query.len()
-                && target.is_char_boundary(offset)
-                && target[offset..].eq_ignore_ascii_case(query)
-            {
-                return true;
-            } else if target.is_ascii() && query.is_ascii() {
+        }
+        if let Some(q_ascii) = &plan.ascii_lower_bytes {
+            if target.len() < q_ascii.len() {
                 return false;
-            } else {
-                let q_lower = regexes.get_lower(query);
-                return target.to_lowercase().ends_with(q_lower.as_ref());
+            }
+            let offset = target.len() - q_ascii.len();
+            let tail = &target.as_bytes()[offset..];
+            if tail.is_ascii() {
+                return match folded_bytes {
+                    Some(folded) => &folded[offset..] == q_ascii.as_slice(),
+                    None => tail.eq_ignore_ascii_case(q_ascii),
+                };
             }
         }
+        return ends_with_ignore_case(target, &plan.lower);
     }
 
     if term.whole_words {
@@ -737,77 +942,59 @@ fn match_text(target: &str, query: &str, term: &SearchTerm, regexes: &RegexProgr
         } else if query.is_ascii() {
             return words.into_iter().any(|w| w.eq_ignore_ascii_case(query));
         } else {
-            let q_lower = regexes.get_lower(query);
             return words.into_iter().any(|w| {
                 if w.eq_ignore_ascii_case(query) {
                     true
                 } else if w.is_ascii() {
                     false
                 } else {
-                    w.to_lowercase() == q_lower.as_ref()
+                    w.to_lowercase() == plan.lower
                 }
             });
         }
     }
 
     if term.prefix && term.suffix {
-        let q_lower = regexes.get_lower(query);
         let words = target.split(|c: char| !c.is_alphanumeric());
         return words.into_iter().any(|w| {
-            word_starts_with(w, query, q_lower.as_ref(), term.case_sensitive)
-                && word_ends_with(w, query, q_lower.as_ref(), term.case_sensitive)
+            word_starts_with(w, query, &plan.lower, term.case_sensitive)
+                && word_ends_with(w, query, &plan.lower, term.case_sensitive)
         });
     }
 
     if term.prefix {
-        let q_lower = regexes.get_lower(query);
         let words = target.split(|c: char| !c.is_alphanumeric());
         return words
             .into_iter()
-            .any(|w| word_starts_with(w, query, q_lower.as_ref(), term.case_sensitive));
+            .any(|w| word_starts_with(w, query, &plan.lower, term.case_sensitive));
     }
 
     if term.suffix {
-        let q_lower = regexes.get_lower(query);
         let words = target.split(|c: char| !c.is_alphanumeric());
         return words
             .into_iter()
-            .any(|w| word_ends_with(w, query, q_lower.as_ref(), term.case_sensitive));
+            .any(|w| word_ends_with(w, query, &plan.lower, term.case_sensitive));
     }
 
     if term.case_sensitive {
         target.contains(query)
-    } else if target.is_ascii() && query.is_ascii() {
-        contains_ignore_ascii_case(target, query)
-    } else if query.is_ascii() {
-        let q_ascii_lower = regexes.get_ascii_lower(query);
-        target.to_ascii_lowercase().contains(q_ascii_lower.as_ref())
-    } else {
-        let q_lower = regexes.get_lower(query);
-        target.to_lowercase().contains(q_lower.as_ref())
-    }
-}
-
-#[inline]
-fn contains_ignore_ascii_case(target: &str, query: &str) -> bool {
-    if query.is_empty() {
-        return true;
-    }
-    if target.len() < query.len() {
-        return false;
-    }
-    let q_bytes = query.as_bytes();
-    let t_bytes = target.as_bytes();
-    let first = q_bytes[0].to_ascii_lowercase();
-    let query_len = q_bytes.len();
-    for i in 0..=(t_bytes.len() - query_len) {
-        if t_bytes[i].to_ascii_lowercase() == first
-            && t_bytes[i..i + query_len].eq_ignore_ascii_case(q_bytes)
-        {
-            return true;
+    } else if plan.ascii_lower_bytes.is_some() {
+        let t_bytes = target.as_bytes();
+        if t_bytes.len() < query.len() {
+            false
+        } else if t_bytes.len() <= 256 {
+            let mut lower_buf = [0u8; 256];
+            for (dst, &src) in lower_buf.iter_mut().zip(t_bytes.iter()) {
+                *dst = src.to_ascii_lowercase();
+            }
+            plan.finder.find(&lower_buf[..t_bytes.len()]).is_some()
+        } else {
+            let lower: Vec<u8> = t_bytes.iter().map(u8::to_ascii_lowercase).collect();
+            plan.finder.find(&lower).is_some()
         }
+    } else {
+        target.to_lowercase().contains(&plan.lower)
     }
-    false
 }
 
 /// Unicode-aware glob token parsing supporting `*` (no separator), `**` (with separators), and `?` (single char).
@@ -845,17 +1032,7 @@ pub fn parse_glob_tokens(pattern: &str, case_sensitive: bool) -> Vec<GlobToken> 
 
 /// Matches precompiled glob tokens against text without reparsing the pattern.
 pub fn match_glob_tokens(tokens: &[GlobToken], text: &str, case_sensitive: bool) -> bool {
-    let char_count = text.chars().count();
-    if char_count <= 256 {
-        let mut buf = ['\0'; 256];
-        for (i, c) in text.chars().enumerate() {
-            buf[i] = c;
-        }
-        match_glob_recursive(tokens, &buf[..char_count], case_sensitive)
-    } else {
-        let t_chars: Vec<char> = text.chars().collect();
-        match_glob_recursive(tokens, &t_chars, case_sensitive)
-    }
+    match_glob_tokens_nfa(tokens, text, case_sensitive)
 }
 
 /// Unicode-aware glob matching supporting `*` (no separator), `**` (with separators), and `?` (single char).
@@ -864,105 +1041,90 @@ pub fn glob_match(pattern: &str, text: &str, case_sensitive: bool) -> bool {
     match_glob_tokens(&tokens, text, case_sensitive)
 }
 
-/// Matches with a visited-state set over (token, text) positions. Every step advances one of the
-/// two indices, so a repeated state can only repeat a failure; the memo keeps star chains from
-/// backtracking exponentially.
-fn match_glob_recursive(tokens: &[GlobToken], t_chars: &[char], case_sensitive: bool) -> bool {
-    let mut visited: HashSet<(usize, usize)> = HashSet::new();
-    match_glob_step(tokens, t_chars, case_sensitive, 0, 0, &mut visited)
+fn match_glob_tokens_nfa(tokens: &[GlobToken], text: &str, case_sensitive: bool) -> bool {
+    let state_count = tokens.len() + 1;
+    if state_count <= 65 {
+        let mut curr = [false; 65];
+        let mut next = [false; 65];
+        run_glob_nfa(
+            tokens,
+            text,
+            case_sensitive,
+            &mut curr[..state_count],
+            &mut next[..state_count],
+        )
+    } else {
+        let mut curr = vec![false; state_count];
+        let mut next = vec![false; state_count];
+        run_glob_nfa(tokens, text, case_sensitive, &mut curr, &mut next)
+    }
 }
 
-fn match_glob_step(
+fn run_glob_nfa(
     tokens: &[GlobToken],
-    t_chars: &[char],
+    text: &str,
     case_sensitive: bool,
-    token_ix: usize,
-    text_ix: usize,
-    visited: &mut HashSet<(usize, usize)>,
+    curr: &mut [bool],
+    next: &mut [bool],
 ) -> bool {
-    if token_ix == tokens.len() {
-        return text_ix == t_chars.len();
-    }
-    if !visited.insert((token_ix, text_ix)) {
-        return false;
+    let end = tokens.len();
+    curr[0] = true;
+    for pos in 0..end {
+        if curr[pos] && matches!(tokens[pos], GlobToken::Star | GlobToken::DoubleStar) {
+            curr[pos + 1] = true;
+        }
     }
 
-    match tokens[token_ix] {
-        GlobToken::DoubleStar => {
-            match_glob_step(
-                tokens,
-                t_chars,
-                case_sensitive,
-                token_ix + 1,
-                text_ix,
-                visited,
-            ) || (text_ix < t_chars.len()
-                && match_glob_step(
-                    tokens,
-                    t_chars,
-                    case_sensitive,
-                    token_ix,
-                    text_ix + 1,
-                    visited,
-                ))
-        }
-        GlobToken::Star => {
-            match_glob_step(
-                tokens,
-                t_chars,
-                case_sensitive,
-                token_ix + 1,
-                text_ix,
-                visited,
-            ) || (text_ix < t_chars.len()
-                && t_chars[text_ix] != '\\'
-                && t_chars[text_ix] != '/'
-                && match_glob_step(
-                    tokens,
-                    t_chars,
-                    case_sensitive,
-                    token_ix,
-                    text_ix + 1,
-                    visited,
-                ))
-        }
-        GlobToken::Question => {
-            text_ix < t_chars.len()
-                && t_chars[text_ix] != '\\'
-                && t_chars[text_ix] != '/'
-                && match_glob_step(
-                    tokens,
-                    t_chars,
-                    case_sensitive,
-                    token_ix + 1,
-                    text_ix + 1,
-                    visited,
-                )
-        }
-        GlobToken::Char(expected) => {
-            if text_ix < t_chars.len() {
-                let actual = if case_sensitive {
-                    t_chars[text_ix]
-                } else {
-                    t_chars[text_ix]
-                        .to_lowercase()
-                        .next()
-                        .unwrap_or(t_chars[text_ix])
-                };
-                actual == expected
-                    && match_glob_step(
-                        tokens,
-                        t_chars,
-                        case_sensitive,
-                        token_ix + 1,
-                        text_ix + 1,
-                        visited,
-                    )
-            } else {
-                false
+    for ch in text.chars() {
+        let is_sep = ch == '\\' || ch == '/';
+        let norm = if case_sensitive {
+            ch
+        } else {
+            ch.to_lowercase().next().unwrap_or(ch)
+        };
+        let mut any_active = false;
+        for pos in 0..end {
+            if !curr[pos] {
+                continue;
+            }
+            match tokens[pos] {
+                GlobToken::DoubleStar => {
+                    next[pos] = true;
+                    any_active = true;
+                }
+                GlobToken::Star => {
+                    if !is_sep {
+                        next[pos] = true;
+                        any_active = true;
+                    }
+                }
+                GlobToken::Question => {
+                    if !is_sep {
+                        next[pos + 1] = true;
+                        any_active = true;
+                    }
+                }
+                GlobToken::Char(expected) => {
+                    if norm == expected {
+                        next[pos + 1] = true;
+                        any_active = true;
+                    }
+                }
             }
         }
+        if !any_active {
+            return false;
+        }
+        for pos in 0..end {
+            if next[pos] && matches!(tokens[pos], GlobToken::Star | GlobToken::DoubleStar) {
+                next[pos + 1] = true;
+            }
+        }
+        curr.copy_from_slice(next);
+        next.fill(false);
     }
+
+    curr[end]
 }
 
 #[cfg(test)]
@@ -1002,117 +1164,90 @@ mod tests {
     fn test_start_with_and_end_with_unicode_safety() {
         use crate::syntax::SearchTerm;
 
+        let check = |target: &str, term: SearchTerm| {
+            let plan = CompiledTermPlan::compile(&term);
+            match_compiled_text(target, None, &plan)
+        };
+
         // Query length 1 vs multi-byte characters in target (must not panic)
-        let term_start = SearchTerm {
-            text: "a".to_string(),
-            start_with: true,
-            case_sensitive: false,
-            ..Default::default()
-        };
-        assert!(!match_text(
+        assert!(!check(
             "中文测试.txt",
-            &term_start.text,
-            &term_start,
-            &RegexPrograms::empty(),
+            SearchTerm {
+                text: "a".to_string(),
+                start_with: true,
+                case_sensitive: false,
+                ..Default::default()
+            },
         ));
 
-        let term_start_match = SearchTerm {
-            text: "中".to_string(),
-            start_with: true,
-            case_sensitive: false,
-            ..Default::default()
-        };
-        assert!(match_text(
+        assert!(check(
             "中文测试.txt",
-            &term_start_match.text,
-            &term_start_match,
-            &RegexPrograms::empty()
+            SearchTerm {
+                text: "中".to_string(),
+                start_with: true,
+                case_sensitive: false,
+                ..Default::default()
+            },
         ));
 
-        let term_end = SearchTerm {
-            text: "a".to_string(),
-            end_with: true,
-            case_sensitive: false,
-            ..Default::default()
-        };
-        assert!(!match_text(
+        assert!(!check(
             "文件.测试",
-            &term_end.text,
-            &term_end,
-            &RegexPrograms::empty(),
+            SearchTerm {
+                text: "a".to_string(),
+                end_with: true,
+                case_sensitive: false,
+                ..Default::default()
+            },
         ));
 
-        let term_end_match = SearchTerm {
-            text: "试".to_string(),
-            end_with: true,
-            case_sensitive: false,
-            ..Default::default()
-        };
-        assert!(match_text(
+        assert!(check(
             "文件.测试",
-            &term_end_match.text,
-            &term_end_match,
-            &RegexPrograms::empty()
+            SearchTerm {
+                text: "试".to_string(),
+                end_with: true,
+                case_sensitive: false,
+                ..Default::default()
+            },
         ));
 
         // Unicode case-insensitive matching where characters have different uppercase/lowercase bytes
-        let term_cyrillic_start = SearchTerm {
-            text: "тест".to_string(),
-            start_with: true,
-            case_sensitive: false,
-            ..Default::default()
-        };
-        let cyr_prog =
-            RegexPrograms::compile(&crate::syntax::QueryExpr::Term(term_cyrillic_start.clone()));
-        assert!(match_text(
+        assert!(check(
             "Тест_123.txt",
-            &term_cyrillic_start.text,
-            &term_cyrillic_start,
-            &cyr_prog
+            SearchTerm {
+                text: "тест".to_string(),
+                start_with: true,
+                case_sensitive: false,
+                ..Default::default()
+            },
         ));
 
-        let term_cyrillic_end = SearchTerm {
-            text: "тест".to_string(),
-            end_with: true,
-            case_sensitive: false,
-            ..Default::default()
-        };
-        let cyr_end_prog =
-            RegexPrograms::compile(&crate::syntax::QueryExpr::Term(term_cyrillic_end.clone()));
-        assert!(match_text(
+        assert!(check(
             "123_Тест",
-            &term_cyrillic_end.text,
-            &term_cyrillic_end,
-            &cyr_end_prog
+            SearchTerm {
+                text: "тест".to_string(),
+                end_with: true,
+                case_sensitive: false,
+                ..Default::default()
+            },
         ));
 
-        let term_cyrillic_ww = SearchTerm {
-            text: "тест".to_string(),
-            whole_words: true,
-            case_sensitive: false,
-            ..Default::default()
-        };
-        let cyr_ww_prog =
-            RegexPrograms::compile(&crate::syntax::QueryExpr::Term(term_cyrillic_ww.clone()));
-        assert!(match_text(
+        assert!(check(
             "Документ Тест 2026",
-            &term_cyrillic_ww.text,
-            &term_cyrillic_ww,
-            &cyr_ww_prog
+            SearchTerm {
+                text: "тест".to_string(),
+                whole_words: true,
+                case_sensitive: false,
+                ..Default::default()
+            },
         ));
 
-        let term_unicode_path = SearchTerm {
-            text: "école".to_string(),
-            case_sensitive: false,
-            ..Default::default()
-        };
-        let ecole_prog =
-            RegexPrograms::compile(&crate::syntax::QueryExpr::Term(term_unicode_path.clone()));
-        assert!(match_text(
+        assert!(check(
             r"C:\École\notes.txt",
-            &term_unicode_path.text,
-            &term_unicode_path,
-            &ecole_prog
+            SearchTerm {
+                text: "école".to_string(),
+                case_sensitive: false,
+                ..Default::default()
+            },
         ));
     }
 
@@ -1324,61 +1459,36 @@ mod tests {
         (pool, records)
     }
 
-    /// A regex query compiles each distinct pattern once for the whole execution, and every
-    /// record reads that compiled program: neither count may grow with the records.
     #[test]
-    fn test_regex_programs_compile_once_per_query() {
+    fn compiled_query_matches_execute_query_for_regex_and_repeated_terms() {
         use crate::syntax::parse_query;
 
-        const MATCHES: usize = 20_000;
-
-        // One pattern: one program for the whole execution.
-        let single = parse_query("regex:^report");
-        let programs = RegexPrograms::compile(&single);
-        assert_eq!(programs.compiles(), 1);
-
-        // Identical patterns share a program; distinct ones each get their own.
-        let repeated = RegexPrograms::compile(&parse_query("regex:log|regex:log regex:log"));
-        assert_eq!(repeated.compiles(), 1, "identical patterns compile once");
-        let distinct = RegexPrograms::compile(&parse_query("regex:rep.* regex:vi.*"));
-        assert_eq!(
-            distinct.compiles(),
-            2,
-            "distinct patterns each compile once"
-        );
-
-        // Every match attempt reads that one program: `match_text` has no other way to get a
-        // regex, which is what keeps the old per-record `Regex::new` from coming back.
-        let term = SearchTerm {
-            text: "^report".to_string(),
-            is_regex: true,
-            ..Default::default()
-        };
-        for _ in 0..MATCHES {
-            assert!(match_text("report.log", &term.text, &term, &programs));
-        }
-        assert_eq!(
-            programs.lookups(),
-            MATCHES,
-            "every record must be matched against the cached program"
-        );
-        assert_eq!(
-            programs.compiles(),
-            1,
-            "matching {MATCHES} records must not compile anything more"
-        );
-
-        // The same program serves a real execution end to end.
-        let names: Vec<&'static str> = vec!["report.log"; MATCHES];
+        let mut names = vec!["report.log"; 2_000];
+        names.push("vision_report.txt");
+        names.push("notes.md");
         let (pool, records) = records_of(&names);
         let path_cache = DirectoryPathCache::new();
         let cancel = CancellationToken::new();
-        let hits = execute_query(&records, &pool, &path_cache, 'C', &single, &cancel);
-        assert_eq!(
-            hits.len(),
-            MATCHES,
-            "the pattern must still match every record"
-        );
+
+        for q in [
+            "regex:^report",
+            "regex:log|regex:log regex:log",
+            "regex:rep.* regex:vi.*",
+        ] {
+            let expr = parse_query(q);
+            let compiled = CompiledQuery::compile(&expr);
+            let full = execute_query(&records, &pool, &path_cache, 'C', &expr, &cancel);
+            let via_compiled: Vec<u32> = records
+                .iter()
+                .enumerate()
+                .filter_map(|(i, rec)| {
+                    compiled
+                        .evaluate_record(rec, i as u32, &records, &pool, &path_cache, 'C')
+                        .then_some(i as u32)
+                })
+                .collect();
+            assert_eq!(via_compiled, full, "mismatch for compiled query {q}");
+        }
     }
 
     /// An unparsable pattern matches nothing, exactly as the per-record compilation did.
@@ -1463,43 +1573,81 @@ mod tests {
         assert!(!records[0].is_hidden() && !records[0].is_system());
     }
 
-    /// Search term text representations (lowercase, folded) are precomputed once per query
-    /// and reused across every record in match_text / evaluate_term without per-record heap allocations.
     #[test]
-    fn test_query_texts_precompute_once_per_query() {
+    fn compiled_query_handles_path_and_prefix_terms_without_divergence() {
         use crate::syntax::parse_query;
 
-        const MATCHES: usize = 20_000;
+        let names = ["sub_report_file.txt", "report.log", "other.txt"];
+        let (pool, records) = records_of(&names);
+        let path_cache = DirectoryPathCache::new();
+        let cancel = CancellationToken::new();
 
-        let query = parse_query("path:report prefix:sub");
-        let programs = RegexPrograms::compile(&query);
-        assert_eq!(programs.term_compiles(), 2);
-
-        let repeated = parse_query("report report report");
-        let rep_programs = RegexPrograms::compile(&repeated);
-        assert_eq!(
-            rep_programs.term_compiles(),
-            1,
-            "identical search term texts compile once"
-        );
-
-        let term = SearchTerm {
-            text: "report".to_string(),
-            prefix: true,
-            ..Default::default()
-        };
-        for _ in 0..MATCHES {
-            assert!(match_text("report_file.txt", &term.text, &term, &programs));
+        for q in ["path:report prefix:sub", "report report report"] {
+            let expr = parse_query(q);
+            let compiled = CompiledQuery::compile(&expr);
+            let full = execute_query(&records, &pool, &path_cache, 'C', &expr, &cancel);
+            let via_compiled: Vec<u32> = records
+                .iter()
+                .enumerate()
+                .filter_map(|(i, rec)| {
+                    compiled
+                        .evaluate_record(rec, i as u32, &records, &pool, &path_cache, 'C')
+                        .then_some(i as u32)
+                })
+                .collect();
+            assert_eq!(via_compiled, full, "mismatch for compiled query {q}");
         }
-        assert_eq!(
-            programs.term_lookups(),
-            MATCHES,
-            "every record must read the precomputed text from the program context"
-        );
-        assert_eq!(
-            programs.term_compiles(),
-            2,
-            "matching {MATCHES} records must not compile any new terms"
-        );
+    }
+
+    #[test]
+    fn glob_and_affix_queries_match_unicode_separators_and_case_edges() {
+        use crate::syntax::parse_query;
+
+        let names = [
+            "main.rs",
+            "MAIN.RS",
+            "中文模块.rs",
+            r"sub\fake.rs",
+            "cairn_core.rs",
+            "my_cairn_lib.txt",
+            "build_step.log",
+            "报告.LOG",
+            "\u{212A}mid\u{212A}",
+            "main.rİ",
+            "main.rK",
+            "Exact.TXT",
+            "dir",
+            "nested.rs",
+        ];
+        let (pool, mut records) = records_of(&names);
+        records[0].size = 2 * 1024 * 1024;
+        records[4].size = 3 * 1024 * 1024;
+        records[5].flags |= crate::model::FLAG_TOMBSTONE;
+        records[12].flags |= crate::model::FLAG_DIRECTORY;
+        records[13].parent_idx = 12;
+        let path_cache = DirectoryPathCache::new();
+        let cancel = CancellationToken::new();
+
+        let run = |q: &str| {
+            let expr = parse_query(q);
+            execute_query(&records, &pool, &path_cache, 'C', &expr, &cancel)
+        };
+
+        assert_eq!(run("*.rs"), vec![0, 1, 2, 4, 13]);
+        assert_eq!(run("**.rs"), vec![0, 1, 2, 3, 4, 13]);
+        assert_eq!(run(r"**\dir\*.rs"), vec![13]);
+        assert_eq!(run(r"**\*.rs"), vec![0, 1, 2, 3, 4, 13]);
+        assert_eq!(run("case:*.RS"), vec![1]);
+        assert_eq!(run("cairn_*"), vec![4]);
+        assert_eq!(run("cairn_*.rs"), vec![4]);
+        assert_eq!(run("*cairn*"), vec![4]);
+        assert_eq!(run("$:log"), vec![6, 7]);
+        assert_eq!(run("^:build"), vec![6]);
+        assert_eq!(run("$:k"), vec![8, 10]);
+        assert_eq!(run("^:k"), vec![8]);
+        assert_eq!(run("*.ri"), vec![9]);
+        assert_eq!(run("*.rk"), vec![10]);
+        assert_eq!(run("wfn:exact.txt"), vec![11]);
+        assert_eq!(run("size:>1mb"), vec![0, 4]);
     }
 }
