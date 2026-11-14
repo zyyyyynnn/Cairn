@@ -27,7 +27,6 @@ use fluent_bundle::FluentArgs;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::StyledExt;
 use gpui_kit::component::menu::ContextMenuExt as _;
-use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{h_flex, v_flex, Icon, Sizable as _};
 use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::*;
@@ -846,7 +845,7 @@ fn render_nested_node(
             .overflow_hidden()
             .cursor_pointer()
             .when(!rcx.panning && !rcx.suppress_tooltip, move |this| {
-                this.tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+                this.tooltip(crate::shell::tooltip::text(tooltip.clone()))
             })
             .on_mouse_down(MouseButton::Right, {
                 let v = aggregate_view.clone();
@@ -969,9 +968,7 @@ fn render_nested_node(
                     .when(header_focusable, |this| this.track_focus(&focus))
                     .aria_label(SharedString::from(format!("{label} {tail_size}")))
                     .when(!rcx.panning && !rcx.suppress_tooltip, move |this| {
-                        this.tooltip(move |window, cx| {
-                            Tooltip::new(chip_tooltip.clone()).build(window, cx)
-                        })
+                        this.tooltip(crate::shell::tooltip::text(chip_tooltip.clone()))
                     })
                     .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                         let path = chip_path.clone();
@@ -1068,9 +1065,7 @@ fn render_nested_node(
                 .overflow_hidden()
                 .cursor_pointer()
                 .when(!rcx.panning && !rcx.suppress_tooltip, move |this| {
-                    this.tooltip(move |window, cx| {
-                        Tooltip::new(header_tooltip.clone()).build(window, cx)
-                    })
+                    this.tooltip(crate::shell::tooltip::text(header_tooltip.clone()))
                 })
                 .on_mouse_down(MouseButton::Right, {
                     let v = header_view.clone();
@@ -1173,7 +1168,7 @@ fn render_nested_node(
         .cursor_pointer()
         // A leaf shows a single clipped line; hovering names the whole item.
         .when(!rcx.panning && !rcx.suppress_tooltip, move |this| {
-            this.tooltip(move |window, cx| Tooltip::new(leaf_tooltip.clone()).build(window, cx))
+            this.tooltip(crate::shell::tooltip::text(leaf_tooltip.clone()))
         })
         .on_mouse_down(MouseButton::Right, {
             let v = leaf_view.clone();

@@ -37,6 +37,7 @@ pub(crate) mod status_bar;
 pub(crate) mod status_bar_view;
 pub(crate) mod theme;
 pub(crate) mod toast;
+pub(crate) mod tooltip;
 #[cfg(windows)]
 pub(crate) mod tray;
 pub(crate) mod update;
