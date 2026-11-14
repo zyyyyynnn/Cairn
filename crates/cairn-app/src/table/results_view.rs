@@ -27,7 +27,6 @@ use gpui_kit::base::Disableable as _;
 use gpui_kit::component::input::Input;
 use gpui_kit::component::menu::ContextMenuExt;
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
-use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
     h_flex, v_flex, Icon, IconName, InteractiveElementExt as _, Sizable as _,
 };
@@ -1082,7 +1081,7 @@ impl CairnApp {
         let cell = if renaming {
             cell
         } else {
-            cell.tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+            cell.tooltip(crate::shell::tooltip::text(tooltip.clone()))
         };
         let cell = cell.child(
             Icon::new(result_row_icon(&row.name, extension, row.is_dir))
@@ -1129,7 +1128,7 @@ impl CairnApp {
                     this.child(
                         div()
                             .id(element_id("result-content-match", full_path))
-                            .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                            .tooltip(crate::shell::tooltip::text(tip.clone()))
                             .flex_shrink_0()
                             .px(rems(layout::SPACE_4))
                             .rounded(tokens.radius)
@@ -1156,7 +1155,7 @@ impl CairnApp {
 
         div()
             .id(element_id("result-path", full_path))
-            .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+            .tooltip(crate::shell::tooltip::text(tooltip.clone()))
             .lane_grow(self.results.column_widths.path)
             .min_w(rems(layout::PATH_MIN_COLUMN))
             .px(rems(layout::INNER_SPACING))

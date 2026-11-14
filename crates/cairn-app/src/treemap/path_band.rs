@@ -18,7 +18,6 @@ use fluent_bundle::FluentArgs;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::input::Input;
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
-use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{h_flex, ActiveTheme as _, Icon, Sizable as _};
 use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::*;
@@ -69,7 +68,7 @@ fn path_menu_option(
             .cursor_pointer()
             .child(Icon::new(IconName::Folder).xsmall().flex_shrink_0())
             .child(div().w(label_width).truncate().child(name.clone()))
-            .tooltip(move |window, cx| Tooltip::new(tooltip_text.clone()).build(window, cx))
+            .tooltip(crate::shell::tooltip::text(tooltip_text.clone()))
     })
     .on_click(move |_, window, cx| {
         view.update(cx, |this, cx| {
@@ -423,7 +422,7 @@ impl CairnApp {
                 .track_focus(&chip_focus)
                 .hover(|this| this.bg(tokens.row_hover).text_color(tokens.foreground))
                 .when(!editing, move |this| {
-                    this.tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+                    this.tooltip(crate::shell::tooltip::text(tooltip.clone()))
                 })
                 .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                     let path = chip_path.clone();
@@ -528,9 +527,7 @@ impl CairnApp {
                         // the label the pointer is on rather than to the whole
                         // field, which is a thousand pixels wide.
                         .when(!menu_open, move |this| {
-                            this.tooltip(move |window, cx| {
-                                Tooltip::new(tip.clone()).build(window, cx)
-                            })
+                            this.tooltip(crate::shell::tooltip::text(tip.clone()))
                         })
                         .child(text)
                         .into_any_element()
@@ -593,11 +590,7 @@ impl CairnApp {
                         ))
                         .when(!menu_open, {
                             let tip = path.clone();
-                            move |this| {
-                                this.tooltip(move |window, cx| {
-                                    Tooltip::new(tip.clone()).build(window, cx)
-                                })
-                            }
+                            move |this| this.tooltip(crate::shell::tooltip::text(tip.clone()))
                         })
                         .child(text)
                         .into_any_element()
@@ -707,9 +700,7 @@ impl CairnApp {
                             // The tooltip would sit on top of the menu the same
                             // press just opened, so it belongs to the quiet state.
                             .when(!menu_open, |this| {
-                                this.tooltip(move |window, cx| {
-                                    Tooltip::new(toggle_label.clone()).build(window, cx)
-                                })
+                                this.tooltip(crate::shell::tooltip::text(toggle_label.clone()))
                             })
                             // The separator and the menu trigger are one control:
                             // it points at the next path step while closed and
