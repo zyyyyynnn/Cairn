@@ -542,20 +542,24 @@ fn single_volume_filtered_sort_and_exclusions_keep_presorted_unbuilt() {
 /// does not depend on whether the view or a materialized result answers the query.
 #[test]
 fn an_excluded_subtree_keeps_the_all_files_space_total() {
+    fn fixture() -> VolumeIndex {
+        let mut vol = VolumeIndex::new('C');
+        vol.ingest_items(vec![
+            index_item(1, 0, "C:", true),
+            index_item(2, 1, "ExcludedDir", true),
+            sized_item(3, 2, "hidden.bin", false, 3 * 1024 * 1024),
+            sized_item(4, 1, "visible.bin", false, 1024),
+        ]);
+        vol
+    }
+
     let temp = tempfile::tempdir().expect("tempdir");
     let cfg = crate::config::ServiceConfig {
         excluded_paths: vec!["ExcludedDir".to_string()],
         ..Default::default()
     };
     let engine = MultiVolumeEngine::with_index_dir_drives_and_config(temp.path(), vec![], cfg);
-    let mut vol = VolumeIndex::new('C');
-    vol.ingest_items(vec![
-        index_item(1, 0, "C:", true),
-        index_item(2, 1, "ExcludedDir", true),
-        sized_item(3, 2, "hidden.bin", false, 3 * 1024 * 1024),
-        sized_item(4, 1, "visible.bin", false, 1024),
-    ]);
-    engine.add_volume(vol);
+    engine.add_volume(fixture());
 
     let cancel = CancellationToken::new();
     let defaults = QueryDefaults::default();
@@ -577,5 +581,15 @@ fn an_excluded_subtree_keeps_the_all_files_space_total() {
     assert_eq!(
         materialized.total_bytes, view.total_bytes,
         "the space total does not depend on how the rows are served"
+    );
+
+    let plain_temp = tempfile::tempdir().expect("tempdir");
+    let plain = MultiVolumeEngine::with_index_dir_and_drives(plain_temp.path(), vec![]);
+    plain.add_volume(fixture());
+    let unruled = plain.execute_search_multi("C: ", &defaults, SortColumn::Name, true, &cancel);
+    assert_eq!(
+        unruled.total_bytes,
+        3 * 1024 * 1024 + 1024,
+        "the same fixture without rules reports the same space"
     );
 }
