@@ -33,6 +33,11 @@ impl PathExclusions {
         Self { states, rules }
     }
 
+    /// Whether the configuration excludes anything at all.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.rules.is_empty()
+    }
+
     /// Whether one record of `volume` falls under the rules.
     pub(crate) fn excludes(&self, volume: &VolumeIndex, index: u32) -> bool {
         if let Some(states) = &self.states {

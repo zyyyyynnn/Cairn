@@ -1013,6 +1013,46 @@ fn the_public_ledger_covers_an_ingested_volume_and_its_single_column() {
     );
 }
 
+/// The all-files total is a maintained counter, not a scan of the order.
+#[test]
+fn live_file_bytes_tracks_ingest_resize_and_delete() {
+    let mut vol = VolumeIndex::new('C');
+    let file = |frn: u64, name: &str, size: u64| ExtractedItem {
+        frn,
+        parent_frn: 5,
+        name: name.to_string(),
+        is_dir: false,
+        size,
+        created_ts: 0,
+        modified_ts: 0,
+        flags: 0,
+        is_reparse_point: false,
+    };
+    vol.ingest_items(vec![
+        file(10, "alpha.txt", 10),
+        file(11, "beta.txt", 20),
+        ExtractedItem {
+            frn: 5,
+            parent_frn: 5,
+            name: ".".to_string(),
+            is_dir: true,
+            size: 0,
+            created_ts: 0,
+            modified_ts: 0,
+            flags: cairn_core::FLAG_DIRECTORY,
+            is_reparse_point: false,
+        },
+    ]);
+    assert_eq!(vol.live_file_bytes(), 30);
+
+    let beta = vol.first_record_index_for_frn(11).expect("beta");
+    vol.update_file_size(beta, 25);
+    assert_eq!(vol.live_file_bytes(), 35);
+
+    vol.apply_usn_changes([UsnChange::Deleted { frn: 11 }]);
+    assert_eq!(vol.live_file_bytes(), 10);
+}
+
 /// A record appended after the order was built merges into it; the table is not re-sorted.
 #[test]
 fn appended_records_merge_into_the_cached_presorted_column() {

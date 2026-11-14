@@ -168,6 +168,8 @@ pub struct VolumeIndex {
     presorted_delta: Vec<u32>,
     /// Live records (tombstones excluded), maintained incrementally so status summaries stay O(1).
     live_count: u64,
+    /// Sum of live file sizes. The all-files view reports it without scanning the order.
+    live_file_bytes: u64,
     /// Whether `FileRecord.size` on directory rows is the recursive aggregate of their indexed
     /// descendants. A cache written before folder sizes existed cannot prove this, so a load
     /// aggregates once and rewrites the flag; every later update maintains the totals in place.
@@ -200,6 +202,7 @@ impl VolumeIndex {
             generation: 0,
             presorted_version: 0,
             live_count: 0,
+            live_file_bytes: 0,
             // An empty table has no totals to be wrong about; the invariant holds trivially.
             directory_sizes_valid: true,
         }
@@ -211,6 +214,7 @@ impl VolumeIndex {
     pub fn clear(&mut self) {
         self.records = Vec::new();
         self.live_count = 0;
+        self.live_file_bytes = 0;
         self.arena.clear_and_shrink();
         self.path_cache.clear();
         self.presorted.clear_and_shrink();
@@ -252,14 +256,19 @@ impl VolumeIndex {
         self.directory_sizes_valid = loaded.directory_sizes_valid;
 
         let mut live_count = 0u64;
+        let mut live_file_bytes = 0u64;
         let mut frn_to_idx = FrnLookup::with_capacity(self.records.len());
         for (idx, record) in self.records.iter().enumerate() {
             if !record.is_tombstone() {
                 live_count = live_count.saturating_add(1);
+                if record.is_file() {
+                    live_file_bytes = live_file_bytes.saturating_add(record.size);
+                }
                 frn_to_idx.push(record.frn, idx as u32);
             }
         }
         self.live_count = live_count;
+        self.live_file_bytes = live_file_bytes;
         self.frn_to_idx = frn_to_idx;
         self.generation = self.generation.wrapping_add(1);
     }
@@ -335,6 +344,11 @@ impl VolumeIndex {
 
     pub fn live_count(&self) -> u64 {
         self.live_count
+    }
+
+    /// Sum of the live files' own bytes; directories contribute through their contents only.
+    pub fn live_file_bytes(&self) -> u64 {
+        self.live_file_bytes
     }
 
     pub fn directory_sizes_valid(&self) -> bool {
@@ -565,6 +579,7 @@ impl VolumeIndex {
             return;
         }
         let was_dir = record.is_dir();
+        let old_size = record.size;
         let mut flags =
             record.flags & !(cairn_core::FLAG_DIRECTORY | cairn_core::FLAG_REPARSE_POINT);
         if update.is_dir {
@@ -582,6 +597,11 @@ impl VolumeIndex {
         let kind_changed = was_dir != update.is_dir;
         if kind_changed {
             record.size = if update.is_dir { 0 } else { update.size };
+            self.live_file_bytes = if update.is_dir {
+                self.live_file_bytes.saturating_sub(old_size)
+            } else {
+                self.live_file_bytes.saturating_add(update.size)
+            };
         }
         if metadata_changed {
             self.mark_presorted_sizes_changed(std::iter::once(update.index));
@@ -753,6 +773,9 @@ impl VolumeIndex {
                 created_ts: item.created_ts,
             });
             self.live_count = self.live_count.saturating_add(1);
+            if self.records[idx as usize].is_file() {
+                self.live_file_bytes = self.live_file_bytes.saturating_add(item.size);
+            }
 
             self.frn_to_idx.push(item.frn, idx);
             parent_frns.push(item.parent_frn);
@@ -881,6 +904,11 @@ impl VolumeIndex {
         }
         let delta = new_size as i128 - record.size as i128;
         self.records[index as usize].size = new_size;
+        self.live_file_bytes = if delta >= 0 {
+            self.live_file_bytes.saturating_add(delta as u64)
+        } else {
+            self.live_file_bytes.saturating_sub((-delta) as u64)
+        };
         self.adjust_record_ancestors(index, delta);
         self.mark_presorted_sizes_changed(std::iter::once(index));
     }
@@ -1101,6 +1129,10 @@ impl VolumeIndex {
                         if was_dir != record.is_dir() {
                             // The size now means the other thing: a file's stream size or a
                             // directory's aggregate. A fresh aggregation restores the tree.
+                            if !was_dir {
+                                self.live_file_bytes =
+                                    self.live_file_bytes.saturating_sub(record.size);
+                            }
                             record.size = 0;
                             kind_changed = true;
                         }
@@ -1136,12 +1168,16 @@ impl VolumeIndex {
         }
         let parent_idx = rec.parent_idx;
         let size = rec.size as i128;
+        let was_file = !rec.is_dir();
         // A descendant of an already deleted directory has already left the ancestor totals with
         // that directory's recursive size.
         if !self.has_tombstone_ancestor(parent_idx) {
             self.adjust_parent_sizes(parent_idx, -size);
         }
         self.live_count = self.live_count.saturating_sub(1);
+        if was_file {
+            self.live_file_bytes = self.live_file_bytes.saturating_sub(size as u64);
+        }
         self.records[idx as usize].mark_tombstone();
         // A view that pages the live order counts visible rows; removing one shifts every
         // later offset, so the order's version moves even though the column itself is intact.
@@ -1293,6 +1329,12 @@ impl VolumeIndex {
         let new_arena_len = arena.len();
         self.records = records;
         self.live_count = self.records.len() as u64;
+        self.live_file_bytes = self
+            .records
+            .iter()
+            .filter(|record| record.is_file())
+            .map(|record| record.size)
+            .fold(0u64, u64::saturating_add);
         self.arena = arena;
         self.frn_to_idx = frn_to_idx;
         self.path_cache.clear();

@@ -551,21 +551,28 @@ impl MultiVolumeEngine {
                         .is_some_and(|drive| drive.eq_ignore_ascii_case(&vol.drive_letter));
                 if all_files {
                     if let Some(column) = presorted_col {
-                        let mut total = 0usize;
-                        let mut view_bytes = 0u64;
-                        for (read, &idx) in column.iter().enumerate() {
-                            if (read & 0xFFF) == 0 && cancel.is_cancelled() {
-                                return SearchOutcome::empty(highlight_terms, snippets);
+                        // Without path rules the volume's own counters are the exact totals, so
+                        // the view costs no scan; with rules the visible set needs the walk.
+                        let (total, view_bytes) = if exclusions.is_empty() {
+                            (vol.live_count() as usize, vol.live_file_bytes())
+                        } else {
+                            let mut total = 0usize;
+                            let mut view_bytes = 0u64;
+                            for (read, &idx) in column.iter().enumerate() {
+                                if (read & 0xFFF) == 0 && cancel.is_cancelled() {
+                                    return SearchOutcome::empty(highlight_terms, snippets);
+                                }
+                                let record = &vol.records()[idx as usize];
+                                if record.is_tombstone() || exclusions.excludes(vol, idx) {
+                                    continue;
+                                }
+                                total += 1;
+                                if record.is_file() {
+                                    view_bytes = view_bytes.saturating_add(record.size);
+                                }
                             }
-                            let record = &vol.records()[idx as usize];
-                            if record.is_tombstone() || exclusions.excludes(vol, idx) {
-                                continue;
-                            }
-                            total += 1;
-                            if record.is_file() {
-                                view_bytes = view_bytes.saturating_add(record.size);
-                            }
-                        }
+                            (total, view_bytes)
+                        };
                         return SearchOutcome {
                             rows: MatchSet::AllFiles(AllFilesView {
                                 drive_letter: vol.drive_letter,
