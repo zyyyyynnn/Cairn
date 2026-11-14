@@ -593,3 +593,42 @@ fn an_excluded_subtree_keeps_the_all_files_space_total() {
         "the same fixture without rules reports the same space"
     );
 }
+
+/// A rule that excludes the volume root leaves its children visible; the total then comes from
+/// the visible top-level records rather than from the root's recursive size.
+#[test]
+fn an_excluded_root_totals_the_visible_top_level_records() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let cfg = crate::config::ServiceConfig {
+        excluded_paths: vec!["*:".to_string()],
+        ..Default::default()
+    };
+    let engine = MultiVolumeEngine::with_index_dir_drives_and_config(temp.path(), vec![], cfg);
+    let mut vol = VolumeIndex::new('C');
+    vol.ingest_items(vec![
+        index_item(1, 0, "C:", true),
+        index_item(2, 1, "ExcludedDir", true),
+        sized_item(3, 2, "hidden.bin", false, 3 * 1024 * 1024),
+        sized_item(4, 1, "visible.bin", false, 1024),
+    ]);
+    engine.add_volume(vol);
+
+    let cancel = CancellationToken::new();
+    let outcome = engine.execute_search_multi(
+        "C: ",
+        &QueryDefaults::default(),
+        SortColumn::Name,
+        true,
+        &cancel,
+    );
+    assert!(matches!(outcome.rows, MatchSet::AllFiles(_)));
+    assert_eq!(
+        outcome.total, 3,
+        "the root is excluded; its descendants remain"
+    );
+    assert_eq!(
+        outcome.total_bytes,
+        3 * 1024 * 1024 + 1024,
+        "the visible top-level records cover the same space"
+    );
+}
