@@ -9,7 +9,7 @@
 | 纯逻辑 | 无系统调用、输入输出都是值 | `src` 内 `#[cfg(test)] mod tests` | 预算计算、排序比较、过滤器解析、错误码映射 |
 | 公开入口 | crate 的公开函数与协调器 Seam，用内存或伪造端口夹具调用 | `src` 内或 `crates/*/tests/` | `MultiVolumeEngine::treemap_tree`、`StartupCoordinator`、`SearchCoordinator`、`RowPresentationCache`、`FrnLookup` |
 | 协议与管道往返 | 真实帧编解码、真实命名管道上的请求与响应 | `crates/*/tests/` | 请求到响应的完整往返、版本拒绝、超长帧、超时与取消 |
-| 性能与内存账本门禁 | 多层级索引全账本字节预算与确定性查询延迟 | `xtask bench-query --check` | `IndexMemoryFootprint` 空闲与单列排序态 `<= 125 B/record`、多级目录查询 P95 阈值 |
+| 性能与内存账本门禁 | 10 万条多级目录合成语料上的索引字节预算与查询延迟回归 | `xtask bench-query --check` | `IndexMemoryFootprint` 空闲与单列排序态 `<= 125 B/record`、查询 P95 回归上限 250ms；SM-1 的 400 万条目标由发布前 release 实测 |
 | 权限与真机 | 裸盘读取、服务安装、UAC、MSI | 仅受控手工或 `--ignored` 层 | 实机索引、服务生命周期、同意对话框 |
 
 一个行为只在一层测一次，放在最接近用户的那一层；下层不重复上层已经断言过的结果。
@@ -71,4 +71,4 @@
 - `Test / Backfill`：构建 `cairn-worker` 并运行 `cairn-service` 内容回填 `#[ignore]` 端到端测试
 - `Test / Tooling`：`cairn-cli` `cairn-worker` `cairn-setup` `cairn-setup-bin` `xtask`，并执行 `cargo run --release -p xtask -- bench-query --check`
 
-新增测试默认必须被上述命令覆盖；无法进入 CI 的测试在“需要权限的验证”或“被忽略的测试”中登记。
+`Domain & System Test Suite` 汇总 `Test` 各层、Tooling 与 Backfill 的结果，作为必需状态检查；`Installer Package` 在 release 二进制与 Tooling 产物就绪后运行 `xtask` 的 `real_package_builds_msi_and_setup`。新增测试默认必须被上述命令覆盖；无法进入 CI 的测试在“需要权限的验证”或“被忽略的测试”中登记。

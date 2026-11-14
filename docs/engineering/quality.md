@@ -14,7 +14,7 @@
 | **安全与权限测试** | `cairn-service` `security::tests` | 校验默认与管理员 SDDL（SY/BA/IU 授权、NU/WD 拒绝）、内核安全描述符构造与目录/配置 DACL 收紧 |
 | **UI 与无障碍测试** | `CairnApp` / 无头结构化契约 + 真实窗口验收 | 快捷键注册表、AccessKit 角色、导航焦点、布局与视觉渲染需经过实机窗口核验 |
 | **输入法专项测试** | 手工与集成核验清单 | 微软拼音、搜狗拼音、微信输入法三款主流 IME 组合无丢字、不重字、候选窗不遮挡 |
-| **端到端性能与全账本基准** | `xtask bench-query` / `--check` | 多级目录合成语料下统计 `VolumeIndex::memory_footprint()` 完整堆账本（空闲态与单列懒排序态 `<= 125 B/record`）及查询 P95 延迟（不包含 Everything 对照） |
+| **端到端性能与全账本基准** | `xtask bench-query` / `--check` | 10 万条多级目录合成语料下统计 `VolumeIndex::memory_footprint()` 完整堆账本（空闲态与单列懒排序态 `<= 125 B/record`）及查询 P95 回归上限 250ms；SM-1 的 400 万条 P95 目标由发布前 release 实测（不包含 Everything 对照） |
 
 ### 1.2 静态检查与回归门禁
 代码变更合入与构建交付必须无条件通过：
