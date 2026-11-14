@@ -422,7 +422,9 @@ impl VolumeIndex {
         !self.presorted_delta.is_empty()
     }
 
-    /// Whether this volume needs work before `col` can answer an ordered read.
+    /// Whether this volume needs work before `col` can answer an ordered read. False means
+    /// either the column is current, the table is empty, or `col` has no presorted array at
+    /// all (created time, extension); callers still read through `presorted_order`.
     pub fn needs_presorted_column(&self, col: SortColumn) -> bool {
         if self.records.is_empty()
             || !matches!(
@@ -1358,8 +1360,9 @@ impl VolumeIndex {
         })
     }
 
-    /// Version of the path-derived exclusion verdicts; changes when a rename can move a
-    /// record between verdicts or the table is replaced.
+    /// Version of the path-derived exclusion verdicts. It moves when a rename can change a
+    /// verdict, on every rename while full-path rules are active, and when the table is
+    /// replaced.
     pub fn exclusion_epoch(&self) -> u64 {
         self.exclusion_epoch
     }
