@@ -4,34 +4,6 @@
 
 //! Presorted index management and lazy rebuilding (FST-01, FST-02).
 
-use super::MultiVolumeEngine;
-use cairn_core::sort::SortColumn;
-
-impl MultiVolumeEngine {
-    /// Ensures the requested sort column across all volumes. Only the four columns with a
-    /// presorted order take work; the volume decides whether that is a merge or a rebuild.
-    pub fn ensure_presorted_indices(&self, sort_by: SortColumn) {
-        if !matches!(
-            sort_by,
-            SortColumn::Name | SortColumn::Size | SortColumn::DateModified | SortColumn::Path
-        ) {
-            return;
-        }
-        let needs_work = {
-            let read_lock = self.volumes.read().unwrap();
-            read_lock
-                .values()
-                .any(|v| v.needs_presorted_column(sort_by))
-        };
-        if needs_work {
-            let mut write_lock = self.volumes.write().unwrap();
-            for vol in write_lock.values_mut() {
-                vol.ensure_presorted_column(sort_by);
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use crate::sync_engine::{MatchSet, MultiVolumeEngine, VolumeIndex};
@@ -235,7 +207,9 @@ mod tests {
             },
         ]);
         engine.add_volume(vol);
-        engine.ensure_presorted_indices(SortColumn::Size);
+        engine.update_volume('C', |volume| {
+            volume.ensure_presorted_column(SortColumn::Size)
+        });
 
         engine.update_volume('C', |volume| {
             volume.apply_usn_changes([UsnChange::Renamed {
@@ -246,7 +220,9 @@ mod tests {
                 is_new_name: true,
             }]);
         });
-        engine.ensure_presorted_indices(SortColumn::Size);
+        engine.update_volume('C', |volume| {
+            volume.ensure_presorted_column(SortColumn::Size)
+        });
         let merged = engine.with_volumes(|volumes| {
             volumes[&'C']
                 .presorted_order(SortColumn::Size)
@@ -254,8 +230,12 @@ mod tests {
                 .to_vec()
         });
 
-        engine.ensure_presorted_indices(SortColumn::Name);
-        engine.ensure_presorted_indices(SortColumn::Size);
+        engine.update_volume('C', |volume| {
+            volume.ensure_presorted_column(SortColumn::Name)
+        });
+        engine.update_volume('C', |volume| {
+            volume.ensure_presorted_column(SortColumn::Size)
+        });
         let rebuilt = engine.with_volumes(|volumes| {
             volumes[&'C']
                 .presorted_order(SortColumn::Size)
@@ -446,6 +426,81 @@ mod tests {
                 v.presorted_order(SortColumn::Name).map(<[u32]>::len),
                 Some(2),
                 "the drive-scoped query consumes the requested column"
+            );
+        });
+    }
+
+    /// A directory rename invalidates the path order; the next path-sorted view rebuilds it
+    /// instead of silently falling back to a materialized result.
+    #[test]
+    fn a_directory_rename_rebuilds_the_path_view() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let engine = MultiVolumeEngine::with_index_dir_and_drives(temp_dir.path(), vec![]);
+        let mut vol = VolumeIndex::new('C');
+        vol.ingest_items(vec![
+            ExtractedItem {
+                frn: 1,
+                parent_frn: 0,
+                name: "C:".to_string(),
+                is_dir: true,
+                size: 0,
+                created_ts: 0,
+                modified_ts: 0,
+                flags: 0,
+                is_reparse_point: false,
+            },
+            ExtractedItem {
+                frn: 2,
+                parent_frn: 1,
+                name: "docs".to_string(),
+                is_dir: true,
+                size: 0,
+                created_ts: 0,
+                modified_ts: 0,
+                flags: 0,
+                is_reparse_point: false,
+            },
+            ExtractedItem {
+                frn: 3,
+                parent_frn: 2,
+                name: "a.txt".to_string(),
+                is_dir: false,
+                size: 10,
+                created_ts: 0,
+                modified_ts: 0,
+                flags: 0,
+                is_reparse_point: false,
+            },
+        ]);
+        engine.add_volume(vol);
+
+        let cancel = CancellationToken::new();
+        let defaults = QueryDefaults::default();
+        let first = engine.execute_search_multi("C: ", &defaults, SortColumn::Path, true, &cancel);
+        assert!(matches!(first.rows, MatchSet::AllFiles(_)));
+
+        engine.update_volume('C', |volume| {
+            volume.apply_usn_changes([UsnChange::Renamed {
+                frn: 2,
+                parent_frn: 1,
+                name: "readme".to_string(),
+                is_dir: true,
+                is_new_name: true,
+            }]);
+        });
+
+        let second = engine.execute_search_multi("C: ", &defaults, SortColumn::Path, true, &cancel);
+        assert!(
+            matches!(second.rows, MatchSet::AllFiles(_)),
+            "the stale path order is rebuilt instead of falling back"
+        );
+        engine.with_volumes(|volumes| {
+            assert_eq!(
+                volumes[&'C']
+                    .presorted_order(SortColumn::Path)
+                    .map(<[u32]>::len),
+                Some(3),
+                "the rebuilt path order answers the next view"
             );
         });
     }

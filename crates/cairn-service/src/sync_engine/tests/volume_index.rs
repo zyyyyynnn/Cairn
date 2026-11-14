@@ -1407,4 +1407,24 @@ fn an_event_invalidates_only_the_orders_its_key_moves() {
     );
     vol.ensure_presorted_column(SortColumn::Name);
     assert!(vol.presorted_order(SortColumn::Name).is_some());
+
+    // A modification time moves only the modification order.
+    vol.ensure_presorted_column(SortColumn::Size);
+    vol.apply_usn_changes([UsnChange::BasicInfoChanged {
+        frn: 10,
+        ts: 5,
+        attributes: 0,
+    }]);
+    assert!(
+        vol.presorted_order(SortColumn::Size).is_some(),
+        "a new modification time does not move a record in the size order"
+    );
+
+    // A size change moves only the size order.
+    vol.ensure_presorted_column(SortColumn::DateModified);
+    vol.update_file_size(0, 200);
+    assert!(
+        vol.presorted_order(SortColumn::DateModified).is_some(),
+        "a new size does not move a record in the modification order"
+    );
 }

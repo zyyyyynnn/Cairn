@@ -186,7 +186,8 @@ pub struct VolumeIndex {
     /// descendants. A cache written before folder sizes existed cannot prove this, so a load
     /// aggregates once and rewrites the flag; every later update maintains the totals in place.
     directory_sizes_valid: bool,
-    /// Bumped whenever a record's path changes, so the cached exclusion states rebuild.
+    /// Bumped when a rename can change an exclusion verdict or the table is replaced, so the
+    /// cached exclusion states rebuild.
     exclusion_epoch: u64,
     /// The active rule set has forms the segment table cannot answer, so every rename must
     /// re-evaluate its verdict and invalidate open views.
@@ -434,7 +435,9 @@ impl VolumeIndex {
         {
             return false;
         }
-        self.presorted_column != Some(col) || !self.presorted_delta.is_empty()
+        self.presorted_column != Some(col)
+            || !self.presorted_delta.is_empty()
+            || (col == SortColumn::Path && self.presorted_path_stale)
     }
 
     /// Invalidates every column: the table itself changed (reconciliation, compaction).
@@ -465,12 +468,17 @@ impl VolumeIndex {
     /// Records renamed or moved. Name and path columns move with the new name; size and
     /// modification columns move too because the name is their tiebreak.
     pub fn mark_presorted_names_changed(&mut self, indices: impl IntoIterator<Item = u32>) {
-        self.mark_repositioned(indices, true, true);
+        self.mark_repositioned(indices, true, true, true);
     }
 
-    /// Records whose position in the size or modification order changed.
+    /// Records whose size key changed.
     pub fn mark_presorted_sizes_changed(&mut self, indices: impl IntoIterator<Item = u32>) {
-        self.mark_repositioned(indices, false, true);
+        self.mark_repositioned(indices, false, true, false);
+    }
+
+    /// Records whose modification time changed.
+    pub fn mark_presorted_dates_changed(&mut self, indices: impl IntoIterator<Item = u32>) {
+        self.mark_repositioned(indices, false, false, true);
     }
 
     /// A directory rename or move invalidates the path order for its whole subtree.
@@ -487,10 +495,12 @@ impl VolumeIndex {
         indices: impl IntoIterator<Item = u32>,
         names: bool,
         sizes: bool,
+        dates: bool,
     ) {
         let affects = match self.presorted_column {
             Some(SortColumn::Name) | Some(SortColumn::Path) => names,
-            Some(SortColumn::Size) | Some(SortColumn::DateModified) => sizes,
+            Some(SortColumn::Size) => sizes,
+            Some(SortColumn::DateModified) => dates,
             Some(SortColumn::DateCreated) | Some(SortColumn::Extension) | None => false,
         };
         if !affects {
@@ -549,7 +559,12 @@ impl VolumeIndex {
     /// is retained: the memory budget covers the lazy single-column state, so switching the
     /// sort column releases the previous order instead of accumulating columns.
     pub fn ensure_presorted_column(&mut self, col: SortColumn) {
-        if self.records.is_empty() {
+        if self.records.is_empty()
+            || !matches!(
+                col,
+                SortColumn::Name | SortColumn::Size | SortColumn::DateModified | SortColumn::Path
+            )
+        {
             return;
         }
         let built = self.presorted_column == Some(col) && self.presorted_has(col);
@@ -651,9 +666,7 @@ impl VolumeIndex {
         if update.is_reparse {
             flags |= cairn_core::FLAG_REPARSE_POINT;
         }
-        let metadata_changed = record.flags != flags
-            || record.created_ts != update.created_ts
-            || record.modified_ts != update.modified_ts;
+        let modified_changed = record.modified_ts != update.modified_ts;
         record.flags = flags;
         record.created_ts = update.created_ts;
         record.modified_ts = update.modified_ts;
@@ -666,10 +679,11 @@ impl VolumeIndex {
                 self.live_file_bytes.saturating_add(update.size)
             };
         }
-        if metadata_changed {
-            self.mark_presorted_sizes_changed(std::iter::once(update.index));
+        if modified_changed {
+            self.mark_presorted_dates_changed(std::iter::once(update.index));
         }
         if kind_changed {
+            self.mark_presorted_sizes_changed(std::iter::once(update.index));
             self.mark_directory_sizes_dirty();
         } else if !update.is_dir {
             self.update_file_size(update.index, update.size);
@@ -904,10 +918,7 @@ impl VolumeIndex {
     /// Moves one size delta up the parent chain. Tombstoned ancestors stop the walk: the deleted
     /// subtree's total was already removed when that ancestor was deleted.
     fn adjust_parent_sizes(&mut self, mut parent_idx: u32, delta: i128) {
-        let tracks_sizes = matches!(
-            self.presorted_column,
-            Some(SortColumn::Size | SortColumn::DateModified)
-        );
+        let tracks_sizes = self.presorted_column == Some(SortColumn::Size);
         let mut changed: Vec<u32> = Vec::new();
         let mut steps = 0usize;
         while parent_idx != FileRecord::ROOT_PARENT && (parent_idx as usize) < self.records.len() {
@@ -1231,7 +1242,10 @@ impl VolumeIndex {
                 }
                 if let Some(indices) = self.frn_to_idx.get(frn) {
                     let affected: Vec<u32> = indices.to_vec();
-                    self.mark_presorted_sizes_changed(affected);
+                    self.mark_presorted_dates_changed(affected.iter().copied());
+                    if kind_changed {
+                        self.mark_presorted_sizes_changed(affected);
+                    }
                 }
                 if kind_changed {
                     // One aggregation per applied batch, not one per event; the batch caller runs
@@ -1375,8 +1389,8 @@ impl VolumeIndex {
             .store(active, AtomicOrdering::Relaxed);
     }
 
-    /// The segment-exclusion states, cached until a path changes. Appended records extend the
-    /// cached table; a rename or a rebuilt table starts it over.
+    /// The segment-exclusion states, cached until a verdict can change. Appended records extend
+    /// the cached table; a verdict-changing rename or a rebuilt table starts it over.
     pub(crate) fn segment_excluded_states_cached(&self, segments: &[String]) -> Arc<Vec<u8>> {
         let mut cache = self.exclusion_cache.lock().unwrap();
         let needs_rebuild = match cache.as_ref() {
