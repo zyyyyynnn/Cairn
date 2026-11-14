@@ -227,6 +227,52 @@ fn cmp_name_entries(a: &NameSortEntry, b: &NameSortEntry, arena: &NamePool) -> O
     natural_cmp(na, nb)
 }
 
+/// The column's ascending order, including the name tiebreak the column builders use.
+fn cmp_indices(
+    col: SortColumn,
+    a: u32,
+    b: u32,
+    records: &[FileRecord],
+    arena: &NamePool,
+    path_cache: &DirectoryPathCache,
+    drive_letter: char,
+) -> Ordering {
+    let ra = &records[a as usize];
+    let rb = &records[b as usize];
+    match col {
+        SortColumn::Name => cmp_name_entries(
+            &make_name_entry(ra, a, arena),
+            &make_name_entry(rb, b, arena),
+            arena,
+        ),
+        SortColumn::Size => ra.size.cmp(&rb.size).then_with(|| {
+            cmp_name_entries(
+                &make_name_entry(ra, a, arena),
+                &make_name_entry(rb, b, arena),
+                arena,
+            )
+        }),
+        SortColumn::DateModified => ra.modified_ts.cmp(&rb.modified_ts).then_with(|| {
+            cmp_name_entries(
+                &make_name_entry(ra, a, arena),
+                &make_name_entry(rb, b, arena),
+                arena,
+            )
+        }),
+        SortColumn::Path => {
+            let pa = path_cache.get_parent_path(records, arena, drive_letter, a);
+            let pb = path_cache.get_parent_path(records, arena, drive_letter, b);
+            pa.cmp(&pb).then_with(|| {
+                natural_cmp(
+                    arena.get_name(ra.name_offset, ra.name_len),
+                    arena.get_name(rb.name_offset, rb.name_len),
+                )
+            })
+        }
+        SortColumn::DateCreated | SortColumn::Extension => Ordering::Equal,
+    }
+}
+
 #[inline]
 fn apply_sort_dir(ord: Ordering, dir: SortDirection) -> Ordering {
     if dir == SortDirection::Descending {
@@ -339,6 +385,55 @@ impl PresortedIndices {
             }
             _ => {}
         }
+    }
+
+    /// Merges records appended since the last build into the cached column. The appended
+    /// indices are new rows, so the existing order is still sorted and two sorted sequences
+    /// combine in one pass.
+    pub fn merge_appended(
+        &mut self,
+        col: SortColumn,
+        appended: &mut Vec<u32>,
+        records: &[FileRecord],
+        arena: &NamePool,
+        path_cache: &DirectoryPathCache,
+        drive_letter: char,
+    ) {
+        let base = match col {
+            SortColumn::Name => &mut self.by_name,
+            SortColumn::Size => &mut self.by_size,
+            SortColumn::DateModified => &mut self.by_date_modified,
+            SortColumn::Path => &mut self.by_path,
+            SortColumn::DateCreated | SortColumn::Extension => return,
+        };
+        appended.sort_unstable_by(|&a, &b| {
+            cmp_indices(col, a, b, records, arena, path_cache, drive_letter).then_with(|| a.cmp(&b))
+        });
+        let mut merged = Vec::with_capacity(base.len() + appended.len());
+        let (mut left, mut right) = (0usize, 0usize);
+        while left < base.len() && right < appended.len() {
+            let ord = cmp_indices(
+                col,
+                base[left],
+                appended[right],
+                records,
+                arena,
+                path_cache,
+                drive_letter,
+            )
+            .then_with(|| base[left].cmp(&appended[right]));
+            if ord == Ordering::Greater {
+                merged.push(appended[right]);
+                right += 1;
+            } else {
+                merged.push(base[left]);
+                left += 1;
+            }
+        }
+        merged.extend_from_slice(&base[left..]);
+        merged.extend_from_slice(&appended[right..]);
+        *base = merged;
+        appended.clear();
     }
 
     /// Builds the four presorted columns (name, size, modified, path). Each column sorts in

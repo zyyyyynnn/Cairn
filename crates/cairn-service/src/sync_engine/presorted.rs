@@ -8,22 +8,22 @@ use super::MultiVolumeEngine;
 use cairn_core::sort::SortColumn;
 
 impl MultiVolumeEngine {
-    /// Ensures presorted indices across all volumes are up to date for the requested sort column.
+    /// Ensures the requested sort column across all volumes. Only the four columns with a
+    /// presorted order take work; the volume decides whether that is a merge or a rebuild.
     pub fn ensure_presorted_indices(&self, sort_by: SortColumn) {
-        let column_has_presort = matches!(
+        if !matches!(
             sort_by,
             SortColumn::Name | SortColumn::Size | SortColumn::DateModified | SortColumn::Path
-        );
-        let needs_rebuild = {
+        ) {
+            return;
+        }
+        let needs_work = {
             let read_lock = self.volumes.read().unwrap();
-            read_lock.values().any(|v| {
-                v.is_presorted_dirty()
-                    || (column_has_presort
-                        && !v.records().is_empty()
-                        && !v.has_presorted_column(sort_by))
-            })
+            read_lock
+                .values()
+                .any(|v| v.needs_presorted_column(sort_by))
         };
-        if needs_rebuild {
+        if needs_work {
             let mut write_lock = self.volumes.write().unwrap();
             for vol in write_lock.values_mut() {
                 vol.ensure_presorted_column(sort_by);
@@ -73,8 +73,8 @@ mod tests {
             ts: 200,
         }]);
 
-        // Dirty flag must be set
-        assert!(vol.is_presorted_dirty());
+        // The unbuilt column must be built before it can answer an ordered read.
+        assert!(vol.needs_presorted_column(SortColumn::Name));
 
         // Add volume to engine
         engine.add_volume(vol);

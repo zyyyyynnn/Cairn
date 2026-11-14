@@ -1012,3 +1012,81 @@ fn the_public_ledger_covers_an_ingested_volume_and_its_single_column() {
         "the column swap stays within the single-column budget"
     );
 }
+
+/// A record appended after the order was built merges into it; the table is not re-sorted.
+#[test]
+fn appended_records_merge_into_the_cached_presorted_column() {
+    let mut vol = VolumeIndex::new('C');
+    let make = |frn: u64, name: &str| ExtractedItem {
+        frn,
+        parent_frn: 5,
+        name: name.to_string(),
+        is_dir: false,
+        size: 100,
+        created_ts: 0,
+        modified_ts: 0,
+        flags: 0,
+        is_reparse_point: false,
+    };
+    vol.ingest_items(vec![make(10, "beta.txt"), make(11, "alpha.txt")]);
+    vol.ensure_presorted_column(SortColumn::Name);
+    let version = vol.presorted_version();
+
+    vol.apply_usn_changes([UsnChange::Created {
+        frn: 12,
+        parent_frn: 5,
+        name: "aardvark.txt".to_string(),
+        is_dir: false,
+        attributes: 0,
+        ts: 1,
+    }]);
+    assert!(vol.needs_presorted_column(SortColumn::Name));
+    vol.ensure_presorted_column(SortColumn::Name);
+    assert!(
+        vol.presorted_version() > version,
+        "the merged order is a new version"
+    );
+
+    let names: Vec<&str> = vol
+        .presorted_order(SortColumn::Name)
+        .expect("order")
+        .iter()
+        .map(|&idx| {
+            let record = &vol.records()[idx as usize];
+            vol.arena().get_name(record.name_offset, record.name_len)
+        })
+        .collect();
+    assert_eq!(names, ["aardvark.txt", "alpha.txt", "beta.txt"]);
+}
+
+/// A column is invalidated only by the events whose key it sorts on.
+#[test]
+fn an_event_invalidates_only_the_orders_its_key_moves() {
+    let mut vol = VolumeIndex::new('C');
+    vol.ingest_items(vec![ExtractedItem {
+        frn: 10,
+        parent_frn: 5,
+        name: "alpha.txt".to_string(),
+        is_dir: false,
+        size: 100,
+        created_ts: 0,
+        modified_ts: 0,
+        flags: 0,
+        is_reparse_point: false,
+    }]);
+    vol.ensure_presorted_column(SortColumn::Name);
+
+    vol.mark_presorted_sizes_changed();
+    assert!(
+        vol.presorted_order(SortColumn::Name).is_some(),
+        "a size change does not move a record in the name order"
+    );
+    assert!(vol.needs_presorted_column(SortColumn::Size));
+
+    vol.mark_presorted_names_changed();
+    assert!(
+        vol.presorted_order(SortColumn::Name).is_none(),
+        "a rename invalidates the name order"
+    );
+    assert!(vol.needs_presorted_column(SortColumn::Name));
+}
