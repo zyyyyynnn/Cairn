@@ -2,7 +2,8 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Presorted index management and lazy rebuilding (FST-01, FST-02).
+//! View-level tests for the presorted order (FST-01, FST-02). The order itself is owned by
+//! `VolumeIndex`; these tests exercise it through whole queries.
 
 #[cfg(test)]
 mod tests {
@@ -198,6 +199,39 @@ mod tests {
                 frn: 11,
                 parent_frn: 5,
                 name: "alpha.txt".to_string(),
+                is_dir: false,
+                size: 10,
+                created_ts: 0,
+                modified_ts: 0,
+                flags: 0,
+                is_reparse_point: false,
+            },
+            ExtractedItem {
+                frn: 12,
+                parent_frn: 5,
+                name: "delta.txt".to_string(),
+                is_dir: false,
+                size: 10,
+                created_ts: 0,
+                modified_ts: 0,
+                flags: 0,
+                is_reparse_point: false,
+            },
+            ExtractedItem {
+                frn: 13,
+                parent_frn: 5,
+                name: "gamma.txt".to_string(),
+                is_dir: false,
+                size: 10,
+                created_ts: 0,
+                modified_ts: 0,
+                flags: 0,
+                is_reparse_point: false,
+            },
+            ExtractedItem {
+                frn: 14,
+                parent_frn: 5,
+                name: "epsilon.txt".to_string(),
                 is_dir: false,
                 size: 10,
                 created_ts: 0,

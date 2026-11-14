@@ -23,7 +23,8 @@ pub mod content_pipeline;
 pub mod journal_reconciliation;
 pub(crate) mod path_exclusions;
 pub mod post_scan;
-pub mod presorted;
+#[cfg(test)]
+mod presorted;
 mod search;
 mod startup_scan;
 mod treemap_build;
