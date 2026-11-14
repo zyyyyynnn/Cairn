@@ -57,6 +57,64 @@ fn result_names(engine: &MultiVolumeEngine, sort_by: SortColumn, sort_asc: bool)
     })
 }
 
+/// A folder hit carries its recursive space; a descendant that also matches adds nothing.
+#[test]
+fn a_folder_match_reports_its_recursive_space_once() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let engine = MultiVolumeEngine::with_index_dir_and_drives(temp_dir.path(), vec![]);
+    let mut vol = VolumeIndex::new('C');
+    vol.ingest_items(vec![
+        ExtractedItem {
+            frn: 10,
+            parent_frn: 5,
+            name: "folderX".to_string(),
+            is_dir: true,
+            size: 0,
+            created_ts: 0,
+            modified_ts: 0,
+            flags: cairn_core::FLAG_DIRECTORY,
+            is_reparse_point: false,
+        },
+        ExtractedItem {
+            frn: 11,
+            parent_frn: 10,
+            name: "inside.txt".to_string(),
+            is_dir: false,
+            size: 50,
+            created_ts: 0,
+            modified_ts: 0,
+            flags: 0,
+            is_reparse_point: false,
+        },
+        ExtractedItem {
+            frn: 12,
+            parent_frn: 5,
+            name: "outside.txt".to_string(),
+            is_dir: false,
+            size: 20,
+            created_ts: 0,
+            modified_ts: 0,
+            flags: 0,
+            is_reparse_point: false,
+        },
+    ]);
+    engine.add_volume(vol);
+
+    let cancel = CancellationToken::new();
+    let defaults = QueryDefaults::default();
+    let folder = engine.execute_search_multi("folderX", &defaults, SortColumn::Name, true, &cancel);
+    assert_eq!(folder.total, 1);
+    assert_eq!(folder.total_bytes, 50, "the folder's recursive space");
+
+    let both =
+        engine.execute_search_multi("folderX|inside", &defaults, SortColumn::Name, true, &cancel);
+    assert_eq!(both.total, 2);
+    assert_eq!(
+        both.total_bytes, 50,
+        "the covered child is not counted twice"
+    );
+}
+
 #[test]
 fn a_filtered_query_does_not_rebuild_the_whole_volume_sort() {
     let (_temp_dir, engine) = engine_with_sorting_fixture();
@@ -426,8 +484,9 @@ fn single_volume_filtered_sort_and_exclusions_keep_presorted_unbuilt() {
     engine.add_volume(vol);
 
     let cancel = CancellationToken::new();
-    // Recursive directory size makes `"C:"` > 1 MB as well, while `sum_unique_matched_bytes`
-    // sums only matching files (alpha.bin + zeta.bin = 6 MiB) and excludes `ExcludedDir`.
+    // The recursive directory size makes `"C:"` > 1 MB as well, and a matched folder carries
+    // its whole subtree: the excluded `ExcludedDir` is not a row, but its bytes are part of
+    // the matched root's space.
     let outcome = engine.execute_search_multi(
         "size:>1mb",
         &QueryDefaults::default(),
@@ -439,7 +498,7 @@ fn single_volume_filtered_sort_and_exclusions_keep_presorted_unbuilt() {
     let total = outcome.total;
     let total_bytes = outcome.total_bytes;
     assert_eq!(total, 3);
-    assert_eq!(total_bytes, 6 * 1024 * 1024);
+    assert_eq!(total_bytes, 9 * 1024 * 1024 + 512);
     let names = engine.with_volumes(|vols| {
         let v = &vols[&'C'];
         assert_eq!(v.memory_footprint().presorted_bytes, 0);

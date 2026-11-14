@@ -788,8 +788,8 @@ impl MultiVolumeEngine {
     }
 }
 
-/// Retains non-excluded unique record indices in place and sums live file sizes.
-/// Returns `None` if `cancel` triggers mid-loop.
+/// Retains non-excluded unique record indices in place and returns their space at the
+/// highest hit point. Returns `None` if `cancel` triggers mid-loop.
 fn filter_unique_volume_matches(
     vol: &VolumeIndex,
     matches: &mut Vec<u32>,
@@ -797,8 +797,6 @@ fn filter_unique_volume_matches(
     cancel: &CancellationToken,
 ) -> Option<u64> {
     let mut write = 0usize;
-    let mut total_bytes: u64 = 0;
-    let records = vol.records();
     for read in 0..matches.len() {
         if (read & 0xFFF) == 0 && cancel.is_cancelled() {
             return None;
@@ -807,16 +805,11 @@ fn filter_unique_volume_matches(
         if exclusions.excludes(vol, idx) {
             continue;
         }
-        if let Some(rec) = records.get(idx as usize) {
-            if rec.is_file() && !rec.is_tombstone() {
-                total_bytes = total_bytes.saturating_add(rec.size);
-            }
-        }
         matches[write] = idx;
         write += 1;
     }
     matches.truncate(write);
-    Some(total_bytes)
+    Some(vol.calculate_matched_bytes(matches))
 }
 
 /// Filters `matches` against `exclusions` and appends non-excluded [`SearchResultItem`]s into

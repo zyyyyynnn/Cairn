@@ -184,7 +184,7 @@ fn the_exclusion_mask_matches_the_full_path_reference() {
 }
 
 #[test]
-fn the_query_total_bytes_sum_matched_files_without_double_counting_directories() {
+fn the_query_total_bytes_follow_the_highest_matched_point() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let engine = MultiVolumeEngine::with_index_dir_and_drives(temp_dir.path(), vec![]);
     let mut vol = VolumeIndex::new('C');
@@ -225,8 +225,8 @@ fn the_query_total_bytes_sum_matched_files_without_double_counting_directories()
     assert_eq!(total, 1);
     assert_eq!(bytes, 100);
 
-    // Directories are containers: folder-only results report 0 bytes because files inside
-    // are not matched.
+    // A folder-only result reports the folder's recursive space, and the highest matched
+    // ancestor carries it once.
     let outcome = engine.execute_search_multi(
         "folder:",
         &QueryDefaults::default(),
@@ -237,7 +237,7 @@ fn the_query_total_bytes_sum_matched_files_without_double_counting_directories()
     let total = outcome.total;
     let bytes = outcome.total_bytes;
     assert_eq!(total, 2, "matches C: and folder");
-    assert_eq!(bytes, 0, "directories contribute zero bytes");
+    assert_eq!(bytes, 600, "the matched root carries the whole tree once");
 
     let outcome = engine.execute_search_multi(
         "folder",
@@ -249,7 +249,7 @@ fn the_query_total_bytes_sum_matched_files_without_double_counting_directories()
     let total = outcome.total;
     let bytes = outcome.total_bytes;
     assert_eq!(total, 1, "matches only the folder named 'folder'");
-    assert_eq!(bytes, 0, "directory contributes zero bytes");
+    assert_eq!(bytes, 300, "the folder reports its recursive space");
 }
 
 /// A rule the per-record mask cannot express is still answered by the same exclusion view, which
