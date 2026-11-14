@@ -180,6 +180,19 @@ fn is_pipe_closed_error(err: &std::io::Error) -> bool {
     }
 }
 
+/// Releases the connection's client registration on every exit path. The last lease of a
+/// client frees its cached sessions.
+struct ClientLease {
+    sessions: Arc<SessionManager>,
+    owner: QueryOwner,
+}
+
+impl Drop for ClientLease {
+    fn drop(&mut self) {
+        self.sessions.release_client(&self.owner);
+    }
+}
+
 async fn handle_client(
     mut pipe: NamedPipeServer,
     engine: Arc<MultiVolumeEngine>,
@@ -214,6 +227,12 @@ async fn handle_client(
         };
     #[cfg(not(windows))]
     let (caller, owner) = (CallerAuthorization::Unauthenticated, QueryOwner::default());
+
+    sessions.register_client(&owner);
+    let _lease = ClientLease {
+        sessions: Arc::clone(&sessions),
+        owner: owner.clone(),
+    };
 
     let mut read_buf = Vec::with_capacity(65536);
     let mut write_buf = Vec::with_capacity(4096);
@@ -422,8 +441,13 @@ fn process_request(
                 .execute_search_multi(&raw_query, &defaults, sort_column, sort_asc, &query_cancel);
             sessions.finish_query(owner, query_id);
 
-            let session_id =
-                sessions.create_session(raw_query, highlight_terms, matched_items, snippets);
+            let session_id = sessions.create_session(
+                owner.clone(),
+                raw_query,
+                highlight_terms,
+                matched_items,
+                snippets,
+            );
 
             let first_page = engine.with_volumes(|vols| {
                 sessions.get_rows_multi(session_id, 0, first_page_limit, vols)

@@ -9,7 +9,7 @@ use cairn_core::engine::CancellationToken;
 use cairn_protocol::message::FileRowData;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::RwLock;
+use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 /// Idle sessions older than 5 minutes are evicted when a new session is created.
@@ -59,6 +59,7 @@ pub enum RowsError {
 }
 
 pub struct QuerySession {
+    owner: QueryOwner,
     pub pre_folded_terms: Vec<Vec<u8>>,
     pub matched_items: Vec<SearchResultItem>,
     pub snippets: HashMap<(char, u64), String>,
@@ -80,6 +81,10 @@ pub struct QueryOwner {
 pub struct SessionManager {
     sessions: RwLock<HashMap<u64, QuerySession>>,
     active_queries: RwLock<HashMap<(QueryOwner, u64), CancellationToken>>,
+    /// Open pipe connections per client. A client's cached results cannot be paged once its
+    /// last connection closes, so the last release frees them immediately instead of waiting
+    /// for the TTL or LRU pressure.
+    connections: Mutex<HashMap<QueryOwner, usize>>,
     next_session_id: AtomicU64,
     max_sessions: usize,
     ttl_nanos: u64,
@@ -97,11 +102,59 @@ impl SessionManager {
         Self {
             sessions: RwLock::new(HashMap::new()),
             active_queries: RwLock::new(HashMap::new()),
+            connections: Mutex::new(HashMap::new()),
             next_session_id: AtomicU64::new(1),
             max_sessions,
             ttl_nanos: ttl.as_nanos().min(u64::MAX as u128) as u64,
             clock: Box::new(clock),
         }
+    }
+
+    /// Records one open pipe connection for `owner`.
+    pub fn register_client(&self, owner: &QueryOwner) {
+        *self
+            .connections
+            .lock()
+            .unwrap()
+            .entry(owner.clone())
+            .or_default() += 1;
+    }
+
+    /// Drops one open connection. The last one releases the client's cached sessions and
+    /// cancels its in-flight queries: nothing can page or join them after the process leaves.
+    pub fn release_client(&self, owner: &QueryOwner) {
+        let last = {
+            let mut connections = self.connections.lock().unwrap();
+            match connections.get_mut(owner) {
+                Some(count) if *count > 1 => {
+                    *count -= 1;
+                    false
+                }
+                Some(_) => {
+                    connections.remove(owner);
+                    true
+                }
+                None => false,
+            }
+        };
+        if !last {
+            return;
+        }
+        self.sessions
+            .write()
+            .unwrap()
+            .retain(|_, session| &session.owner != owner);
+        self.active_queries
+            .write()
+            .unwrap()
+            .retain(|(query_owner, _), token| {
+                if query_owner == owner {
+                    token.cancel();
+                    false
+                } else {
+                    true
+                }
+            });
     }
 
     /// Registers an in-flight query and preemptively cancels that client's earlier in-flight queries,
@@ -141,6 +194,7 @@ impl SessionManager {
 
     pub fn create_session(
         &self,
+        owner: QueryOwner,
         _query_text: String,
         highlight_terms: Vec<String>,
         matched_items: Vec<SearchResultItem>,
@@ -185,6 +239,7 @@ impl SessionManager {
         lock.insert(
             session_id,
             QuerySession {
+                owner,
                 pre_folded_terms,
                 matched_items,
                 snippets,
@@ -294,11 +349,19 @@ mod tests {
         }
     }
 
+    fn owner(pid: u32) -> QueryOwner {
+        QueryOwner {
+            client_pid: pid,
+            user_sid: "S-1-5-21-test".to_string(),
+        }
+    }
+
     #[test]
     fn unchanged_volumes_serve_pages() {
         let sessions = SessionManager::default();
         let vol = volume_with("notes.txt");
         let session_id = sessions.create_session(
+            owner(7),
             "notes".into(),
             Vec::new(),
             vec![item(vol.generation())],
@@ -318,6 +381,7 @@ mod tests {
         let sessions = SessionManager::default();
         let vol = volume_with("notes.txt");
         let session_id = sessions.create_session(
+            owner(7),
             "notes".into(),
             Vec::new(),
             vec![item(vol.generation())],
@@ -338,9 +402,20 @@ mod tests {
         let sessions = SessionManager::new(1, DEFAULT_SESSION_TTL, SystemClock::new());
         let vol = volume_with("notes.txt");
         let volumes = HashMap::from([('C', vol)]);
-        let first =
-            sessions.create_session("notes".into(), Vec::new(), vec![item(0)], HashMap::new());
-        sessions.create_session("other".into(), Vec::new(), Vec::new(), HashMap::new());
+        let first = sessions.create_session(
+            owner(7),
+            "notes".into(),
+            Vec::new(),
+            vec![item(0)],
+            HashMap::new(),
+        );
+        sessions.create_session(
+            owner(7),
+            "other".into(),
+            Vec::new(),
+            Vec::new(),
+            HashMap::new(),
+        );
         assert_eq!(
             sessions.get_rows_multi(first, 0, 10, &volumes),
             Err(RowsError::UnknownSession)
@@ -384,16 +459,34 @@ mod tests {
         let gen = vol.generation();
         let volumes = HashMap::from([('C', vol)]);
 
-        let s1 = sessions.create_session("s1".into(), Vec::new(), vec![item(gen)], HashMap::new());
+        let s1 = sessions.create_session(
+            owner(7),
+            "s1".into(),
+            Vec::new(),
+            vec![item(gen)],
+            HashMap::new(),
+        );
         clock.advance(Duration::from_millis(20));
-        let s2 = sessions.create_session("s2".into(), Vec::new(), vec![item(gen)], HashMap::new());
+        let s2 = sessions.create_session(
+            owner(7),
+            "s2".into(),
+            Vec::new(),
+            vec![item(gen)],
+            HashMap::new(),
+        );
 
         // Access s1, making s2 the least recently accessed
         clock.advance(Duration::from_millis(20));
         assert!(sessions.get_rows_multi(s1, 0, 10, &volumes).is_ok());
 
         // Create s3: capacity is 2, so s2 should be evicted because s1 was accessed more recently
-        let s3 = sessions.create_session("s3".into(), Vec::new(), vec![item(gen)], HashMap::new());
+        let s3 = sessions.create_session(
+            owner(7),
+            "s3".into(),
+            Vec::new(),
+            vec![item(gen)],
+            HashMap::new(),
+        );
 
         assert!(sessions.get_rows_multi(s1, 0, 10, &volumes).is_ok());
         assert_eq!(
@@ -417,9 +510,21 @@ mod tests {
         let gen = vol.generation();
         let volumes = HashMap::from([('C', vol)]);
 
-        let s1 = sessions.create_session("s1".into(), Vec::new(), vec![item(gen)], HashMap::new());
+        let s1 = sessions.create_session(
+            owner(7),
+            "s1".into(),
+            Vec::new(),
+            vec![item(gen)],
+            HashMap::new(),
+        );
         clock.advance(Duration::from_secs(299));
-        let _s2 = sessions.create_session("s2".into(), Vec::new(), vec![item(gen)], HashMap::new());
+        let _s2 = sessions.create_session(
+            owner(7),
+            "s2".into(),
+            Vec::new(),
+            vec![item(gen)],
+            HashMap::new(),
+        );
         assert!(
             sessions.get_rows_multi(s1, 0, 10, &volumes).is_ok(),
             "session accessed before TTL must stay live"
@@ -427,7 +532,13 @@ mod tests {
 
         // Accessing s1 reset its idle timer; advance full 300s to cross expiry.
         clock.advance(Duration::from_secs(300));
-        let _s3 = sessions.create_session("s3".into(), Vec::new(), vec![item(gen)], HashMap::new());
+        let _s3 = sessions.create_session(
+            owner(7),
+            "s3".into(),
+            Vec::new(),
+            vec![item(gen)],
+            HashMap::new(),
+        );
         assert_eq!(
             sessions.get_rows_multi(s1, 0, 10, &volumes),
             Err(RowsError::UnknownSession)
@@ -448,9 +559,21 @@ mod tests {
         let gen = vol.generation();
         let volumes = std::sync::Arc::new(HashMap::from([('C', vol)]));
 
-        let s1 = sessions.create_session("s1".into(), Vec::new(), vec![item(gen)], HashMap::new());
+        let s1 = sessions.create_session(
+            owner(7),
+            "s1".into(),
+            Vec::new(),
+            vec![item(gen)],
+            HashMap::new(),
+        );
         clock.advance(Duration::from_secs(1));
-        let s2 = sessions.create_session("s2".into(), Vec::new(), vec![item(gen)], HashMap::new());
+        let s2 = sessions.create_session(
+            owner(7),
+            "s2".into(),
+            Vec::new(),
+            vec![item(gen)],
+            HashMap::new(),
+        );
         clock.advance(Duration::from_secs(1));
 
         std::thread::scope(|scope| {
@@ -465,7 +588,13 @@ mod tests {
             }
         });
 
-        let _s3 = sessions.create_session("s3".into(), Vec::new(), vec![item(gen)], HashMap::new());
+        let _s3 = sessions.create_session(
+            owner(7),
+            "s3".into(),
+            Vec::new(),
+            vec![item(gen)],
+            HashMap::new(),
+        );
         assert!(sessions.get_rows_multi(s1, 0, 10, &volumes).is_ok());
         assert_eq!(
             sessions.get_rows_multi(s2, 0, 10, &volumes),
@@ -536,5 +665,67 @@ mod tests {
         );
         sessions.finish_query(&first, 1);
         assert!(!second_query.is_cancelled());
+    }
+
+    /// A client's cached match lists can only be paged while it holds a connection; the last
+    /// release frees them instead of waiting for the TTL.
+    #[test]
+    fn the_last_connection_release_frees_only_that_clients_sessions() {
+        let sessions = SessionManager::default();
+        let vol = volume_with("notes.txt");
+        let generation = vol.generation();
+        let volumes = HashMap::from([('C', vol)]);
+        let mine = owner(7);
+        let other = owner(8);
+        sessions.register_client(&mine);
+        sessions.register_client(&mine);
+        sessions.register_client(&other);
+        let my_session = sessions.create_session(
+            mine.clone(),
+            "mine".into(),
+            Vec::new(),
+            vec![item(generation)],
+            HashMap::new(),
+        );
+        let other_session = sessions.create_session(
+            other.clone(),
+            "other".into(),
+            Vec::new(),
+            vec![item(generation)],
+            HashMap::new(),
+        );
+
+        sessions.release_client(&mine);
+        assert!(
+            sessions.get_rows_multi(my_session, 0, 10, &volumes).is_ok(),
+            "a remaining connection keeps the session"
+        );
+
+        sessions.release_client(&mine);
+        assert_eq!(
+            sessions.get_rows_multi(my_session, 0, 10, &volumes),
+            Err(RowsError::UnknownSession)
+        );
+        assert!(
+            sessions
+                .get_rows_multi(other_session, 0, 10, &volumes)
+                .is_ok(),
+            "another client's session is untouched"
+        );
+    }
+
+    #[test]
+    fn the_last_connection_release_cancels_that_clients_query() {
+        let sessions = SessionManager::default();
+        let mine = owner(7);
+        let other = owner(8);
+        sessions.register_client(&mine);
+        sessions.register_client(&other);
+        let my_query = sessions.begin_query(&mine, 1);
+        let other_query = sessions.begin_query(&other, 1);
+
+        sessions.release_client(&mine);
+        assert!(my_query.is_cancelled());
+        assert!(!other_query.is_cancelled());
     }
 }
