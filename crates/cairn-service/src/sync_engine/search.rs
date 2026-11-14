@@ -257,7 +257,7 @@ impl MultiVolumeEngine {
         let (total, view_bytes) = if view.exclusions.is_empty() {
             (volume.live_count() as usize, volume.live_file_bytes())
         } else {
-            let mut visible = Vec::new();
+            let mut visible = Vec::with_capacity(volume.live_count() as usize);
             if !view.visit_visible_until(
                 volume,
                 0,
