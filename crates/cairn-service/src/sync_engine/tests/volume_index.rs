@@ -4,7 +4,6 @@
 
 use super::*;
 use crate::persistence;
-use std::collections::HashMap;
 use crate::sync_engine::treemap_build::budgeted_tree_depth;
 use crate::sync_engine::volume_index::BitSet;
 use crate::sync_engine::{MultiVolumeEngine, TreeUnavailable, VolumeIndex};
@@ -15,6 +14,7 @@ use cairn_core::syntax::parse_query;
 use cairn_ntfs::mft::ExtractedItem;
 use cairn_ntfs::usn::UsnChange;
 use cairn_protocol::status::VolumeState;
+use std::collections::HashMap;
 
 #[test]
 fn directory_sizes_aggregate_their_indexed_descendants() {
@@ -1011,6 +1011,51 @@ fn the_public_ledger_covers_an_ingested_volume_and_its_single_column() {
     assert_eq!(
         switched.presorted_bytes, warm.presorted_bytes,
         "the column swap stays within the single-column budget"
+    );
+}
+
+/// Ordinary renames keep the shared exclusion table; only a rule-relevant move rebuilds it.
+#[test]
+fn ordinary_renames_keep_the_cached_exclusion_states() {
+    let mut vol = VolumeIndex::new('C');
+    vol.ingest_items(vec![ExtractedItem {
+        frn: 10,
+        parent_frn: 5,
+        name: "alpha.txt".to_string(),
+        is_dir: false,
+        size: 10,
+        created_ts: 0,
+        modified_ts: 0,
+        flags: 0,
+        is_reparse_point: false,
+    }]);
+    let segments = vec!["$Recycle.Bin".to_string()];
+    let before = vol.segment_excluded_states_cached(&segments);
+
+    vol.apply_usn_changes([UsnChange::Renamed {
+        frn: 10,
+        parent_frn: 5,
+        name: "renamed.txt".to_string(),
+        is_dir: false,
+        is_new_name: true,
+    }]);
+    let after = vol.segment_excluded_states_cached(&segments);
+    assert!(
+        std::sync::Arc::ptr_eq(&before, &after),
+        "an ordinary rename keeps the cached table"
+    );
+
+    vol.apply_usn_changes([UsnChange::Renamed {
+        frn: 10,
+        parent_frn: 5,
+        name: "$Recycle.Bin".to_string(),
+        is_dir: false,
+        is_new_name: true,
+    }]);
+    let after = vol.segment_excluded_states_cached(&segments);
+    assert!(
+        !std::sync::Arc::ptr_eq(&before, &after),
+        "a rename into a rule segment rebuilds the table"
     );
 }
 

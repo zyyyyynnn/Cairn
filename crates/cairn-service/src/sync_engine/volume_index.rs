@@ -1096,9 +1096,15 @@ impl VolumeIndex {
                             .first(parent_frn)
                             .unwrap_or(FileRecord::ROOT_PARENT);
 
-                        let (old_parent, moved_size) = {
+                        let (old_parent, moved_size, old_name) = {
                             let rec = &self.records[idx as usize];
-                            (rec.parent_idx, rec.size as i128)
+                            (
+                                rec.parent_idx,
+                                rec.size as i128,
+                                self.arena
+                                    .get_name(rec.name_offset, rec.name_len)
+                                    .to_string(),
+                            )
                         };
                         if old_parent != parent_idx && !self.records[idx as usize].is_tombstone() {
                             if !self.has_tombstone_ancestor(old_parent) {
@@ -1120,7 +1126,11 @@ impl VolumeIndex {
                         // and a rename out of the extension whitelist has to delete it.
                         self.pending_data_changes.insert(frn);
                         self.mark_presorted_names_changed(std::iter::once(idx));
-                        self.exclusion_epoch = self.exclusion_epoch.wrapping_add(1);
+                        if self.rename_changes_exclusion_states(
+                            &old_name, &name, old_parent, parent_idx,
+                        ) {
+                            self.exclusion_epoch = self.exclusion_epoch.wrapping_add(1);
+                        }
                     }
                 }
             }
@@ -1317,6 +1327,40 @@ impl VolumeIndex {
             entry.states = Arc::new(states);
         }
         entry.states.clone()
+    }
+
+    /// Whether a rename can change any record's exclusion verdict. An ordinary rename under
+    /// kept parents keeps the cached table valid; only a name that matches a rule or a move
+    /// across an excluded boundary can move records between verdicts.
+    fn rename_changes_exclusion_states(
+        &self,
+        old_name: &str,
+        new_name: &str,
+        old_parent: u32,
+        new_parent: u32,
+    ) -> bool {
+        let cache = self.exclusion_cache.lock().unwrap();
+        let Some(entry) = cache.as_ref() else {
+            return false;
+        };
+        let matches = |name: &str| {
+            entry
+                .segments
+                .iter()
+                .any(|segment| name.eq_ignore_ascii_case(segment))
+        };
+        if matches(old_name) || matches(new_name) {
+            return true;
+        }
+        let state_of = |index: u32| {
+            if index == FileRecord::ROOT_PARENT {
+                // Records at the volume root sit under no named segment.
+                Some(SUBTREE_KEPT)
+            } else {
+                entry.states.get(index as usize).copied()
+            }
+        };
+        state_of(old_parent) != Some(SUBTREE_KEPT) || state_of(new_parent) != Some(SUBTREE_KEPT)
     }
 
     /// Classifies records appended since `states` was built. Ancestors below the old length
