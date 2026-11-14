@@ -8,12 +8,13 @@ use super::volume_index::SUBTREE_EXCLUDED;
 use super::VolumeIndex;
 use crate::exclusion::{ExclusionPath, ExclusionRules};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// The configured path exclusions of one operation, read once. Segment rules are answered from a
 /// per-volume subtree state table; rule forms the table cannot express read the record's full path
 /// through the same parsed rule set. Neither route re-parses the configuration per record.
 pub(crate) struct PathExclusions {
-    states: Option<HashMap<char, Vec<u8>>>,
+    states: Option<HashMap<char, Arc<Vec<u8>>>>,
     rules: ExclusionRules,
 }
 
@@ -26,7 +27,9 @@ impl PathExclusions {
             rules.single_segments().map(|segments| {
                 volumes
                     .iter()
-                    .map(|(drive, volume)| (*drive, volume.segment_excluded_states(&segments)))
+                    .map(|(drive, volume)| {
+                        (*drive, volume.segment_excluded_states_cached(&segments))
+                    })
                     .collect()
             })
         };

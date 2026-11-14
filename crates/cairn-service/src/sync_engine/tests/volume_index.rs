@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::persistence;
+use std::collections::HashMap;
 use crate::sync_engine::treemap_build::budgeted_tree_depth;
 use crate::sync_engine::volume_index::BitSet;
 use crate::sync_engine::{MultiVolumeEngine, TreeUnavailable, VolumeIndex};
@@ -1011,6 +1012,47 @@ fn the_public_ledger_covers_an_ingested_volume_and_its_single_column() {
         switched.presorted_bytes, warm.presorted_bytes,
         "the column swap stays within the single-column budget"
     );
+}
+
+/// The segment-exclusion table is shared between queries and extended by appends.
+#[test]
+fn appended_records_extend_the_cached_exclusion_states() {
+    let mut vol = VolumeIndex::new('C');
+    vol.ingest_items(vec![ExtractedItem {
+        frn: 10,
+        parent_frn: 5,
+        name: "alpha.txt".to_string(),
+        is_dir: false,
+        size: 10,
+        created_ts: 0,
+        modified_ts: 0,
+        flags: 0,
+        is_reparse_point: false,
+    }]);
+    let segments = vec!["$Recycle.Bin".to_string()];
+    assert_eq!(vol.segment_excluded_states_cached(&segments).len(), 1);
+
+    vol.apply_usn_changes([UsnChange::Created {
+        frn: 11,
+        parent_frn: 5,
+        name: "$Recycle.Bin".to_string(),
+        is_dir: true,
+        attributes: 0,
+        ts: 1,
+    }]);
+    let states = vol.segment_excluded_states_cached(&segments);
+    assert_eq!(states.len(), 2, "the appended record extends the table");
+
+    let volumes = HashMap::from([('C', vol)]);
+    let exclusions = crate::sync_engine::path_exclusions::PathExclusions::new(&volumes, &segments);
+    let excluded = volumes[&'C']
+        .first_record_index_for_frn(11)
+        .expect("the new directory");
+    let kept = volumes[&'C']
+        .first_record_index_for_frn(10)
+        .expect("the old file");
+    assert!(exclusions.excludes(&volumes[&'C'], excluded));
+    assert!(!exclusions.excludes(&volumes[&'C'], kept));
 }
 
 /// The all-files total is a maintained counter, not a scan of the order.

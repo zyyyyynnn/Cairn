@@ -18,6 +18,7 @@ use cairn_protocol::message::FileRowData;
 use cairn_protocol::status::{VolumeState, VolumeStatusSummary};
 use std::collections::{HashMap, HashSet};
 use std::mem::size_of;
+use std::sync::{Arc, Mutex};
 
 pub(super) struct BitSet {
     pub(super) words: Vec<u64>,
@@ -67,6 +68,13 @@ impl BitSet {
             *word |= incoming;
         }
     }
+}
+
+/// The per-volume segment-exclusion state table, keyed by the rules and the path epoch.
+struct ExclusionStatesCache {
+    segments: Vec<String>,
+    epoch: u64,
+    states: Arc<Vec<u8>>,
 }
 
 /// A smaller volume is rebuilt quickly enough that compaction on every start would cost more than
@@ -174,6 +182,11 @@ pub struct VolumeIndex {
     /// descendants. A cache written before folder sizes existed cannot prove this, so a load
     /// aggregates once and rewrites the flag; every later update maintains the totals in place.
     directory_sizes_valid: bool,
+    /// Bumped whenever a record's path changes, so the cached exclusion states rebuild.
+    exclusion_epoch: u64,
+    /// Segment-exclusion states are the same for every query until a path changes; rebuilding
+    /// the 1.5M-entry table per query would cost more than the search itself.
+    exclusion_cache: Mutex<Option<ExclusionStatesCache>>,
 }
 
 impl VolumeIndex {
@@ -205,6 +218,8 @@ impl VolumeIndex {
             live_file_bytes: 0,
             // An empty table has no totals to be wrong about; the invariant holds trivially.
             directory_sizes_valid: true,
+            exclusion_epoch: 0,
+            exclusion_cache: Mutex::new(None),
         }
     }
 
@@ -233,6 +248,8 @@ impl VolumeIndex {
         // that now belongs to another file.
         self.generation = self.generation.wrapping_add(1);
         self.directory_sizes_valid = true;
+        self.exclusion_epoch = self.exclusion_epoch.wrapping_add(1);
+        self.exclusion_cache = Mutex::new(None);
     }
 
     /// Populates this volume from persisted index data, building a compact FRN map without
@@ -1103,6 +1120,7 @@ impl VolumeIndex {
                         // and a rename out of the extension whitelist has to delete it.
                         self.pending_data_changes.insert(frn);
                         self.mark_presorted_names_changed(std::iter::once(idx));
+                        self.exclusion_epoch = self.exclusion_epoch.wrapping_add(1);
                     }
                 }
             }
@@ -1270,6 +1288,91 @@ impl VolumeIndex {
         })
     }
 
+    /// The segment-exclusion states, cached until a path changes. Appended records extend the
+    /// cached table; a rename or a rebuilt table starts it over.
+    pub(crate) fn segment_excluded_states_cached(&self, segments: &[String]) -> Arc<Vec<u8>> {
+        let mut cache = self.exclusion_cache.lock().unwrap();
+        let needs_rebuild = match cache.as_ref() {
+            Some(entry) => {
+                entry.epoch != self.exclusion_epoch
+                    || entry.segments.as_slice() != segments
+                    || entry.states.len() > self.records.len()
+            }
+            None => true,
+        };
+        if needs_rebuild {
+            let states = Arc::new(self.segment_excluded_states(segments));
+            *cache = Some(ExclusionStatesCache {
+                segments: segments.to_vec(),
+                epoch: self.exclusion_epoch,
+                states: states.clone(),
+            });
+            return states;
+        }
+
+        let entry = cache.as_mut().expect("cache was checked");
+        if entry.states.len() < self.records.len() {
+            let mut states = (*entry.states).clone();
+            self.extend_segment_states(&mut states, segments);
+            entry.states = Arc::new(states);
+        }
+        entry.states.clone()
+    }
+
+    /// Classifies records appended since `states` was built. Ancestors below the old length
+    /// already carry a final verdict, so the same walk reaches it without revisiting them.
+    fn extend_segment_states(&self, states: &mut Vec<u8>, segments: &[String]) {
+        let from = states.len();
+        let count = self.records.len();
+        if from >= count {
+            return;
+        }
+        states.resize(count, SUBTREE_UNKNOWN);
+        let mut stack: Vec<u32> = Vec::new();
+        for start in from..count {
+            if states[start] != SUBTREE_UNKNOWN {
+                continue;
+            }
+            stack.clear();
+            let mut current = start as u32;
+            let verdict = loop {
+                let idx = current as usize;
+                match states[idx] {
+                    SUBTREE_IN_PROGRESS | SUBTREE_KEPT => break SUBTREE_KEPT,
+                    SUBTREE_EXCLUDED => break SUBTREE_EXCLUDED,
+                    SUBTREE_UNKNOWN => {}
+                    _ => unreachable!("record exclusion state"),
+                }
+                let record = &self.records[idx];
+                let name = self.arena.get_name(record.name_offset, record.name_len);
+                if segments
+                    .iter()
+                    .any(|segment| name.eq_ignore_ascii_case(segment))
+                {
+                    states[idx] = SUBTREE_EXCLUDED;
+                    break SUBTREE_EXCLUDED;
+                }
+                states[idx] = SUBTREE_IN_PROGRESS;
+                stack.push(current);
+                match record.parent_idx {
+                    parent
+                        if parent != FileRecord::ROOT_PARENT
+                            && (parent as usize) < count
+                            && parent as usize != idx =>
+                    {
+                        current = parent;
+                    }
+                    _ => break SUBTREE_KEPT,
+                }
+            };
+            for &pending in &stack {
+                if states[pending as usize] == SUBTREE_IN_PROGRESS {
+                    states[pending as usize] = verdict;
+                }
+            }
+        }
+    }
+
     /// Rewrites the table without tombstones or excluded subtrees and repacks the name arena with
     /// controlled growth headroom.
     fn compact_with_states(
@@ -1353,6 +1456,8 @@ impl VolumeIndex {
         self.presorted_pending = BitSet::with_capacity(0);
         self.presorted_removed = BitSet::with_capacity(0);
         self.presorted_delta.clear();
+        self.exclusion_epoch = self.exclusion_epoch.wrapping_add(1);
+        self.exclusion_cache = Mutex::new(None);
         CompactionReport {
             dropped_records,
             reclaimed_arena_bytes: old_arena_len.saturating_sub(new_arena_len),
