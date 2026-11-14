@@ -63,9 +63,19 @@ impl MultiVolumeEngine {
         // Only the single-volume all-files query can consume a presorted order: the
         // multi-volume path merges per-volume matches and sorts them itself. A filtered query
         // scans the records and sorts just its matches, so rebuilding the volume's whole
-        // name/path/size array first is pure latency.
-        let single_volume = self.volumes.read().unwrap().len() == 1;
-        if single_volume && content_queries.is_empty() && query_expr.is_empty() {
+        // name/path/size array first is pure latency. A drive-scoped textless query is the same
+        // all-files view for that volume: the sidebar default sends `C: `, and its whole-match
+        // sort would otherwise rebuild the order on every launch.
+        let drive_scope = query_expr.drive_scope();
+        let all_files_view = query_expr.is_empty()
+            || drive_scope.is_some_and(|drive| {
+                let volumes = self.volumes.read().unwrap();
+                volumes.len() == 1
+                    && volumes
+                        .values()
+                        .any(|vol| vol.drive_letter.eq_ignore_ascii_case(&drive))
+            });
+        if all_files_view && content_queries.is_empty() {
             self.ensure_presorted_indices(sort_by);
         }
 
@@ -76,8 +86,8 @@ impl MultiVolumeEngine {
 
         let mut all_results = Vec::new();
         let mut snippets = HashMap::new();
-        // Sum of matched files' own sizes. Directories are containers; adding their recursive
-        // size would double count files that are also matched (the all-files view contains both).
+        // Space of the matched set at its highest hit point: a matched directory brings its
+        // recursive size, and anything already covered by a matched ancestor adds nothing.
         let mut total_bytes = 0u64;
 
         let lock;
@@ -534,8 +544,7 @@ impl MultiVolumeEngine {
                 else {
                     return (Vec::new(), 0, highlight_terms, snippets, 0);
                 };
-                total_bytes =
-                    total_bytes.saturating_add(vol.sum_unique_matched_bytes(&vol_matches));
+                total_bytes = total_bytes.saturating_add(vol.calculate_matched_bytes(&vol_matches));
             }
         }
 

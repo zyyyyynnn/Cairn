@@ -109,4 +109,57 @@ mod tests {
             );
         });
     }
+
+    /// The sidebar's all-files view is a drive-scoped textless query (`C: `). It is the same
+    /// whole-volume view, so it must build and consume the presorted order instead of sorting
+    /// every match per request.
+    #[test]
+    fn a_drive_scoped_all_files_query_uses_the_presorted_column() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let engine = MultiVolumeEngine::with_index_dir_and_drives(temp_dir.path(), vec![]);
+
+        let mut vol = VolumeIndex::new('C');
+        vol.ingest_items(
+            ["beta.txt", "alpha.txt"]
+                .into_iter()
+                .enumerate()
+                .map(|(ix, name)| ExtractedItem {
+                    frn: 10 + ix as u64,
+                    parent_frn: 5,
+                    name: name.to_string(),
+                    is_dir: false,
+                    size: 100,
+                    created_ts: 100,
+                    modified_ts: 100,
+                    flags: 0,
+                    is_reparse_point: false,
+                })
+                .collect(),
+        );
+        engine.add_volume(vol);
+
+        let cancel = CancellationToken::new();
+        let (results, total, ..) = engine.execute_search_multi(
+            "C: ",
+            &QueryDefaults::default(),
+            SortColumn::Name,
+            true,
+            &cancel,
+        );
+        assert_eq!(total, 2);
+        assert_eq!(results.len(), 2);
+
+        engine.with_volumes(|volumes| {
+            let v = &volumes[&'C'];
+            assert!(
+                !v.is_presorted_dirty(),
+                "a drive-scoped all-files query builds the order"
+            );
+            assert_eq!(
+                v.presorted_order(SortColumn::Name).map(<[u32]>::len),
+                Some(2),
+                "the drive-scoped query consumes the requested column"
+            );
+        });
+    }
 }
