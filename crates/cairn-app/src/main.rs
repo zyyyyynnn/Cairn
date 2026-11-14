@@ -91,6 +91,7 @@ fn main() {
             // Bootstrap order is fixed by the Coding Guides: initialize the Kit once, install the
             // keymap before any window or menu reads it, then open the window through
             // `gpui_kit::open_window` so `Root` owns the first level of the window.
+            crate::shell::perf::mark("app loop start");
             gpui_kit::init(cx);
             crate::shell::perf::mark("kit ready");
             cairn_ui::brand::init_fonts(cx);
