@@ -13,7 +13,7 @@ use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::gpui::*;
 use std::time::Duration;
 
-/// The managed entrance: a 4 px upward slide under a fade, 150 ms.
+/// Matches the managed tooltip entrance: a 4 px upward slide under a fade, 150 ms.
 const ENTER_DURATION: Duration = Duration::from_millis(150);
 
 struct AppTooltip {
@@ -21,11 +21,8 @@ struct AppTooltip {
 }
 
 impl Render for AppTooltip {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let content = div().child(self.content.clone());
-        if cx.reduce_motion() {
-            return content.into_any_element();
-        }
         EffectTransition::new(ENTER_DURATION)
             .ease(ease_out_cubic)
             .slide_y(px(4.), px(0.))
