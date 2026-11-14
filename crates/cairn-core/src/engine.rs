@@ -275,18 +275,14 @@ impl CompiledGlob {
     fn compile(pattern: &str, case_sensitive: bool) -> Self {
         let tokens = parse_glob_tokens(pattern, case_sensitive);
         let fast = if pattern.is_ascii() {
-            Self::build_fast_kind(pattern, &tokens, case_sensitive)
+            Self::build_fast_kind(&tokens, case_sensitive)
         } else {
             None
         };
         Self { tokens, fast }
     }
 
-    fn tokens_to_ascii_bytes(
-        pattern_bytes: &[u8],
-        tokens: &[GlobToken],
-        case_sensitive: bool,
-    ) -> Option<Vec<u8>> {
+    fn tokens_to_ascii_bytes(tokens: &[GlobToken], case_sensitive: bool) -> Option<Vec<u8>> {
         if case_sensitive {
             let mut out = Vec::with_capacity(tokens.len());
             for tok in tokens {
@@ -295,7 +291,6 @@ impl CompiledGlob {
                     _ => return None,
                 }
             }
-            let _ = pattern_bytes;
             Some(out)
         } else {
             let mut out = Vec::with_capacity(tokens.len());
@@ -309,23 +304,18 @@ impl CompiledGlob {
         }
     }
 
-    fn build_fast_kind(
-        pattern: &str,
-        tokens: &[GlobToken],
-        case_sensitive: bool,
-    ) -> Option<AsciiGlobFast> {
-        let p_bytes = pattern.as_bytes();
+    fn build_fast_kind(tokens: &[GlobToken], case_sensitive: bool) -> Option<AsciiGlobFast> {
         if tokens.iter().any(|t| matches!(t, GlobToken::Question)) {
             return None;
         }
         if tokens.iter().all(|t| matches!(t, GlobToken::Char(_))) {
-            let bytes = Self::tokens_to_ascii_bytes(p_bytes, tokens, case_sensitive)?;
+            let bytes = Self::tokens_to_ascii_bytes(tokens, case_sensitive)?;
             return Some(AsciiGlobFast::Exact { bytes });
         }
         if tokens.len() >= 2 && matches!(tokens[0], GlobToken::Star | GlobToken::DoubleStar) {
             let rest = &tokens[1..];
             if rest.iter().all(|t| matches!(t, GlobToken::Char(_))) {
-                let bytes = Self::tokens_to_ascii_bytes(p_bytes, rest, case_sensitive)?;
+                let bytes = Self::tokens_to_ascii_bytes(rest, case_sensitive)?;
                 return Some(AsciiGlobFast::Suffix {
                     bytes,
                     forbid_sep: tokens[0] == GlobToken::Star,
@@ -340,7 +330,7 @@ impl CompiledGlob {
         {
             let head = &tokens[..tokens.len() - 1];
             if head.iter().all(|t| matches!(t, GlobToken::Char(_))) {
-                let bytes = Self::tokens_to_ascii_bytes(p_bytes, head, case_sensitive)?;
+                let bytes = Self::tokens_to_ascii_bytes(head, case_sensitive)?;
                 return Some(AsciiGlobFast::Prefix {
                     bytes,
                     forbid_sep: tokens[tokens.len() - 1] == GlobToken::Star,
@@ -355,7 +345,7 @@ impl CompiledGlob {
             {
                 let mid = &tokens[1..tokens.len() - 1];
                 if mid.iter().all(|t| matches!(t, GlobToken::Char(_))) {
-                    let bytes = Self::tokens_to_ascii_bytes(p_bytes, mid, case_sensitive)?;
+                    let bytes = Self::tokens_to_ascii_bytes(mid, case_sensitive)?;
                     if memchr::memchr2(b'\\', b'/', &bytes).is_none() {
                         return Some(AsciiGlobFast::Contains {
                             finder: Box::new(Finder::new(&bytes).into_owned()),
@@ -374,13 +364,9 @@ impl CompiledGlob {
                         .iter()
                         .all(|t| matches!(t, GlobToken::Char(_)))
                 {
-                    let prefix =
-                        Self::tokens_to_ascii_bytes(p_bytes, &tokens[..star_pos], case_sensitive)?;
-                    let suffix = Self::tokens_to_ascii_bytes(
-                        p_bytes,
-                        &tokens[star_pos + 1..],
-                        case_sensitive,
-                    )?;
+                    let prefix = Self::tokens_to_ascii_bytes(&tokens[..star_pos], case_sensitive)?;
+                    let suffix =
+                        Self::tokens_to_ascii_bytes(&tokens[star_pos + 1..], case_sensitive)?;
                     return Some(AsciiGlobFast::Affix { prefix, suffix });
                 }
             }
