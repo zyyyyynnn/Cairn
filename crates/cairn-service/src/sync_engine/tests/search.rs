@@ -632,3 +632,39 @@ fn an_excluded_root_totals_the_visible_top_level_records() {
         "the visible top-level records cover the same space"
     );
 }
+
+/// A volume whose root record is absent keeps its top-level records under `ROOT_PARENT`. Segment
+/// rules then make those top-level records the highest hit points.
+#[test]
+fn a_volume_without_a_root_record_totals_its_visible_top_level() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let cfg = crate::config::ServiceConfig {
+        excluded_paths: vec!["private".to_string()],
+        ..Default::default()
+    };
+    let engine = MultiVolumeEngine::with_index_dir_drives_and_config(temp.path(), vec![], cfg);
+    let mut vol = VolumeIndex::new('C');
+    vol.ingest_items(vec![
+        index_item(1, 0, "docs", true),
+        index_item(2, 1, "private", true),
+        sized_item(3, 2, "secret.bin", false, 3 * 1024 * 1024),
+        sized_item(4, 0, "a.bin", false, 1024),
+    ]);
+    engine.add_volume(vol);
+
+    let cancel = CancellationToken::new();
+    let outcome = engine.execute_search_multi(
+        "C: ",
+        &QueryDefaults::default(),
+        SortColumn::Name,
+        true,
+        &cancel,
+    );
+    assert!(matches!(outcome.rows, MatchSet::AllFiles(_)));
+    assert_eq!(outcome.total, 2, "docs and a.bin remain visible");
+    assert_eq!(
+        outcome.total_bytes,
+        3 * 1024 * 1024 + 1024,
+        "the visible top-level records cover the whole space"
+    );
+}

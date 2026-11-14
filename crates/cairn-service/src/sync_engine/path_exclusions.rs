@@ -45,6 +45,12 @@ impl PathExclusions {
         self.rules.is_empty()
     }
 
+    /// Whether every rule is answered by the per-volume segment table. Such rules exclude
+    /// whole subtrees, so a visible record always has visible ancestors.
+    pub(crate) fn uses_segment_table(&self) -> bool {
+        self.states.is_some()
+    }
+
     /// Whether one record of `volume` falls under the rules.
     pub(crate) fn excludes(&self, volume: &VolumeIndex, index: u32) -> bool {
         if let Some(states) = &self.states {
