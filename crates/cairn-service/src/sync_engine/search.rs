@@ -256,9 +256,14 @@ impl MultiVolumeEngine {
         // follows the same highest-hit rule as a filtered query.
         let (total, view_bytes) = if view.exclusions.is_empty() {
             (volume.live_count() as usize, volume.live_file_bytes())
-        } else {
+        } else if view.exclusions.uses_segment_table() {
+            // Segment rules exclude whole subtrees, so a visible record always has visible
+            // ancestors. The visible root, or the visible records whose parent is not in the
+            // table, are then the only highest hit points; their recursive sizes cover every
+            // visible row without materializing the set.
             let mut total = 0usize;
             let mut root_size = None;
+            let mut top_level_bytes = 0u64;
             if !view.visit_visible_until(
                 volume,
                 0,
@@ -269,31 +274,28 @@ impl MultiVolumeEngine {
                     let record = &volume.records()[idx as usize];
                     if record.parent_idx == idx {
                         root_size = Some(record.size);
+                    } else if record.parent_idx == FileRecord::ROOT_PARENT {
+                        top_level_bytes = top_level_bytes.saturating_add(record.size);
                     }
                 },
             ) {
                 return SearchOutcome::empty(highlight_terms, snippets);
             }
-            // A visible root is the one top hit of the all-files set and covers every row,
-            // so its recursive size is the exact total without materializing the set. Only a
-            // view that excluded the root itself needs the per-row calculation.
-            let view_bytes = match root_size {
-                Some(size) => size,
-                None => {
-                    let mut visible = Vec::with_capacity(total);
-                    if !view.visit_visible_until(
-                        volume,
-                        0,
-                        usize::MAX,
-                        || cancel.is_cancelled(),
-                        |idx| visible.push(idx),
-                    ) {
-                        return SearchOutcome::empty(highlight_terms, snippets);
-                    }
-                    volume.calculate_matched_bytes(&visible)
-                }
-            };
-            (total, view_bytes)
+            (total, root_size.unwrap_or(top_level_bytes))
+        } else {
+            // Full-path rules can exclude a directory while leaving its children visible, so
+            // the per-row highest-hit calculation decides.
+            let mut visible = Vec::with_capacity(volume.live_count() as usize);
+            if !view.visit_visible_until(
+                volume,
+                0,
+                usize::MAX,
+                || cancel.is_cancelled(),
+                |idx| visible.push(idx),
+            ) {
+                return SearchOutcome::empty(highlight_terms, snippets);
+            }
+            (visible.len(), volume.calculate_matched_bytes(&visible))
         };
         SearchOutcome {
             rows: MatchSet::AllFiles(view),
