@@ -374,6 +374,7 @@ fn rows_for_items<'a>(
 mod tests {
     use super::*;
     use cairn_ntfs::mft::ExtractedItem;
+    use cairn_ntfs::usn::UsnChange;
     use std::collections::HashMap;
 
     fn volume_with(name: &str) -> VolumeIndex {
@@ -441,6 +442,7 @@ mod tests {
         mut volume: VolumeIndex,
         sort_by: cairn_core::sort::SortColumn,
         sort_asc: bool,
+        rules: &[String],
     ) -> (AllFilesView, HashMap<char, VolumeIndex>) {
         volume.ensure_presorted_column(sort_by);
         let generation = volume.generation();
@@ -448,7 +450,7 @@ mod tests {
         let drive_letter = volume.drive_letter;
         let volumes = HashMap::from([(drive_letter, volume)]);
         let exclusion_epoch = volumes[&drive_letter].exclusion_epoch();
-        let exclusions = crate::sync_engine::path_exclusions::PathExclusions::new(&volumes, &[]);
+        let exclusions = crate::sync_engine::path_exclusions::PathExclusions::new(&volumes, rules);
         (
             AllFilesView {
                 drive_letter,
@@ -469,7 +471,7 @@ mod tests {
     fn an_all_files_view_pages_the_presorted_order_without_retaining_items() {
         let sessions = SessionManager::default();
         let vol = three_file_volume();
-        let (view, volumes) = all_files_view(vol, cairn_core::sort::SortColumn::Name, true);
+        let (view, volumes) = all_files_view(vol, cairn_core::sort::SortColumn::Name, true, &[]);
         let id = sessions.create_session(
             owner(7),
             MatchSet::AllFiles(view),
@@ -491,11 +493,61 @@ mod tests {
         assert_eq!(second[0].name, "c.txt");
     }
 
+    /// A rename that can move a record across an exclusion verdict makes open pages stale;
+    /// an ordinary rename keeps them readable.
+    #[test]
+    fn a_view_refuses_pages_after_a_rule_relevant_rename() {
+        let sessions = SessionManager::default();
+        let vol = three_file_volume();
+        let (view, mut volumes) = all_files_view(
+            vol,
+            cairn_core::sort::SortColumn::Name,
+            true,
+            &["$Recycle.Bin".to_string()],
+        );
+        let id = sessions.create_session(
+            owner(7),
+            MatchSet::AllFiles(view),
+            Vec::new(),
+            HashMap::new(),
+        );
+
+        volumes
+            .get_mut(&'C')
+            .expect("volume")
+            .apply_usn_changes([UsnChange::Renamed {
+                frn: 10,
+                parent_frn: 0,
+                name: "renamed.txt".to_string(),
+                is_dir: false,
+                is_new_name: true,
+            }]);
+        assert!(
+            sessions.get_rows_multi(id, 0, 2, &volumes).is_ok(),
+            "an ordinary rename keeps the view"
+        );
+
+        volumes
+            .get_mut(&'C')
+            .expect("volume")
+            .apply_usn_changes([UsnChange::Renamed {
+                frn: 10,
+                parent_frn: 0,
+                name: "$Recycle.Bin".to_string(),
+                is_dir: false,
+                is_new_name: true,
+            }]);
+        assert_eq!(
+            sessions.get_rows_multi(id, 0, 2, &volumes),
+            Err(RowsError::Stale { drive_letter: 'C' })
+        );
+    }
+
     #[test]
     fn a_descending_all_files_view_pages_the_reversed_order() {
         let sessions = SessionManager::default();
         let vol = three_file_volume();
-        let (view, volumes) = all_files_view(vol, cairn_core::sort::SortColumn::Name, false);
+        let (view, volumes) = all_files_view(vol, cairn_core::sort::SortColumn::Name, false, &[]);
         let id = sessions.create_session(
             owner(7),
             MatchSet::AllFiles(view),
@@ -515,7 +567,7 @@ mod tests {
     fn an_all_files_view_refuses_pages_after_a_rebuild() {
         let sessions = SessionManager::default();
         let vol = three_file_volume();
-        let (view, volumes) = all_files_view(vol, cairn_core::sort::SortColumn::Name, true);
+        let (view, volumes) = all_files_view(vol, cairn_core::sort::SortColumn::Name, true, &[]);
         let id = sessions.create_session(
             owner(7),
             MatchSet::AllFiles(view),

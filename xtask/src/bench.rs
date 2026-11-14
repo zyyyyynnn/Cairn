@@ -2,7 +2,8 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Automated benchmark and regression check suite comparing Cairn against SM-1 and SM-2 budgets.
+//! Deterministic cost-model benchmark. `--check` is a fixed 100k-fixture regression gate;
+//! SM-1/SM-2 acceptance at 4M records is measured per release.
 
 use cairn_core::engine::CancellationToken;
 use cairn_core::frn_index::IndexMemoryFootprint;
@@ -190,7 +191,7 @@ fn build_benchmark_engine(items: Vec<ExtractedItem>, index_dir: &Path) -> MultiV
 
 fn print_footprint(label: &str, fp: &IndexMemoryFootprint) {
     let mb = |bytes: usize| bytes as f64 / (1024.0 * 1024.0);
-    println!("\n--- [SM-2] {label} Memory Ledger ---");
+    println!("\n--- {label} Memory Ledger ---");
     println!(
         "Records: {} (live {}), FileRecord={} B, Total={:.2} MB ({:.2} B/record)",
         fp.record_count,
@@ -271,7 +272,7 @@ pub fn run_benchmark(
     let effective_runs = runs.max(1);
     let use_corpus = if check { None } else { Some(corpus_path) };
 
-    println!("=== Cairn Engine Benchmark (SM-1, SM-2) ===");
+    println!("=== Cairn Engine Benchmark ===");
     match use_corpus.filter(|p| p.exists()) {
         Some(p) => println!("Loading synthetic corpus from {:?}...", p),
         None => println!(
@@ -309,7 +310,7 @@ pub fn run_benchmark(
     ];
 
     println!(
-        "\n--- [SM-1] Query Latency Benchmark (Warmup 2x, Samples {}x) ---",
+        "\n--- Query Latency Benchmark (Warmup 2x, Samples {}x) ---",
         effective_runs
     );
     println!(
@@ -363,7 +364,7 @@ pub fn run_benchmark(
             .map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
     } else if idle_footprint.bytes_per_record() > MEMORY_BUDGET_BYTES_PER_RECORD {
         return Err(format!(
-            "SM-2 violation: idle full-ledger {:.2} B/record exceeds {:.2} B/record",
+            "Memory regression: idle full-ledger {:.2} B/record exceeds {:.2} B/record",
             idle_footprint.bytes_per_record(),
             MEMORY_BUDGET_BYTES_PER_RECORD
         )

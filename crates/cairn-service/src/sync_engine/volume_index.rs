@@ -452,7 +452,7 @@ impl VolumeIndex {
 
     /// Records whose position in the name or path order changed (rename, move).
     pub fn mark_presorted_names_changed(&mut self, indices: impl IntoIterator<Item = u32>) {
-        self.mark_repositioned(indices, true, false);
+        self.mark_repositioned(indices, true, true);
     }
 
     /// Records whose position in the size or modification order changed.
@@ -495,6 +495,22 @@ impl VolumeIndex {
 
     pub fn has_presorted_column(&self, col: SortColumn) -> bool {
         self.presorted_column == Some(col) && self.presorted_order(col).is_some()
+    }
+
+    /// The cached order as an open view captured it: pending merges belong to future reads,
+    /// and the view's slots still describe its own snapshot.
+    pub fn presorted_order_snapshot(&self, sort_by: SortColumn) -> Option<&[u32]> {
+        if self.presorted_column != Some(sort_by) {
+            return None;
+        }
+        let order = match sort_by {
+            SortColumn::Name => &self.presorted.by_name,
+            SortColumn::Size => &self.presorted.by_size,
+            SortColumn::DateModified => &self.presorted.by_date_modified,
+            SortColumn::Path => &self.presorted.by_path,
+            SortColumn::DateCreated | SortColumn::Extension => return None,
+        };
+        (!order.is_empty()).then_some(order.as_slice())
     }
 
     pub fn presorted_order(&self, sort_by: SortColumn) -> Option<&[u32]> {
