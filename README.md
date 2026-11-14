@@ -90,7 +90,7 @@ cargo run -p xtask -- check-docs
 cargo run -p xtask -- check-size
 ```
 
-工作区测试含 4 个 `#[ignore]` 用例，前置条件与运行命令见[测试与验证](docs/engineering/testing.md)；内容回填端到端用例由 CI 的 `Test / Service` 作业执行。
+工作区测试含 5 个 `#[ignore]` 用例，前置条件与运行命令见[测试与验证](docs/engineering/testing.md)；内容回填端到端用例由 CI 的 `Test / Backfill` 作业执行。
 
 ## 仓库结构
 
