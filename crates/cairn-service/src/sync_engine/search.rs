@@ -257,17 +257,43 @@ impl MultiVolumeEngine {
         let (total, view_bytes) = if view.exclusions.is_empty() {
             (volume.live_count() as usize, volume.live_file_bytes())
         } else {
-            let mut visible = Vec::with_capacity(volume.live_count() as usize);
+            let mut total = 0usize;
+            let mut root_size = None;
             if !view.visit_visible_until(
                 volume,
                 0,
                 usize::MAX,
                 || cancel.is_cancelled(),
-                |idx| visible.push(idx),
+                |idx| {
+                    total += 1;
+                    let record = &volume.records()[idx as usize];
+                    if record.parent_idx == idx {
+                        root_size = Some(record.size);
+                    }
+                },
             ) {
                 return SearchOutcome::empty(highlight_terms, snippets);
             }
-            (visible.len(), volume.calculate_matched_bytes(&visible))
+            // A visible root is the one top hit of the all-files set and covers every row,
+            // so its recursive size is the exact total without materializing the set. Only a
+            // view that excluded the root itself needs the per-row calculation.
+            let view_bytes = match root_size {
+                Some(size) => size,
+                None => {
+                    let mut visible = Vec::with_capacity(total);
+                    if !view.visit_visible_until(
+                        volume,
+                        0,
+                        usize::MAX,
+                        || cancel.is_cancelled(),
+                        |idx| visible.push(idx),
+                    ) {
+                        return SearchOutcome::empty(highlight_terms, snippets);
+                    }
+                    volume.calculate_matched_bytes(&visible)
+                }
+            };
+            (total, view_bytes)
         };
         SearchOutcome {
             rows: MatchSet::AllFiles(view),
