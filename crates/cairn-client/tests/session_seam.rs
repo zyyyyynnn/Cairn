@@ -17,6 +17,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 use tokio::sync::{oneshot, Mutex};
 
+/// The fields a `Query` carries, captured to compare a request with its replay.
+type SentQuery = (u64, String, QueryDefaults, SortColumn, bool, usize);
+
 fn unique_pipe_name(tag: &str) -> String {
     static NEXT: AtomicUsize = AtomicUsize::new(1);
     let seq = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -253,8 +256,7 @@ async fn a_retried_query_carries_the_same_request() {
         .create(&pipe)
         .expect("first server");
 
-    let queries: Arc<Mutex<Vec<(u64, String, QueryDefaults, SortColumn, bool, usize)>>> =
-        Arc::new(Mutex::new(Vec::new()));
+    let queries: Arc<Mutex<Vec<SentQuery>>> = Arc::new(Mutex::new(Vec::new()));
     let queries_srv = queries.clone();
     let pipe_srv = pipe.clone();
 
