@@ -447,6 +447,7 @@ mod tests {
         let presorted_version = volume.presorted_version();
         let drive_letter = volume.drive_letter;
         let volumes = HashMap::from([(drive_letter, volume)]);
+        let exclusion_epoch = volumes[&drive_letter].exclusion_epoch();
         let exclusions = crate::sync_engine::path_exclusions::PathExclusions::new(&volumes, &[]);
         (
             AllFilesView {
@@ -455,6 +456,7 @@ mod tests {
                 sort_asc,
                 generation,
                 presorted_version,
+                exclusion_epoch,
                 exclusions,
             },
             volumes,

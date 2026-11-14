@@ -50,6 +50,7 @@ pub struct AllFilesView {
     pub(crate) sort_asc: bool,
     pub(crate) generation: u64,
     pub(crate) presorted_version: u64,
+    pub(crate) exclusion_epoch: u64,
     pub(crate) exclusions: PathExclusions,
 }
 
@@ -76,6 +77,7 @@ impl AllFilesView {
     ) -> bool {
         if volume.generation() != self.generation
             || volume.presorted_version() != self.presorted_version
+            || volume.exclusion_epoch() != self.exclusion_epoch
         {
             return false;
         }
@@ -620,6 +622,7 @@ impl MultiVolumeEngine {
                         sort_asc,
                         generation: vol.generation(),
                         presorted_version: vol.presorted_version(),
+                        exclusion_epoch: vol.exclusion_epoch(),
                         exclusions,
                     };
                     // Without path rules the volume's own counters are the exact totals, so

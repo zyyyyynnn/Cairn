@@ -1330,6 +1330,12 @@ impl VolumeIndex {
         })
     }
 
+    /// Version of the path-derived exclusion verdicts; changes when a rename can move a
+    /// record between verdicts or the table is replaced.
+    pub fn exclusion_epoch(&self) -> u64 {
+        self.exclusion_epoch
+    }
+
     /// The segment-exclusion states, cached until a path changes. Appended records extend the
     /// cached table; a rename or a rebuilt table starts it over.
     pub(crate) fn segment_excluded_states_cached(&self, segments: &[String]) -> Arc<Vec<u8>> {
