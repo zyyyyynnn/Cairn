@@ -1270,8 +1270,13 @@ impl VolumeIndex {
         path: &mut Vec<u32>,
     ) -> bool {
         path.clear();
+        let mut steps = 0usize;
         let covered = loop {
             if parent == FileRecord::ROOT_PARENT || parent as usize >= self.records.len() {
+                break false;
+            }
+            steps += 1;
+            if steps > self.records.len() {
                 break false;
             }
             match coverage[parent as usize] {
