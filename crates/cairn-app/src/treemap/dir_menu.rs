@@ -88,15 +88,6 @@ fn menu_directory(entry: &std::fs::DirEntry) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{list_menu_directories, DirectoryMenuLoader};
-    use std::path::PathBuf;
-
-    struct TempDirGuard(PathBuf);
-
-    impl Drop for TempDirGuard {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
 
     #[test]
     fn stale_epoch_directory_listing_is_ignored_after_toggle_or_navigation() {
@@ -120,15 +111,8 @@ mod tests {
 
     #[test]
     fn list_menu_directories_returns_naturally_sorted_subdirectories_without_files() {
-        let root = std::env::temp_dir().join(format!(
-            "cairn_dir_menu_test_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        let _guard = TempDirGuard(root.clone());
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("menu");
         std::fs::create_dir_all(root.join("dir10")).unwrap();
         std::fs::create_dir_all(root.join("dir2")).unwrap();
         std::fs::write(root.join("plain.txt"), b"hello").unwrap();
