@@ -774,31 +774,35 @@ fn matched_bytes_are_counted_once_at_the_highest_matched_point() {
     let note_idx = vol.first_record_index_for_frn(30).expect("note");
     let out_idx = vol.first_record_index_for_frn(50).expect("out");
 
-    // 1. Folders alone contribute zero bytes.
+    // 1. Every folder matched: the root is the highest hit point and owns the whole tree.
     let all_folders = vec![root_idx, win_idx, sys_idx, users_idx];
-    assert_eq!(vol.calculate_matched_bytes(&all_folders), 0);
+    assert_eq!(vol.calculate_matched_bytes(&all_folders), 150);
 
-    // 2. Subfolders alone contribute zero bytes.
+    // 2. A folder-only hit reports the folder's recursive size; the nested System32 is
+    //    covered by Windows and adds nothing.
     let subfolders = vec![win_idx, sys_idx, users_idx];
-    assert_eq!(vol.calculate_matched_bytes(&subfolders), 0);
+    assert_eq!(vol.calculate_matched_bytes(&subfolders), 50);
 
-    // 3. Sibling directories contribute zero bytes.
+    // 3. A single folder hit reports its recursive size on its own.
+    assert_eq!(vol.calculate_matched_bytes(&[sys_idx]), 50);
+
+    // 4. Sibling directories keep their own shares.
     let siblings = vec![win_idx, users_idx];
-    assert_eq!(vol.calculate_matched_bytes(&siblings), 0);
+    assert_eq!(vol.calculate_matched_bytes(&siblings), 50);
 
-    // 4. Pure file query: files contribute their size.
+    // 5. Pure file query: files contribute their size.
     let files = vec![note_idx, out_idx];
     assert_eq!(vol.calculate_matched_bytes(&files), 150);
 
-    // 5. Mixed query: only files contribute size; folders contribute zero.
+    // 6. Mixed query: Windows covers its matched descendant; the outside file counts once.
     let mixed = vec![win_idx, note_idx, out_idx];
     assert_eq!(vol.calculate_matched_bytes(&mixed), 150);
 
-    // 6. Duplicate indices are deduplicated in small sets.
+    // 7. Duplicate indices are counted once.
     let duplicates = vec![note_idx, note_idx, out_idx, out_idx];
     assert_eq!(vol.calculate_matched_bytes(&duplicates), 150);
 
-    // 7. Large query sets (> 64 items) use BitSet deduplication.
+    // 8. A many-times repeated index is still one record.
     let mut large_query = Vec::new();
     for _ in 0..50 {
         large_query.push(note_idx);
@@ -807,7 +811,7 @@ fn matched_bytes_are_counted_once_at_the_highest_matched_point() {
     assert!(large_query.len() > 64);
     assert_eq!(vol.calculate_matched_bytes(&large_query), 150);
 
-    // 8. Tombstoned records contribute zero bytes.
+    // 9. Tombstoned records contribute zero bytes.
     vol.apply_usn_changes([UsnChange::Deleted { frn: 30 }]);
     assert_eq!(
         vol.calculate_matched_bytes(&[note_idx, out_idx]),

@@ -1212,59 +1212,86 @@ impl VolumeIndex {
         }
     }
 
-    /// Sums the own sizes of matched files.
-    ///
-    /// Directories are containers: they contribute zero here, so the total always describes the
-    /// visible result set and never counts an excluded descendant through an ancestor's aggregate.
+    /// Sums the space the matched set describes at its highest hit point: a matched directory
+    /// contributes its recursive size once, and a match already covered by a matched ancestor
+    /// directory adds nothing. A folder-only hit therefore reports the folder's space without
+    /// any file being counted twice.
     pub(crate) fn calculate_matched_bytes(&self, matched_indices: &[u32]) -> u64 {
         if matched_indices.is_empty() || self.records.is_empty() {
             return 0;
         }
 
-        if matched_indices.len() <= 64 {
-            let mut total: u64 = 0;
-            for (i, &idx) in matched_indices.iter().enumerate() {
-                let index = idx as usize;
-                if matched_indices[..i].contains(&idx) {
-                    continue;
-                }
-                if let Some(record) = self.records.get(index) {
-                    if record.is_file() && !record.is_tombstone() {
-                        total = total.saturating_add(record.size);
-                    }
+        let mut matched_dirs = BitSet::with_capacity(self.records.len());
+        let mut has_matched_dirs = false;
+        for &idx in matched_indices {
+            if let Some(record) = self.records.get(idx as usize) {
+                if record.is_dir() && !record.is_tombstone() {
+                    matched_dirs.insert(idx as usize);
+                    has_matched_dirs = true;
                 }
             }
-            return total;
         }
 
-        let max_idx = matched_indices.iter().copied().max().unwrap_or(0) as usize;
-        let bit_capacity = (max_idx + 1).min(self.records.len());
-        let mut seen = BitSet::with_capacity(bit_capacity);
+        let mut seen = BitSet::with_capacity(self.records.len());
+        // Coverage is only consulted when a matched directory can cover a descendant; a
+        // file-only match set sums its own sizes without the lookup table.
+        let mut coverage = has_matched_dirs.then(|| vec![0u8; self.records.len()]);
+        let mut path = Vec::new();
         let mut total: u64 = 0;
 
         for &idx in matched_indices {
             let index = idx as usize;
-            if index < self.records.len() && seen.insert(index) {
-                let record = &self.records[index];
-                if record.is_file() && !record.is_tombstone() {
-                    total = total.saturating_add(record.size);
-                }
+            if index >= self.records.len() || !seen.insert(index) {
+                continue;
+            }
+            let record = &self.records[index];
+            if record.is_tombstone() {
+                continue;
+            }
+            // The volume root is its own parent; a record is never covered by itself.
+            let covered = record.parent_idx != index as u32
+                && coverage.as_mut().is_some_and(|coverage| {
+                    self.parent_is_covered(record.parent_idx, &matched_dirs, coverage, &mut path)
+                });
+            if !covered {
+                total = total.saturating_add(record.size);
             }
         }
 
         total
     }
 
-    /// Sums file sizes across unique matched record indices without allocating a dedup bitset.
-    pub(crate) fn sum_unique_matched_bytes(&self, matched_indices: &[u32]) -> u64 {
-        let mut total: u64 = 0;
-        for &idx in matched_indices {
-            if let Some(record) = self.records.get(idx as usize) {
-                if record.is_file() && !record.is_tombstone() {
-                    total = total.saturating_add(record.size);
-                }
+    /// Whether `parent` or one of its ancestors is a matched live directory.
+    fn parent_is_covered(
+        &self,
+        mut parent: u32,
+        matched_dirs: &BitSet,
+        coverage: &mut [u8],
+        path: &mut Vec<u32>,
+    ) -> bool {
+        path.clear();
+        let covered = loop {
+            if parent == FileRecord::ROOT_PARENT || parent as usize >= self.records.len() {
+                break false;
             }
+            match coverage[parent as usize] {
+                1 => break true,
+                2 => break false,
+                _ => {}
+            }
+            if matched_dirs.contains(parent as usize) {
+                break true;
+            }
+            path.push(parent);
+            let record = &self.records[parent as usize];
+            if record.parent_idx == parent {
+                break false;
+            }
+            parent = record.parent_idx;
+        };
+        for &index in path.iter() {
+            coverage[index as usize] = if covered { 1 } else { 2 };
         }
-        total
+        covered
     }
 }
