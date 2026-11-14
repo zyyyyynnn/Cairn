@@ -174,6 +174,15 @@ impl SearchOutcome {
     }
 }
 
+/// Whether a volume can answer a query: not excluded by preference, and either fully indexed
+/// or holding records from a previous session.
+fn volume_is_active(volume: &VolumeIndex, excluded_drives: &[char]) -> bool {
+    !excluded_drives
+        .iter()
+        .any(|drive| drive.eq_ignore_ascii_case(&volume.drive_letter))
+        && (volume.status.state().is_synced() || !volume.records().is_empty())
+}
+
 impl MultiVolumeEngine {
     /// The one active volume a textless query would view. A drive-scoped query names it; an
     /// unscoped one needs exactly one active volume. The presorted build and the view read
@@ -184,22 +193,20 @@ impl MultiVolumeEngine {
             cfg.excluded_drives.clone()
         };
         let volumes = self.volumes.read().unwrap();
-        let active = |volume: &&VolumeIndex| {
-            !excluded_drives
-                .iter()
-                .any(|&ex| ex.eq_ignore_ascii_case(&volume.drive_letter))
-                && (volume.status.state().is_synced() || !volume.records().is_empty())
-        };
         match drive_scope {
             Some(drive) => volumes
                 .values()
-                .filter(active)
-                .find(|volume| volume.drive_letter.eq_ignore_ascii_case(&drive))
+                .find(|volume| {
+                    volume_is_active(volume, &excluded_drives)
+                        && volume.drive_letter.eq_ignore_ascii_case(&drive)
+                })
                 .map(|volume| volume.drive_letter),
             None => {
-                let mut active_volumes = volumes.values().filter(active);
-                let volume = active_volumes.next()?;
-                if active_volumes.next().is_some() {
+                let mut active = volumes
+                    .values()
+                    .filter(|volume| volume_is_active(volume, &excluded_drives));
+                let volume = active.next()?;
+                if active.next().is_some() {
                     return None;
                 }
                 Some(volume.drive_letter)
@@ -245,28 +252,22 @@ impl MultiVolumeEngine {
             exclusions,
         };
         // Without path rules the volume's own counters are the exact totals, so the view
-        // costs no scan; with rules the visible set needs the walk.
+        // costs no scan. With rules the visible set is the matched set, so its space total
+        // follows the same highest-hit rule as a filtered query.
         let (total, view_bytes) = if view.exclusions.is_empty() {
             (volume.live_count() as usize, volume.live_file_bytes())
         } else {
-            let mut total = 0usize;
-            let mut view_bytes = 0u64;
+            let mut visible = Vec::new();
             if !view.visit_visible_until(
                 volume,
                 0,
                 usize::MAX,
                 || cancel.is_cancelled(),
-                |idx| {
-                    total += 1;
-                    let record = &volume.records()[idx as usize];
-                    if record.is_file() {
-                        view_bytes = view_bytes.saturating_add(record.size);
-                    }
-                },
+                |idx| visible.push(idx),
             ) {
                 return SearchOutcome::empty(highlight_terms, snippets);
             }
-            (total, view_bytes)
+            (visible.len(), volume.calculate_matched_bytes(&visible))
         };
         SearchOutcome {
             rows: MatchSet::AllFiles(view),
@@ -688,15 +689,7 @@ impl MultiVolumeEngine {
             let exclusions = PathExclusions::new(&lock, &excluded_paths);
             let active_vols: Vec<_> = lock
                 .values()
-                .filter(|v| {
-                    if excluded_drives
-                        .iter()
-                        .any(|&ex| ex.eq_ignore_ascii_case(&v.drive_letter))
-                    {
-                        return false;
-                    }
-                    v.status.state().is_synced() || !v.records().is_empty()
-                })
+                .filter(|volume| volume_is_active(volume, &excluded_drives))
                 .collect();
             // The view is the requested volume's whole order. A scoped query names it; an
             // unscoped one may only view the sole active volume. Both are re-checked against

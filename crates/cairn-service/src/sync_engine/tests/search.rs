@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::{index_item, sized_item};
-use crate::sync_engine::{MultiVolumeEngine, VolumeIndex};
+use crate::sync_engine::{MatchSet, MultiVolumeEngine, VolumeIndex};
 use cairn_core::engine::CancellationToken;
 use cairn_core::sort::SortColumn;
 use cairn_core::syntax::QueryDefaults;
@@ -536,4 +536,46 @@ fn single_volume_filtered_sort_and_exclusions_keep_presorted_unbuilt() {
             .collect::<Vec<_>>()
     });
     assert_eq!(file_names, vec!["alpha.bin", "zeta.bin"]);
+}
+
+/// An excluded subtree hides rows but stays inside the space of the matched root, so the total
+/// does not depend on whether the view or a materialized result answers the query.
+#[test]
+fn an_excluded_subtree_keeps_the_all_files_space_total() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let cfg = crate::config::ServiceConfig {
+        excluded_paths: vec!["ExcludedDir".to_string()],
+        ..Default::default()
+    };
+    let engine = MultiVolumeEngine::with_index_dir_drives_and_config(temp.path(), vec![], cfg);
+    let mut vol = VolumeIndex::new('C');
+    vol.ingest_items(vec![
+        index_item(1, 0, "C:", true),
+        index_item(2, 1, "ExcludedDir", true),
+        sized_item(3, 2, "hidden.bin", false, 3 * 1024 * 1024),
+        sized_item(4, 1, "visible.bin", false, 1024),
+    ]);
+    engine.add_volume(vol);
+
+    let cancel = CancellationToken::new();
+    let defaults = QueryDefaults::default();
+    let view = engine.execute_search_multi("C: ", &defaults, SortColumn::Name, true, &cancel);
+    assert!(matches!(view.rows, MatchSet::AllFiles(_)));
+    assert_eq!(
+        view.total, 2,
+        "the excluded directory and its file are not rows"
+    );
+    assert_eq!(
+        view.total_bytes,
+        3 * 1024 * 1024 + 1024,
+        "the matched root's recursive space includes the excluded subtree"
+    );
+
+    let materialized =
+        engine.execute_search_multi("C: ", &defaults, SortColumn::DateCreated, true, &cancel);
+    assert!(matches!(materialized.rows, MatchSet::Items(_)));
+    assert_eq!(
+        materialized.total_bytes, view.total_bytes,
+        "the space total does not depend on how the rows are served"
+    );
 }

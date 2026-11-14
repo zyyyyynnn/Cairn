@@ -210,7 +210,7 @@ fn the_query_total_bytes_follow_the_highest_matched_point() {
     assert_eq!(total, 5, "directories are results too");
     assert_eq!(
         bytes, 600,
-        "only file rows contribute bytes; the folder's recursive size is not added on top"
+        "the matched root contributes its recursive total once; it equals the file sum"
     );
 
     let outcome = engine.execute_search_multi(
