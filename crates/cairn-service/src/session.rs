@@ -140,19 +140,19 @@ impl SessionManager {
     /// Drops one open connection. The last one releases the client's cached sessions and
     /// cancels its in-flight queries: nothing can page or join them after the process leaves.
     pub fn release_client(&self, owner: &QueryOwner) {
-        let last = {
-            let mut connections = self.connections.lock().unwrap();
-            match connections.get_mut(owner) {
-                Some(count) if *count > 1 => {
-                    *count -= 1;
-                    false
-                }
-                Some(_) => {
-                    connections.remove(owner);
-                    true
-                }
-                None => false,
+        // The registration lock stays held through the purge: a reconnecting client cannot
+        // register and open a session between the last release and the cleanup that removes it.
+        let mut connections = self.connections.lock().unwrap();
+        let last = match connections.get_mut(owner) {
+            Some(count) if *count > 1 => {
+                *count -= 1;
+                false
             }
+            Some(_) => {
+                connections.remove(owner);
+                true
+            }
+            None => false,
         };
         if !last {
             return;
