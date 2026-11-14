@@ -4,17 +4,17 @@
 
 //! One tooltip entrance for every trigger.
 //!
-//! Component controls get their slide-and-fade from the managed tooltip system. Plain
-//! elements attach tooltips through GPUI's own path, which shows them without an entrance;
-//! routing those through this builder keeps every tooltip moving the same way.
+//! gpui-kit component tooltips animate through the managed overlay. A GPUI-native
+//! `.tooltip()` builder, the form the result table, path band and Treemap use, shows its
+//! view without one; this wrapper gives those views the same 150 ms, 4 px entrance.
 
 use gpui_kit::component::animation::{ease_out_cubic, EffectTransition};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::gpui::*;
 use std::time::Duration;
 
-/// The managed tooltip entrance: a 4 px upward slide under a fade, 150 ms.
-const ENTER: Duration = Duration::from_millis(150);
+/// The managed entrance: a 4 px upward slide under a fade, 150 ms.
+const ENTER_DURATION: Duration = Duration::from_millis(150);
 
 struct AppTooltip {
     content: AnyView,
@@ -26,7 +26,7 @@ impl Render for AppTooltip {
         if cx.reduce_motion() {
             return content.into_any_element();
         }
-        EffectTransition::new(ENTER)
+        EffectTransition::new(ENTER_DURATION)
             .ease(ease_out_cubic)
             .slide_y(px(4.), px(0.))
             .fade(0.0, 1.0)
@@ -35,7 +35,7 @@ impl Render for AppTooltip {
     }
 }
 
-/// Builds a tooltip with the same entrance a component control's tooltip uses.
+/// Builds a tooltip whose entrance matches a managed component tooltip.
 pub fn text(text: impl Into<SharedString> + 'static) -> impl Fn(&mut Window, &mut App) -> AnyView {
     let text = text.into();
     move |window, cx| {
