@@ -436,7 +436,7 @@ pub struct CairnApp {
 }
 
 impl CairnApp {
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let bundle = crate::startup::StartupCoordinator::prepare(
             Vec::new(),
