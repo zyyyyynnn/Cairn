@@ -75,7 +75,7 @@ fn a_filtered_query_does_not_rebuild_the_whole_volume_sort() {
     assert_eq!(total, 1);
     assert_eq!(results.len(), 1);
     assert!(
-        engine.with_volumes(|volumes| volumes[&'C'].is_presorted_dirty()),
+        engine.with_volumes(|volumes| volumes[&'C'].needs_presorted_column(SortColumn::Name)),
         "a filtered query has no use for the volume-wide presorted order"
     );
 
@@ -89,7 +89,7 @@ fn a_filtered_query_does_not_rebuild_the_whole_volume_sort() {
     let total = outcome.total;
     assert_eq!(total, 3);
     assert!(
-        !engine.with_volumes(|volumes| volumes[&'C'].is_presorted_dirty()),
+        !engine.with_volumes(|volumes| volumes[&'C'].needs_presorted_column(SortColumn::Name)),
         "the all-files query does need the order and must rebuild it"
     );
 }

@@ -52,6 +52,14 @@ impl BitSet {
             .is_some_and(|word| word & (1u64 << (bit % 64)) != 0)
     }
 
+    /// Grows the set so `bits` are addressable; existing bits are untouched.
+    pub(super) fn ensure_capacity(&mut self, bits: usize) {
+        let words = bits.div_ceil(64);
+        if self.words.len() < words {
+            self.words.resize(words, 0);
+        }
+    }
+
     /// Unions `other` into `self`. Both sets describe the same record table, so their word
     /// vectors have equal length.
     pub(super) fn merge(&mut self, other: &Self) {
@@ -150,12 +158,13 @@ pub struct VolumeIndex {
     /// order refuses pages after the column was rebuilt, because the same offset can then
     /// name a different row.
     presorted_version: u64,
-    /// The one cached presorted column, the columns invalidated since its build, and the
-    /// records appended since then. A rename or a size change invalidates only the columns
-    /// whose key it moves; a create only extends the delta, so the next query merges instead
-    /// of re-sorting the whole table.
+    /// The one cached presorted column, plus the records whose position changed since its
+    /// build (new, renamed, resized) and the base indices that must leave the order. A key
+    /// change marks only the columns whose key it moves, so the next query merges instead of
+    /// re-sorting the whole table.
     presorted_column: Option<SortColumn>,
-    presorted_stale: [bool; 6],
+    presorted_pending: BitSet,
+    presorted_removed: BitSet,
     presorted_delta: Vec<u32>,
     /// Live records (tombstones excluded), maintained incrementally so status summaries stay O(1).
     live_count: u64,
@@ -176,7 +185,8 @@ impl VolumeIndex {
             path_cache: DirectoryPathCache::new(),
             presorted: PresortedIndices::default(),
             presorted_column: None,
-            presorted_stale: [false; 6],
+            presorted_pending: BitSet::with_capacity(0),
+            presorted_removed: BitSet::with_capacity(0),
             presorted_delta: Vec::new(),
             frn_to_idx: FrnLookup::new(),
             pending_renames: HashMap::new(),
@@ -205,7 +215,8 @@ impl VolumeIndex {
         self.path_cache.clear();
         self.presorted.clear_and_shrink();
         self.presorted_column = None;
-        self.presorted_stale = [false; 6];
+        self.presorted_pending = BitSet::with_capacity(0);
+        self.presorted_removed = BitSet::with_capacity(0);
         self.presorted_delta.clear();
         self.frn_to_idx.clear_and_shrink();
         self.pending_renames.clear();
@@ -226,7 +237,8 @@ impl VolumeIndex {
         self.path_cache.clear();
         self.presorted.clear_and_shrink();
         self.presorted_column = None;
-        self.presorted_stale = [false; 6];
+        self.presorted_pending = BitSet::with_capacity(0);
+        self.presorted_removed = BitSet::with_capacity(0);
         self.presorted_delta.clear();
         self.pending_renames.clear();
         self.pending_data_changes.clear();
@@ -360,10 +372,10 @@ impl VolumeIndex {
         self.pending_content_deletions.contains(&(volume_id, frn))
     }
 
-    /// Whether the cached order was invalidated or holds records waiting to be merged. An
-    /// unbuilt column is not dirty: it simply has not been requested yet.
+    /// Whether the cached order holds records waiting to be merged. An unbuilt column is not
+    /// dirty: it simply has not been requested yet.
     pub fn is_presorted_dirty(&self) -> bool {
-        self.presorted_stale.iter().any(|&stale| stale) || !self.presorted_delta.is_empty()
+        !self.presorted_delta.is_empty()
     }
 
     /// Whether this volume needs work before `col` can answer an ordered read.
@@ -371,16 +383,15 @@ impl VolumeIndex {
         if self.records.is_empty() {
             return false;
         }
-        self.presorted_column != Some(col)
-            || self.presorted_stale_for(col)
-            || !self.presorted_delta.is_empty()
+        self.presorted_column != Some(col) || !self.presorted_delta.is_empty()
     }
 
     /// Invalidates every column: the table itself changed (reconciliation, compaction).
     pub fn mark_presorted_dirty(&mut self) {
         self.presorted.clear_and_shrink();
         self.presorted_column = None;
-        self.presorted_stale = [true; 6];
+        self.presorted_pending = BitSet::with_capacity(0);
+        self.presorted_removed = BitSet::with_capacity(0);
         self.presorted_delta.clear();
         self.presorted_version = self.presorted_version.wrapping_add(1);
     }
@@ -388,27 +399,57 @@ impl VolumeIndex {
     /// Records appended since the last build. With no cached column the next build is full
     /// anyway, so the indices would only cost memory.
     pub fn mark_presorted_appended(&mut self, indices: impl IntoIterator<Item = u32>) {
-        if self.presorted_column.is_some() {
-            self.presorted_delta.extend(indices);
+        if self.presorted_column.is_none() {
+            return;
+        }
+        self.presorted_pending.ensure_capacity(self.records.len());
+        for index in indices {
+            if self.presorted_pending.insert(index as usize) {
+                self.presorted_delta.push(index);
+            }
         }
     }
 
-    /// A rename or move changes the name order and every path built from it.
-    pub fn mark_presorted_names_changed(&mut self) {
-        self.presorted_stale[Self::sort_col_index(SortColumn::Name)] = true;
-        self.presorted_stale[Self::sort_col_index(SortColumn::Path)] = true;
+    /// Records whose position in the name or path order changed (rename, move).
+    pub fn mark_presorted_names_changed(&mut self, indices: impl IntoIterator<Item = u32>) {
+        self.mark_repositioned(indices, true, true);
     }
 
-    /// A size or timestamp change moves records in the size and modification orders.
-    pub fn mark_presorted_sizes_changed(&mut self) {
-        self.presorted_stale[Self::sort_col_index(SortColumn::Size)] = true;
-        self.presorted_stale[Self::sort_col_index(SortColumn::DateModified)] = true;
-        self.presorted_stale[Self::sort_col_index(SortColumn::DateCreated)] = true;
+    /// Records whose position in the size or modification order changed.
+    pub fn mark_presorted_sizes_changed(&mut self, indices: impl IntoIterator<Item = u32>) {
+        self.mark_repositioned(indices, false, true);
     }
 
-    /// A parent change moves records in the path order only.
-    pub fn mark_presorted_paths_changed(&mut self) {
-        self.presorted_stale[Self::sort_col_index(SortColumn::Path)] = true;
+    /// Records whose position in the path order changed but whose name stayed.
+    pub fn mark_presorted_paths_changed(&mut self, indices: impl IntoIterator<Item = u32>) {
+        self.mark_repositioned(indices, true, false);
+    }
+
+    /// Marks records for repositioning when the cached column sorts on one of the changed
+    /// keys. A column that is not cached is built fresh when requested, so its marks would be
+    /// wasted work.
+    fn mark_repositioned(
+        &mut self,
+        indices: impl IntoIterator<Item = u32>,
+        names: bool,
+        sizes: bool,
+    ) {
+        let affects = match self.presorted_column {
+            Some(SortColumn::Name) | Some(SortColumn::Path) => names,
+            Some(SortColumn::Size) | Some(SortColumn::DateModified) => sizes,
+            Some(SortColumn::DateCreated) | Some(SortColumn::Extension) | None => false,
+        };
+        if !affects {
+            return;
+        }
+        self.presorted_pending.ensure_capacity(self.records.len());
+        self.presorted_removed.ensure_capacity(self.records.len());
+        for index in indices {
+            if self.presorted_pending.insert(index as usize) {
+                self.presorted_delta.push(index);
+            }
+            self.presorted_removed.insert(index as usize);
+        }
     }
 
     pub fn has_presorted_column(&self, col: SortColumn) -> bool {
@@ -416,7 +457,7 @@ impl VolumeIndex {
     }
 
     pub fn presorted_order(&self, sort_by: SortColumn) -> Option<&[u32]> {
-        if self.presorted_column != Some(sort_by) || self.presorted_stale_for(sort_by) {
+        if self.presorted_column != Some(sort_by) {
             return None;
         }
         let order = match sort_by {
@@ -429,66 +470,56 @@ impl VolumeIndex {
         (!order.is_empty()).then_some(order.as_slice())
     }
 
-    /// Ensures a specific presorted column is up-to-date. A clean column absorbs the appended
-    /// records in one merge; an invalidated one is rebuilt. Only one column is retained: the
-    /// memory budget covers the lazy single-column state, so switching the sort column releases
-    /// the previous order instead of accumulating columns.
+    /// Ensures a specific presorted column is up-to-date. A clean column absorbs the changed
+    /// records in one merge; a column that is missing or invalidated is rebuilt. A change set
+    /// that covers a quarter of the table is cheaper to re-sort than to merge. Only one column
+    /// is retained: the memory budget covers the lazy single-column state, so switching the
+    /// sort column releases the previous order instead of accumulating columns.
     pub fn ensure_presorted_column(&mut self, col: SortColumn) {
         if self.records.is_empty() {
             return;
         }
-        let clean = self.presorted_column == Some(col)
-            && self.presorted_has(col)
-            && !self.presorted_stale_for(col);
-        if clean {
-            if self.presorted_delta.is_empty() {
-                return;
-            }
-            let mut appended = std::mem::take(&mut self.presorted_delta);
-            self.presorted.merge_appended(
+        let built = self.presorted_column == Some(col) && self.presorted_has(col);
+        if built && self.presorted_delta.is_empty() {
+            return;
+        }
+        let rebuild = !built || self.presorted_delta.len().saturating_mul(4) > self.records.len();
+        if rebuild {
+            self.presorted.clear_and_shrink();
+            self.presorted.ensure_column(
                 col,
-                &mut appended,
                 &self.records,
                 &self.arena,
                 &self.path_cache,
                 self.drive_letter,
             );
+            self.presorted_column = Some(col);
+            self.presorted_pending = BitSet::with_capacity(0);
+            self.presorted_removed = BitSet::with_capacity(0);
+            self.presorted_delta.clear();
             self.presorted_version = self.presorted_version.wrapping_add(1);
             return;
         }
 
-        self.presorted.clear_and_shrink();
-        self.presorted.ensure_column(
+        let mut changed = std::mem::take(&mut self.presorted_delta);
+        let removed = &self.presorted_removed;
+        self.presorted.merge_changed(
             col,
+            &mut changed,
+            |index| removed.contains(index as usize),
             &self.records,
             &self.arena,
             &self.path_cache,
             self.drive_letter,
         );
-        self.presorted_column = Some(col);
-        self.presorted_stale = [false; 6];
-        self.presorted_delta.clear();
+        self.presorted_pending = BitSet::with_capacity(0);
+        self.presorted_removed = BitSet::with_capacity(0);
         self.presorted_version = self.presorted_version.wrapping_add(1);
     }
 
     /// Version of the current presorted order; changes whenever the order is rebuilt or merged.
     pub fn presorted_version(&self) -> u64 {
         self.presorted_version
-    }
-
-    fn sort_col_index(col: SortColumn) -> usize {
-        match col {
-            SortColumn::Name => 0,
-            SortColumn::Size => 1,
-            SortColumn::DateModified => 2,
-            SortColumn::Path => 3,
-            SortColumn::DateCreated => 4,
-            SortColumn::Extension => 5,
-        }
-    }
-
-    fn presorted_stale_for(&self, col: SortColumn) -> bool {
-        self.presorted_stale[Self::sort_col_index(col)]
     }
 
     fn presorted_has(&self, col: SortColumn) -> bool {
@@ -553,7 +584,7 @@ impl VolumeIndex {
             record.size = if update.is_dir { 0 } else { update.size };
         }
         if metadata_changed {
-            self.mark_presorted_sizes_changed();
+            self.mark_presorted_sizes_changed(std::iter::once(update.index));
         }
         if kind_changed {
             self.mark_directory_sizes_dirty();
@@ -653,7 +684,8 @@ impl VolumeIndex {
         // Keep presorted arrays empty until an all-files query actually requests a column.
         self.presorted.clear_and_shrink();
         self.presorted_column = None;
-        self.presorted_stale = [false; 6];
+        self.presorted_pending = BitSet::with_capacity(0);
+        self.presorted_removed = BitSet::with_capacity(0);
         self.presorted_delta.clear();
         // A snapshot by itself proves nothing about freshness: the journal position is only known
         // once the scan has been reconciled with the change journal. Until then the volume is
@@ -759,14 +791,20 @@ impl VolumeIndex {
     pub(crate) fn recompute_directory_sizes(&mut self) {
         DirectorySizeIndex::apply_directory_sizes(&mut self.records, &self.arena);
         self.directory_sizes_valid = true;
-        self.mark_presorted_sizes_changed();
+        let directories: Vec<u32> = self
+            .records
+            .iter()
+            .enumerate()
+            .filter(|(_, record)| record.is_dir() && !record.is_tombstone())
+            .map(|(index, _)| index as u32)
+            .collect();
+        self.mark_presorted_sizes_changed(directories);
     }
 
     /// Flags the totals as stale without paying for a rebuild per event. Callers that can change a
     /// record's kind in a batch mark here and run [`Self::ensure_directory_sizes`] once at the end.
     pub(crate) fn mark_directory_sizes_dirty(&mut self) {
         self.directory_sizes_valid = false;
-        self.mark_presorted_sizes_changed();
     }
 
     /// Rebuilds the folder totals only when an event invalidated them.
@@ -844,7 +882,7 @@ impl VolumeIndex {
         let delta = new_size as i128 - record.size as i128;
         self.records[index as usize].size = new_size;
         self.adjust_record_ancestors(index, delta);
-        self.mark_presorted_sizes_changed();
+        self.mark_presorted_sizes_changed(std::iter::once(index));
     }
 
     /// `true` when a live record for this `(frn, parent, name)` triple is already indexed.
@@ -1036,9 +1074,9 @@ impl VolumeIndex {
                         // The content document stores the path; a rename has to replace it,
                         // and a rename out of the extension whitelist has to delete it.
                         self.pending_data_changes.insert(frn);
+                        self.mark_presorted_names_changed(std::iter::once(idx));
                     }
                 }
-                self.mark_presorted_names_changed();
             }
             UsnChange::BasicInfoChanged {
                 frn,
@@ -1068,7 +1106,10 @@ impl VolumeIndex {
                         }
                     }
                 }
-                self.mark_presorted_sizes_changed();
+                if let Some(indices) = self.frn_to_idx.get(frn) {
+                    let affected: Vec<u32> = indices.to_vec();
+                    self.mark_presorted_sizes_changed(affected);
+                }
                 if kind_changed {
                     // One aggregation per applied batch, not one per event; the batch caller runs
                     // `ensure_directory_sizes` after the last change.
@@ -1102,6 +1143,9 @@ impl VolumeIndex {
         }
         self.live_count = self.live_count.saturating_sub(1);
         self.records[idx as usize].mark_tombstone();
+        // A view that pages the live order counts visible rows; removing one shifts every
+        // later offset, so the order's version moves even though the column itself is intact.
+        self.presorted_version = self.presorted_version.wrapping_add(1);
     }
 
     /// Classifies every record by whether it belongs to an excluded subtree: its own FRN is an
@@ -1264,7 +1308,8 @@ impl VolumeIndex {
         self.recompute_directory_sizes();
         self.presorted.clear_and_shrink();
         self.presorted_column = None;
-        self.presorted_stale = [false; 6];
+        self.presorted_pending = BitSet::with_capacity(0);
+        self.presorted_removed = BitSet::with_capacity(0);
         self.presorted_delta.clear();
         CompactionReport {
             dropped_records,

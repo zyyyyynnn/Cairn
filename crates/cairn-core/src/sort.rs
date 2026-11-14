@@ -387,13 +387,16 @@ impl PresortedIndices {
         }
     }
 
-    /// Merges records appended since the last build into the cached column. The appended
-    /// indices are new rows, so the existing order is still sorted and two sorted sequences
-    /// combine in one pass.
-    pub fn merge_appended(
+    /// Merges records whose key changed since the last build into the cached column. `changed`
+    /// holds both records new to the table and records whose old position must go: `removed`
+    /// answers whether a base index is one of the latter. The base stays sorted, so one pass
+    /// combines it with the sorted change list.
+    #[allow(clippy::too_many_arguments)]
+    pub fn merge_changed(
         &mut self,
         col: SortColumn,
-        appended: &mut Vec<u32>,
+        changed: &mut Vec<u32>,
+        removed: impl Fn(u32) -> bool,
         records: &[FileRecord],
         arena: &NamePool,
         path_cache: &DirectoryPathCache,
@@ -406,34 +409,46 @@ impl PresortedIndices {
             SortColumn::Path => &mut self.by_path,
             SortColumn::DateCreated | SortColumn::Extension => return,
         };
-        appended.sort_unstable_by(|&a, &b| {
+        changed.sort_unstable_by(|&a, &b| {
             cmp_indices(col, a, b, records, arena, path_cache, drive_letter).then_with(|| a.cmp(&b))
         });
-        let mut merged = Vec::with_capacity(base.len() + appended.len());
+        let base_len = base.len();
+        let mut merged = Vec::with_capacity(base_len + changed.len());
         let (mut left, mut right) = (0usize, 0usize);
-        while left < base.len() && right < appended.len() {
+        loop {
+            while left < base_len && removed(base[left]) {
+                left += 1;
+            }
+            if left >= base_len || right >= changed.len() {
+                break;
+            }
             let ord = cmp_indices(
                 col,
                 base[left],
-                appended[right],
+                changed[right],
                 records,
                 arena,
                 path_cache,
                 drive_letter,
             )
-            .then_with(|| base[left].cmp(&appended[right]));
+            .then_with(|| base[left].cmp(&changed[right]));
             if ord == Ordering::Greater {
-                merged.push(appended[right]);
+                merged.push(changed[right]);
                 right += 1;
             } else {
                 merged.push(base[left]);
                 left += 1;
             }
         }
-        merged.extend_from_slice(&base[left..]);
-        merged.extend_from_slice(&appended[right..]);
+        while left < base_len {
+            if !removed(base[left]) {
+                merged.push(base[left]);
+            }
+            left += 1;
+        }
+        merged.extend_from_slice(&changed[right..]);
         *base = merged;
-        appended.clear();
+        changed.clear();
     }
 
     /// Builds the four presorted columns (name, size, modified, path). Each column sorts in

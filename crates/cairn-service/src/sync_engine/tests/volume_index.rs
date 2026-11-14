@@ -1076,17 +1076,18 @@ fn an_event_invalidates_only_the_orders_its_key_moves() {
     }]);
     vol.ensure_presorted_column(SortColumn::Name);
 
-    vol.mark_presorted_sizes_changed();
+    vol.mark_presorted_sizes_changed([0]);
     assert!(
         vol.presorted_order(SortColumn::Name).is_some(),
         "a size change does not move a record in the name order"
     );
     assert!(vol.needs_presorted_column(SortColumn::Size));
 
-    vol.mark_presorted_names_changed();
+    vol.mark_presorted_names_changed([0]);
     assert!(
-        vol.presorted_order(SortColumn::Name).is_none(),
-        "a rename invalidates the name order"
+        vol.needs_presorted_column(SortColumn::Name),
+        "a rename is merged into the name order"
     );
-    assert!(vol.needs_presorted_column(SortColumn::Name));
+    vol.ensure_presorted_column(SortColumn::Name);
+    assert!(vol.presorted_order(SortColumn::Name).is_some());
 }
