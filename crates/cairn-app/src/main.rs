@@ -75,9 +75,11 @@ fn main() {
     // Prepare settings, OS theme preference, CLI launch flags and shared locale state once before
     // building the tray or window.
     let startup = startup::StartupCoordinator::prepare(raw_args, &startup::SystemBootstrapPorts);
+    crate::shell::perf::mark("startup prepared");
 
     #[cfg(windows)]
     let _tray = shell::tray::init_with_i18n(&startup.i18n);
+    crate::shell::perf::mark("tray ready");
 
     let initial_dark = startup.is_dark();
     let initial_zoom = startup.settings.zoom_level;
@@ -90,13 +92,17 @@ fn main() {
             // keymap before any window or menu reads it, then open the window through
             // `gpui_kit::open_window` so `Root` owns the first level of the window.
             gpui_kit::init(cx);
+            crate::shell::perf::mark("kit ready");
             cairn_ui::brand::init_fonts(cx);
+            crate::shell::perf::mark("fonts ready");
             cairn_ui::brand::init_text_rendering(cx);
             shell::commands::init_keymap(cx);
+            crate::shell::perf::mark("keymap ready");
 
             // The persisted appearance is installed before the first frame, so the window opens at
             // the palette and density the user left it in rather than repainting after the fact.
             shell::theme::apply_resolved(initial_dark, initial_zoom, cx);
+            crate::shell::perf::mark("theme ready");
 
             // `TitleBar` draws the window's own chrome, owns its drag region and paints the platform
             // controls, so the options start from the set the component is built to work with. The
@@ -141,6 +147,7 @@ fn main() {
             let open_match = startup.plan.open_match;
             let mut app_bundle = Some(startup);
 
+            crate::shell::perf::mark("window open");
             let (_handle, _app) = gpui_kit::open_window(window_options, cx, |window, cx| {
                 crate::shell::perf::mark("window factory");
                 window.activate_window();
