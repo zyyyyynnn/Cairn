@@ -4,7 +4,7 @@
 
 //! Query session cache and pagination manager with multi-volume support.
 
-use crate::sync_engine::{SearchResultItem, VolumeIndex};
+use crate::sync_engine::{AllFilesView, MatchSet, SearchResultItem, VolumeIndex};
 use cairn_core::engine::CancellationToken;
 use cairn_protocol::message::FileRowData;
 use std::collections::HashMap;
@@ -61,10 +61,21 @@ pub enum RowsError {
 pub struct QuerySession {
     owner: QueryOwner,
     pub pre_folded_terms: Vec<Vec<u8>>,
-    pub matched_items: Vec<SearchResultItem>,
+    rows: MatchSet,
     pub snippets: HashMap<(char, u64), String>,
     pub created_nanos: u64,
     pub last_accessed_nanos: AtomicU64,
+}
+
+impl QuerySession {
+    /// Rows this session holds in memory. A live all-files view holds none: it pages the
+    /// volume's order, so it never counts against the cache budget.
+    fn retained_items(&self) -> usize {
+        match &self.rows {
+            MatchSet::Items(items) => items.len(),
+            MatchSet::AllFiles(_) => 0,
+        }
+    }
 }
 
 /// The client a query belongs to. Query ids are client-local counters, so the
@@ -195,9 +206,8 @@ impl SessionManager {
     pub fn create_session(
         &self,
         owner: QueryOwner,
-        _query_text: String,
+        rows: MatchSet,
         highlight_terms: Vec<String>,
-        matched_items: Vec<SearchResultItem>,
         snippets: HashMap<(char, u64), String>,
     ) -> u64 {
         let session_id = self.next_session_id.fetch_add(1, Ordering::Relaxed);
@@ -211,9 +221,12 @@ impl SessionManager {
         });
 
         // LRU eviction if session count or total retained item budget is exceeded.
-        let new_items = matched_items.len();
+        let new_items = match &rows {
+            MatchSet::Items(items) => items.len(),
+            MatchSet::AllFiles(_) => 0,
+        };
         while !lock.is_empty() && {
-            let total_items: usize = lock.values().map(|s| s.matched_items.len()).sum();
+            let total_items: usize = lock.values().map(QuerySession::retained_items).sum();
             lock.len() >= self.max_sessions
                 || total_items.saturating_add(new_items) > MAX_TOTAL_CACHED_ITEMS
         } {
@@ -241,7 +254,7 @@ impl SessionManager {
             QuerySession {
                 owner,
                 pre_folded_terms,
-                matched_items,
+                rows,
                 snippets,
                 created_nanos: now,
                 last_accessed_nanos: AtomicU64::new(now),
@@ -276,28 +289,96 @@ impl SessionManager {
             .last_accessed_nanos
             .store(self.clock.now_nanos(), Ordering::Relaxed);
 
-        rows_for(session, offset, limit, &session.pre_folded_terms, |item| {
-            volumes.get(&item.drive_letter)
-        })
+        match &session.rows {
+            MatchSet::Items(items) => rows_for_items(
+                session,
+                items,
+                offset,
+                limit,
+                &session.pre_folded_terms,
+                |item| volumes.get(&item.drive_letter),
+            ),
+            MatchSet::AllFiles(view) => rows_for_all_files(view, offset, limit, volumes),
+        }
     }
 }
 
+/// Pages one live all-files view: the volume's order is the answer, filtered by the
+/// exclusions the query applied. The offset counts visible rows, not raw order slots.
+fn rows_for_all_files(
+    view: &AllFilesView,
+    offset: usize,
+    limit: usize,
+    volumes: &HashMap<char, VolumeIndex>,
+) -> Result<Vec<FileRowData>, RowsError> {
+    let Some(volume) = volumes.get(&view.drive_letter) else {
+        return Err(RowsError::Stale {
+            drive_letter: view.drive_letter,
+        });
+    };
+    if volume.generation() != view.generation
+        || volume.presorted_version() != view.presorted_version
+    {
+        return Err(RowsError::Stale {
+            drive_letter: view.drive_letter,
+        });
+    }
+    let Some(column) = volume.presorted_order(view.sort_by) else {
+        return Err(RowsError::Stale {
+            drive_letter: view.drive_letter,
+        });
+    };
+
+    let end = offset.saturating_add(limit);
+    let mut visible = 0usize;
+    let mut rows = Vec::with_capacity(limit.min(column.len().saturating_sub(offset)));
+    let push = |idx: u32, visible: &mut usize, rows: &mut Vec<FileRowData>| -> bool {
+        if *visible >= end {
+            return true;
+        }
+        let record = &volume.records()[idx as usize];
+        if record.is_tombstone() || view.exclusions.excludes(volume, idx) {
+            return false;
+        }
+        if *visible >= offset {
+            if let Some(row) = volume.build_file_row(idx, &[], |_| None) {
+                rows.push(row);
+            }
+        }
+        *visible += 1;
+        rows.len() >= limit
+    };
+    if view.sort_asc {
+        for &idx in column {
+            if push(idx, &mut visible, &mut rows) {
+                break;
+            }
+        }
+    } else {
+        for &idx in column.iter().rev() {
+            if push(idx, &mut visible, &mut rows) {
+                break;
+            }
+        }
+    }
+    Ok(rows)
+}
+
 /// Materializes one page of a session against the current volume tables.
-fn rows_for<'a>(
+fn rows_for_items<'a>(
     session: &QuerySession,
+    items: &[SearchResultItem],
     offset: usize,
     limit: usize,
     folded_terms: &[Vec<u8>],
     volume_of: impl Fn(&SearchResultItem) -> Option<&'a VolumeIndex>,
 ) -> Result<Vec<FileRowData>, RowsError> {
-    let end = offset
-        .saturating_add(limit)
-        .min(session.matched_items.len());
-    if offset >= session.matched_items.len() {
+    let end = offset.saturating_add(limit).min(items.len());
+    if offset >= items.len() {
         return Ok(Vec::new());
     }
 
-    let slice = &session.matched_items[offset..end];
+    let slice = &items[offset..end];
     let mut rows = Vec::with_capacity(slice.len());
 
     for item in slice {
@@ -356,17 +437,136 @@ mod tests {
         }
     }
 
+    fn create_items(
+        sessions: &SessionManager,
+        owner: QueryOwner,
+        items: Vec<SearchResultItem>,
+    ) -> u64 {
+        sessions.create_session(owner, MatchSet::Items(items), Vec::new(), HashMap::new())
+    }
+
+    fn three_file_volume() -> VolumeIndex {
+        let mut vol = VolumeIndex::new('C');
+        vol.ingest_items(
+            ["c.txt", "a.txt", "b.txt"]
+                .into_iter()
+                .enumerate()
+                .map(|(ix, name)| ExtractedItem {
+                    frn: 10 + ix as u64,
+                    parent_frn: 0,
+                    name: name.to_string(),
+                    is_dir: false,
+                    size: 10,
+                    created_ts: 0,
+                    modified_ts: 0,
+                    flags: 0,
+                    is_reparse_point: false,
+                })
+                .collect(),
+        );
+        vol
+    }
+
+    fn all_files_view(
+        mut volume: VolumeIndex,
+        sort_by: cairn_core::sort::SortColumn,
+        sort_asc: bool,
+    ) -> (AllFilesView, HashMap<char, VolumeIndex>) {
+        volume.ensure_presorted_column(sort_by);
+        let generation = volume.generation();
+        let presorted_version = volume.presorted_version();
+        let drive_letter = volume.drive_letter;
+        let volumes = HashMap::from([(drive_letter, volume)]);
+        let exclusions = crate::sync_engine::path_exclusions::PathExclusions::new(&volumes, &[]);
+        (
+            AllFilesView {
+                drive_letter,
+                sort_by,
+                sort_asc,
+                generation,
+                presorted_version,
+                exclusions,
+            },
+            volumes,
+        )
+    }
+
+    /// The default view retains no row list: it pages the volume's presorted order, and the
+    /// page offset counts visible rows.
+    #[test]
+    fn an_all_files_view_pages_the_presorted_order_without_retaining_items() {
+        let sessions = SessionManager::default();
+        let vol = three_file_volume();
+        let (view, volumes) = all_files_view(vol, cairn_core::sort::SortColumn::Name, true);
+        let id = sessions.create_session(
+            owner(7),
+            MatchSet::AllFiles(view),
+            Vec::new(),
+            HashMap::new(),
+        );
+
+        let first = sessions
+            .get_rows_multi(id, 0, 2, &volumes)
+            .expect("first page");
+        assert_eq!(first.len(), 2);
+        assert_eq!(first[0].name, "a.txt");
+        assert_eq!(first[1].name, "b.txt");
+
+        let second = sessions
+            .get_rows_multi(id, 2, 2, &volumes)
+            .expect("second page");
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].name, "c.txt");
+    }
+
+    #[test]
+    fn a_descending_all_files_view_pages_the_reversed_order() {
+        let sessions = SessionManager::default();
+        let vol = three_file_volume();
+        let (view, volumes) = all_files_view(vol, cairn_core::sort::SortColumn::Name, false);
+        let id = sessions.create_session(
+            owner(7),
+            MatchSet::AllFiles(view),
+            Vec::new(),
+            HashMap::new(),
+        );
+        let page = sessions
+            .get_rows_multi(id, 0, 2, &volumes)
+            .expect("first page");
+        assert_eq!(page[0].name, "c.txt");
+        assert_eq!(page[1].name, "b.txt");
+    }
+
+    /// A rebuilt order makes the session's offsets meaningless; the page is refused instead
+    /// of naming a different row.
+    #[test]
+    fn an_all_files_view_refuses_pages_after_a_rebuild() {
+        let sessions = SessionManager::default();
+        let vol = three_file_volume();
+        let (view, volumes) = all_files_view(vol, cairn_core::sort::SortColumn::Name, true);
+        let id = sessions.create_session(
+            owner(7),
+            MatchSet::AllFiles(view),
+            Vec::new(),
+            HashMap::new(),
+        );
+
+        let mut volumes = volumes;
+        volumes
+            .get_mut(&'C')
+            .expect("volume")
+            .ensure_presorted_column(cairn_core::sort::SortColumn::Size);
+        assert_eq!(
+            sessions.get_rows_multi(id, 0, 2, &volumes),
+            Err(RowsError::Stale { drive_letter: 'C' })
+        );
+    }
+
     #[test]
     fn unchanged_volumes_serve_pages() {
         let sessions = SessionManager::default();
         let vol = volume_with("notes.txt");
-        let session_id = sessions.create_session(
-            owner(7),
-            "notes".into(),
-            Vec::new(),
-            vec![item(vol.generation())],
-            HashMap::new(),
-        );
+        let session_id = create_items(&sessions, owner(7), vec![item(vol.generation())]);
         let volumes = HashMap::from([('C', vol)]);
 
         let rows = sessions
@@ -380,13 +580,7 @@ mod tests {
     fn a_rebuilt_volume_refuses_stale_pages_instead_of_serving_other_rows() {
         let sessions = SessionManager::default();
         let vol = volume_with("notes.txt");
-        let session_id = sessions.create_session(
-            owner(7),
-            "notes".into(),
-            Vec::new(),
-            vec![item(vol.generation())],
-            HashMap::new(),
-        );
+        let session_id = create_items(&sessions, owner(7), vec![item(vol.generation())]);
         let mut volumes = HashMap::from([('C', vol)]);
 
         // Replacing the table (rescan, reload, compaction) invalidates every cached record index.
@@ -402,20 +596,8 @@ mod tests {
         let sessions = SessionManager::new(1, DEFAULT_SESSION_TTL, SystemClock::new());
         let vol = volume_with("notes.txt");
         let volumes = HashMap::from([('C', vol)]);
-        let first = sessions.create_session(
-            owner(7),
-            "notes".into(),
-            Vec::new(),
-            vec![item(0)],
-            HashMap::new(),
-        );
-        sessions.create_session(
-            owner(7),
-            "other".into(),
-            Vec::new(),
-            Vec::new(),
-            HashMap::new(),
-        );
+        let first = create_items(&sessions, owner(7), vec![item(0)]);
+        create_items(&sessions, owner(7), Vec::new());
         assert_eq!(
             sessions.get_rows_multi(first, 0, 10, &volumes),
             Err(RowsError::UnknownSession)
@@ -459,34 +641,16 @@ mod tests {
         let gen = vol.generation();
         let volumes = HashMap::from([('C', vol)]);
 
-        let s1 = sessions.create_session(
-            owner(7),
-            "s1".into(),
-            Vec::new(),
-            vec![item(gen)],
-            HashMap::new(),
-        );
+        let s1 = create_items(&sessions, owner(7), vec![item(gen)]);
         clock.advance(Duration::from_millis(20));
-        let s2 = sessions.create_session(
-            owner(7),
-            "s2".into(),
-            Vec::new(),
-            vec![item(gen)],
-            HashMap::new(),
-        );
+        let s2 = create_items(&sessions, owner(7), vec![item(gen)]);
 
         // Access s1, making s2 the least recently accessed
         clock.advance(Duration::from_millis(20));
         assert!(sessions.get_rows_multi(s1, 0, 10, &volumes).is_ok());
 
         // Create s3: capacity is 2, so s2 should be evicted because s1 was accessed more recently
-        let s3 = sessions.create_session(
-            owner(7),
-            "s3".into(),
-            Vec::new(),
-            vec![item(gen)],
-            HashMap::new(),
-        );
+        let s3 = create_items(&sessions, owner(7), vec![item(gen)]);
 
         assert!(sessions.get_rows_multi(s1, 0, 10, &volumes).is_ok());
         assert_eq!(
@@ -510,21 +674,9 @@ mod tests {
         let gen = vol.generation();
         let volumes = HashMap::from([('C', vol)]);
 
-        let s1 = sessions.create_session(
-            owner(7),
-            "s1".into(),
-            Vec::new(),
-            vec![item(gen)],
-            HashMap::new(),
-        );
+        let s1 = create_items(&sessions, owner(7), vec![item(gen)]);
         clock.advance(Duration::from_secs(299));
-        let _s2 = sessions.create_session(
-            owner(7),
-            "s2".into(),
-            Vec::new(),
-            vec![item(gen)],
-            HashMap::new(),
-        );
+        let _s2 = create_items(&sessions, owner(7), vec![item(gen)]);
         assert!(
             sessions.get_rows_multi(s1, 0, 10, &volumes).is_ok(),
             "session accessed before TTL must stay live"
@@ -532,13 +684,7 @@ mod tests {
 
         // Accessing s1 reset its idle timer; advance full 300s to cross expiry.
         clock.advance(Duration::from_secs(300));
-        let _s3 = sessions.create_session(
-            owner(7),
-            "s3".into(),
-            Vec::new(),
-            vec![item(gen)],
-            HashMap::new(),
-        );
+        let _s3 = create_items(&sessions, owner(7), vec![item(gen)]);
         assert_eq!(
             sessions.get_rows_multi(s1, 0, 10, &volumes),
             Err(RowsError::UnknownSession)
@@ -559,21 +705,9 @@ mod tests {
         let gen = vol.generation();
         let volumes = std::sync::Arc::new(HashMap::from([('C', vol)]));
 
-        let s1 = sessions.create_session(
-            owner(7),
-            "s1".into(),
-            Vec::new(),
-            vec![item(gen)],
-            HashMap::new(),
-        );
+        let s1 = create_items(&sessions, owner(7), vec![item(gen)]);
         clock.advance(Duration::from_secs(1));
-        let s2 = sessions.create_session(
-            owner(7),
-            "s2".into(),
-            Vec::new(),
-            vec![item(gen)],
-            HashMap::new(),
-        );
+        let s2 = create_items(&sessions, owner(7), vec![item(gen)]);
         clock.advance(Duration::from_secs(1));
 
         std::thread::scope(|scope| {
@@ -588,13 +722,7 @@ mod tests {
             }
         });
 
-        let _s3 = sessions.create_session(
-            owner(7),
-            "s3".into(),
-            Vec::new(),
-            vec![item(gen)],
-            HashMap::new(),
-        );
+        let _s3 = create_items(&sessions, owner(7), vec![item(gen)]);
         assert!(sessions.get_rows_multi(s1, 0, 10, &volumes).is_ok());
         assert_eq!(
             sessions.get_rows_multi(s2, 0, 10, &volumes),
@@ -680,20 +808,8 @@ mod tests {
         sessions.register_client(&mine);
         sessions.register_client(&mine);
         sessions.register_client(&other);
-        let my_session = sessions.create_session(
-            mine.clone(),
-            "mine".into(),
-            Vec::new(),
-            vec![item(generation)],
-            HashMap::new(),
-        );
-        let other_session = sessions.create_session(
-            other.clone(),
-            "other".into(),
-            Vec::new(),
-            vec![item(generation)],
-            HashMap::new(),
-        );
+        let my_session = create_items(&sessions, mine.clone(), vec![item(generation)]);
+        let other_session = create_items(&sessions, other.clone(), vec![item(generation)]);
 
         sessions.release_client(&mine);
         assert!(

@@ -66,13 +66,16 @@ fn test_multi_volume_engine_save_load_lifecycle() {
         MultiVolumeEngine::with_index_dir_and_drives(temp_dir.path(), vec!['X', 'Y']);
 
     let cancel = CancellationToken::new();
-    let (results, total, highlights, _, _) = loaded_engine.execute_search_multi(
+    let outcome = loaded_engine.execute_search_multi(
         "file.txt",
         &QueryDefaults::default(),
         SortColumn::Name,
         true,
         &cancel,
     );
+    let results = loaded_engine.test_items(outcome.rows);
+    let total = outcome.total;
+    let highlights = outcome.highlight_terms;
 
     assert_eq!(total, 2);
     assert_eq!(results.len(), 2);
@@ -166,13 +169,14 @@ fn the_exclusion_mask_matches_the_full_path_reference() {
     config.excluded_paths = rules;
     engine.update_config(config);
     let cancel = CancellationToken::new();
-    let (_, total, _, _, _) = engine.execute_search_multi(
+    let outcome = engine.execute_search_multi(
         "",
         &QueryDefaults::default(),
         SortColumn::Name,
         true,
         &cancel,
     );
+    let total = outcome.total;
     assert_eq!(
         total, 5,
         "the all-files query must apply the same exclusions as the reference"
@@ -194,48 +198,56 @@ fn the_query_total_bytes_sum_matched_files_without_double_counting_directories()
     engine.add_volume(vol);
     let cancel = CancellationToken::new();
 
-    let (_, total, _, _, bytes) = engine.execute_search_multi(
+    let outcome = engine.execute_search_multi(
         "",
         &QueryDefaults::default(),
         SortColumn::Name,
         true,
         &cancel,
     );
+    let total = outcome.total;
+    let bytes = outcome.total_bytes;
     assert_eq!(total, 5, "directories are results too");
     assert_eq!(
         bytes, 600,
         "only file rows contribute bytes; the folder's recursive size is not added on top"
     );
 
-    let (_, total, _, _, bytes) = engine.execute_search_multi(
+    let outcome = engine.execute_search_multi(
         "a.txt",
         &QueryDefaults::default(),
         SortColumn::Name,
         true,
         &cancel,
     );
+    let total = outcome.total;
+    let bytes = outcome.total_bytes;
     assert_eq!(total, 1);
     assert_eq!(bytes, 100);
 
     // Directories are containers: folder-only results report 0 bytes because files inside
     // are not matched.
-    let (_, total, _, _, bytes) = engine.execute_search_multi(
+    let outcome = engine.execute_search_multi(
         "folder:",
         &QueryDefaults::default(),
         SortColumn::Name,
         true,
         &cancel,
     );
+    let total = outcome.total;
+    let bytes = outcome.total_bytes;
     assert_eq!(total, 2, "matches C: and folder");
     assert_eq!(bytes, 0, "directories contribute zero bytes");
 
-    let (_, total, _, _, bytes) = engine.execute_search_multi(
+    let outcome = engine.execute_search_multi(
         "folder",
         &QueryDefaults::default(),
         SortColumn::Name,
         true,
         &cancel,
     );
+    let total = outcome.total;
+    let bytes = outcome.total_bytes;
     assert_eq!(total, 1, "matches only the folder named 'folder'");
     assert_eq!(bytes, 0, "directory contributes zero bytes");
 }
@@ -356,13 +368,15 @@ fn test_volume_cache_invalidation_does_not_silently_return_stale_data() {
 
     // Search must return 0 results
     let cancel = CancellationToken::new();
-    let (results, total, ..) = engine.execute_search_multi(
+    let outcome = engine.execute_search_multi(
         "stale_secret",
         &QueryDefaults::default(),
         SortColumn::Name,
         true,
         &cancel,
     );
+    let results = engine.test_items(outcome.rows);
+    let total = outcome.total;
     assert_eq!(total, 0);
     assert!(results.is_empty());
 }
@@ -510,13 +524,15 @@ fn test_excluded_drives_filtering() {
     );
 
     let cancel = CancellationToken::new();
-    let (results, total, ..) = engine.execute_search_multi(
+    let outcome = engine.execute_search_multi(
         "",
         &QueryDefaults::default(),
         SortColumn::Name,
         true,
         &cancel,
     );
+    let results = engine.test_items(outcome.rows);
+    let total = outcome.total;
     assert_eq!(total, 0);
     assert!(results.is_empty());
 }
@@ -639,13 +655,15 @@ fn test_excluded_paths_filtering_and_hot_apply() {
     let cancel = CancellationToken::new();
 
     // 1. Search without query text (returns all allowed)
-    let (results, total, ..) = engine.execute_search_multi(
+    let outcome = engine.execute_search_multi(
         "",
         &QueryDefaults::default(),
         SortColumn::Name,
         true,
         &cancel,
     );
+    let results = engine.test_items(outcome.rows);
+    let total = outcome.total;
     // Only public_doc.txt (frn 40) should be returned:
     // - deleted_file.txt in $Recycle.Bin is excluded
     // - confidential.pdf in C:\Secret is excluded (via C:/Secret/ rule)
@@ -656,35 +674,41 @@ fn test_excluded_paths_filtering_and_hot_apply() {
     assert_eq!(results.len(), 1);
 
     // 2. Direct search for deleted_file must be excluded
-    let (results, total, ..) = engine.execute_search_multi(
+    let outcome = engine.execute_search_multi(
         "deleted_file",
         &QueryDefaults::default(),
         SortColumn::Name,
         true,
         &cancel,
     );
+    let results = engine.test_items(outcome.rows);
+    let total = outcome.total;
     assert_eq!(total, 0);
     assert!(results.is_empty());
 
     // 3. Direct search for confidential must be excluded
-    let (results, total, ..) = engine.execute_search_multi(
+    let outcome = engine.execute_search_multi(
         "confidential",
         &QueryDefaults::default(),
         SortColumn::Name,
         true,
         &cancel,
     );
+    let results = engine.test_items(outcome.rows);
+    let total = outcome.total;
     assert_eq!(total, 0);
     assert!(results.is_empty());
 
     // 4. Direct search for package.json in node_modules must be excluded
-    let (results, total, ..) = engine.execute_search_multi(
+    let outcome = engine.execute_search_multi(
         "package.json",
         &QueryDefaults::default(),
         SortColumn::Name,
         true,
         &cancel,
     );
+    let results = engine.test_items(outcome.rows);
+    let total = outcome.total;
     assert_eq!(total, 0);
     assert!(results.is_empty());
 
@@ -694,13 +718,15 @@ fn test_excluded_paths_filtering_and_hot_apply() {
     engine.update_config(new_cfg);
 
     // Now search for .tmp finds scratch.tmp immediately without restart
-    let (results, total, ..) = engine.execute_search_multi(
+    let outcome = engine.execute_search_multi(
         ".tmp",
         &QueryDefaults::default(),
         SortColumn::Name,
         true,
         &cancel,
     );
+    let results = engine.test_items(outcome.rows);
+    let total = outcome.total;
     assert_eq!(total, 1);
     assert_eq!(results.len(), 1);
 }
@@ -738,13 +764,15 @@ fn test_snapshot_mode_fallback_and_search() {
 
     // SnapshotMode volume must participate in search and return results
     let cancel = CancellationToken::new();
-    let (results, total, ..) = engine.execute_search_multi(
+    let outcome = engine.execute_search_multi(
         "snapshot_file",
         &QueryDefaults::default(),
         SortColumn::Name,
         true,
         &cancel,
     );
+    let results = engine.test_items(outcome.rows);
+    let total = outcome.total;
     assert_eq!(total, 1);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].drive_letter, 'E');

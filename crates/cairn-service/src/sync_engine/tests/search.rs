@@ -40,8 +40,10 @@ fn engine_with_sorting_fixture() -> (tempfile::TempDir, MultiVolumeEngine) {
 
 fn result_names(engine: &MultiVolumeEngine, sort_by: SortColumn, sort_asc: bool) -> Vec<String> {
     let cancel = CancellationToken::new();
-    let (results, total, ..) =
+    let outcome =
         engine.execute_search_multi("", &QueryDefaults::default(), sort_by, sort_asc, &cancel);
+    let results = engine.test_items(outcome.rows);
+    let total = outcome.total;
     assert_eq!(total, results.len());
     engine.with_volumes(|vols| {
         let vol = &vols[&'C'];
@@ -61,13 +63,15 @@ fn a_filtered_query_does_not_rebuild_the_whole_volume_sort() {
     engine.update_volume('C', |volume| volume.mark_presorted_dirty());
 
     let cancel = CancellationToken::new();
-    let (results, total, ..) = engine.execute_search_multi(
+    let outcome = engine.execute_search_multi(
         "alpha",
         &QueryDefaults::default(),
         SortColumn::Name,
         true,
         &cancel,
     );
+    let results = engine.test_items(outcome.rows);
+    let total = outcome.total;
     assert_eq!(total, 1);
     assert_eq!(results.len(), 1);
     assert!(
@@ -75,13 +79,14 @@ fn a_filtered_query_does_not_rebuild_the_whole_volume_sort() {
         "a filtered query has no use for the volume-wide presorted order"
     );
 
-    let (_, total, ..) = engine.execute_search_multi(
+    let outcome = engine.execute_search_multi(
         "",
         &QueryDefaults::default(),
         SortColumn::Name,
         true,
         &cancel,
     );
+    let total = outcome.total;
     assert_eq!(total, 3);
     assert!(
         !engine.with_volumes(|volumes| volumes[&'C'].is_presorted_dirty()),
@@ -250,13 +255,15 @@ fn test_multi_volume_schwartzian_transform_sort() {
     let cancel = CancellationToken::new();
 
     // 1. Sort by Name ascending (natural sort: file_1, file_2, file_10, file_20)
-    let (results, total, ..) = engine.execute_search_multi(
+    let outcome = engine.execute_search_multi(
         "",
         &QueryDefaults::default(),
         SortColumn::Name,
         true,
         &cancel,
     );
+    let results = engine.test_items(outcome.rows);
+    let total = outcome.total;
     assert_eq!(total, 4);
     let names: Vec<String> = engine.with_volumes(|vols| {
         results
@@ -274,13 +281,14 @@ fn test_multi_volume_schwartzian_transform_sort() {
     );
 
     // 2. Sort by Name descending
-    let (results_desc, ..) = engine.execute_search_multi(
+    let outcome = engine.execute_search_multi(
         "",
         &QueryDefaults::default(),
         SortColumn::Name,
         false,
         &cancel,
     );
+    let results_desc = engine.test_items(outcome.rows);
     let names_desc: Vec<String> = engine.with_volumes(|vols| {
         results_desc
             .iter()
@@ -297,13 +305,14 @@ fn test_multi_volume_schwartzian_transform_sort() {
     );
 
     // 3. Sort by Size ascending (10, 50, 100, 200)
-    let (results_size, ..) = engine.execute_search_multi(
+    let outcome = engine.execute_search_multi(
         "",
         &QueryDefaults::default(),
         SortColumn::Size,
         true,
         &cancel,
     );
+    let results_size = engine.test_items(outcome.rows);
     let sizes: Vec<u64> = engine.with_volumes(|vols| {
         results_size
             .iter()
@@ -316,13 +325,14 @@ fn test_multi_volume_schwartzian_transform_sort() {
     assert_eq!(sizes, [10, 50, 100, 200]);
 
     // 4. Sort by DateModified ascending (100, 200, 300, 400)
-    let (results_mod, ..) = engine.execute_search_multi(
+    let outcome = engine.execute_search_multi(
         "",
         &QueryDefaults::default(),
         SortColumn::DateModified,
         true,
         &cancel,
     );
+    let results_mod = engine.test_items(outcome.rows);
     let dates: Vec<i64> = engine.with_volumes(|vols| {
         results_mod
             .iter()
@@ -372,13 +382,14 @@ fn test_multi_volume_schwartzian_transform_sort() {
         },
     ]);
     engine.add_volume(vol_e);
-    let (results_ext, ..) = engine.execute_search_multi(
+    let outcome = engine.execute_search_multi(
         "",
         &QueryDefaults::default(),
         SortColumn::Extension,
         true,
         &cancel,
     );
+    let results_ext = engine.test_items(outcome.rows);
     let exts: Vec<String> = engine.with_volumes(|vols| {
         results_ext
             .iter()
@@ -417,13 +428,16 @@ fn single_volume_filtered_sort_and_exclusions_keep_presorted_unbuilt() {
     let cancel = CancellationToken::new();
     // Recursive directory size makes `"C:"` > 1 MB as well, while `sum_unique_matched_bytes`
     // sums only matching files (alpha.bin + zeta.bin = 6 MiB) and excludes `ExcludedDir`.
-    let (results, total, _, _, total_bytes) = engine.execute_search_multi(
+    let outcome = engine.execute_search_multi(
         "size:>1mb",
         &QueryDefaults::default(),
         SortColumn::Name,
         true,
         &cancel,
     );
+    let results = engine.test_items(outcome.rows);
+    let total = outcome.total;
+    let total_bytes = outcome.total_bytes;
     assert_eq!(total, 3);
     assert_eq!(total_bytes, 6 * 1024 * 1024);
     let names = engine.with_volumes(|vols| {
@@ -439,13 +453,16 @@ fn single_volume_filtered_sort_and_exclusions_keep_presorted_unbuilt() {
     });
     assert_eq!(names, vec!["alpha.bin", "C:", "zeta.bin"]);
 
-    let (file_results, file_total, _, _, file_bytes) = engine.execute_search_multi(
+    let outcome = engine.execute_search_multi(
         "file: size:>1mb",
         &QueryDefaults::default(),
         SortColumn::Name,
         true,
         &cancel,
     );
+    let file_results = engine.test_items(outcome.rows);
+    let file_total = outcome.total;
+    let file_bytes = outcome.total_bytes;
     assert_eq!(file_total, 2);
     assert_eq!(file_bytes, 6 * 1024 * 1024);
     let file_names = engine.with_volumes(|vols| {

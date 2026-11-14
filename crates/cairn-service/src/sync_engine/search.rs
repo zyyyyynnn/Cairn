@@ -33,13 +33,81 @@ pub struct SearchResultItem {
     pub generation: u64,
 }
 
-pub type MultiSearchResult = (
-    Vec<SearchResultItem>,
-    usize,
-    Vec<String>,
-    HashMap<(char, u64), String>,
-    u64,
-);
+/// The rows a query produced. A whole-volume textless query is answered by the volume's
+/// presorted order itself, so its session pages that order instead of retaining one item per
+/// record; every other query carries its materialized match list.
+pub enum MatchSet {
+    Items(Vec<SearchResultItem>),
+    AllFiles(AllFilesView),
+}
+
+/// One volume's live records in presorted order, plus the exclusions the query applied.
+/// Sessions read pages from this descriptor and refuse them once the order or the table
+/// changes underneath.
+pub struct AllFilesView {
+    pub(crate) drive_letter: char,
+    pub(crate) sort_by: SortColumn,
+    pub(crate) sort_asc: bool,
+    pub(crate) generation: u64,
+    pub(crate) presorted_version: u64,
+    pub(crate) exclusions: PathExclusions,
+}
+
+/// Everything one query produced: the rows (materialized or a live view), the exact counts,
+/// and the display extras. One model for the pipe server, the session cache and the benches.
+pub struct SearchOutcome {
+    pub rows: MatchSet,
+    pub total: usize,
+    pub highlight_terms: Vec<String>,
+    pub snippets: HashMap<(char, u64), String>,
+    pub total_bytes: u64,
+}
+
+#[cfg(test)]
+impl MultiVolumeEngine {
+    /// Test seam: the rows a consumer that needs the full list would see. A live all-files
+    /// view is materialized from the same order and exclusions its pages use.
+    pub(crate) fn test_items(&self, rows: MatchSet) -> Vec<SearchResultItem> {
+        match rows {
+            MatchSet::Items(items) => items,
+            MatchSet::AllFiles(view) => {
+                let volumes = self.volumes.read().unwrap();
+                let volume = volumes.get(&view.drive_letter).expect("viewed volume");
+                let Some(column) = volume.presorted_order(view.sort_by) else {
+                    return Vec::new();
+                };
+                let ordered: Box<dyn Iterator<Item = u32>> = if view.sort_asc {
+                    Box::new(column.iter().copied())
+                } else {
+                    Box::new(column.iter().rev().copied())
+                };
+                ordered
+                    .filter(|&idx| {
+                        let record = &volume.records()[idx as usize];
+                        !record.is_tombstone() && !view.exclusions.excludes(volume, idx)
+                    })
+                    .map(|idx| SearchResultItem {
+                        drive_letter: view.drive_letter,
+                        record_idx: idx,
+                        generation: view.generation,
+                    })
+                    .collect()
+            }
+        }
+    }
+}
+
+impl SearchOutcome {
+    fn empty(highlight_terms: Vec<String>, snippets: HashMap<(char, u64), String>) -> Self {
+        Self {
+            rows: MatchSet::Items(Vec::new()),
+            total: 0,
+            highlight_terms,
+            snippets,
+            total_bytes: 0,
+        }
+    }
+}
 
 impl MultiVolumeEngine {
     /// Evaluates search across all volumes, filtering excluded paths, sorting by column,
@@ -52,7 +120,7 @@ impl MultiVolumeEngine {
         sort_by: SortColumn,
         sort_asc: bool,
         cancel: &CancellationToken,
-    ) -> MultiSearchResult {
+    ) -> SearchOutcome {
         let query_expr = parse_query_with(raw_query, defaults);
         let highlight_terms = query_expr.collect_highlight_terms();
         let content_queries = query_expr.extract_content_queries();
@@ -101,24 +169,24 @@ impl MultiVolumeEngine {
                 None
             };
             let Some(searcher) = searcher else {
-                return (all_results, 0, highlight_terms, snippets, 0);
+                return SearchOutcome::empty(highlight_terms, snippets);
             };
 
             // A disjunction of content-only terms is one merged Tantivy search: the union hit
             // set answers every branch at once.
             if let Some(terms) = query_expr.pure_content_disjunction() {
                 if cancel.is_cancelled() {
-                    return (all_results, 0, highlight_terms, snippets, 0);
+                    return SearchOutcome::empty(highlight_terms, snippets);
                 }
                 let union_hits = match searcher.search_all_frns_union(&terms) {
                     Ok(hits) => hits,
                     Err(err) => {
                         tracing::warn!("content union search for {terms:?} failed: {err}");
-                        return (Vec::new(), 0, highlight_terms, snippets, 0);
+                        return SearchOutcome::empty(highlight_terms, snippets);
                     }
                 };
                 if cancel.is_cancelled() || union_hits.is_empty() {
-                    return (all_results, 0, highlight_terms, snippets, 0);
+                    return SearchOutcome::empty(highlight_terms, snippets);
                 }
 
                 // The collector emits one pair per matching document, so the hit set's length is
@@ -127,7 +195,7 @@ impl MultiVolumeEngine {
                 let mut frns_by_drive: HashMap<char, Vec<u64>> = HashMap::new();
                 for (i, (volume_id, frn)) in union_hits.into_iter().enumerate() {
                     if (i & 0x3FFF) == 0 && cancel.is_cancelled() {
-                        return (Vec::new(), 0, highlight_terms, snippets, 0);
+                        return SearchOutcome::empty(highlight_terms, snippets);
                     }
                     let Some(drive_letter) = u16::try_from(volume_id)
                         .ok()
@@ -143,13 +211,13 @@ impl MultiVolumeEngine {
                 let mut snippets_by_key: HashMap<(char, u64), String> = HashMap::new();
                 if union_count < CONTENT_RESULT_TOP_K {
                     if cancel.is_cancelled() {
-                        return (Vec::new(), 0, highlight_terms, snippets, 0);
+                        return SearchOutcome::empty(highlight_terms, snippets);
                     }
                     let hits = match searcher.search_union(&terms, CONTENT_RESULT_TOP_K) {
                         Ok(hits) => hits,
                         Err(err) => {
                             tracing::warn!("content union search for {terms:?} failed: {err}");
-                            return (Vec::new(), 0, highlight_terms, snippets, 0);
+                            return SearchOutcome::empty(highlight_terms, snippets);
                         }
                     };
                     for hit in &hits {
@@ -167,7 +235,7 @@ impl MultiVolumeEngine {
                 let exclusions = PathExclusions::new(&lock, &excluded_paths);
                 for vol in lock.values() {
                     if cancel.is_cancelled() {
-                        return (Vec::new(), 0, highlight_terms, snippets, 0);
+                        return SearchOutcome::empty(highlight_terms, snippets);
                     }
                     if excluded_drives
                         .iter()
@@ -189,7 +257,7 @@ impl MultiVolumeEngine {
                     let mut matches = Vec::new();
                     for (idx, rec) in vol.records().iter().enumerate() {
                         if (idx & 0x3FFF) == 0 && cancel.is_cancelled() {
-                            return (Vec::new(), 0, highlight_terms, snippets, 0);
+                            return SearchOutcome::empty(highlight_terms, snippets);
                         }
                         if !rec.is_tombstone() && union_bits.contains(idx) {
                             matches.push(idx as u32);
@@ -198,7 +266,7 @@ impl MultiVolumeEngine {
                     let Some(vol_matches) =
                         collect_volume_matches(vol, matches, &exclusions, cancel, &mut all_results)
                     else {
-                        return (Vec::new(), 0, highlight_terms, snippets, 0);
+                        return SearchOutcome::empty(highlight_terms, snippets);
                     };
                     for &idx in &vol_matches {
                         let frn = vol.records()[idx as usize].frn;
@@ -220,12 +288,12 @@ impl MultiVolumeEngine {
                         Ok(hits) => hits,
                         Err(err) => {
                             tracing::warn!("content search for {content_queries:?} failed: {err}");
-                            return (Vec::new(), 0, highlight_terms, snippets, 0);
+                            return SearchOutcome::empty(highlight_terms, snippets);
                         }
                     };
 
                 if cancel.is_cancelled() || content_hits.is_empty() {
-                    return (all_results, 0, highlight_terms, snippets, 0);
+                    return SearchOutcome::empty(highlight_terms, snippets);
                 }
 
                 // Precompile MFT filter outside the lock to keep lock duration minimal
@@ -242,7 +310,7 @@ impl MultiVolumeEngine {
 
                 for hit in &content_hits {
                     if cancel.is_cancelled() {
-                        return (Vec::new(), 0, highlight_terms, snippets, 0);
+                        return SearchOutcome::empty(highlight_terms, snippets);
                     }
                     let Some(drive_letter) = u16::try_from(hit.volume_id)
                         .ok()
@@ -325,7 +393,7 @@ impl MultiVolumeEngine {
                 let mut snippets_by_key: HashMap<(char, u64), String> = HashMap::new();
                 for (term_slot, term) in content_queries.iter().enumerate() {
                     if cancel.is_cancelled() {
-                        return (Vec::new(), 0, highlight_terms, snippets, 0);
+                        return SearchOutcome::empty(highlight_terms, snippets);
                     }
                     // Snippets exist only for terms whose polarity can make a row match. A term
                     // below a Not never explains the result, and its snippet would mislabel rows
@@ -337,7 +405,7 @@ impl MultiVolumeEngine {
                             Ok(count) => count < CONTENT_RESULT_TOP_K,
                             Err(err) => {
                                 tracing::warn!("content count for {term:?} failed: {err}");
-                                return (Vec::new(), 0, highlight_terms, snippets, 0);
+                                return SearchOutcome::empty(highlight_terms, snippets);
                             }
                         }
                     } else {
@@ -348,7 +416,7 @@ impl MultiVolumeEngine {
                             Ok(hits) => hits,
                             Err(err) => {
                                 tracing::warn!("content search for {term:?} failed: {err}");
-                                return (Vec::new(), 0, highlight_terms, snippets, 0);
+                                return SearchOutcome::empty(highlight_terms, snippets);
                             }
                         };
                         for hit in &hits {
@@ -370,7 +438,7 @@ impl MultiVolumeEngine {
                             Ok(pairs) => pairs,
                             Err(err) => {
                                 tracing::warn!("content search for {term:?} failed: {err}");
-                                return (Vec::new(), 0, highlight_terms, snippets, 0);
+                                return SearchOutcome::empty(highlight_terms, snippets);
                             }
                         };
                         for (volume_id, frn) in pairs {
@@ -393,7 +461,7 @@ impl MultiVolumeEngine {
                 let exclusions = PathExclusions::new(&lock, &excluded_paths);
                 for vol in lock.values() {
                     if cancel.is_cancelled() {
-                        return (Vec::new(), 0, highlight_terms, snippets, 0);
+                        return SearchOutcome::empty(highlight_terms, snippets);
                     }
                     if excluded_drives
                         .iter()
@@ -436,7 +504,7 @@ impl MultiVolumeEngine {
                     let Some(vol_matches) =
                         collect_volume_matches(vol, matches, &exclusions, cancel, &mut all_results)
                     else {
-                        return (Vec::new(), 0, highlight_terms, snippets, 0);
+                        return SearchOutcome::empty(highlight_terms, snippets);
                     };
                     for &idx in &vol_matches {
                         let frn = vol.records()[idx as usize].frn;
@@ -471,9 +539,49 @@ impl MultiVolumeEngine {
             if active_vols.len() == 1 {
                 let vol = active_vols[0];
                 if cancel.is_cancelled() {
-                    return (Vec::new(), 0, highlight_terms, snippets, 0);
+                    return SearchOutcome::empty(highlight_terms, snippets);
                 }
                 let presorted_col = vol.presorted_order(sort_by);
+                // A textless whole-volume query needs no match list: the presorted order is
+                // the answer, so the response carries the view and the session pages it
+                // directly instead of retaining one item per record.
+                let all_files = query_expr.is_empty()
+                    || query_expr
+                        .drive_scope()
+                        .is_some_and(|drive| drive.eq_ignore_ascii_case(&vol.drive_letter));
+                if all_files {
+                    if let Some(column) = presorted_col {
+                        let mut total = 0usize;
+                        let mut view_bytes = 0u64;
+                        for (read, &idx) in column.iter().enumerate() {
+                            if (read & 0xFFF) == 0 && cancel.is_cancelled() {
+                                return SearchOutcome::empty(highlight_terms, snippets);
+                            }
+                            let record = &vol.records()[idx as usize];
+                            if record.is_tombstone() || exclusions.excludes(vol, idx) {
+                                continue;
+                            }
+                            total += 1;
+                            if record.is_file() {
+                                view_bytes = view_bytes.saturating_add(record.size);
+                            }
+                        }
+                        return SearchOutcome {
+                            rows: MatchSet::AllFiles(AllFilesView {
+                                drive_letter: vol.drive_letter,
+                                sort_by,
+                                sort_asc,
+                                generation: vol.generation(),
+                                presorted_version: vol.presorted_version(),
+                                exclusions,
+                            }),
+                            total,
+                            highlight_terms,
+                            snippets,
+                            total_bytes: view_bytes,
+                        };
+                    }
+                }
                 let mut matches = cairn_core::engine::execute_query_ordered(
                     vol.records(),
                     vol.arena(),
@@ -486,7 +594,7 @@ impl MultiVolumeEngine {
                 let Some(vol_bytes) =
                     filter_unique_volume_matches(vol, &mut matches, &exclusions, cancel)
                 else {
-                    return (Vec::new(), 0, highlight_terms, snippets, 0);
+                    return SearchOutcome::empty(highlight_terms, snippets);
                 };
                 if presorted_col.is_some() {
                     if !sort_asc {
@@ -510,7 +618,7 @@ impl MultiVolumeEngine {
                     );
                 }
                 if cancel.is_cancelled() {
-                    return (Vec::new(), 0, highlight_terms, snippets, 0);
+                    return SearchOutcome::empty(highlight_terms, snippets);
                 }
                 let gen = vol.generation();
                 let drive_letter = vol.drive_letter;
@@ -523,12 +631,18 @@ impl MultiVolumeEngine {
                     })
                     .collect();
                 let total = all_results.len();
-                return (all_results, total, highlight_terms, snippets, vol_bytes);
+                return SearchOutcome {
+                    rows: MatchSet::Items(all_results),
+                    total,
+                    highlight_terms,
+                    snippets,
+                    total_bytes: vol_bytes,
+                };
             }
 
             for vol in active_vols {
                 if cancel.is_cancelled() {
-                    return (Vec::new(), 0, highlight_terms, snippets, 0);
+                    return SearchOutcome::empty(highlight_terms, snippets);
                 }
                 let matches = cairn_core::engine::execute_query_ordered(
                     vol.records(),
@@ -542,7 +656,7 @@ impl MultiVolumeEngine {
                 let Some(vol_matches) =
                     collect_volume_matches(vol, matches, &exclusions, cancel, &mut all_results)
                 else {
-                    return (Vec::new(), 0, highlight_terms, snippets, 0);
+                    return SearchOutcome::empty(highlight_terms, snippets);
                 };
                 total_bytes = total_bytes.saturating_add(vol.calculate_matched_bytes(&vol_matches));
             }
@@ -613,7 +727,7 @@ impl MultiVolumeEngine {
                 .collect();
 
             if cancel.is_cancelled() {
-                return (Vec::new(), 0, highlight_terms, snippets, 0);
+                return SearchOutcome::empty(highlight_terms, snippets);
             }
 
             decorated.par_sort_unstable_by(|(ka, a), (kb, b)| {
@@ -653,11 +767,17 @@ impl MultiVolumeEngine {
         }
 
         if cancel.is_cancelled() {
-            return (Vec::new(), 0, highlight_terms, snippets, 0);
+            return SearchOutcome::empty(highlight_terms, snippets);
         }
 
         let total = all_results.len();
-        (all_results, total, highlight_terms, snippets, total_bytes)
+        SearchOutcome {
+            rows: MatchSet::Items(all_results),
+            total,
+            highlight_terms,
+            snippets,
+            total_bytes,
+        }
     }
 }
 

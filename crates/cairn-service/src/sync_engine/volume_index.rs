@@ -147,6 +147,10 @@ pub struct VolumeIndex {
     /// table (`clear`, `ingest_items`, compaction) increments it, so a query session can refuse
     /// record indices that no longer describe the same rows.
     generation: u64,
+    /// Monotonic version of the presorted column set. A session that pages through the live
+    /// order refuses pages after the column was rebuilt, because the same offset can then
+    /// name a different row.
+    presorted_version: u64,
     /// Live records (tombstones excluded), maintained incrementally so status summaries stay O(1).
     live_count: u64,
     /// Whether `FileRecord.size` on directory rows is the recursive aggregate of their indexed
@@ -176,6 +180,7 @@ impl VolumeIndex {
             volume_serial: 0,
             usn_enabled: true,
             generation: 0,
+            presorted_version: 0,
             live_count: 0,
             // An empty table has no totals to be wrong about; the invariant holds trivially.
             directory_sizes_valid: true,
@@ -374,12 +379,15 @@ impl VolumeIndex {
     /// Only one column is retained: the memory budget covers the lazy single-column state, so
     /// switching the sort column releases the previous order instead of accumulating columns.
     pub fn ensure_presorted_column(&mut self, col: SortColumn) {
+        let mut rebuilt = false;
         if self.presorted_dirty {
             self.presorted.clear_and_shrink();
             self.presorted_dirty = false;
+            rebuilt = true;
         }
         if !self.presorted_has(col) {
             self.presorted.clear_and_shrink();
+            rebuilt = true;
         }
         self.presorted.ensure_column(
             col,
@@ -388,6 +396,14 @@ impl VolumeIndex {
             &self.path_cache,
             self.drive_letter,
         );
+        if rebuilt {
+            self.presorted_version = self.presorted_version.wrapping_add(1);
+        }
+    }
+
+    /// Version of the current presorted order; changes whenever the order is rebuilt.
+    pub fn presorted_version(&self) -> u64 {
+        self.presorted_version
     }
 
     fn presorted_has(&self, col: SortColumn) -> bool {

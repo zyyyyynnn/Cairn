@@ -332,10 +332,10 @@ pub fn run_benchmark(
 
         for _ in 0..effective_runs {
             let t0 = Instant::now();
-            let (_, total, _, _, _) =
+            let outcome =
                 engine.execute_search_multi(q, &defaults, SortColumn::Name, true, &cancel);
             latencies.push(t0.elapsed());
-            match_count = total;
+            match_count = outcome.total;
         }
 
         latencies.sort();
@@ -384,30 +384,25 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let engine = build_benchmark_engine(items, temp_dir.path());
 
-        let defaults = QueryDefaults::default();
-        let cancel = CancellationToken::new();
-        let (rows, total, _, _, _) =
-            engine.execute_search_multi("", &defaults, SortColumn::Name, true, &cancel);
-
-        assert!(total > 0, "the all-files query must match the fixture");
         // Directory hits resolve to their own parent, so pick a file below the
         // deepest fixture directory: its resolved parent proves the chain kept
         // every intermediate level instead of flattening to one component.
         let resolved_parent = engine.with_volumes(|vols| {
             let vol = &vols[&'C'];
-            rows.iter()
-                .filter_map(|row| {
-                    let rec = &vol.records()[row.record_idx as usize];
-                    (rec.flags & FLAG_DIRECTORY == 0).then(|| {
-                        vol.path_cache().get_full_path(
-                            vol.records(),
-                            vol.arena(),
-                            'C',
-                            rec.parent_idx,
-                        )
-                    })
+            assert!(!vol.records().is_empty(), "the fixture must carry records");
+            vol.records()
+                .iter()
+                .filter(|rec| rec.flags & FLAG_DIRECTORY == 0)
+                .find_map(|rec| {
+                    let path = vol.path_cache().get_full_path(
+                        vol.records(),
+                        vol.arena(),
+                        'C',
+                        rec.parent_idx,
+                    );
+                    path.contains(r"\Users\User\Documents\Work\2026")
+                        .then_some(path)
                 })
-                .find(|path| path.contains(r"\Users\User\Documents\Work\2026"))
         });
         assert!(
             resolved_parent.is_some(),

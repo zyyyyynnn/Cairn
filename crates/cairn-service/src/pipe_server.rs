@@ -437,16 +437,20 @@ fn process_request(
                 };
             }
             let query_cancel = sessions.begin_query(owner, query_id);
-            let (matched_items, total_matches, highlight_terms, snippets, total_bytes) = engine
-                .execute_search_multi(&raw_query, &defaults, sort_column, sort_asc, &query_cancel);
+            let outcome = engine.execute_search_multi(
+                &raw_query,
+                &defaults,
+                sort_column,
+                sort_asc,
+                &query_cancel,
+            );
             sessions.finish_query(owner, query_id);
 
             let session_id = sessions.create_session(
                 owner.clone(),
-                raw_query,
-                highlight_terms,
-                matched_items,
-                snippets,
+                outcome.rows,
+                outcome.highlight_terms,
+                outcome.snippets,
             );
 
             let first_page = engine.with_volumes(|vols| {
@@ -467,8 +471,8 @@ fn process_request(
             ResponsePayload::QueryResult {
                 query_id,
                 session_id,
-                total_matches,
-                total_bytes,
+                total_matches: outcome.total,
+                total_bytes: outcome.total_bytes,
                 first_page,
             }
         }

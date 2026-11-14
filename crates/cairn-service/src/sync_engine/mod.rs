@@ -21,7 +21,7 @@ use crate::persistence;
 mod config_apply;
 pub mod content_pipeline;
 pub mod journal_reconciliation;
-mod path_exclusions;
+pub(crate) mod path_exclusions;
 pub mod post_scan;
 pub mod presorted;
 mod search;
@@ -32,7 +32,7 @@ mod volume_status;
 
 pub use journal_reconciliation::*;
 pub use post_scan::*;
-pub use search::{MultiSearchResult, SearchResultItem};
+pub use search::{AllFilesView, MatchSet, SearchOutcome, SearchResultItem};
 pub use treemap_build::TreeUnavailable;
 pub use volume_index::{CompactPolicy, CompactionReport, VolumeIndex};
 

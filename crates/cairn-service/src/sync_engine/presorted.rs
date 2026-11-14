@@ -34,7 +34,7 @@ impl MultiVolumeEngine {
 
 #[cfg(test)]
 mod tests {
-    use crate::sync_engine::{MultiVolumeEngine, VolumeIndex};
+    use crate::sync_engine::{MatchSet, MultiVolumeEngine, VolumeIndex};
     use cairn_core::engine::CancellationToken;
     use cairn_core::sort::SortColumn;
     use cairn_core::syntax::QueryDefaults;
@@ -81,13 +81,15 @@ mod tests {
 
         // The all-files query is the one that consumes the order, so it triggers the lazy build.
         let cancel = CancellationToken::new();
-        let (results, total, ..) = engine.execute_search_multi(
+        let outcome = engine.execute_search_multi(
             "",
             &QueryDefaults::default(),
             SortColumn::Name,
             true,
             &cancel,
         );
+        let results = engine.test_items(outcome.rows);
+        let total = outcome.total;
         assert_eq!(total, 2);
         assert_eq!(results.len(), 2);
 
@@ -108,6 +110,65 @@ mod tests {
                 "unrequested presorted columns must stay unbuilt"
             );
         });
+    }
+
+    /// A textless whole-volume query is answered by the view, not by a materialized list;
+    /// its exact totals still describe the same records.
+    #[test]
+    fn the_all_files_view_carries_the_exact_totals() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let engine = MultiVolumeEngine::with_index_dir_and_drives(temp_dir.path(), vec![]);
+        let mut vol = VolumeIndex::new('C');
+        vol.ingest_items(vec![
+            cairn_ntfs::mft::ExtractedItem {
+                frn: 10,
+                parent_frn: 5,
+                name: "alpha.txt".to_string(),
+                is_dir: false,
+                size: 10,
+                created_ts: 0,
+                modified_ts: 0,
+                flags: 0,
+                is_reparse_point: false,
+            },
+            cairn_ntfs::mft::ExtractedItem {
+                frn: 11,
+                parent_frn: 5,
+                name: "beta.txt".to_string(),
+                is_dir: false,
+                size: 20,
+                created_ts: 0,
+                modified_ts: 0,
+                flags: 0,
+                is_reparse_point: false,
+            },
+            cairn_ntfs::mft::ExtractedItem {
+                frn: 5,
+                parent_frn: 5,
+                name: ".".to_string(),
+                is_dir: true,
+                size: 0,
+                created_ts: 0,
+                modified_ts: 0,
+                flags: cairn_core::FLAG_DIRECTORY,
+                is_reparse_point: false,
+            },
+        ]);
+        engine.add_volume(vol);
+
+        let cancel = CancellationToken::new();
+        let defaults = QueryDefaults::default();
+        let outcome = engine.execute_search_multi("", &defaults, SortColumn::Name, true, &cancel);
+        assert!(matches!(outcome.rows, MatchSet::AllFiles(_)));
+        assert_eq!(outcome.total, 3);
+        assert_eq!(outcome.total_bytes, 30);
+        let rows = engine.test_items(outcome.rows);
+        assert_eq!(rows.len(), 3);
+
+        let filtered =
+            engine.execute_search_multi("alpha", &defaults, SortColumn::Name, true, &cancel);
+        assert!(matches!(filtered.rows, MatchSet::Items(_)));
+        assert_eq!(filtered.total, 1);
     }
 
     /// The sidebar's all-files view is a drive-scoped textless query (`C: `). It is the same
@@ -139,13 +200,15 @@ mod tests {
         engine.add_volume(vol);
 
         let cancel = CancellationToken::new();
-        let (results, total, ..) = engine.execute_search_multi(
+        let outcome = engine.execute_search_multi(
             "C: ",
             &QueryDefaults::default(),
             SortColumn::Name,
             true,
             &cancel,
         );
+        let results = engine.test_items(outcome.rows);
+        let total = outcome.total;
         assert_eq!(total, 2);
         assert_eq!(results.len(), 2);
 
