@@ -54,7 +54,6 @@ enum Commands {
         count: usize,
     },
     /// Run benchmark against synthetic corpus (SM-1, SM-2)
-    #[command(alias = "bench-everything")]
     BenchQuery {
         #[arg(short, long, default_value = "corpus.tsv")]
         corpus: PathBuf,
