@@ -686,23 +686,6 @@ impl MultiVolumeEngine {
             // verdict once per volume and use it as an O(1) lookup; unsupported rule forms keep
             // the reference behavior.
             let exclusions = PathExclusions::new(&lock, &excluded_paths);
-            // The view is the requested volume's whole order, independent of how many other
-            // volumes are active; its order was built above through the same verdict.
-            if let Some(drive) = view_drive {
-                if let Some(volume) = lock.get(&drive) {
-                    if volume.presorted_order(sort_by).is_some() {
-                        return Self::all_files_outcome(
-                            volume,
-                            sort_by,
-                            sort_asc,
-                            exclusions,
-                            cancel,
-                            highlight_terms,
-                            snippets,
-                        );
-                    }
-                }
-            }
             let active_vols: Vec<_> = lock
                 .values()
                 .filter(|v| {
@@ -715,6 +698,30 @@ impl MultiVolumeEngine {
                     v.status.state().is_synced() || !v.records().is_empty()
                 })
                 .collect();
+            // The view is the requested volume's whole order. A scoped query names it; an
+            // unscoped one may only view the sole active volume, re-checked here in case
+            // another volume became active while the order was being built.
+            if let Some(drive) = view_drive {
+                let view_allowed = match drive_scope {
+                    Some(_) => true,
+                    None => active_vols.len() == 1 && active_vols[0].drive_letter == drive,
+                };
+                if view_allowed {
+                    if let Some(volume) = lock.get(&drive) {
+                        if volume.presorted_order(sort_by).is_some() {
+                            return Self::all_files_outcome(
+                                volume,
+                                sort_by,
+                                sort_asc,
+                                exclusions,
+                                cancel,
+                                highlight_terms,
+                                snippets,
+                            );
+                        }
+                    }
+                }
+            }
 
             if active_vols.len() == 1 {
                 let vol = active_vols[0];

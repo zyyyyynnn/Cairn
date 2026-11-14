@@ -18,6 +18,7 @@ use cairn_protocol::message::FileRowData;
 use cairn_protocol::status::{VolumeState, VolumeStatusSummary};
 use std::collections::{HashMap, HashSet};
 use std::mem::size_of;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 
 pub(super) struct BitSet {
@@ -187,6 +188,9 @@ pub struct VolumeIndex {
     directory_sizes_valid: bool,
     /// Bumped whenever a record's path changes, so the cached exclusion states rebuild.
     exclusion_epoch: u64,
+    /// The active rule set has forms the segment table cannot answer, so every rename must
+    /// re-evaluate its verdict and invalidate open views.
+    full_path_exclusion_rules: AtomicBool,
     /// Segment-exclusion states are the same for every query until a path changes; rebuilding
     /// the 1.5M-entry table per query would cost more than the search itself.
     exclusion_cache: Mutex<Option<ExclusionStatesCache>>,
@@ -223,6 +227,7 @@ impl VolumeIndex {
             // An empty table has no totals to be wrong about; the invariant holds trivially.
             directory_sizes_valid: true,
             exclusion_epoch: 0,
+            full_path_exclusion_rules: AtomicBool::new(false),
             exclusion_cache: Mutex::new(None),
         }
     }
@@ -419,7 +424,12 @@ impl VolumeIndex {
 
     /// Whether this volume needs work before `col` can answer an ordered read.
     pub fn needs_presorted_column(&self, col: SortColumn) -> bool {
-        if self.records.is_empty() {
+        if self.records.is_empty()
+            || !matches!(
+                col,
+                SortColumn::Name | SortColumn::Size | SortColumn::DateModified | SortColumn::Path
+            )
+        {
             return false;
         }
         self.presorted_column != Some(col) || !self.presorted_delta.is_empty()
@@ -1174,9 +1184,11 @@ impl VolumeIndex {
                         if self.records[idx as usize].is_dir() {
                             self.mark_presorted_path_stale();
                         }
-                        if self.rename_changes_exclusion_states(
-                            &old_name, &name, old_parent, parent_idx,
-                        ) {
+                        if self.full_path_exclusion_rules.load(AtomicOrdering::Relaxed)
+                            || self.rename_changes_exclusion_states(
+                                &old_name, &name, old_parent, parent_idx,
+                            )
+                        {
                             self.exclusion_epoch = self.exclusion_epoch.wrapping_add(1);
                         }
                     }
@@ -1350,6 +1362,13 @@ impl VolumeIndex {
     /// record between verdicts or the table is replaced.
     pub fn exclusion_epoch(&self) -> u64 {
         self.exclusion_epoch
+    }
+
+    /// Records whether the active rules need the full path, so a rename may change a verdict
+    /// without the segment table noticing.
+    pub fn set_full_path_exclusion_rules(&self, active: bool) {
+        self.full_path_exclusion_rules
+            .store(active, AtomicOrdering::Relaxed);
     }
 
     /// The segment-exclusion states, cached until a path changes. Appended records extend the

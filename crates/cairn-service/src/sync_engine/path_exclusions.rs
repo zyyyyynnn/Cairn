@@ -33,6 +33,10 @@ impl PathExclusions {
                     .collect()
             })
         };
+        let full_path_rules = !rules.is_empty() && states.is_none();
+        for volume in volumes.values() {
+            volume.set_full_path_exclusion_rules(full_path_rules);
+        }
         Self { states, rules }
     }
 

@@ -112,6 +112,47 @@ mod tests {
         });
     }
 
+    /// A column without a presorted array must not disturb the warm order an open view uses.
+    #[test]
+    fn a_created_sorted_view_keeps_the_warm_name_order() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let engine = MultiVolumeEngine::with_index_dir_and_drives(temp_dir.path(), vec![]);
+        let mut vol = VolumeIndex::new('C');
+        vol.ingest_items(vec![ExtractedItem {
+            frn: 10,
+            parent_frn: 5,
+            name: "alpha.txt".to_string(),
+            is_dir: false,
+            size: 10,
+            created_ts: 1,
+            modified_ts: 1,
+            flags: 0,
+            is_reparse_point: false,
+        }]);
+        engine.add_volume(vol);
+
+        let cancel = CancellationToken::new();
+        let defaults = QueryDefaults::default();
+        engine.execute_search_multi("C: ", &defaults, SortColumn::Name, true, &cancel);
+        let version = engine.with_volumes(|volumes| volumes[&'C'].presorted_version());
+
+        let outcome =
+            engine.execute_search_multi("C: ", &defaults, SortColumn::DateCreated, true, &cancel);
+        assert!(matches!(outcome.rows, MatchSet::Items(_)));
+        assert_eq!(outcome.total, 1);
+        engine.with_volumes(|volumes| {
+            assert!(
+                volumes[&'C'].has_presorted_column(SortColumn::Name),
+                "the warm order survives a column without a presorted array"
+            );
+            assert_eq!(
+                volumes[&'C'].presorted_version(),
+                version,
+                "the warm order is not invalidated"
+            );
+        });
+    }
+
     /// A drive-scoped view is served for its own volume no matter how many other volumes are
     /// indexed, and only its order is built.
     #[test]

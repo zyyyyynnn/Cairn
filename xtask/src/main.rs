@@ -53,13 +53,13 @@ enum Commands {
         #[arg(short, long, default_value_t = 1_000_000)]
         count: usize,
     },
-    /// Run benchmark against synthetic corpus (SM-1, SM-2)
+    /// Run the cost-model benchmark against a synthetic corpus
     BenchQuery {
         #[arg(short, long, default_value = "corpus.tsv")]
         corpus: PathBuf,
         #[arg(short, long, default_value_t = 6)]
         runs: usize,
-        /// Run deterministic multi-level fixture with strict SM-1/SM-2 ledger gates for CI
+        /// Run the fixed 100k fixture as the CI regression gate
         #[arg(long, default_value_t = false)]
         check: bool,
     },

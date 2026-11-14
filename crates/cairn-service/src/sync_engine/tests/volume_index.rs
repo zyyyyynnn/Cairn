@@ -1253,6 +1253,43 @@ fn a_resize_repositions_the_ancestors_in_the_size_order() {
     );
 }
 
+/// A rule set the segment table cannot answer invalidates open views on every rename.
+#[test]
+fn a_full_path_rule_rename_invalidates_exclusion_verdicts() {
+    let mut vol = VolumeIndex::new('C');
+    vol.ingest_items(vec![ExtractedItem {
+        frn: 10,
+        parent_frn: 5,
+        name: "alpha.txt".to_string(),
+        is_dir: false,
+        size: 10,
+        created_ts: 0,
+        modified_ts: 0,
+        flags: 0,
+        is_reparse_point: false,
+    }]);
+    let volumes = HashMap::from([('C', vol)]);
+    let _exclusions =
+        crate::sync_engine::path_exclusions::PathExclusions::new(&volumes, &["*.tmp".to_string()]);
+    let epoch = volumes[&'C'].exclusion_epoch();
+
+    let mut volumes = volumes;
+    volumes
+        .get_mut(&'C')
+        .expect("volume")
+        .apply_usn_changes([UsnChange::Renamed {
+            frn: 10,
+            parent_frn: 5,
+            name: "alpha.tmp".to_string(),
+            is_dir: false,
+            is_new_name: true,
+        }]);
+    assert!(
+        volumes[&'C'].exclusion_epoch() > epoch,
+        "a full-path rule rename can move the record's verdict"
+    );
+}
+
 /// The all-files total is a maintained counter, not a scan of the order.
 #[test]
 fn live_file_bytes_tracks_ingest_resize_and_delete() {
