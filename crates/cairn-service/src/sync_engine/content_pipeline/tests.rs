@@ -782,13 +782,16 @@ fn test_content_query_intersection_with_mft() {
     let cancel = CancellationToken::new();
 
     // Query 1: Pure content query "content:架构" -> should match architecture.md (frn 101 on C:)
-    let (results, total, _, snippets, _) = engine.execute_search_multi(
+    let outcome = engine.execute_search_multi(
         "content:架构",
         &QueryDefaults::default(),
         SortColumn::Name,
         true,
         &cancel,
     );
+    let results = engine.test_items(outcome.rows);
+    let total = outcome.total;
+    let snippets = outcome.snippets;
     assert_eq!(total, 1);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].drive_letter, 'C');
@@ -811,46 +814,54 @@ fn test_content_query_intersection_with_mft() {
     engine.add_volume(vol_d);
 
     // Content search should STILL only return C:\docs\architecture.md and NOT D:\d_unrelated.txt
-    let (results_mv, total_mv, ..) = engine.execute_search_multi(
+    let outcome = engine.execute_search_multi(
         "content:架构",
         &QueryDefaults::default(),
         SortColumn::Name,
         true,
         &cancel,
     );
+    let results_mv = engine.test_items(outcome.rows);
+    let total_mv = outcome.total;
     assert_eq!(total_mv, 1);
     assert_eq!(results_mv[0].drive_letter, 'C');
 
     // Query 2: Combined MFT filter and content "ext:md content:架构" -> matches 101
-    let (results_combined, total_c, ..) = engine.execute_search_multi(
+    let outcome = engine.execute_search_multi(
         "ext:md content:架构",
         &QueryDefaults::default(),
         SortColumn::Name,
         true,
         &cancel,
     );
+    let results_combined = engine.test_items(outcome.rows);
+    let total_c = outcome.total;
     assert_eq!(total_c, 1);
     assert_eq!(results_combined.len(), 1);
 
     // Query 3: Combined MFT filter mismatch "ext:txt content:架构" -> 0 matches
-    let (results_mismatch, total_m, ..) = engine.execute_search_multi(
+    let outcome = engine.execute_search_multi(
         "ext:txt content:架构",
         &QueryDefaults::default(),
         SortColumn::Name,
         true,
         &cancel,
     );
+    let results_mismatch = engine.test_items(outcome.rows);
+    let total_m = outcome.total;
     assert_eq!(total_m, 0);
     assert!(results_mismatch.is_empty());
 
     // Query 4: Content query for non-existent word -> 0 matches
-    let (results_none, total_n, ..) = engine.execute_search_multi(
+    let outcome = engine.execute_search_multi(
         "content:不存在的词",
         &QueryDefaults::default(),
         SortColumn::Name,
         true,
         &cancel,
     );
+    let results_none = engine.test_items(outcome.rows);
+    let total_n = outcome.total;
     assert_eq!(total_n, 0);
     assert!(results_none.is_empty());
 }
@@ -888,25 +899,27 @@ fn test_clear_content_index_roundtrip() {
     assert!(engine.content_index_status().state.is_ready());
 
     let cancel = CancellationToken::new();
-    let (_, total, ..) = engine.execute_search_multi(
+    let outcome = engine.execute_search_multi(
         "content:关键词",
         &QueryDefaults::default(),
         SortColumn::Name,
         true,
         &cancel,
     );
+    let total = outcome.total;
     assert_eq!(total, 1);
 
     // Clear content index (CNT-07)
     engine.clear_content_index().unwrap();
 
-    let (_, total_after, ..) = engine.execute_search_multi(
+    let outcome = engine.execute_search_multi(
         "content:关键词",
         &QueryDefaults::default(),
         SortColumn::Name,
         true,
         &cancel,
     );
+    let total_after = outcome.total;
     assert_eq!(total_after, 0);
 }
 
@@ -1480,13 +1493,14 @@ fn a_full_backfill_reaches_ready_and_indexes_existing_files() {
     }
 
     let cancel = CancellationToken::new();
-    let (_, total, ..) = engine.execute_search_multi(
+    let outcome = engine.execute_search_multi(
         "content:hello",
         &QueryDefaults::default(),
         SortColumn::Name,
         true,
         &cancel,
     );
+    let total = outcome.total;
     assert_eq!(total, 1, "the pre-existing file must be searchable");
 
     // A file created after the ready state is queued through the USN path and sent to a fresh
@@ -1522,13 +1536,14 @@ fn a_full_backfill_reaches_ready_and_indexes_existing_files() {
         );
         std::thread::sleep(Duration::from_millis(100));
     }
-    let (_, total, ..) = engine.execute_search_multi(
+    let outcome = engine.execute_search_multi(
         "content:needle",
         &QueryDefaults::default(),
         SortColumn::Name,
         true,
         &cancel,
     );
+    let total = outcome.total;
     assert_eq!(total, 1, "the new file must be searchable");
 
     // A deleted file must lose its body document; keeping it would return stale content and
@@ -1551,13 +1566,14 @@ fn a_full_backfill_reaches_ready_and_indexes_existing_files() {
         );
         std::thread::sleep(Duration::from_millis(100));
     }
-    let (_, total, ..) = engine.execute_search_multi(
+    let outcome = engine.execute_search_multi(
         "content:needle",
         &QueryDefaults::default(),
         SortColumn::Name,
         true,
         &cancel,
     );
+    let total = outcome.total;
     assert_eq!(total, 0, "a deleted file must not stay searchable");
 
     // Renaming out of the whitelist is a deletion, not a stale document under the old name.
@@ -1584,13 +1600,14 @@ fn a_full_backfill_reaches_ready_and_indexes_existing_files() {
         );
         std::thread::sleep(Duration::from_millis(100));
     }
-    let (_, total, ..) = engine.execute_search_multi(
+    let outcome = engine.execute_search_multi(
         "content:hello",
         &QueryDefaults::default(),
         SortColumn::Name,
         true,
         &cancel,
     );
+    let total = outcome.total;
     assert_eq!(total, 0, "a renamed-out file must not stay searchable");
 }
 

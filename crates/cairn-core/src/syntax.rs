@@ -74,6 +74,15 @@ impl QueryExpr {
         }
     }
 
+    /// The drive a textless query scopes to, when that is its only constraint.
+    pub fn drive_scope(&self) -> Option<char> {
+        match self {
+            QueryExpr::Term(term) => term.drive_scope(),
+            QueryExpr::And(items) if items.len() == 1 => items[0].drive_scope(),
+            QueryExpr::And(_) | QueryExpr::Or(_) | QueryExpr::Not(_) => None,
+        }
+    }
+
     /// Collects search terms that should be highlighted in search results (QRY-08).
     pub fn collect_highlight_terms(&self) -> Vec<String> {
         let mut terms = Vec::new();
@@ -371,6 +380,17 @@ impl SearchTerm {
             && !self.folder_only
             && !self.exclude_hidden
             && !self.exclude_system
+    }
+
+    /// The drive this item scopes to when the drive is its only constraint.
+    pub fn drive_scope(&self) -> Option<char> {
+        let drive = self.drive?;
+        (Self {
+            drive: None,
+            ..self.clone()
+        })
+        .is_empty()
+        .then_some(drive)
     }
 }
 

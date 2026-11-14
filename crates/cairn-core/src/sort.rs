@@ -227,6 +227,52 @@ fn cmp_name_entries(a: &NameSortEntry, b: &NameSortEntry, arena: &NamePool) -> O
     natural_cmp(na, nb)
 }
 
+/// The column's ascending order, including the name tiebreak the column builders use.
+fn cmp_indices(
+    col: SortColumn,
+    a: u32,
+    b: u32,
+    records: &[FileRecord],
+    arena: &NamePool,
+    path_cache: &DirectoryPathCache,
+    drive_letter: char,
+) -> Ordering {
+    let ra = &records[a as usize];
+    let rb = &records[b as usize];
+    match col {
+        SortColumn::Name => cmp_name_entries(
+            &make_name_entry(ra, a, arena),
+            &make_name_entry(rb, b, arena),
+            arena,
+        ),
+        SortColumn::Size => ra.size.cmp(&rb.size).then_with(|| {
+            cmp_name_entries(
+                &make_name_entry(ra, a, arena),
+                &make_name_entry(rb, b, arena),
+                arena,
+            )
+        }),
+        SortColumn::DateModified => ra.modified_ts.cmp(&rb.modified_ts).then_with(|| {
+            cmp_name_entries(
+                &make_name_entry(ra, a, arena),
+                &make_name_entry(rb, b, arena),
+                arena,
+            )
+        }),
+        SortColumn::Path => {
+            let pa = path_cache.get_parent_path(records, arena, drive_letter, a);
+            let pb = path_cache.get_parent_path(records, arena, drive_letter, b);
+            pa.cmp(&pb).then_with(|| {
+                natural_cmp(
+                    arena.get_name(ra.name_offset, ra.name_len),
+                    arena.get_name(rb.name_offset, rb.name_len),
+                )
+            })
+        }
+        SortColumn::DateCreated | SortColumn::Extension => Ordering::Equal,
+    }
+}
+
 #[inline]
 fn apply_sort_dir(ord: Ordering, dir: SortDirection) -> Ordering {
     if dir == SortDirection::Descending {
@@ -339,6 +385,70 @@ impl PresortedIndices {
             }
             _ => {}
         }
+    }
+
+    /// Merges records whose key changed since the last build into the cached column. `changed`
+    /// holds both records new to the table and records whose old position must go: `removed`
+    /// answers whether a base index is one of the latter. The base stays sorted, so one pass
+    /// combines it with the sorted change list.
+    #[allow(clippy::too_many_arguments)]
+    pub fn merge_changed(
+        &mut self,
+        col: SortColumn,
+        changed: &mut Vec<u32>,
+        removed: impl Fn(u32) -> bool,
+        records: &[FileRecord],
+        arena: &NamePool,
+        path_cache: &DirectoryPathCache,
+        drive_letter: char,
+    ) {
+        let base = match col {
+            SortColumn::Name => &mut self.by_name,
+            SortColumn::Size => &mut self.by_size,
+            SortColumn::DateModified => &mut self.by_date_modified,
+            SortColumn::Path => &mut self.by_path,
+            SortColumn::DateCreated | SortColumn::Extension => return,
+        };
+        changed.sort_unstable_by(|&a, &b| {
+            cmp_indices(col, a, b, records, arena, path_cache, drive_letter).then_with(|| a.cmp(&b))
+        });
+        let base_len = base.len();
+        let mut merged = Vec::with_capacity(base_len + changed.len());
+        let (mut left, mut right) = (0usize, 0usize);
+        loop {
+            while left < base_len && removed(base[left]) {
+                left += 1;
+            }
+            if left >= base_len || right >= changed.len() {
+                break;
+            }
+            let ord = cmp_indices(
+                col,
+                base[left],
+                changed[right],
+                records,
+                arena,
+                path_cache,
+                drive_letter,
+            )
+            .then_with(|| base[left].cmp(&changed[right]));
+            if ord == Ordering::Greater {
+                merged.push(changed[right]);
+                right += 1;
+            } else {
+                merged.push(base[left]);
+                left += 1;
+            }
+        }
+        while left < base_len {
+            if !removed(base[left]) {
+                merged.push(base[left]);
+            }
+            left += 1;
+        }
+        merged.extend_from_slice(&changed[right..]);
+        *base = merged;
+        changed.clear();
     }
 
     /// Builds the four presorted columns (name, size, modified, path). Each column sorts in

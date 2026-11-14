@@ -16,7 +16,7 @@ use crate::sync_engine::MultiVolumeEngine;
 use cairn_core::syntax::{parse_query_with, MAX_CONTENT_TERMS};
 use cairn_protocol::codec::{encode_frame_into, peek_frame_header, try_decode_frame};
 use cairn_protocol::message::{
-    ClientRequest, Envelope, ResponsePayload, ERROR_CODE_HANDSHAKE_REQUIRED,
+    ClientRequest, Envelope, FileRowData, ResponsePayload, ERROR_CODE_HANDSHAKE_REQUIRED,
     ERROR_CODE_PROTOCOL_VERSION_MISMATCH, ERROR_CODE_QUERY_TOO_COMPLEX, ERROR_CODE_SESSION_EXPIRED,
     MAX_TREE_DEPTH, PIPE_NAME, PRODUCT_VERSION, WIRE_GUARD,
 };
@@ -180,6 +180,19 @@ fn is_pipe_closed_error(err: &std::io::Error) -> bool {
     }
 }
 
+/// Releases the connection's client registration on every exit path. The last lease of a
+/// client frees its cached sessions.
+struct ClientLease {
+    sessions: Arc<SessionManager>,
+    owner: QueryOwner,
+}
+
+impl Drop for ClientLease {
+    fn drop(&mut self) {
+        self.sessions.release_client(&self.owner);
+    }
+}
+
 async fn handle_client(
     mut pipe: NamedPipeServer,
     engine: Arc<MultiVolumeEngine>,
@@ -214,6 +227,12 @@ async fn handle_client(
         };
     #[cfg(not(windows))]
     let (caller, owner) = (CallerAuthorization::Unauthenticated, QueryOwner::default());
+
+    sessions.register_client(&owner);
+    let _lease = ClientLease {
+        sessions: Arc::clone(&sessions),
+        owner: owner.clone(),
+    };
 
     let mut read_buf = Vec::with_capacity(65536);
     let mut write_buf = Vec::with_capacity(4096);
@@ -418,28 +437,53 @@ fn process_request(
                 };
             }
             let query_cancel = sessions.begin_query(owner, query_id);
-            let (matched_items, total_matches, highlight_terms, snippets, total_bytes) = engine
-                .execute_search_multi(&raw_query, &defaults, sort_column, sort_asc, &query_cancel);
+            // A table or order change between the search and its first page refuses the page.
+            // Answering the query again against the new state hides that race from the client;
+            // the fallback keeps today's recovery path when the retry loses the same race.
+            let mut answered: Option<(u64, usize, u64, Vec<FileRowData>)> = None;
+            let mut fallback: Option<(u64, usize, u64, Vec<FileRowData>)> = None;
+            for attempt in 0..2 {
+                let outcome = engine.execute_search_multi(
+                    &raw_query,
+                    &defaults,
+                    sort_column,
+                    sort_asc,
+                    &query_cancel,
+                );
+                let total_matches = outcome.total;
+                let total_bytes = outcome.total_bytes;
+                let session_id = sessions.create_session(
+                    owner.clone(),
+                    outcome.rows,
+                    outcome.highlight_terms,
+                    outcome.snippets,
+                );
+                let first_page = engine.with_volumes(|vols| {
+                    sessions.get_rows_multi(session_id, 0, first_page_limit, vols)
+                });
+                match first_page {
+                    Ok(rows) => {
+                        answered = Some((session_id, total_matches, total_bytes, rows));
+                        break;
+                    }
+                    Err(err) => {
+                        // The session is dropped rather than serving rows from the new table
+                        // under old offsets; its next page answers 410 and the client re-asks.
+                        warn!(
+                            "query session {session_id} expired before its first page \
+                             (attempt {}): {err:?}",
+                            attempt + 1
+                        );
+                        sessions.invalidate(session_id);
+                        fallback = Some((session_id, total_matches, total_bytes, Vec::new()));
+                    }
+                }
+            }
             sessions.finish_query(owner, query_id);
 
-            let session_id =
-                sessions.create_session(raw_query, highlight_terms, matched_items, snippets);
-
-            let first_page = engine.with_volumes(|vols| {
-                sessions.get_rows_multi(session_id, 0, first_page_limit, vols)
-            });
-            let first_page = match first_page {
-                Ok(rows) => rows,
-                Err(err) => {
-                    // A volume was rebuilt between the query and its first page. The cached
-                    // indices no longer describe those rows, so the session is dropped rather
-                    // than serving rows from the new table under old offsets.
-                    warn!("query session {session_id} expired before its first page: {err:?}");
-                    sessions.invalidate(session_id);
-                    Vec::new()
-                }
-            };
-
+            let (session_id, total_matches, total_bytes, first_page) = answered
+                .or(fallback)
+                .expect("the first attempt always answers or falls back");
             ResponsePayload::QueryResult {
                 query_id,
                 session_id,

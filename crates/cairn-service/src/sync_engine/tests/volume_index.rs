@@ -14,6 +14,7 @@ use cairn_core::syntax::parse_query;
 use cairn_ntfs::mft::ExtractedItem;
 use cairn_ntfs::usn::UsnChange;
 use cairn_protocol::status::VolumeState;
+use std::collections::HashMap;
 
 #[test]
 fn directory_sizes_aggregate_their_indexed_descendants() {
@@ -774,31 +775,35 @@ fn matched_bytes_are_counted_once_at_the_highest_matched_point() {
     let note_idx = vol.first_record_index_for_frn(30).expect("note");
     let out_idx = vol.first_record_index_for_frn(50).expect("out");
 
-    // 1. Folders alone contribute zero bytes.
+    // 1. Every folder matched: the root is the highest hit point and owns the whole tree.
     let all_folders = vec![root_idx, win_idx, sys_idx, users_idx];
-    assert_eq!(vol.calculate_matched_bytes(&all_folders), 0);
+    assert_eq!(vol.calculate_matched_bytes(&all_folders), 150);
 
-    // 2. Subfolders alone contribute zero bytes.
+    // 2. A folder-only hit reports the folder's recursive size; the nested System32 is
+    //    covered by Windows and adds nothing.
     let subfolders = vec![win_idx, sys_idx, users_idx];
-    assert_eq!(vol.calculate_matched_bytes(&subfolders), 0);
+    assert_eq!(vol.calculate_matched_bytes(&subfolders), 50);
 
-    // 3. Sibling directories contribute zero bytes.
+    // 3. A single folder hit reports its recursive size on its own.
+    assert_eq!(vol.calculate_matched_bytes(&[sys_idx]), 50);
+
+    // 4. Sibling directories keep their own shares.
     let siblings = vec![win_idx, users_idx];
-    assert_eq!(vol.calculate_matched_bytes(&siblings), 0);
+    assert_eq!(vol.calculate_matched_bytes(&siblings), 50);
 
-    // 4. Pure file query: files contribute their size.
+    // 5. Pure file query: files contribute their size.
     let files = vec![note_idx, out_idx];
     assert_eq!(vol.calculate_matched_bytes(&files), 150);
 
-    // 5. Mixed query: only files contribute size; folders contribute zero.
+    // 6. Mixed query: Windows covers its matched descendant; the outside file counts once.
     let mixed = vec![win_idx, note_idx, out_idx];
     assert_eq!(vol.calculate_matched_bytes(&mixed), 150);
 
-    // 6. Duplicate indices are deduplicated in small sets.
+    // 7. Duplicate indices are counted once.
     let duplicates = vec![note_idx, note_idx, out_idx, out_idx];
     assert_eq!(vol.calculate_matched_bytes(&duplicates), 150);
 
-    // 7. Large query sets (> 64 items) use BitSet deduplication.
+    // 8. A many-times repeated index is still one record.
     let mut large_query = Vec::new();
     for _ in 0..50 {
         large_query.push(note_idx);
@@ -807,7 +812,7 @@ fn matched_bytes_are_counted_once_at_the_highest_matched_point() {
     assert!(large_query.len() > 64);
     assert_eq!(vol.calculate_matched_bytes(&large_query), 150);
 
-    // 8. Tombstoned records contribute zero bytes.
+    // 9. Tombstoned records contribute zero bytes.
     vol.apply_usn_changes([UsnChange::Deleted { frn: 30 }]);
     assert_eq!(
         vol.calculate_matched_bytes(&[note_idx, out_idx]),
@@ -1006,5 +1011,420 @@ fn the_public_ledger_covers_an_ingested_volume_and_its_single_column() {
     assert_eq!(
         switched.presorted_bytes, warm.presorted_bytes,
         "the column swap stays within the single-column budget"
+    );
+}
+
+/// Ordinary renames keep the shared exclusion table; only a rule-relevant move rebuilds it.
+#[test]
+fn ordinary_renames_keep_the_cached_exclusion_states() {
+    let mut vol = VolumeIndex::new('C');
+    vol.ingest_items(vec![ExtractedItem {
+        frn: 10,
+        parent_frn: 5,
+        name: "alpha.txt".to_string(),
+        is_dir: false,
+        size: 10,
+        created_ts: 0,
+        modified_ts: 0,
+        flags: 0,
+        is_reparse_point: false,
+    }]);
+    let segments = vec!["$Recycle.Bin".to_string()];
+    let before = vol.segment_excluded_states_cached(&segments);
+
+    vol.apply_usn_changes([UsnChange::Renamed {
+        frn: 10,
+        parent_frn: 5,
+        name: "renamed.txt".to_string(),
+        is_dir: false,
+        is_new_name: true,
+    }]);
+    let after = vol.segment_excluded_states_cached(&segments);
+    assert!(
+        std::sync::Arc::ptr_eq(&before, &after),
+        "an ordinary rename keeps the cached table"
+    );
+
+    vol.apply_usn_changes([UsnChange::Renamed {
+        frn: 10,
+        parent_frn: 5,
+        name: "$Recycle.Bin".to_string(),
+        is_dir: false,
+        is_new_name: true,
+    }]);
+    let after = vol.segment_excluded_states_cached(&segments);
+    assert!(
+        !std::sync::Arc::ptr_eq(&before, &after),
+        "a rename into a rule segment rebuilds the table"
+    );
+}
+
+/// The segment-exclusion table is shared between queries and extended by appends.
+#[test]
+fn appended_records_extend_the_cached_exclusion_states() {
+    let mut vol = VolumeIndex::new('C');
+    vol.ingest_items(vec![ExtractedItem {
+        frn: 10,
+        parent_frn: 5,
+        name: "alpha.txt".to_string(),
+        is_dir: false,
+        size: 10,
+        created_ts: 0,
+        modified_ts: 0,
+        flags: 0,
+        is_reparse_point: false,
+    }]);
+    let segments = vec!["$Recycle.Bin".to_string()];
+    assert_eq!(vol.segment_excluded_states_cached(&segments).len(), 1);
+
+    vol.apply_usn_changes([UsnChange::Created {
+        frn: 11,
+        parent_frn: 5,
+        name: "$Recycle.Bin".to_string(),
+        is_dir: true,
+        attributes: 0,
+        ts: 1,
+    }]);
+    let states = vol.segment_excluded_states_cached(&segments);
+    assert_eq!(states.len(), 2, "the appended record extends the table");
+
+    let volumes = HashMap::from([('C', vol)]);
+    let exclusions = crate::sync_engine::path_exclusions::PathExclusions::new(&volumes, &segments);
+    let excluded = volumes[&'C']
+        .first_record_index_for_frn(11)
+        .expect("the new directory");
+    let kept = volumes[&'C']
+        .first_record_index_for_frn(10)
+        .expect("the old file");
+    assert!(exclusions.excludes(&volumes[&'C'], excluded));
+    assert!(!exclusions.excludes(&volumes[&'C'], kept));
+}
+
+/// A pending change set makes the cached order unreadable; the merged order must match a
+/// fresh build exactly.
+#[test]
+fn an_order_with_pending_changes_reads_as_unbuilt_and_merges_to_the_rebuilt_order() {
+    let mut vol = VolumeIndex::new('C');
+    let file = |frn: u64, name: &str, size: u64| ExtractedItem {
+        frn,
+        parent_frn: 5,
+        name: name.to_string(),
+        is_dir: false,
+        size,
+        created_ts: 0,
+        modified_ts: 0,
+        flags: 0,
+        is_reparse_point: false,
+    };
+    vol.ingest_items(vec![file(10, "beta.txt", 10), file(11, "alpha.txt", 20)]);
+    vol.ensure_presorted_column(SortColumn::Name);
+
+    vol.apply_usn_changes([
+        UsnChange::Created {
+            frn: 12,
+            parent_frn: 5,
+            name: "aardvark.txt".to_string(),
+            is_dir: false,
+            attributes: 0,
+            ts: 1,
+        },
+        UsnChange::Renamed {
+            frn: 10,
+            parent_frn: 5,
+            name: "zulu.txt".to_string(),
+            is_dir: false,
+            is_new_name: true,
+        },
+    ]);
+    assert!(
+        vol.presorted_order(SortColumn::Name).is_none(),
+        "a pending change set is not a readable order"
+    );
+
+    vol.ensure_presorted_column(SortColumn::Name);
+    let merged: Vec<u32> = vol
+        .presorted_order(SortColumn::Name)
+        .expect("merged order")
+        .to_vec();
+
+    // Switching columns releases the order; switching back rebuilds it from scratch.
+    vol.ensure_presorted_column(SortColumn::Size);
+    vol.ensure_presorted_column(SortColumn::Name);
+    let rebuilt: Vec<u32> = vol
+        .presorted_order(SortColumn::Name)
+        .expect("rebuilt order")
+        .to_vec();
+    assert_eq!(merged, rebuilt, "the merge equals a fresh build");
+}
+
+/// A directory rename invalidates the path order for the whole subtree.
+#[test]
+fn a_directory_rename_invalidates_the_path_order() {
+    let mut vol = VolumeIndex::new('C');
+    vol.ingest_items(vec![
+        ExtractedItem {
+            frn: 10,
+            parent_frn: 5,
+            name: "folder".to_string(),
+            is_dir: true,
+            size: 0,
+            created_ts: 0,
+            modified_ts: 0,
+            flags: cairn_core::FLAG_DIRECTORY,
+            is_reparse_point: false,
+        },
+        ExtractedItem {
+            frn: 11,
+            parent_frn: 10,
+            name: "inside.txt".to_string(),
+            is_dir: false,
+            size: 10,
+            created_ts: 0,
+            modified_ts: 0,
+            flags: 0,
+            is_reparse_point: false,
+        },
+    ]);
+    vol.ensure_presorted_column(SortColumn::Path);
+    vol.apply_usn_changes([UsnChange::Renamed {
+        frn: 10,
+        parent_frn: 5,
+        name: "renamed".to_string(),
+        is_dir: true,
+        is_new_name: true,
+    }]);
+    assert!(
+        vol.presorted_order(SortColumn::Path).is_none(),
+        "descendant paths changed with the directory"
+    );
+    vol.ensure_presorted_column(SortColumn::Path);
+    assert!(vol.presorted_order(SortColumn::Path).is_some());
+}
+
+/// A file resize moves its ancestors in the size order, not just the file.
+#[test]
+fn a_resize_repositions_the_ancestors_in_the_size_order() {
+    let mut vol = VolumeIndex::new('C');
+    let dir = |frn: u64, name: &str| ExtractedItem {
+        frn,
+        parent_frn: 5,
+        name: name.to_string(),
+        is_dir: true,
+        size: 0,
+        created_ts: 0,
+        modified_ts: 0,
+        flags: cairn_core::FLAG_DIRECTORY,
+        is_reparse_point: false,
+    };
+    let file = |frn: u64, parent: u64, name: &str, size: u64| ExtractedItem {
+        frn,
+        parent_frn: parent,
+        name: name.to_string(),
+        is_dir: false,
+        size,
+        created_ts: 0,
+        modified_ts: 0,
+        flags: 0,
+        is_reparse_point: false,
+    };
+    vol.ingest_items(vec![
+        dir(10, "small"),
+        file(11, 10, "a.txt", 10),
+        dir(12, "large"),
+        file(13, 12, "b.txt", 30),
+    ]);
+    vol.ensure_presorted_column(SortColumn::Size);
+
+    let a = vol.first_record_index_for_frn(11).expect("a.txt");
+    vol.update_file_size(a, 100);
+    vol.ensure_presorted_column(SortColumn::Size);
+
+    let order: Vec<u64> = vol
+        .presorted_order(SortColumn::Size)
+        .expect("merged order")
+        .iter()
+        .map(|&idx| vol.records()[idx as usize].frn)
+        .collect();
+    let small = order.iter().position(|&frn| frn == 10).expect("small");
+    let large = order.iter().position(|&frn| frn == 12).expect("large");
+    assert!(
+        large < small,
+        "the enlarged folder moves after the smaller one"
+    );
+}
+
+/// A rule set the segment table cannot answer invalidates open views on every rename.
+#[test]
+fn a_full_path_rule_rename_invalidates_exclusion_verdicts() {
+    let mut vol = VolumeIndex::new('C');
+    vol.ingest_items(vec![ExtractedItem {
+        frn: 10,
+        parent_frn: 5,
+        name: "alpha.txt".to_string(),
+        is_dir: false,
+        size: 10,
+        created_ts: 0,
+        modified_ts: 0,
+        flags: 0,
+        is_reparse_point: false,
+    }]);
+    let volumes = HashMap::from([('C', vol)]);
+    let _exclusions =
+        crate::sync_engine::path_exclusions::PathExclusions::new(&volumes, &["*.tmp".to_string()]);
+    let epoch = volumes[&'C'].exclusion_epoch();
+
+    let mut volumes = volumes;
+    volumes
+        .get_mut(&'C')
+        .expect("volume")
+        .apply_usn_changes([UsnChange::Renamed {
+            frn: 10,
+            parent_frn: 5,
+            name: "alpha.tmp".to_string(),
+            is_dir: false,
+            is_new_name: true,
+        }]);
+    assert!(
+        volumes[&'C'].exclusion_epoch() > epoch,
+        "a full-path rule rename can move the record's verdict"
+    );
+}
+
+/// The all-files total is a maintained counter, not a scan of the order.
+#[test]
+fn live_file_bytes_tracks_ingest_resize_and_delete() {
+    let mut vol = VolumeIndex::new('C');
+    let file = |frn: u64, name: &str, size: u64| ExtractedItem {
+        frn,
+        parent_frn: 5,
+        name: name.to_string(),
+        is_dir: false,
+        size,
+        created_ts: 0,
+        modified_ts: 0,
+        flags: 0,
+        is_reparse_point: false,
+    };
+    vol.ingest_items(vec![
+        file(10, "alpha.txt", 10),
+        file(11, "beta.txt", 20),
+        ExtractedItem {
+            frn: 5,
+            parent_frn: 5,
+            name: ".".to_string(),
+            is_dir: true,
+            size: 0,
+            created_ts: 0,
+            modified_ts: 0,
+            flags: cairn_core::FLAG_DIRECTORY,
+            is_reparse_point: false,
+        },
+    ]);
+    assert_eq!(vol.live_file_bytes(), 30);
+
+    let beta = vol.first_record_index_for_frn(11).expect("beta");
+    vol.update_file_size(beta, 25);
+    assert_eq!(vol.live_file_bytes(), 35);
+
+    vol.apply_usn_changes([UsnChange::Deleted { frn: 11 }]);
+    assert_eq!(vol.live_file_bytes(), 10);
+}
+
+/// A record appended after the order was built merges into it; the table is not re-sorted.
+#[test]
+fn appended_records_merge_into_the_cached_presorted_column() {
+    let mut vol = VolumeIndex::new('C');
+    let make = |frn: u64, name: &str| ExtractedItem {
+        frn,
+        parent_frn: 5,
+        name: name.to_string(),
+        is_dir: false,
+        size: 100,
+        created_ts: 0,
+        modified_ts: 0,
+        flags: 0,
+        is_reparse_point: false,
+    };
+    vol.ingest_items(vec![make(10, "beta.txt"), make(11, "alpha.txt")]);
+    vol.ensure_presorted_column(SortColumn::Name);
+    let version = vol.presorted_version();
+
+    vol.apply_usn_changes([UsnChange::Created {
+        frn: 12,
+        parent_frn: 5,
+        name: "aardvark.txt".to_string(),
+        is_dir: false,
+        attributes: 0,
+        ts: 1,
+    }]);
+    assert!(vol.needs_presorted_column(SortColumn::Name));
+    vol.ensure_presorted_column(SortColumn::Name);
+    assert!(
+        vol.presorted_version() > version,
+        "the merged order is a new version"
+    );
+
+    let names: Vec<&str> = vol
+        .presorted_order(SortColumn::Name)
+        .expect("order")
+        .iter()
+        .map(|&idx| {
+            let record = &vol.records()[idx as usize];
+            vol.arena().get_name(record.name_offset, record.name_len)
+        })
+        .collect();
+    assert_eq!(names, ["aardvark.txt", "alpha.txt", "beta.txt"]);
+}
+
+/// A column is invalidated only by the events whose key it sorts on.
+#[test]
+fn an_event_invalidates_only_the_orders_its_key_moves() {
+    let mut vol = VolumeIndex::new('C');
+    vol.ingest_items(vec![ExtractedItem {
+        frn: 10,
+        parent_frn: 5,
+        name: "alpha.txt".to_string(),
+        is_dir: false,
+        size: 100,
+        created_ts: 0,
+        modified_ts: 0,
+        flags: 0,
+        is_reparse_point: false,
+    }]);
+    vol.ensure_presorted_column(SortColumn::Name);
+
+    vol.mark_presorted_sizes_changed([0]);
+    assert!(
+        vol.presorted_order(SortColumn::Name).is_some(),
+        "a size change does not move a record in the name order"
+    );
+    assert!(vol.needs_presorted_column(SortColumn::Size));
+
+    vol.mark_presorted_names_changed([0]);
+    assert!(
+        vol.needs_presorted_column(SortColumn::Name),
+        "a rename is merged into the name order"
+    );
+    vol.ensure_presorted_column(SortColumn::Name);
+    assert!(vol.presorted_order(SortColumn::Name).is_some());
+
+    // A modification time moves only the modification order.
+    vol.ensure_presorted_column(SortColumn::Size);
+    vol.apply_usn_changes([UsnChange::BasicInfoChanged {
+        frn: 10,
+        ts: 5,
+        attributes: 0,
+    }]);
+    assert!(
+        vol.presorted_order(SortColumn::Size).is_some(),
+        "a new modification time does not move a record in the size order"
+    );
+
+    // A size change moves only the size order.
+    vol.ensure_presorted_column(SortColumn::DateModified);
+    vol.update_file_size(0, 200);
+    assert!(
+        vol.presorted_order(SortColumn::DateModified).is_some(),
+        "a new size does not move a record in the modification order"
     );
 }

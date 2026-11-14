@@ -2,7 +2,8 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Automated benchmark and regression check suite comparing Cairn against SM-1 and SM-2 budgets.
+//! Deterministic cost-model benchmark. `--check` is a fixed 100k-fixture regression gate;
+//! SM-1/SM-2 acceptance at 4M records is measured per release.
 
 use cairn_core::engine::CancellationToken;
 use cairn_core::frn_index::IndexMemoryFootprint;
@@ -190,7 +191,7 @@ fn build_benchmark_engine(items: Vec<ExtractedItem>, index_dir: &Path) -> MultiV
 
 fn print_footprint(label: &str, fp: &IndexMemoryFootprint) {
     let mb = |bytes: usize| bytes as f64 / (1024.0 * 1024.0);
-    println!("\n--- [SM-2] {label} Memory Ledger ---");
+    println!("\n--- {label} Memory Ledger ---");
     println!(
         "Records: {} (live {}), FileRecord={} B, Total={:.2} MB ({:.2} B/record)",
         fp.record_count,
@@ -221,24 +222,24 @@ fn validate_check_thresholds(
     measurements: &[QueryMeasurement],
 ) -> Result<(), String> {
     if idle.record_count == 0 {
-        return Err("SM-2 check failed: benchmark fixture is empty".to_string());
+        return Err("Memory regression: benchmark fixture is empty".to_string());
     }
     if idle.presorted_bytes != 0 {
         return Err(format!(
-            "SM-2 check failed: idle presorted_bytes should be 0 (lazy), got {}",
+            "Memory regression: idle presorted_bytes should be 0 (lazy), got {}",
             idle.presorted_bytes
         ));
     }
     if idle.bytes_per_record() > MEMORY_BUDGET_BYTES_PER_RECORD {
         return Err(format!(
-            "SM-2 check failed: idle footprint {:.2} B/record exceeds {:.2} B/record ({idle:?})",
+            "Memory regression: idle footprint {:.2} B/record exceeds {:.2} B/record ({idle:?})",
             idle.bytes_per_record(),
             MEMORY_BUDGET_BYTES_PER_RECORD
         ));
     }
     if warm.bytes_per_record() > MEMORY_BUDGET_BYTES_PER_RECORD {
         return Err(format!(
-            "SM-2 check failed: single-column warm footprint {:.2} B/record exceeds {:.2} B/record ({warm:?})",
+            "Memory regression: single-column warm footprint {:.2} B/record exceeds {:.2} B/record ({warm:?})",
             warm.bytes_per_record(),
             MEMORY_BUDGET_BYTES_PER_RECORD
         ));
@@ -248,13 +249,13 @@ fn validate_check_thresholds(
     for m in measurements {
         if m.matches == 0 {
             return Err(format!(
-                "SM-1 check failed: benchmark query {:?} returned 0 matches",
+                "Query regression: benchmark query {:?} returned 0 matches",
                 m.query
             ));
         }
         if m.p95 > budget {
             return Err(format!(
-                "SM-1 check failed: query {:?} P95 {:?} exceeded regression ceiling {:?}",
+                "Query regression: query {:?} P95 {:?} exceeded regression ceiling {:?}",
                 m.query, m.p95, budget
             ));
         }
@@ -271,7 +272,7 @@ pub fn run_benchmark(
     let effective_runs = runs.max(1);
     let use_corpus = if check { None } else { Some(corpus_path) };
 
-    println!("=== Cairn Engine Benchmark (SM-1, SM-2) ===");
+    println!("=== Cairn Engine Benchmark ===");
     match use_corpus.filter(|p| p.exists()) {
         Some(p) => println!("Loading synthetic corpus from {:?}...", p),
         None => println!(
@@ -309,7 +310,7 @@ pub fn run_benchmark(
     ];
 
     println!(
-        "\n--- [SM-1] Query Latency Benchmark (Warmup 2x, Samples {}x) ---",
+        "\n--- Query Latency Benchmark (Warmup 2x, Samples {}x) ---",
         effective_runs
     );
     println!(
@@ -332,10 +333,10 @@ pub fn run_benchmark(
 
         for _ in 0..effective_runs {
             let t0 = Instant::now();
-            let (_, total, _, _, _) =
+            let outcome =
                 engine.execute_search_multi(q, &defaults, SortColumn::Name, true, &cancel);
             latencies.push(t0.elapsed());
-            match_count = total;
+            match_count = outcome.total;
         }
 
         latencies.sort();
@@ -363,7 +364,7 @@ pub fn run_benchmark(
             .map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
     } else if idle_footprint.bytes_per_record() > MEMORY_BUDGET_BYTES_PER_RECORD {
         return Err(format!(
-            "SM-2 violation: idle full-ledger {:.2} B/record exceeds {:.2} B/record",
+            "Memory regression: idle full-ledger {:.2} B/record exceeds {:.2} B/record",
             idle_footprint.bytes_per_record(),
             MEMORY_BUDGET_BYTES_PER_RECORD
         )
@@ -384,30 +385,25 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let engine = build_benchmark_engine(items, temp_dir.path());
 
-        let defaults = QueryDefaults::default();
-        let cancel = CancellationToken::new();
-        let (rows, total, _, _, _) =
-            engine.execute_search_multi("", &defaults, SortColumn::Name, true, &cancel);
-
-        assert!(total > 0, "the all-files query must match the fixture");
         // Directory hits resolve to their own parent, so pick a file below the
         // deepest fixture directory: its resolved parent proves the chain kept
         // every intermediate level instead of flattening to one component.
         let resolved_parent = engine.with_volumes(|vols| {
             let vol = &vols[&'C'];
-            rows.iter()
-                .filter_map(|row| {
-                    let rec = &vol.records()[row.record_idx as usize];
-                    (rec.flags & FLAG_DIRECTORY == 0).then(|| {
-                        vol.path_cache().get_full_path(
-                            vol.records(),
-                            vol.arena(),
-                            'C',
-                            rec.parent_idx,
-                        )
-                    })
+            assert!(!vol.records().is_empty(), "the fixture must carry records");
+            vol.records()
+                .iter()
+                .filter(|rec| rec.flags & FLAG_DIRECTORY == 0)
+                .find_map(|rec| {
+                    let path = vol.path_cache().get_full_path(
+                        vol.records(),
+                        vol.arena(),
+                        'C',
+                        rec.parent_idx,
+                    );
+                    path.contains(r"\Users\User\Documents\Work\2026")
+                        .then_some(path)
                 })
-                .find(|path| path.contains(r"\Users\User\Documents\Work\2026"))
         });
         assert!(
             resolved_parent.is_some(),

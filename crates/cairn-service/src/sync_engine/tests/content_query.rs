@@ -51,13 +51,14 @@ fn engine_with_indexed_content() -> (MultiVolumeEngine, tempfile::TempDir) {
 
 fn matched_content_frns(engine: &MultiVolumeEngine, query: &str) -> Vec<u64> {
     let cancel = CancellationToken::new();
-    let (results, ..) = engine.execute_search_multi(
+    let outcome = engine.execute_search_multi(
         query,
         &QueryDefaults::default(),
         SortColumn::Name,
         true,
         &cancel,
     );
+    let results = engine.test_items(outcome.rows);
     let volumes = engine.volumes.read().unwrap();
     let mut frns: Vec<u64> = results
         .iter()
@@ -205,13 +206,15 @@ fn an_empty_content_term_matches_nothing() {
 fn an_or_content_query_keeps_snippets_on_content_hit_rows() {
     let (engine, _dir) = engine_with_indexed_content();
     let cancel = CancellationToken::new();
-    let (results, .., snippets, _) = engine.execute_search_multi(
+    let outcome = engine.execute_search_multi(
         "content:needle|content:quarterly",
         &QueryDefaults::default(),
         SortColumn::Name,
         true,
         &cancel,
     );
+    let results = engine.test_items(outcome.rows);
+    let snippets = outcome.snippets;
     assert_eq!(results.len(), 3);
     let volumes = engine.volumes.read().unwrap();
     for item in &results {
@@ -227,13 +230,15 @@ fn an_or_content_query_keeps_snippets_on_content_hit_rows() {
 fn a_negated_content_term_never_supplies_a_content_snippet() {
     let (engine, _dir) = engine_with_indexed_content();
     let cancel = CancellationToken::new();
-    let (results, .., snippets, _) = engine.execute_search_multi(
+    let outcome = engine.execute_search_multi(
         "report|!content:needle",
         &QueryDefaults::default(),
         SortColumn::Name,
         true,
         &cancel,
     );
+    let results = engine.test_items(outcome.rows);
+    let snippets = outcome.snippets;
     let volumes = engine.volumes.read().unwrap();
     let mut frns: Vec<u64> = results
         .iter()
@@ -264,13 +269,15 @@ fn a_cancelled_query_returns_no_rows_in_either_content_shape() {
     ] {
         let cancel = CancellationToken::new();
         cancel.cancel();
-        let (results, total, ..) = engine.execute_search_multi(
+        let outcome = engine.execute_search_multi(
             query,
             &QueryDefaults::default(),
             SortColumn::Name,
             true,
             &cancel,
         );
+        let results = engine.test_items(outcome.rows);
+        let total = outcome.total;
         assert!(
             results.is_empty(),
             "{query} must not return partial rows after a cancel"

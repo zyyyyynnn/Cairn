@@ -33,15 +33,251 @@ pub struct SearchResultItem {
     pub generation: u64,
 }
 
-pub type MultiSearchResult = (
-    Vec<SearchResultItem>,
-    usize,
-    Vec<String>,
-    HashMap<(char, u64), String>,
-    u64,
-);
+/// The rows a query produced. A whole-volume textless query is answered by the volume's
+/// presorted order itself, so its session pages that order instead of retaining one item per
+/// record; every other query carries its materialized match list.
+pub enum MatchSet {
+    Items(Vec<SearchResultItem>),
+    AllFiles(AllFilesView),
+}
+
+/// One volume's live records in presorted order, plus the exclusions the query applied.
+/// Sessions read pages from this descriptor and refuse them once the order or the table
+/// changes underneath.
+pub struct AllFilesView {
+    pub(crate) drive_letter: char,
+    pub(crate) sort_by: SortColumn,
+    pub(crate) sort_asc: bool,
+    pub(crate) generation: u64,
+    pub(crate) presorted_version: u64,
+    pub(crate) exclusion_epoch: u64,
+    pub(crate) exclusions: PathExclusions,
+}
+
+/// Everything one query produced: the rows (materialized or a live view), the exact counts,
+/// and the display extras. One model for the pipe server, the session cache and the benches.
+pub struct SearchOutcome {
+    pub rows: MatchSet,
+    pub total: usize,
+    pub highlight_terms: Vec<String>,
+    pub snippets: HashMap<(char, u64), String>,
+    pub total_bytes: u64,
+}
+
+impl AllFilesView {
+    /// Visits the view's visible records in order, starting at `offset` visible rows and
+    /// stopping after `limit` visits. Returns `false` when the volume's table or order no
+    /// longer matches this view. Totals, paging and tests share this one walk.
+    pub(crate) fn visit_visible(
+        &self,
+        volume: &VolumeIndex,
+        offset: usize,
+        limit: usize,
+        visit: impl FnMut(u32),
+    ) -> bool {
+        self.visit_visible_until(volume, offset, limit, || false, visit)
+    }
+
+    /// The same walk with a stop probe, so a superseded totals scan releases the order.
+    pub(crate) fn visit_visible_until(
+        &self,
+        volume: &VolumeIndex,
+        offset: usize,
+        limit: usize,
+        stop: impl Fn() -> bool,
+        mut visit: impl FnMut(u32),
+    ) -> bool {
+        if volume.generation() != self.generation
+            || volume.presorted_version() != self.presorted_version
+            || volume.exclusion_epoch() != self.exclusion_epoch
+        {
+            return false;
+        }
+        let Some(column) = volume.presorted_order_snapshot(self.sort_by) else {
+            return false;
+        };
+        let end = offset.saturating_add(limit);
+        let mut visible = 0usize;
+        let mut stopped = false;
+        let mut take = |idx: u32, visible: &mut usize| -> bool {
+            if *visible & 0xFFF == 0 && stop() {
+                stopped = true;
+                return true;
+            }
+            if *visible >= end {
+                return true;
+            }
+            let record = &volume.records()[idx as usize];
+            if record.is_tombstone() || self.exclusions.excludes(volume, idx) {
+                return false;
+            }
+            if *visible >= offset {
+                visit(idx);
+            }
+            *visible += 1;
+            *visible >= end
+        };
+        if self.sort_asc {
+            for &idx in column {
+                if take(idx, &mut visible) {
+                    break;
+                }
+            }
+        } else {
+            for &idx in column.iter().rev() {
+                if take(idx, &mut visible) {
+                    break;
+                }
+            }
+        }
+        !stopped
+    }
+}
+
+#[cfg(test)]
+impl MultiVolumeEngine {
+    /// Test seam: the rows a consumer that needs the full list would see. A live all-files
+    /// view is materialized from the same order and exclusions its pages use.
+    pub(crate) fn test_items(&self, rows: MatchSet) -> Vec<SearchResultItem> {
+        match rows {
+            MatchSet::Items(items) => items,
+            MatchSet::AllFiles(view) => {
+                let volumes = self.volumes.read().unwrap();
+                let volume = volumes.get(&view.drive_letter).expect("viewed volume");
+                let mut items = Vec::new();
+                let visible = view.visit_visible(volume, 0, usize::MAX, |idx| {
+                    items.push(SearchResultItem {
+                        drive_letter: view.drive_letter,
+                        record_idx: idx,
+                        generation: view.generation,
+                    });
+                });
+                if visible {
+                    items
+                } else {
+                    Default::default()
+                }
+            }
+        }
+    }
+}
+
+impl SearchOutcome {
+    fn empty(highlight_terms: Vec<String>, snippets: HashMap<(char, u64), String>) -> Self {
+        Self {
+            rows: MatchSet::Items(Vec::new()),
+            total: 0,
+            highlight_terms,
+            snippets,
+            total_bytes: 0,
+        }
+    }
+}
+
+/// Whether a volume can answer a query: not excluded by preference, and either fully indexed
+/// or holding records from a previous session.
+fn volume_is_active(volume: &VolumeIndex, excluded_drives: &[char]) -> bool {
+    !excluded_drives
+        .iter()
+        .any(|drive| drive.eq_ignore_ascii_case(&volume.drive_letter))
+        && (volume.status.state().is_synced() || !volume.records().is_empty())
+}
 
 impl MultiVolumeEngine {
+    /// The one active volume a textless query would view. A drive-scoped query names it; an
+    /// unscoped one needs exactly one active volume. The presorted build and the view read
+    /// this one verdict.
+    fn view_drive(&self, drive_scope: Option<char>) -> Option<char> {
+        let excluded_drives = {
+            let cfg = self.config.read().unwrap();
+            cfg.excluded_drives.clone()
+        };
+        let volumes = self.volumes.read().unwrap();
+        match drive_scope {
+            Some(drive) => volumes
+                .values()
+                .find(|volume| {
+                    volume_is_active(volume, &excluded_drives)
+                        && volume.drive_letter.eq_ignore_ascii_case(&drive)
+                })
+                .map(|volume| volume.drive_letter),
+            None => {
+                let mut active = volumes
+                    .values()
+                    .filter(|volume| volume_is_active(volume, &excluded_drives));
+                let volume = active.next()?;
+                if active.next().is_some() {
+                    return None;
+                }
+                Some(volume.drive_letter)
+            }
+        }
+    }
+
+    /// Builds or merges the scoped volume's order for a view query.
+    fn ensure_presorted_column_for(&self, drive: char, col: SortColumn) {
+        let needs_work = self
+            .volumes
+            .read()
+            .unwrap()
+            .get(&drive)
+            .is_some_and(|volume| volume.needs_presorted_column(col));
+        if !needs_work {
+            return;
+        }
+        let mut volumes = self.volumes.write().unwrap();
+        if let Some(volume) = volumes.get_mut(&drive) {
+            volume.ensure_presorted_column(col);
+        }
+    }
+
+    /// The outcome of a textless whole-volume query: the view descriptor, its exact totals
+    /// and the display extras.
+    fn all_files_outcome(
+        volume: &VolumeIndex,
+        sort_by: SortColumn,
+        sort_asc: bool,
+        exclusions: PathExclusions,
+        cancel: &CancellationToken,
+        highlight_terms: Vec<String>,
+        snippets: HashMap<(char, u64), String>,
+    ) -> SearchOutcome {
+        let view = AllFilesView {
+            drive_letter: volume.drive_letter,
+            sort_by,
+            sort_asc,
+            generation: volume.generation(),
+            presorted_version: volume.presorted_version(),
+            exclusion_epoch: volume.exclusion_epoch(),
+            exclusions,
+        };
+        // Without path rules the volume's own counters are the exact totals, so the view
+        // costs no scan. With rules the visible set is the matched set, so its space total
+        // follows the same highest-hit rule as a filtered query.
+        let (total, view_bytes) = if view.exclusions.is_empty() {
+            (volume.live_count() as usize, volume.live_file_bytes())
+        } else {
+            let mut visible = Vec::with_capacity(volume.live_count() as usize);
+            if !view.visit_visible_until(
+                volume,
+                0,
+                usize::MAX,
+                || cancel.is_cancelled(),
+                |idx| visible.push(idx),
+            ) {
+                return SearchOutcome::empty(highlight_terms, snippets);
+            }
+            (visible.len(), volume.calculate_matched_bytes(&visible))
+        };
+        SearchOutcome {
+            rows: MatchSet::AllFiles(view),
+            total,
+            highlight_terms,
+            snippets,
+            total_bytes: view_bytes,
+        }
+    }
+
     /// Evaluates search across all volumes, filtering excluded paths, sorting by column,
     /// returning highlight terms and content snippets. `defaults` carries the query-wide match
     /// toggles and attribute filters the client sent with the text.
@@ -52,7 +288,7 @@ impl MultiVolumeEngine {
         sort_by: SortColumn,
         sort_asc: bool,
         cancel: &CancellationToken,
-    ) -> MultiSearchResult {
+    ) -> SearchOutcome {
         let query_expr = parse_query_with(raw_query, defaults);
         let highlight_terms = query_expr.collect_highlight_terms();
         let content_queries = query_expr.extract_content_queries();
@@ -60,13 +296,19 @@ impl MultiVolumeEngine {
             .strip_content_queries()
             .unwrap_or_else(|| QueryExpr::Term(cairn_core::syntax::SearchTerm::default()));
 
-        // Only the single-volume all-files query can consume a presorted order: the
-        // multi-volume path merges per-volume matches and sorts them itself. A filtered query
-        // scans the records and sorts just its matches, so rebuilding the volume's whole
-        // name/path/size array first is pure latency.
-        let single_volume = self.volumes.read().unwrap().len() == 1;
-        if single_volume && content_queries.is_empty() && query_expr.is_empty() {
-            self.ensure_presorted_indices(sort_by);
+        // A textless query that names one volume is that volume's all-files view; the sidebar
+        // default sends `C: `. Its order is built only when the view will consume it. A
+        // filtered query scans and sorts just its matches, so rebuilding a whole column first
+        // would be pure latency; the multi-volume path merges per-volume matches itself.
+        let drive_scope = query_expr.drive_scope();
+        let all_files_shape = query_expr.is_empty() || drive_scope.is_some();
+        let view_drive = if all_files_shape && content_queries.is_empty() {
+            self.view_drive(drive_scope)
+        } else {
+            None
+        };
+        if let Some(drive) = view_drive {
+            self.ensure_presorted_column_for(drive, sort_by);
         }
 
         let (excluded_drives, excluded_paths) = {
@@ -76,8 +318,8 @@ impl MultiVolumeEngine {
 
         let mut all_results = Vec::new();
         let mut snippets = HashMap::new();
-        // Sum of matched files' own sizes. Directories are containers; adding their recursive
-        // size would double count files that are also matched (the all-files view contains both).
+        // Space of the matched set at its highest hit point: a matched directory brings its
+        // recursive size, and anything already covered by a matched ancestor adds nothing.
         let mut total_bytes = 0u64;
 
         let lock;
@@ -91,24 +333,24 @@ impl MultiVolumeEngine {
                 None
             };
             let Some(searcher) = searcher else {
-                return (all_results, 0, highlight_terms, snippets, 0);
+                return SearchOutcome::empty(highlight_terms, snippets);
             };
 
             // A disjunction of content-only terms is one merged Tantivy search: the union hit
             // set answers every branch at once.
             if let Some(terms) = query_expr.pure_content_disjunction() {
                 if cancel.is_cancelled() {
-                    return (all_results, 0, highlight_terms, snippets, 0);
+                    return SearchOutcome::empty(highlight_terms, snippets);
                 }
                 let union_hits = match searcher.search_all_frns_union(&terms) {
                     Ok(hits) => hits,
                     Err(err) => {
                         tracing::warn!("content union search for {terms:?} failed: {err}");
-                        return (Vec::new(), 0, highlight_terms, snippets, 0);
+                        return SearchOutcome::empty(highlight_terms, snippets);
                     }
                 };
                 if cancel.is_cancelled() || union_hits.is_empty() {
-                    return (all_results, 0, highlight_terms, snippets, 0);
+                    return SearchOutcome::empty(highlight_terms, snippets);
                 }
 
                 // The collector emits one pair per matching document, so the hit set's length is
@@ -117,7 +359,7 @@ impl MultiVolumeEngine {
                 let mut frns_by_drive: HashMap<char, Vec<u64>> = HashMap::new();
                 for (i, (volume_id, frn)) in union_hits.into_iter().enumerate() {
                     if (i & 0x3FFF) == 0 && cancel.is_cancelled() {
-                        return (Vec::new(), 0, highlight_terms, snippets, 0);
+                        return SearchOutcome::empty(highlight_terms, snippets);
                     }
                     let Some(drive_letter) = u16::try_from(volume_id)
                         .ok()
@@ -133,13 +375,13 @@ impl MultiVolumeEngine {
                 let mut snippets_by_key: HashMap<(char, u64), String> = HashMap::new();
                 if union_count < CONTENT_RESULT_TOP_K {
                     if cancel.is_cancelled() {
-                        return (Vec::new(), 0, highlight_terms, snippets, 0);
+                        return SearchOutcome::empty(highlight_terms, snippets);
                     }
                     let hits = match searcher.search_union(&terms, CONTENT_RESULT_TOP_K) {
                         Ok(hits) => hits,
                         Err(err) => {
                             tracing::warn!("content union search for {terms:?} failed: {err}");
-                            return (Vec::new(), 0, highlight_terms, snippets, 0);
+                            return SearchOutcome::empty(highlight_terms, snippets);
                         }
                     };
                     for hit in &hits {
@@ -157,7 +399,7 @@ impl MultiVolumeEngine {
                 let exclusions = PathExclusions::new(&lock, &excluded_paths);
                 for vol in lock.values() {
                     if cancel.is_cancelled() {
-                        return (Vec::new(), 0, highlight_terms, snippets, 0);
+                        return SearchOutcome::empty(highlight_terms, snippets);
                     }
                     if excluded_drives
                         .iter()
@@ -179,7 +421,7 @@ impl MultiVolumeEngine {
                     let mut matches = Vec::new();
                     for (idx, rec) in vol.records().iter().enumerate() {
                         if (idx & 0x3FFF) == 0 && cancel.is_cancelled() {
-                            return (Vec::new(), 0, highlight_terms, snippets, 0);
+                            return SearchOutcome::empty(highlight_terms, snippets);
                         }
                         if !rec.is_tombstone() && union_bits.contains(idx) {
                             matches.push(idx as u32);
@@ -188,7 +430,7 @@ impl MultiVolumeEngine {
                     let Some(vol_matches) =
                         collect_volume_matches(vol, matches, &exclusions, cancel, &mut all_results)
                     else {
-                        return (Vec::new(), 0, highlight_terms, snippets, 0);
+                        return SearchOutcome::empty(highlight_terms, snippets);
                     };
                     for &idx in &vol_matches {
                         let frn = vol.records()[idx as usize].frn;
@@ -210,12 +452,12 @@ impl MultiVolumeEngine {
                         Ok(hits) => hits,
                         Err(err) => {
                             tracing::warn!("content search for {content_queries:?} failed: {err}");
-                            return (Vec::new(), 0, highlight_terms, snippets, 0);
+                            return SearchOutcome::empty(highlight_terms, snippets);
                         }
                     };
 
                 if cancel.is_cancelled() || content_hits.is_empty() {
-                    return (all_results, 0, highlight_terms, snippets, 0);
+                    return SearchOutcome::empty(highlight_terms, snippets);
                 }
 
                 // Precompile MFT filter outside the lock to keep lock duration minimal
@@ -232,7 +474,7 @@ impl MultiVolumeEngine {
 
                 for hit in &content_hits {
                     if cancel.is_cancelled() {
-                        return (Vec::new(), 0, highlight_terms, snippets, 0);
+                        return SearchOutcome::empty(highlight_terms, snippets);
                     }
                     let Some(drive_letter) = u16::try_from(hit.volume_id)
                         .ok()
@@ -315,7 +557,7 @@ impl MultiVolumeEngine {
                 let mut snippets_by_key: HashMap<(char, u64), String> = HashMap::new();
                 for (term_slot, term) in content_queries.iter().enumerate() {
                     if cancel.is_cancelled() {
-                        return (Vec::new(), 0, highlight_terms, snippets, 0);
+                        return SearchOutcome::empty(highlight_terms, snippets);
                     }
                     // Snippets exist only for terms whose polarity can make a row match. A term
                     // below a Not never explains the result, and its snippet would mislabel rows
@@ -327,7 +569,7 @@ impl MultiVolumeEngine {
                             Ok(count) => count < CONTENT_RESULT_TOP_K,
                             Err(err) => {
                                 tracing::warn!("content count for {term:?} failed: {err}");
-                                return (Vec::new(), 0, highlight_terms, snippets, 0);
+                                return SearchOutcome::empty(highlight_terms, snippets);
                             }
                         }
                     } else {
@@ -338,7 +580,7 @@ impl MultiVolumeEngine {
                             Ok(hits) => hits,
                             Err(err) => {
                                 tracing::warn!("content search for {term:?} failed: {err}");
-                                return (Vec::new(), 0, highlight_terms, snippets, 0);
+                                return SearchOutcome::empty(highlight_terms, snippets);
                             }
                         };
                         for hit in &hits {
@@ -360,7 +602,7 @@ impl MultiVolumeEngine {
                             Ok(pairs) => pairs,
                             Err(err) => {
                                 tracing::warn!("content search for {term:?} failed: {err}");
-                                return (Vec::new(), 0, highlight_terms, snippets, 0);
+                                return SearchOutcome::empty(highlight_terms, snippets);
                             }
                         };
                         for (volume_id, frn) in pairs {
@@ -383,7 +625,7 @@ impl MultiVolumeEngine {
                 let exclusions = PathExclusions::new(&lock, &excluded_paths);
                 for vol in lock.values() {
                     if cancel.is_cancelled() {
-                        return (Vec::new(), 0, highlight_terms, snippets, 0);
+                        return SearchOutcome::empty(highlight_terms, snippets);
                     }
                     if excluded_drives
                         .iter()
@@ -426,7 +668,7 @@ impl MultiVolumeEngine {
                     let Some(vol_matches) =
                         collect_volume_matches(vol, matches, &exclusions, cancel, &mut all_results)
                     else {
-                        return (Vec::new(), 0, highlight_terms, snippets, 0);
+                        return SearchOutcome::empty(highlight_terms, snippets);
                     };
                     for &idx in &vol_matches {
                         let frn = vol.records()[idx as usize].frn;
@@ -447,21 +689,38 @@ impl MultiVolumeEngine {
             let exclusions = PathExclusions::new(&lock, &excluded_paths);
             let active_vols: Vec<_> = lock
                 .values()
-                .filter(|v| {
-                    if excluded_drives
-                        .iter()
-                        .any(|&ex| ex.eq_ignore_ascii_case(&v.drive_letter))
-                    {
-                        return false;
-                    }
-                    v.status.state().is_synced() || !v.records().is_empty()
-                })
+                .filter(|volume| volume_is_active(volume, &excluded_drives))
                 .collect();
+            // The view is the requested volume's whole order. A scoped query names it; an
+            // unscoped one may only view the sole active volume. Both are re-checked against
+            // the active set under this lock, so a configuration change or a rebuild between
+            // the order build and this read cannot serve a volume the query no longer covers.
+            if let Some(drive) = view_drive {
+                let view_allowed = match drive_scope {
+                    Some(_) => active_vols.iter().any(|vol| vol.drive_letter == drive),
+                    None => active_vols.len() == 1 && active_vols[0].drive_letter == drive,
+                };
+                if view_allowed {
+                    if let Some(volume) = lock.get(&drive) {
+                        if volume.presorted_order(sort_by).is_some() {
+                            return Self::all_files_outcome(
+                                volume,
+                                sort_by,
+                                sort_asc,
+                                exclusions,
+                                cancel,
+                                highlight_terms,
+                                snippets,
+                            );
+                        }
+                    }
+                }
+            }
 
             if active_vols.len() == 1 {
                 let vol = active_vols[0];
                 if cancel.is_cancelled() {
-                    return (Vec::new(), 0, highlight_terms, snippets, 0);
+                    return SearchOutcome::empty(highlight_terms, snippets);
                 }
                 let presorted_col = vol.presorted_order(sort_by);
                 let mut matches = cairn_core::engine::execute_query_ordered(
@@ -476,7 +735,7 @@ impl MultiVolumeEngine {
                 let Some(vol_bytes) =
                     filter_unique_volume_matches(vol, &mut matches, &exclusions, cancel)
                 else {
-                    return (Vec::new(), 0, highlight_terms, snippets, 0);
+                    return SearchOutcome::empty(highlight_terms, snippets);
                 };
                 if presorted_col.is_some() {
                     if !sort_asc {
@@ -500,7 +759,7 @@ impl MultiVolumeEngine {
                     );
                 }
                 if cancel.is_cancelled() {
-                    return (Vec::new(), 0, highlight_terms, snippets, 0);
+                    return SearchOutcome::empty(highlight_terms, snippets);
                 }
                 let gen = vol.generation();
                 let drive_letter = vol.drive_letter;
@@ -513,12 +772,18 @@ impl MultiVolumeEngine {
                     })
                     .collect();
                 let total = all_results.len();
-                return (all_results, total, highlight_terms, snippets, vol_bytes);
+                return SearchOutcome {
+                    rows: MatchSet::Items(all_results),
+                    total,
+                    highlight_terms,
+                    snippets,
+                    total_bytes: vol_bytes,
+                };
             }
 
             for vol in active_vols {
                 if cancel.is_cancelled() {
-                    return (Vec::new(), 0, highlight_terms, snippets, 0);
+                    return SearchOutcome::empty(highlight_terms, snippets);
                 }
                 let matches = cairn_core::engine::execute_query_ordered(
                     vol.records(),
@@ -532,10 +797,9 @@ impl MultiVolumeEngine {
                 let Some(vol_matches) =
                     collect_volume_matches(vol, matches, &exclusions, cancel, &mut all_results)
                 else {
-                    return (Vec::new(), 0, highlight_terms, snippets, 0);
+                    return SearchOutcome::empty(highlight_terms, snippets);
                 };
-                total_bytes =
-                    total_bytes.saturating_add(vol.sum_unique_matched_bytes(&vol_matches));
+                total_bytes = total_bytes.saturating_add(vol.calculate_matched_bytes(&vol_matches));
             }
         }
 
@@ -604,7 +868,7 @@ impl MultiVolumeEngine {
                 .collect();
 
             if cancel.is_cancelled() {
-                return (Vec::new(), 0, highlight_terms, snippets, 0);
+                return SearchOutcome::empty(highlight_terms, snippets);
             }
 
             decorated.par_sort_unstable_by(|(ka, a), (kb, b)| {
@@ -644,16 +908,22 @@ impl MultiVolumeEngine {
         }
 
         if cancel.is_cancelled() {
-            return (Vec::new(), 0, highlight_terms, snippets, 0);
+            return SearchOutcome::empty(highlight_terms, snippets);
         }
 
         let total = all_results.len();
-        (all_results, total, highlight_terms, snippets, total_bytes)
+        SearchOutcome {
+            rows: MatchSet::Items(all_results),
+            total,
+            highlight_terms,
+            snippets,
+            total_bytes,
+        }
     }
 }
 
-/// Retains non-excluded unique record indices in place and sums live file sizes.
-/// Returns `None` if `cancel` triggers mid-loop.
+/// Retains non-excluded unique record indices in place and returns their space at the
+/// highest hit point. Returns `None` if `cancel` triggers mid-loop.
 fn filter_unique_volume_matches(
     vol: &VolumeIndex,
     matches: &mut Vec<u32>,
@@ -661,8 +931,6 @@ fn filter_unique_volume_matches(
     cancel: &CancellationToken,
 ) -> Option<u64> {
     let mut write = 0usize;
-    let mut total_bytes: u64 = 0;
-    let records = vol.records();
     for read in 0..matches.len() {
         if (read & 0xFFF) == 0 && cancel.is_cancelled() {
             return None;
@@ -671,16 +939,11 @@ fn filter_unique_volume_matches(
         if exclusions.excludes(vol, idx) {
             continue;
         }
-        if let Some(rec) = records.get(idx as usize) {
-            if rec.is_file() && !rec.is_tombstone() {
-                total_bytes = total_bytes.saturating_add(rec.size);
-            }
-        }
         matches[write] = idx;
         write += 1;
     }
     matches.truncate(write);
-    Some(total_bytes)
+    Some(vol.calculate_matched_bytes(matches))
 }
 
 /// Filters `matches` against `exclusions` and appends non-excluded [`SearchResultItem`]s into

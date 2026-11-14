@@ -153,9 +153,9 @@ pub enum ResponsePayload {
         query_id: u64,
         session_id: u64,
         total_matches: usize,
-        /// Sum of the matched files' own sizes. Directories are containers and do not add their
-        /// recursive size here, so the all-files total matches the disk usage without double
-        /// counting a folder and its contents.
+        /// Space the matched set describes, counted once at its highest hit point: a matched
+        /// directory contributes its recursive size, and matches under a matched ancestor add
+        /// nothing.
         total_bytes: u64,
         first_page: Vec<FileRowData>,
     },
