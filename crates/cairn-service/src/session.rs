@@ -68,7 +68,7 @@ pub struct QuerySession {
 }
 
 impl MatchSet {
-    /// Rows this result holds in memory. A live all-files view holds none: it pages the
+    /// Rows this result holds in memory. A live all-files view holds no rows: it pages the
     /// volume's order, so it never counts against the cache budget.
     fn retained_items(&self) -> usize {
         match self {

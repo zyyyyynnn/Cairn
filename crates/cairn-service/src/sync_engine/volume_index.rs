@@ -462,7 +462,8 @@ impl VolumeIndex {
         }
     }
 
-    /// Records whose position in the name or path order changed (rename, move).
+    /// Records renamed or moved. Name and path columns move with the new name; size and
+    /// modification columns move too because the name is their tiebreak.
     pub fn mark_presorted_names_changed(&mut self, indices: impl IntoIterator<Item = u32>) {
         self.mark_repositioned(indices, true, true);
     }
