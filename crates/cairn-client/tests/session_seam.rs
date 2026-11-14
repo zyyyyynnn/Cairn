@@ -400,6 +400,18 @@ async fn a_retried_query_carries_the_same_request() {
         "the request is sent once per connection attempt"
     );
     assert_eq!(seen[0], seen[1], "the retry carries the same query fields");
+    assert_eq!(
+        seen[1],
+        (
+            9,
+            "notes".to_string(),
+            QueryDefaults::default(),
+            SortColumn::Size,
+            false,
+            25,
+        ),
+        "the replay carries the request the caller sent"
+    );
 }
 
 #[tokio::test]
