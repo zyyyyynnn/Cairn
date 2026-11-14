@@ -246,6 +246,161 @@ async fn session_reconnects_once_after_cached_pipe_closes() {
 }
 
 #[tokio::test]
+async fn a_retried_query_carries_the_same_request() {
+    let pipe = unique_pipe_name("query_replay");
+    let first_server = ServerOptions::new()
+        .first_pipe_instance(true)
+        .create(&pipe)
+        .expect("first server");
+
+    let queries: Arc<Mutex<Vec<(u64, String, QueryDefaults, SortColumn, bool, usize)>>> =
+        Arc::new(Mutex::new(Vec::new()));
+    let queries_srv = queries.clone();
+    let pipe_srv = pipe.clone();
+
+    let server_task = tokio::spawn(async move {
+        let mut s1 = first_server;
+        s1.connect().await.expect("accept 1");
+        let mut s2 = ServerOptions::new()
+            .first_pipe_instance(false)
+            .create(&pipe_srv)
+            .expect("second server");
+
+        let mut buf = Vec::new();
+        let mut cached_query_answered = false;
+        while let Some(req) = read_one_request(&mut s1, &mut buf).await {
+            match req {
+                ClientRequest::Hello { .. } => {
+                    write_response(
+                        &mut s1,
+                        ResponsePayload::HelloAck {
+                            server_version: WIRE_GUARD as u32,
+                            caller_is_admin: false,
+                        },
+                    )
+                    .await;
+                }
+                ClientRequest::Query {
+                    query_id,
+                    raw_query,
+                    defaults,
+                    sort_column,
+                    sort_asc,
+                    first_page_limit,
+                } => {
+                    if !cached_query_answered {
+                        cached_query_answered = true;
+                        write_response(
+                            &mut s1,
+                            ResponsePayload::QueryResult {
+                                query_id,
+                                session_id: 11,
+                                total_matches: 1,
+                                total_bytes: 32,
+                                first_page: Vec::new(),
+                            },
+                        )
+                        .await;
+                        continue;
+                    }
+                    queries_srv.lock().await.push((
+                        query_id,
+                        raw_query,
+                        defaults,
+                        sort_column,
+                        sort_asc,
+                        first_page_limit,
+                    ));
+                    // Close before answering: the cached connection dies under the request.
+                    break;
+                }
+                other => panic!("unexpected req on conn 1: {other:?}"),
+            }
+        }
+        drop(s1);
+
+        s2.connect().await.expect("accept 2");
+        buf.clear();
+        while let Some(req) = read_one_request(&mut s2, &mut buf).await {
+            let reply = match req {
+                ClientRequest::Hello { .. } => ResponsePayload::HelloAck {
+                    server_version: WIRE_GUARD as u32,
+                    caller_is_admin: false,
+                },
+                ClientRequest::Query {
+                    query_id,
+                    raw_query,
+                    defaults,
+                    sort_column,
+                    sort_asc,
+                    first_page_limit,
+                } => {
+                    queries_srv.lock().await.push((
+                        query_id,
+                        raw_query,
+                        defaults,
+                        sort_column,
+                        sort_asc,
+                        first_page_limit,
+                    ));
+                    ResponsePayload::QueryResult {
+                        query_id,
+                        session_id: 12,
+                        total_matches: 1,
+                        total_bytes: 64,
+                        first_page: Vec::new(),
+                    }
+                }
+                other => panic!("unexpected req on conn 2: {other:?}"),
+            };
+            write_response(&mut s2, reply).await;
+        }
+    });
+
+    let session = ServiceSession::for_pipe(pipe);
+    let warm = session
+        .query(
+            8,
+            "warm",
+            QueryDefaults::default(),
+            SortColumn::Name,
+            true,
+            10,
+        )
+        .await
+        .expect("the first query caches the primary connection");
+    assert!(matches!(
+        warm.payload,
+        ResponsePayload::QueryResult { session_id: 11, .. }
+    ));
+    let query = session
+        .query(
+            9,
+            "notes",
+            QueryDefaults::default(),
+            SortColumn::Size,
+            false,
+            25,
+        )
+        .await
+        .expect("the retried query answers on the new connection");
+    assert!(matches!(
+        query.payload,
+        ResponsePayload::QueryResult { session_id: 12, .. }
+    ));
+    drop(session);
+
+    server_task.await.expect("server finish");
+    let seen = queries.lock().await;
+    assert_eq!(
+        seen.len(),
+        2,
+        "the request is sent once per connection attempt"
+    );
+    assert_eq!(seen[0], seen[1], "the retry carries the same query fields");
+}
+
+#[tokio::test]
 async fn cancel_uses_independent_connection_while_query_is_in_flight() {
     let pipe = unique_pipe_name("cancel_split");
     let s1 = ServerOptions::new()
