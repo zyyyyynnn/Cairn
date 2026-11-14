@@ -5,9 +5,7 @@
 //! Long-lived Named Pipe session management with transparent reconnect and independent cancellation.
 
 use crate::client::{CairnClient, ClientError};
-use cairn_protocol::message::{
-    ClientRequest, Envelope, QueryDefaults, ResponsePayload, SortColumn, PIPE_NAME,
-};
+use cairn_protocol::message::{Envelope, QueryDefaults, ResponsePayload, SortColumn, PIPE_NAME};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -84,39 +82,20 @@ impl ServiceSession {
         sort_asc: bool,
         first_page_limit: usize,
     ) -> Result<Envelope<ResponsePayload>, ClientError> {
-        let req = ClientRequest::Query {
-            query_id,
-            raw_query: raw_query.to_string(),
-            defaults,
-            sort_column,
-            sort_asc,
-            first_page_limit,
-        };
+        let raw_query = raw_query.to_string();
         self.call_primary(|client| {
-            let req = req.clone();
+            let raw_query = raw_query.clone();
             Box::pin(async move {
-                match &req {
-                    ClientRequest::Query {
+                client
+                    .query(
                         query_id,
-                        raw_query,
+                        &raw_query,
                         defaults,
                         sort_column,
                         sort_asc,
                         first_page_limit,
-                    } => {
-                        client
-                            .query(
-                                *query_id,
-                                raw_query,
-                                *defaults,
-                                *sort_column,
-                                *sort_asc,
-                                *first_page_limit,
-                            )
-                            .await
-                    }
-                    _ => unreachable!(),
-                }
+                    )
+                    .await
             })
         })
         .await

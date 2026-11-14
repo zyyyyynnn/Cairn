@@ -108,7 +108,7 @@ impl StaticLabelCache {
         self.get_or_resolve(i18n.revision(), key, |k| i18n.get_text(k))
     }
 
-    pub fn get_or_resolve(
+    fn get_or_resolve(
         &self,
         revision: u64,
         key: &'static str,
