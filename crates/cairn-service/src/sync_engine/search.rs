@@ -699,11 +699,12 @@ impl MultiVolumeEngine {
                 })
                 .collect();
             // The view is the requested volume's whole order. A scoped query names it; an
-            // unscoped one may only view the sole active volume, re-checked here in case
-            // another volume became active while the order was being built.
+            // unscoped one may only view the sole active volume. Both are re-checked against
+            // the active set under this lock, so a configuration change or a rebuild between
+            // the order build and this read cannot serve a volume the query no longer covers.
             if let Some(drive) = view_drive {
                 let view_allowed = match drive_scope {
-                    Some(_) => true,
+                    Some(_) => active_vols.iter().any(|vol| vol.drive_letter == drive),
                     None => active_vols.len() == 1 && active_vols[0].drive_letter == drive,
                 };
                 if view_allowed {
