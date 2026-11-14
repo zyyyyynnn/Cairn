@@ -174,6 +174,9 @@ pub struct VolumeIndex {
     presorted_pending: BitSet,
     presorted_removed: BitSet,
     presorted_delta: Vec<u32>,
+    /// A directory rename or move changes every descendant's path key, which has no cheap
+    /// descendant index; the path order is rebuilt on its next use.
+    presorted_path_stale: bool,
     /// Live records (tombstones excluded), maintained incrementally so status summaries stay O(1).
     live_count: u64,
     /// Sum of live file sizes. The all-files view reports it without scanning the order.
@@ -203,6 +206,7 @@ impl VolumeIndex {
             presorted_pending: BitSet::with_capacity(0),
             presorted_removed: BitSet::with_capacity(0),
             presorted_delta: Vec::new(),
+            presorted_path_stale: false,
             frn_to_idx: FrnLookup::new(),
             pending_renames: HashMap::new(),
             pending_data_changes: HashSet::new(),
@@ -237,6 +241,7 @@ impl VolumeIndex {
         self.presorted_pending = BitSet::with_capacity(0);
         self.presorted_removed = BitSet::with_capacity(0);
         self.presorted_delta.clear();
+        self.presorted_path_stale = false;
         self.frn_to_idx.clear_and_shrink();
         self.pending_renames.clear();
         self.pending_data_changes.clear();
@@ -261,6 +266,7 @@ impl VolumeIndex {
         self.presorted_pending = BitSet::with_capacity(0);
         self.presorted_removed = BitSet::with_capacity(0);
         self.presorted_delta.clear();
+        self.presorted_path_stale = false;
         self.pending_renames.clear();
         self.pending_data_changes.clear();
         self.pending_content_deletions.clear();
@@ -288,6 +294,8 @@ impl VolumeIndex {
         self.live_file_bytes = live_file_bytes;
         self.frn_to_idx = frn_to_idx;
         self.generation = self.generation.wrapping_add(1);
+        self.exclusion_epoch = self.exclusion_epoch.wrapping_add(1);
+        self.exclusion_cache = Mutex::new(None);
     }
 
     /// Registers directory FRNs whose whole subtree must stay out of this volume's index. Adding a
@@ -424,6 +432,7 @@ impl VolumeIndex {
         self.presorted_pending = BitSet::with_capacity(0);
         self.presorted_removed = BitSet::with_capacity(0);
         self.presorted_delta.clear();
+        self.presorted_path_stale = false;
         self.presorted_version = self.presorted_version.wrapping_add(1);
     }
 
@@ -443,7 +452,7 @@ impl VolumeIndex {
 
     /// Records whose position in the name or path order changed (rename, move).
     pub fn mark_presorted_names_changed(&mut self, indices: impl IntoIterator<Item = u32>) {
-        self.mark_repositioned(indices, true, true);
+        self.mark_repositioned(indices, true, false);
     }
 
     /// Records whose position in the size or modification order changed.
@@ -451,9 +460,10 @@ impl VolumeIndex {
         self.mark_repositioned(indices, false, true);
     }
 
-    /// Records whose position in the path order changed but whose name stayed.
-    pub fn mark_presorted_paths_changed(&mut self, indices: impl IntoIterator<Item = u32>) {
-        self.mark_repositioned(indices, true, false);
+    /// A directory rename or move invalidates the path order for its whole subtree.
+    pub fn mark_presorted_path_stale(&mut self) {
+        self.presorted_path_stale = true;
+        self.presorted_version = self.presorted_version.wrapping_add(1);
     }
 
     /// Marks records for repositioning when the cached column sorts on one of the changed
@@ -488,7 +498,10 @@ impl VolumeIndex {
     }
 
     pub fn presorted_order(&self, sort_by: SortColumn) -> Option<&[u32]> {
-        if self.presorted_column != Some(sort_by) {
+        if self.presorted_column != Some(sort_by) || !self.presorted_delta.is_empty() {
+            return None;
+        }
+        if sort_by == SortColumn::Path && self.presorted_path_stale {
             return None;
         }
         let order = match sort_by {
@@ -511,10 +524,13 @@ impl VolumeIndex {
             return;
         }
         let built = self.presorted_column == Some(col) && self.presorted_has(col);
-        if built && self.presorted_delta.is_empty() {
+        let path_stale = col == SortColumn::Path && self.presorted_path_stale;
+        if built && self.presorted_delta.is_empty() && !path_stale {
             return;
         }
-        let rebuild = !built || self.presorted_delta.len().saturating_mul(4) > self.records.len();
+        let rebuild = !built
+            || path_stale
+            || self.presorted_delta.len().saturating_mul(4) > self.records.len();
         if rebuild {
             self.presorted.clear_and_shrink();
             self.presorted.ensure_column(
@@ -528,6 +544,7 @@ impl VolumeIndex {
             self.presorted_pending = BitSet::with_capacity(0);
             self.presorted_removed = BitSet::with_capacity(0);
             self.presorted_delta.clear();
+            self.presorted_path_stale = false;
             self.presorted_version = self.presorted_version.wrapping_add(1);
             return;
         }
@@ -724,6 +741,7 @@ impl VolumeIndex {
         self.presorted_pending = BitSet::with_capacity(0);
         self.presorted_removed = BitSet::with_capacity(0);
         self.presorted_delta.clear();
+        self.presorted_path_stale = false;
         // A snapshot by itself proves nothing about freshness: the journal position is only known
         // once the scan has been reconciled with the change journal. Until then the volume is
         // still being rebuilt, so no path can report it as in sync with data it never read.
@@ -857,6 +875,11 @@ impl VolumeIndex {
     /// Moves one size delta up the parent chain. Tombstoned ancestors stop the walk: the deleted
     /// subtree's total was already removed when that ancestor was deleted.
     fn adjust_parent_sizes(&mut self, mut parent_idx: u32, delta: i128) {
+        let tracks_sizes = matches!(
+            self.presorted_column,
+            Some(SortColumn::Size | SortColumn::DateModified)
+        );
+        let mut changed: Vec<u32> = Vec::new();
         let mut steps = 0usize;
         while parent_idx != FileRecord::ROOT_PARENT && (parent_idx as usize) < self.records.len() {
             let record = &mut self.records[parent_idx as usize];
@@ -864,6 +887,9 @@ impl VolumeIndex {
                 break;
             }
             record.size = apply_size_delta(record.size, delta);
+            if tracks_sizes {
+                changed.push(parent_idx);
+            }
             if record.parent_idx == parent_idx {
                 break;
             }
@@ -872,6 +898,9 @@ impl VolumeIndex {
             if steps > self.records.len() {
                 break;
             }
+        }
+        if !changed.is_empty() {
+            self.mark_presorted_sizes_changed(changed);
         }
     }
 
@@ -1126,6 +1155,9 @@ impl VolumeIndex {
                         // and a rename out of the extension whitelist has to delete it.
                         self.pending_data_changes.insert(frn);
                         self.mark_presorted_names_changed(std::iter::once(idx));
+                        if self.records[idx as usize].is_dir() {
+                            self.mark_presorted_path_stale();
+                        }
                         if self.rename_changes_exclusion_states(
                             &old_name, &name, old_parent, parent_idx,
                         ) {
@@ -1500,6 +1532,7 @@ impl VolumeIndex {
         self.presorted_pending = BitSet::with_capacity(0);
         self.presorted_removed = BitSet::with_capacity(0);
         self.presorted_delta.clear();
+        self.presorted_path_stale = false;
         self.exclusion_epoch = self.exclusion_epoch.wrapping_add(1);
         self.exclusion_cache = Mutex::new(None);
         CompactionReport {

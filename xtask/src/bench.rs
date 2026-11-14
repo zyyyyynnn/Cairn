@@ -221,24 +221,24 @@ fn validate_check_thresholds(
     measurements: &[QueryMeasurement],
 ) -> Result<(), String> {
     if idle.record_count == 0 {
-        return Err("SM-2 check failed: benchmark fixture is empty".to_string());
+        return Err("Memory regression: benchmark fixture is empty".to_string());
     }
     if idle.presorted_bytes != 0 {
         return Err(format!(
-            "SM-2 check failed: idle presorted_bytes should be 0 (lazy), got {}",
+            "Memory regression: idle presorted_bytes should be 0 (lazy), got {}",
             idle.presorted_bytes
         ));
     }
     if idle.bytes_per_record() > MEMORY_BUDGET_BYTES_PER_RECORD {
         return Err(format!(
-            "SM-2 check failed: idle footprint {:.2} B/record exceeds {:.2} B/record ({idle:?})",
+            "Memory regression: idle footprint {:.2} B/record exceeds {:.2} B/record ({idle:?})",
             idle.bytes_per_record(),
             MEMORY_BUDGET_BYTES_PER_RECORD
         ));
     }
     if warm.bytes_per_record() > MEMORY_BUDGET_BYTES_PER_RECORD {
         return Err(format!(
-            "SM-2 check failed: single-column warm footprint {:.2} B/record exceeds {:.2} B/record ({warm:?})",
+            "Memory regression: single-column warm footprint {:.2} B/record exceeds {:.2} B/record ({warm:?})",
             warm.bytes_per_record(),
             MEMORY_BUDGET_BYTES_PER_RECORD
         ));
@@ -248,13 +248,13 @@ fn validate_check_thresholds(
     for m in measurements {
         if m.matches == 0 {
             return Err(format!(
-                "SM-1 check failed: benchmark query {:?} returned 0 matches",
+                "Query regression: benchmark query {:?} returned 0 matches",
                 m.query
             ));
         }
         if m.p95 > budget {
             return Err(format!(
-                "SM-1 check failed: query {:?} P95 {:?} exceeded regression ceiling {:?}",
+                "Query regression: query {:?} P95 {:?} exceeded regression ceiling {:?}",
                 m.query, m.p95, budget
             ));
         }

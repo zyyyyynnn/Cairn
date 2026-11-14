@@ -112,6 +112,45 @@ mod tests {
         });
     }
 
+    /// One active volume beside an empty one still gets its order built and its view served.
+    /// The build predicate and the view predicate are the same one.
+    #[test]
+    fn a_single_active_volume_still_serves_the_view_beside_an_empty_volume() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let engine = MultiVolumeEngine::with_index_dir_and_drives(temp_dir.path(), vec![]);
+        let mut vol = VolumeIndex::new('C');
+        vol.ingest_items(vec![ExtractedItem {
+            frn: 10,
+            parent_frn: 5,
+            name: "alpha.txt".to_string(),
+            is_dir: false,
+            size: 10,
+            created_ts: 0,
+            modified_ts: 0,
+            flags: 0,
+            is_reparse_point: false,
+        }]);
+        engine.add_volume(vol);
+        engine.add_volume(VolumeIndex::new('D'));
+
+        let cancel = CancellationToken::new();
+        let outcome = engine.execute_search_multi(
+            "C: ",
+            &QueryDefaults::default(),
+            SortColumn::Name,
+            true,
+            &cancel,
+        );
+        assert!(matches!(outcome.rows, MatchSet::AllFiles(_)));
+        assert_eq!(outcome.total, 1);
+        engine.with_volumes(|volumes| {
+            assert!(
+                volumes[&'C'].has_presorted_column(SortColumn::Name),
+                "the viewed volume's order is built"
+            );
+        });
+    }
+
     /// A textless whole-volume query is answered by the view, not by a materialized list;
     /// its exact totals still describe the same records.
     #[test]

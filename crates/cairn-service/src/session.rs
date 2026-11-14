@@ -67,14 +67,20 @@ pub struct QuerySession {
     pub last_accessed_nanos: AtomicU64,
 }
 
-impl QuerySession {
-    /// Rows this session holds in memory. A live all-files view holds none: it pages the
+impl MatchSet {
+    /// Rows this result holds in memory. A live all-files view holds none: it pages the
     /// volume's order, so it never counts against the cache budget.
     fn retained_items(&self) -> usize {
-        match &self.rows {
+        match self {
             MatchSet::Items(items) => items.len(),
             MatchSet::AllFiles(_) => 0,
         }
+    }
+}
+
+impl QuerySession {
+    fn retained_items(&self) -> usize {
+        self.rows.retained_items()
     }
 }
 
@@ -221,10 +227,7 @@ impl SessionManager {
         });
 
         // LRU eviction if session count or total retained item budget is exceeded.
-        let new_items = match &rows {
-            MatchSet::Items(items) => items.len(),
-            MatchSet::AllFiles(_) => 0,
-        };
+        let new_items = rows.retained_items();
         while !lock.is_empty() && {
             let total_items: usize = lock.values().map(QuerySession::retained_items).sum();
             lock.len() >= self.max_sessions
@@ -316,52 +319,19 @@ fn rows_for_all_files(
             drive_letter: view.drive_letter,
         });
     };
-    if volume.generation() != view.generation
-        || volume.presorted_version() != view.presorted_version
-    {
-        return Err(RowsError::Stale {
-            drive_letter: view.drive_letter,
-        });
-    }
-    let Some(column) = volume.presorted_order(view.sort_by) else {
-        return Err(RowsError::Stale {
-            drive_letter: view.drive_letter,
-        });
-    };
-
-    let end = offset.saturating_add(limit);
-    let mut visible = 0usize;
-    let mut rows = Vec::with_capacity(limit.min(column.len().saturating_sub(offset)));
-    let push = |idx: u32, visible: &mut usize, rows: &mut Vec<FileRowData>| -> bool {
-        if *visible >= end {
-            return true;
+    let mut rows = Vec::new();
+    let current = view.visit_visible(volume, offset, limit, |idx| {
+        if let Some(row) = volume.build_file_row(idx, &[], |_| None) {
+            rows.push(row);
         }
-        let record = &volume.records()[idx as usize];
-        if record.is_tombstone() || view.exclusions.excludes(volume, idx) {
-            return false;
-        }
-        if *visible >= offset {
-            if let Some(row) = volume.build_file_row(idx, &[], |_| None) {
-                rows.push(row);
-            }
-        }
-        *visible += 1;
-        rows.len() >= limit
-    };
-    if view.sort_asc {
-        for &idx in column {
-            if push(idx, &mut visible, &mut rows) {
-                break;
-            }
-        }
+    });
+    if current {
+        Ok(rows)
     } else {
-        for &idx in column.iter().rev() {
-            if push(idx, &mut visible, &mut rows) {
-                break;
-            }
-        }
+        Err(RowsError::Stale {
+            drive_letter: view.drive_letter,
+        })
     }
-    Ok(rows)
 }
 
 /// Materializes one page of a session against the current volume tables.

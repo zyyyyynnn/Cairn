@@ -63,6 +63,58 @@ pub struct SearchOutcome {
     pub total_bytes: u64,
 }
 
+impl AllFilesView {
+    /// Visits the view's visible records in order, starting at `offset` visible rows and
+    /// stopping after `limit` visits. Returns `false` when the volume's table or order no
+    /// longer matches this view. Totals, paging and tests share this one walk.
+    pub(crate) fn visit_visible(
+        &self,
+        volume: &VolumeIndex,
+        offset: usize,
+        limit: usize,
+        mut visit: impl FnMut(u32),
+    ) -> bool {
+        if volume.generation() != self.generation
+            || volume.presorted_version() != self.presorted_version
+        {
+            return false;
+        }
+        let Some(column) = volume.presorted_order(self.sort_by) else {
+            return false;
+        };
+        let end = offset.saturating_add(limit);
+        let mut visible = 0usize;
+        let mut take = |idx: u32, visible: &mut usize| -> bool {
+            if *visible >= end {
+                return true;
+            }
+            let record = &volume.records()[idx as usize];
+            if record.is_tombstone() || self.exclusions.excludes(volume, idx) {
+                return false;
+            }
+            if *visible >= offset {
+                visit(idx);
+            }
+            *visible += 1;
+            *visible >= end
+        };
+        if self.sort_asc {
+            for &idx in column {
+                if take(idx, &mut visible) {
+                    break;
+                }
+            }
+        } else {
+            for &idx in column.iter().rev() {
+                if take(idx, &mut visible) {
+                    break;
+                }
+            }
+        }
+        true
+    }
+}
+
 #[cfg(test)]
 impl MultiVolumeEngine {
     /// Test seam: the rows a consumer that needs the full list would see. A live all-files
@@ -73,25 +125,19 @@ impl MultiVolumeEngine {
             MatchSet::AllFiles(view) => {
                 let volumes = self.volumes.read().unwrap();
                 let volume = volumes.get(&view.drive_letter).expect("viewed volume");
-                let Some(column) = volume.presorted_order(view.sort_by) else {
-                    return Vec::new();
-                };
-                let ordered: Box<dyn Iterator<Item = u32>> = if view.sort_asc {
-                    Box::new(column.iter().copied())
-                } else {
-                    Box::new(column.iter().rev().copied())
-                };
-                ordered
-                    .filter(|&idx| {
-                        let record = &volume.records()[idx as usize];
-                        !record.is_tombstone() && !view.exclusions.excludes(volume, idx)
-                    })
-                    .map(|idx| SearchResultItem {
+                let mut items = Vec::new();
+                let visible = view.visit_visible(volume, 0, usize::MAX, |idx| {
+                    items.push(SearchResultItem {
                         drive_letter: view.drive_letter,
                         record_idx: idx,
                         generation: view.generation,
-                    })
-                    .collect()
+                    });
+                });
+                if visible {
+                    items
+                } else {
+                    Default::default()
+                }
             }
         }
     }
@@ -113,6 +159,30 @@ impl MultiVolumeEngine {
     /// Evaluates search across all volumes, filtering excluded paths, sorting by column,
     /// returning highlight terms and content snippets. `defaults` carries the query-wide match
     /// toggles and attribute filters the client sent with the text.
+    /// The one active volume a textless query would view, when the query names no drive or
+    /// names that volume. The presorted build and the view both read this verdict.
+    fn view_drive(&self, drive_scope: Option<char>) -> Option<char> {
+        let excluded_drives = {
+            let cfg = self.config.read().unwrap();
+            cfg.excluded_drives.clone()
+        };
+        let volumes = self.volumes.read().unwrap();
+        let mut active = volumes.values().filter(|volume| {
+            !excluded_drives
+                .iter()
+                .any(|&ex| ex.eq_ignore_ascii_case(&volume.drive_letter))
+                && (volume.status.state().is_synced() || !volume.records().is_empty())
+        });
+        let volume = active.next()?;
+        if active.next().is_some() {
+            return None;
+        }
+        if drive_scope.is_some_and(|drive| !volume.drive_letter.eq_ignore_ascii_case(&drive)) {
+            return None;
+        }
+        Some(volume.drive_letter)
+    }
+
     pub fn execute_search_multi(
         &self,
         raw_query: &str,
@@ -135,15 +205,13 @@ impl MultiVolumeEngine {
         // all-files view for that volume: the sidebar default sends `C: `, and its whole-match
         // sort would otherwise rebuild the order on every launch.
         let drive_scope = query_expr.drive_scope();
-        let all_files_view = query_expr.is_empty()
-            || drive_scope.is_some_and(|drive| {
-                let volumes = self.volumes.read().unwrap();
-                volumes.len() == 1
-                    && volumes
-                        .values()
-                        .any(|vol| vol.drive_letter.eq_ignore_ascii_case(&drive))
-            });
-        if all_files_view && content_queries.is_empty() {
+        let all_files_shape = query_expr.is_empty() || drive_scope.is_some();
+        let view_drive = if all_files_shape && content_queries.is_empty() {
+            self.view_drive(drive_scope)
+        } else {
+            None
+        };
+        if view_drive.is_some() {
             self.ensure_presorted_indices(sort_by);
         }
 
@@ -545,49 +613,40 @@ impl MultiVolumeEngine {
                 // A textless whole-volume query needs no match list: the presorted order is
                 // the answer, so the response carries the view and the session pages it
                 // directly instead of retaining one item per record.
-                let all_files = query_expr.is_empty()
-                    || query_expr
-                        .drive_scope()
-                        .is_some_and(|drive| drive.eq_ignore_ascii_case(&vol.drive_letter));
-                if all_files {
-                    if let Some(column) = presorted_col {
-                        // Without path rules the volume's own counters are the exact totals, so
-                        // the view costs no scan; with rules the visible set needs the walk.
-                        let (total, view_bytes) = if exclusions.is_empty() {
-                            (vol.live_count() as usize, vol.live_file_bytes())
-                        } else {
-                            let mut total = 0usize;
-                            let mut view_bytes = 0u64;
-                            for (read, &idx) in column.iter().enumerate() {
-                                if (read & 0xFFF) == 0 && cancel.is_cancelled() {
-                                    return SearchOutcome::empty(highlight_terms, snippets);
-                                }
-                                let record = &vol.records()[idx as usize];
-                                if record.is_tombstone() || exclusions.excludes(vol, idx) {
-                                    continue;
-                                }
-                                total += 1;
-                                if record.is_file() {
-                                    view_bytes = view_bytes.saturating_add(record.size);
-                                }
+                if view_drive == Some(vol.drive_letter) && presorted_col.is_some() {
+                    let view = AllFilesView {
+                        drive_letter: vol.drive_letter,
+                        sort_by,
+                        sort_asc,
+                        generation: vol.generation(),
+                        presorted_version: vol.presorted_version(),
+                        exclusions,
+                    };
+                    // Without path rules the volume's own counters are the exact totals, so
+                    // the view costs no scan; with rules the visible set needs the walk.
+                    let (total, view_bytes) = if view.exclusions.is_empty() {
+                        (vol.live_count() as usize, vol.live_file_bytes())
+                    } else {
+                        let mut total = 0usize;
+                        let mut view_bytes = 0u64;
+                        if !view.visit_visible(vol, 0, usize::MAX, |idx| {
+                            total += 1;
+                            let record = &vol.records()[idx as usize];
+                            if record.is_file() {
+                                view_bytes = view_bytes.saturating_add(record.size);
                             }
-                            (total, view_bytes)
-                        };
-                        return SearchOutcome {
-                            rows: MatchSet::AllFiles(AllFilesView {
-                                drive_letter: vol.drive_letter,
-                                sort_by,
-                                sort_asc,
-                                generation: vol.generation(),
-                                presorted_version: vol.presorted_version(),
-                                exclusions,
-                            }),
-                            total,
-                            highlight_terms,
-                            snippets,
-                            total_bytes: view_bytes,
-                        };
-                    }
+                        }) {
+                            return SearchOutcome::empty(highlight_terms, snippets);
+                        }
+                        (total, view_bytes)
+                    };
+                    return SearchOutcome {
+                        rows: MatchSet::AllFiles(view),
+                        total,
+                        highlight_terms,
+                        snippets,
+                        total_bytes: view_bytes,
+                    };
                 }
                 let mut matches = cairn_core::engine::execute_query_ordered(
                     vol.records(),

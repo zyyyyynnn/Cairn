@@ -1100,6 +1100,159 @@ fn appended_records_extend_the_cached_exclusion_states() {
     assert!(!exclusions.excludes(&volumes[&'C'], kept));
 }
 
+/// A pending change set makes the cached order unreadable; the merged order must match a
+/// fresh build exactly.
+#[test]
+fn an_order_with_pending_changes_reads_as_unbuilt_and_merges_to_the_rebuilt_order() {
+    let mut vol = VolumeIndex::new('C');
+    let file = |frn: u64, name: &str, size: u64| ExtractedItem {
+        frn,
+        parent_frn: 5,
+        name: name.to_string(),
+        is_dir: false,
+        size,
+        created_ts: 0,
+        modified_ts: 0,
+        flags: 0,
+        is_reparse_point: false,
+    };
+    vol.ingest_items(vec![file(10, "beta.txt", 10), file(11, "alpha.txt", 20)]);
+    vol.ensure_presorted_column(SortColumn::Name);
+
+    vol.apply_usn_changes([
+        UsnChange::Created {
+            frn: 12,
+            parent_frn: 5,
+            name: "aardvark.txt".to_string(),
+            is_dir: false,
+            attributes: 0,
+            ts: 1,
+        },
+        UsnChange::Renamed {
+            frn: 10,
+            parent_frn: 5,
+            name: "zulu.txt".to_string(),
+            is_dir: false,
+            is_new_name: true,
+        },
+    ]);
+    assert!(
+        vol.presorted_order(SortColumn::Name).is_none(),
+        "a pending change set is not a readable order"
+    );
+
+    vol.ensure_presorted_column(SortColumn::Name);
+    let merged: Vec<u32> = vol
+        .presorted_order(SortColumn::Name)
+        .expect("merged order")
+        .to_vec();
+
+    // Switching columns releases the order; switching back rebuilds it from scratch.
+    vol.ensure_presorted_column(SortColumn::Size);
+    vol.ensure_presorted_column(SortColumn::Name);
+    let rebuilt: Vec<u32> = vol
+        .presorted_order(SortColumn::Name)
+        .expect("rebuilt order")
+        .to_vec();
+    assert_eq!(merged, rebuilt, "the merge equals a fresh build");
+}
+
+/// A directory rename invalidates the path order for the whole subtree.
+#[test]
+fn a_directory_rename_invalidates_the_path_order() {
+    let mut vol = VolumeIndex::new('C');
+    vol.ingest_items(vec![
+        ExtractedItem {
+            frn: 10,
+            parent_frn: 5,
+            name: "folder".to_string(),
+            is_dir: true,
+            size: 0,
+            created_ts: 0,
+            modified_ts: 0,
+            flags: cairn_core::FLAG_DIRECTORY,
+            is_reparse_point: false,
+        },
+        ExtractedItem {
+            frn: 11,
+            parent_frn: 10,
+            name: "inside.txt".to_string(),
+            is_dir: false,
+            size: 10,
+            created_ts: 0,
+            modified_ts: 0,
+            flags: 0,
+            is_reparse_point: false,
+        },
+    ]);
+    vol.ensure_presorted_column(SortColumn::Path);
+    vol.apply_usn_changes([UsnChange::Renamed {
+        frn: 10,
+        parent_frn: 5,
+        name: "renamed".to_string(),
+        is_dir: true,
+        is_new_name: true,
+    }]);
+    assert!(
+        vol.presorted_order(SortColumn::Path).is_none(),
+        "descendant paths changed with the directory"
+    );
+    vol.ensure_presorted_column(SortColumn::Path);
+    assert!(vol.presorted_order(SortColumn::Path).is_some());
+}
+
+/// A file resize moves its ancestors in the size order, not just the file.
+#[test]
+fn a_resize_repositions_the_ancestors_in_the_size_order() {
+    let mut vol = VolumeIndex::new('C');
+    let dir = |frn: u64, name: &str| ExtractedItem {
+        frn,
+        parent_frn: 5,
+        name: name.to_string(),
+        is_dir: true,
+        size: 0,
+        created_ts: 0,
+        modified_ts: 0,
+        flags: cairn_core::FLAG_DIRECTORY,
+        is_reparse_point: false,
+    };
+    let file = |frn: u64, parent: u64, name: &str, size: u64| ExtractedItem {
+        frn,
+        parent_frn: parent,
+        name: name.to_string(),
+        is_dir: false,
+        size,
+        created_ts: 0,
+        modified_ts: 0,
+        flags: 0,
+        is_reparse_point: false,
+    };
+    vol.ingest_items(vec![
+        dir(10, "small"),
+        file(11, 10, "a.txt", 10),
+        dir(12, "large"),
+        file(13, 12, "b.txt", 30),
+    ]);
+    vol.ensure_presorted_column(SortColumn::Size);
+
+    let a = vol.first_record_index_for_frn(11).expect("a.txt");
+    vol.update_file_size(a, 100);
+    vol.ensure_presorted_column(SortColumn::Size);
+
+    let order: Vec<u64> = vol
+        .presorted_order(SortColumn::Size)
+        .expect("merged order")
+        .iter()
+        .map(|&idx| vol.records()[idx as usize].frn)
+        .collect();
+    let small = order.iter().position(|&frn| frn == 10).expect("small");
+    let large = order.iter().position(|&frn| frn == 12).expect("large");
+    assert!(
+        large < small,
+        "the enlarged folder moves after the smaller one"
+    );
+}
+
 /// The all-files total is a maintained counter, not a scan of the order.
 #[test]
 fn live_file_bytes_tracks_ingest_resize_and_delete() {
