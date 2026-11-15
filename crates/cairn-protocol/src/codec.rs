@@ -137,7 +137,7 @@ pub fn try_decode_frame<T: DeserializeOwned>(buf: &[u8]) -> Result<Option<(usize
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::message::{ClientRequest, SortColumn};
+    use crate::message::ClientRequest;
 
     #[test]
     fn test_encode_decode_roundtrip() {
@@ -176,15 +176,20 @@ mod tests {
             match_path: true,
             is_regex: false,
             content: true,
+            pinyin: true,
+            ignore_punctuation: false,
+            ignore_whitespace: true,
+            ignore_diacritics: false,
             exclude_hidden: true,
             exclude_system: false,
         };
+        let sort_spec =
+            cairn_core::sort::SortSpec::parse_clause("-name,+size").expect("valid sort spec");
         let req = ClientRequest::Query {
             query_id: 7,
             raw_query: "报告 季度".to_string(),
             defaults,
-            sort_column: SortColumn::Name,
-            sort_asc: false,
+            sort_spec: sort_spec.clone(),
             first_page_limit: 50,
         };
 
@@ -199,15 +204,13 @@ mod tests {
                 query_id,
                 raw_query,
                 defaults: received,
-                sort_column,
-                sort_asc,
+                sort_spec: decoded_sort,
                 first_page_limit,
             } => {
                 assert_eq!(query_id, 7);
                 assert_eq!(raw_query, "报告 季度");
                 assert_eq!(received, defaults, "toggles must survive the frame");
-                assert_eq!(sort_column, SortColumn::Name);
-                assert!(!sort_asc);
+                assert_eq!(decoded_sort, sort_spec);
                 assert_eq!(first_page_limit, 50);
             }
             other => panic!("Unexpected decoded request: {other:?}"),
@@ -221,8 +224,7 @@ mod tests {
             query_id: 7,
             raw_query: "报告 季度".to_string(),
             defaults: flipped,
-            sort_column: SortColumn::Name,
-            sort_asc: false,
+            sort_spec,
             first_page_limit: 50,
         };
         assert_ne!(
@@ -230,6 +232,121 @@ mod tests {
             encode_frame(&other).expect("encode"),
             "a single toggle must change the frame"
         );
+    }
+
+    #[test]
+    fn extended_payloads_round_trip_without_data_loss() {
+        use crate::message::{
+            FileRowData, PropertyKind, QueryDegradedReason, RecordPropertyData, ResponsePayload,
+            SourceId,
+        };
+        use crate::status::{
+            IndexJournalEntry, IndexJournalStatus, JournalChangeKind, SourceKind,
+            SourceStatusSummary, VolumeState,
+        };
+
+        let row = FileRowData {
+            frn: 42,
+            name: "clip.mp4".to_string(),
+            path: r"C:\Media\clip.mp4".to_string(),
+            size: 4096,
+            modified_ts: 1_700_000_000,
+            created_ts: 1_699_000_000,
+            is_dir: false,
+            flags: 0,
+            name_highlights: vec![(0, 4)],
+            path_highlights: Vec::new(),
+            snippets: vec!["line one".to_string(), "line two".to_string()],
+            properties: Some(RecordPropertyData {
+                length_ms: Some(12_345),
+                author: Some("Cairn".to_string()),
+                tags: Some("demo;video".to_string()),
+                dimensions: Some((1920, 1080)),
+                framerate_mfps: Some(29_970),
+            }),
+        };
+        let payload = ResponsePayload::QueryResult {
+            query_id: 9,
+            session_id: 3,
+            total_matches: 1,
+            total_bytes: 4096,
+            first_page: vec![row.clone()],
+            applied_sort: cairn_core::sort::SortSpec::parse_clause("-length,+name").unwrap(),
+            degraded: Some(QueryDegradedReason::PropertyIndexDisabled {
+                requested: vec![PropertyKind::Length],
+            }),
+        };
+        let encoded = encode_frame(&payload).expect("encode query result");
+        let (_, decoded) = try_decode_frame::<ResponsePayload>(&encoded)
+            .expect("decode")
+            .expect("complete");
+        match decoded {
+            ResponsePayload::QueryResult {
+                first_page,
+                applied_sort,
+                degraded,
+                ..
+            } => {
+                assert_eq!(first_page, vec![row]);
+                assert_eq!(applied_sort.to_clause(), "length-desc,name-asc");
+                assert_eq!(
+                    degraded,
+                    Some(QueryDegradedReason::PropertyIndexDisabled {
+                        requested: vec![PropertyKind::Length],
+                    })
+                );
+            }
+            other => panic!("unexpected payload: {other:?}"),
+        }
+
+        let journal = ResponsePayload::IndexJournalResult {
+            status: IndexJournalStatus {
+                enabled: true,
+                entry_count: 1,
+                resident_bytes: 128,
+                max_entries: 200_000,
+                max_bytes: 32 * 1024 * 1024,
+                oldest_seq: 1,
+                newest_seq: 1,
+            },
+            entries: vec![IndexJournalEntry {
+                seq: 1,
+                timestamp_ts: 1_700_000_123,
+                source_id: SourceId(7),
+                frn: 88,
+                kind: JournalChangeKind::Renamed,
+                path: r"C:\Docs\new.md".to_string(),
+                old_path: Some(r"C:\Docs\old.md".to_string()),
+            }],
+        };
+        let encoded_journal = encode_frame(&journal).expect("encode journal");
+        let (_, decoded_journal) = try_decode_frame::<ResponsePayload>(&encoded_journal)
+            .expect("decode journal")
+            .expect("complete");
+        assert!(matches!(
+            decoded_journal,
+            ResponsePayload::IndexJournalResult { ref entries, .. } if entries.len() == 1
+        ));
+
+        let sources = ResponsePayload::SourcesResult {
+            sources: vec![SourceStatusSummary {
+                source_id: SourceId(2),
+                kind: SourceKind::Folder,
+                root_path: r"D:\Notes".to_string(),
+                volume_guid: String::new(),
+                status: VolumeState::Synced,
+                indexed_count: 15,
+                live_watch_enabled: true,
+            }],
+        };
+        let encoded_sources = encode_frame(&sources).expect("encode sources");
+        let (_, decoded_sources) = try_decode_frame::<ResponsePayload>(&encoded_sources)
+            .expect("decode sources")
+            .expect("complete");
+        assert!(matches!(
+            decoded_sources,
+            ResponsePayload::SourcesResult { ref sources } if sources.len() == 1
+        ));
     }
 
     #[test]
@@ -307,14 +424,11 @@ mod tests {
 /// Pins the bytes a query request puts on the wire.
 ///
 /// The postcard payload is positional: adding, removing, reordering or retyping a field changes
-/// these bytes, and the header carries the product wire guard. The typed sort column encodes as
-/// the string the released wire carries, so the layout below is the 0.2 one. A layout change
-/// belongs to a release commit: update this pin together with the product version, so the new
-/// guard makes older clients fail the handshake instead of misreading the payload.
+/// Pins the serialized `ClientRequest::Query` bytes and `0.2.1` wire guard header.
 #[cfg(test)]
 mod wire_layout {
     use super::encode_frame;
-    use crate::message::{ClientRequest, SortColumn};
+    use crate::message::{ClientRequest, SortColumn, SortDirection, SortSpec};
     use std::str::FromStr;
 
     #[test]
@@ -323,22 +437,22 @@ mod wire_layout {
             query_id: 7,
             raw_query: "rs".to_string(),
             defaults: crate::message::QueryDefaults::default(),
-            sort_column: SortColumn::Size,
-            sort_asc: true,
+            sort_spec: SortSpec::single(SortColumn::Size, SortDirection::Ascending),
             first_page_limit: 50,
         };
         assert_eq!(
             encode_frame(&req).expect("encode"),
             vec![
-                19, 0, 0, 0, // payload length
-                2, 0, // wire guard (product major.minor: 0.2)
+                24, 0, 0, 0, // payload length
+                0x81, 0, // wire guard (product version: 0.2.1)
                 1, // Query variant
                 7, // query_id
                 2, b'r', b's', // raw_query
-                0, 0, 0, 0, 0, 0, 0, // QueryDefaults toggles, in declaration order
-                4, b's', b'i', b'z', b'e', // sort_column, encoded as its key string
-                1,    // sort_asc
-                50,   // first_page_limit
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, // QueryDefaults toggles, in declaration order
+                1, 4, b's', b'i', b'z', b'e',
+                0,  // sort_spec: 1 key, column="size", Ascending(0)
+                50, // first_page_limit
             ]
         );
     }

@@ -916,7 +916,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "cairn-app"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "cairn-client",
  "cairn-core",
@@ -942,7 +942,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-cli"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "cairn-client",
  "cairn-core",
@@ -957,7 +957,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-client"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "cairn-protocol",
  "thiserror 2.0.21",
@@ -968,7 +968,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-content"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "chardetng",
  "encoding_rs",
@@ -983,7 +983,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "crc32fast",
  "memchr",
@@ -997,10 +997,11 @@ dependencies = [
 
 [[package]]
 name = "cairn-ntfs"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "cairn-core",
  "rayon",
+ "tempfile",
  "thiserror 2.0.21",
  "tracing",
  "windows 0.62.2",
@@ -1008,7 +1009,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-protocol"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "cairn-core",
  "postcard",
@@ -1018,13 +1019,14 @@ dependencies = [
 
 [[package]]
 name = "cairn-service"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "cairn-client",
  "cairn-content",
  "cairn-core",
  "cairn-ntfs",
  "cairn-protocol",
+ "cairn-worker",
  "clap",
  "crc32fast",
  "memchr",
@@ -1044,7 +1046,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-setup"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "cairn-protocol",
  "cairn-ui",
@@ -1060,7 +1062,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-setup-bin"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "cairn-setup",
  "winresource",
@@ -1068,7 +1070,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-ui"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "fluent-bundle",
  "gpui-kit",
@@ -1078,17 +1080,23 @@ dependencies = [
 
 [[package]]
 name = "cairn-worker"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "cairn-content",
+ "cairn-core",
  "cairn-protocol",
  "clap",
+ "lopdf",
+ "quick-xml 0.42.0",
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.21",
  "tracing",
  "tracing-subscriber",
+ "windows 0.62.2",
  "winresource",
+ "zip",
 ]
 
 [[package]]
@@ -9598,7 +9606,7 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "xtask"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "cairn-client",
  "cairn-core",

@@ -32,6 +32,11 @@ impl VolumeStatus {
         self.0 = state;
     }
 
+    /// Marks a directory-backed source synchronized after a complete subtree walk.
+    pub(super) fn mark_folder_synced(&mut self) {
+        self.0 = VolumeState::Synced;
+    }
+
     /// Restores a state captured earlier, such as the pre-scan state of a volume whose rescan
     /// failed. The caller rolls back to a value the volume already held; this is not a new claim
     /// of freshness.

@@ -9,10 +9,19 @@
 mod tests {
     use crate::sync_engine::{MatchSet, MultiVolumeEngine, VolumeIndex};
     use cairn_core::engine::CancellationToken;
-    use cairn_core::sort::SortColumn;
+    use cairn_core::sort::{SortColumn, SortDirection, SortSpec};
     use cairn_core::syntax::QueryDefaults;
     use cairn_ntfs::mft::ExtractedItem;
     use cairn_ntfs::usn::UsnChange;
+
+    fn sort(column: SortColumn, asc: bool) -> SortSpec {
+        let dir = if asc {
+            SortDirection::Ascending
+        } else {
+            SortDirection::Descending
+        };
+        SortSpec::single(column, dir)
+    }
 
     #[test]
     fn test_usn_polling_marks_presorted_dirty_and_lazy_builds() {
@@ -57,8 +66,7 @@ mod tests {
         let outcome = engine.execute_search_multi(
             "",
             &QueryDefaults::default(),
-            SortColumn::Name,
-            true,
+            &sort(SortColumn::Name, true),
             &cancel,
         );
         let results = engine.test_items(outcome.rows);
@@ -106,11 +114,15 @@ mod tests {
 
         let cancel = CancellationToken::new();
         let defaults = QueryDefaults::default();
-        engine.execute_search_multi("C: ", &defaults, SortColumn::Name, true, &cancel);
+        engine.execute_search_multi("C: ", &defaults, &sort(SortColumn::Name, true), &cancel);
         let version = engine.with_volumes(|volumes| volumes[&'C'].presorted_version());
 
-        let outcome =
-            engine.execute_search_multi("C: ", &defaults, SortColumn::DateCreated, true, &cancel);
+        let outcome = engine.execute_search_multi(
+            "C: ",
+            &defaults,
+            &sort(SortColumn::DateCreated, true),
+            &cancel,
+        );
         assert!(matches!(outcome.rows, MatchSet::Items(_)));
         assert_eq!(outcome.total, 1);
         engine.with_volumes(|volumes| {
@@ -152,8 +164,7 @@ mod tests {
         let outcome = engine.execute_search_multi(
             "C: ",
             &QueryDefaults::default(),
-            SortColumn::Name,
-            true,
+            &sort(SortColumn::Name, true),
             &cancel,
         );
         assert!(matches!(outcome.rows, MatchSet::AllFiles(_)));
@@ -169,8 +180,7 @@ mod tests {
         let all = engine.execute_search_multi(
             "",
             &QueryDefaults::default(),
-            SortColumn::Name,
-            true,
+            &sort(SortColumn::Name, true),
             &cancel,
         );
         assert!(matches!(all.rows, MatchSet::Items(_)));
@@ -303,8 +313,7 @@ mod tests {
         let outcome = engine.execute_search_multi(
             "C: ",
             &QueryDefaults::default(),
-            SortColumn::Name,
-            true,
+            &sort(SortColumn::Name, true),
             &cancel,
         );
         assert_eq!(outcome.total, 0);
@@ -336,8 +345,7 @@ mod tests {
         let outcome = engine.execute_search_multi(
             "C: ",
             &QueryDefaults::default(),
-            SortColumn::Name,
-            true,
+            &sort(SortColumn::Name, true),
             &cancel,
         );
         assert!(matches!(outcome.rows, MatchSet::AllFiles(_)));
@@ -396,7 +404,8 @@ mod tests {
 
         let cancel = CancellationToken::new();
         let defaults = QueryDefaults::default();
-        let outcome = engine.execute_search_multi("", &defaults, SortColumn::Name, true, &cancel);
+        let outcome =
+            engine.execute_search_multi("", &defaults, &sort(SortColumn::Name, true), &cancel);
         assert!(matches!(outcome.rows, MatchSet::AllFiles(_)));
         assert_eq!(outcome.total, 3);
         assert_eq!(outcome.total_bytes, 30);
@@ -404,7 +413,7 @@ mod tests {
         assert_eq!(rows.len(), 3);
 
         let filtered =
-            engine.execute_search_multi("alpha", &defaults, SortColumn::Name, true, &cancel);
+            engine.execute_search_multi("alpha", &defaults, &sort(SortColumn::Name, true), &cancel);
         assert!(matches!(filtered.rows, MatchSet::Items(_)));
         assert_eq!(filtered.total, 1);
     }
@@ -441,8 +450,7 @@ mod tests {
         let outcome = engine.execute_search_multi(
             "C: ",
             &QueryDefaults::default(),
-            SortColumn::Name,
-            true,
+            &sort(SortColumn::Name, true),
             &cancel,
         );
         let results = engine.test_items(outcome.rows);
@@ -510,7 +518,8 @@ mod tests {
 
         let cancel = CancellationToken::new();
         let defaults = QueryDefaults::default();
-        let first = engine.execute_search_multi("C: ", &defaults, SortColumn::Path, true, &cancel);
+        let first =
+            engine.execute_search_multi("C: ", &defaults, &sort(SortColumn::Path, true), &cancel);
         assert!(matches!(first.rows, MatchSet::AllFiles(_)));
 
         engine.update_volume('C', |volume| {
@@ -523,7 +532,8 @@ mod tests {
             }]);
         });
 
-        let second = engine.execute_search_multi("C: ", &defaults, SortColumn::Path, true, &cancel);
+        let second =
+            engine.execute_search_multi("C: ", &defaults, &sort(SortColumn::Path, true), &cancel);
         assert!(
             matches!(second.rows, MatchSet::AllFiles(_)),
             "the stale path order is rebuilt instead of falling back"

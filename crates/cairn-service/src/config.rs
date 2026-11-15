@@ -55,6 +55,14 @@ fn default_content_index_max_bytes() -> u64 {
     10 * 1024 * 1024 // 10MB
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn default_folder_rescan_interval_secs() -> u64 {
+    300
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ServiceConfig {
     #[serde(default)]
@@ -71,6 +79,14 @@ pub struct ServiceConfig {
     pub content_index_max_bytes: u64,
     #[serde(default)]
     pub admin_only_query: bool,
+    #[serde(default)]
+    pub folder_sources: Vec<String>,
+    #[serde(default)]
+    pub property_index_enabled: bool,
+    #[serde(default = "default_true")]
+    pub index_journal_enabled: bool,
+    #[serde(default = "default_folder_rescan_interval_secs")]
+    pub folder_rescan_interval_secs: u64,
 }
 
 impl Default for ServiceConfig {
@@ -83,6 +99,10 @@ impl Default for ServiceConfig {
             content_index_extensions: default_content_index_extensions(),
             content_index_max_bytes: default_content_index_max_bytes(),
             admin_only_query: false,
+            folder_sources: Vec::new(),
+            property_index_enabled: false,
+            index_journal_enabled: true,
+            folder_rescan_interval_secs: default_folder_rescan_interval_secs(),
         }
     }
 }

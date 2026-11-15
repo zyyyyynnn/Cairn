@@ -5,7 +5,9 @@
 //! Long-lived Named Pipe session management with transparent reconnect and independent cancellation.
 
 use crate::client::{CairnClient, ClientError};
-use cairn_protocol::message::{Envelope, QueryDefaults, ResponsePayload, SortColumn, PIPE_NAME};
+use cairn_protocol::message::{
+    Envelope, QueryDefaults, ResponsePayload, SortSpec, SourceId, PIPE_NAME,
+};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -78,23 +80,17 @@ impl ServiceSession {
         query_id: u64,
         raw_query: &str,
         defaults: QueryDefaults,
-        sort_column: SortColumn,
-        sort_asc: bool,
+        sort_spec: &SortSpec,
         first_page_limit: usize,
     ) -> Result<Envelope<ResponsePayload>, ClientError> {
         let raw_query = raw_query.to_string();
+        let sort_spec = sort_spec.clone();
         self.call_primary(|client| {
             let raw_query = raw_query.clone();
+            let sort_spec = sort_spec.clone();
             Box::pin(async move {
                 client
-                    .query(
-                        query_id,
-                        &raw_query,
-                        defaults,
-                        sort_column,
-                        sort_asc,
-                        first_page_limit,
-                    )
+                    .query(query_id, &raw_query, defaults, &sort_spec, first_page_limit)
                     .await
             })
         })
@@ -131,6 +127,83 @@ impl ServiceSession {
 
     pub async fn clear_content_index(&self) -> Result<Envelope<ResponsePayload>, ClientError> {
         self.call_control(|client| Box::pin(client.clear_content_index()))
+            .await
+    }
+
+    pub async fn rescan(
+        &self,
+        volume_id: Option<u16>,
+    ) -> Result<Envelope<ResponsePayload>, ClientError> {
+        self.call_control(|client| Box::pin(client.rescan(volume_id)))
+            .await
+    }
+
+    pub async fn get_sources(&self) -> Result<Envelope<ResponsePayload>, ClientError> {
+        self.call_control(|client| Box::pin(client.get_sources()))
+            .await
+    }
+
+    pub async fn add_folder_source(
+        &self,
+        path: &str,
+    ) -> Result<Envelope<ResponsePayload>, ClientError> {
+        let path = path.to_string();
+        self.call_control(|client| {
+            let path = path.clone();
+            Box::pin(async move { client.add_folder_source(&path).await })
+        })
+        .await
+    }
+
+    pub async fn remove_folder_source(
+        &self,
+        path: &str,
+    ) -> Result<Envelope<ResponsePayload>, ClientError> {
+        let path = path.to_string();
+        self.call_control(|client| {
+            let path = path.clone();
+            Box::pin(async move { client.remove_folder_source(&path).await })
+        })
+        .await
+    }
+
+    pub async fn rescan_source(
+        &self,
+        source_id: SourceId,
+    ) -> Result<Envelope<ResponsePayload>, ClientError> {
+        self.call_control(|client| Box::pin(client.rescan_source(source_id)))
+            .await
+    }
+
+    pub async fn get_property_index_status(
+        &self,
+    ) -> Result<Envelope<ResponsePayload>, ClientError> {
+        self.call_control(|client| Box::pin(client.get_property_index_status()))
+            .await
+    }
+
+    pub async fn set_property_index_enabled(
+        &self,
+        enabled: bool,
+    ) -> Result<Envelope<ResponsePayload>, ClientError> {
+        self.call_control(|client| Box::pin(client.set_property_index_enabled(enabled)))
+            .await
+    }
+
+    pub async fn get_index_journal(
+        &self,
+        after_seq: u64,
+        limit: usize,
+    ) -> Result<Envelope<ResponsePayload>, ClientError> {
+        self.call_control(|client| Box::pin(client.get_index_journal(after_seq, limit)))
+            .await
+    }
+
+    pub async fn set_index_journal_enabled(
+        &self,
+        enabled: bool,
+    ) -> Result<Envelope<ResponsePayload>, ClientError> {
+        self.call_control(|client| Box::pin(client.set_index_journal_enabled(enabled)))
             .await
     }
 

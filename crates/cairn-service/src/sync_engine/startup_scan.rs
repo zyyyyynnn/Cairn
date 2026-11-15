@@ -99,11 +99,20 @@ impl MultiVolumeEngine {
             match cairn_ntfs::scan_live_volume_mft(drive, 4096) {
                 Ok(items) if !items.is_empty() => {
                     let count = items.len();
+                    let live_identity = cairn_ntfs::volume_identity::enumerate_volumes()
+                        .into_iter()
+                        .find(|id| {
+                            id.drive_letter
+                                .is_some_and(|ch| ch.eq_ignore_ascii_case(&drive))
+                        });
                     let mut lock = self.volumes.write().unwrap();
                     let vol = match lock.get_mut(&drive) {
                         Some(vol) => vol,
                         None => return Err(format!("volume {drive}: is not indexed")),
                     };
+                    if let Some(identity) = live_identity {
+                        vol.set_identity(identity);
+                    }
                     vol.ingest_items(items);
                     finalize_scanned_volume(&mut *vol, &self.index_dir, scan_start)?;
                     tracing::info!(
@@ -321,7 +330,12 @@ impl MultiVolumeEngine {
                             vol.journal_id = active_jid;
                             vol.last_usn = next_usn;
                             if !changes.is_empty() {
-                                vol.apply_usn_changes(changes);
+                                let mut journal = self.index_journal.lock().unwrap();
+                                vol.apply_usn_changes_with_journal(
+                                    changes,
+                                    Some(&mut *journal),
+                                    super::unix_now_secs(),
+                                );
                                 vol.clear_path_cache();
                             }
                             if is_live_poll_trackable(vol.status.state()) {

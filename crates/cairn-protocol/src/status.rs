@@ -8,6 +8,7 @@
 //! user-facing text (and choosing its language, SPEC UI-07) is the presentation layer's job,
 //! never the protocol's.
 
+use cairn_core::property_store::{RecordPropertyData, SourceId};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -124,6 +125,119 @@ pub struct ContentIndexTask {
     pub size: u64,
     pub modified_ts: i64,
     pub path: String,
+}
+
+/// One file handed to `CairnWorker.exe` for extended property extraction (`IDX-12`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PropertyExtractTask {
+    pub source_id: SourceId,
+    pub record_key: u64,
+    pub modified_ts: i64,
+    pub path: String,
+}
+
+/// Extracted extended properties returned by `CairnWorker.exe` (`IDX-12`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PropertyExtractResult {
+    pub source_id: SourceId,
+    pub record_key: u64,
+    pub modified_ts: i64,
+    pub properties: Option<RecordPropertyData>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SourceKind {
+    NtfsVolume,
+    Folder,
+}
+
+impl SourceKind {
+    pub const fn key(&self) -> &'static str {
+        match self {
+            SourceKind::NtfsVolume => "ntfs_volume",
+            SourceKind::Folder => "folder",
+        }
+    }
+}
+
+/// Transport-neutral status summary for any indexed source (`NtfsVolume` or `Folder`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceStatusSummary {
+    pub source_id: SourceId,
+    pub kind: SourceKind,
+    pub root_path: String,
+    pub volume_guid: String,
+    pub status: VolumeState,
+    pub indexed_count: u64,
+    pub live_watch_enabled: bool,
+}
+
+/// Status of the optional extended-property side-table index (`IDX-12`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PropertyIndexStatus {
+    pub state: ContentIndexState,
+    pub enabled: bool,
+    pub indexed_records: u64,
+    pub side_table_bytes: usize,
+    pub last_updated_ts: i64,
+}
+
+impl Default for PropertyIndexStatus {
+    fn default() -> Self {
+        Self {
+            state: ContentIndexState::Disabled,
+            enabled: false,
+            indexed_records: 0,
+            side_table_bytes: 0,
+            last_updated_ts: 0,
+        }
+    }
+}
+
+/// Event kinds recorded by the bounded read-only index journal (`IDX-13`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum JournalChangeKind {
+    Created,
+    Deleted,
+    Renamed,
+    Modified,
+    AttributeChanged,
+    OverflowRescan,
+}
+
+impl JournalChangeKind {
+    pub const fn key(&self) -> &'static str {
+        match self {
+            JournalChangeKind::Created => "created",
+            JournalChangeKind::Deleted => "deleted",
+            JournalChangeKind::Renamed => "renamed",
+            JournalChangeKind::Modified => "modified",
+            JournalChangeKind::AttributeChanged => "attribute_changed",
+            JournalChangeKind::OverflowRescan => "overflow_rescan",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexJournalEntry {
+    pub seq: u64,
+    pub timestamp_ts: i64,
+    pub source_id: SourceId,
+    pub frn: u64,
+    pub kind: JournalChangeKind,
+    pub path: String,
+    pub old_path: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexJournalStatus {
+    pub enabled: bool,
+    pub entry_count: usize,
+    pub resident_bytes: usize,
+    pub max_entries: usize,
+    pub max_bytes: usize,
+    pub oldest_seq: u64,
+    pub newest_seq: u64,
 }
 
 #[cfg(test)]

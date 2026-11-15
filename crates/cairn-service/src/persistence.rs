@@ -135,6 +135,37 @@ pub fn save_volume_index_atomic(
     Ok(target_path)
 }
 
+fn volume_guid_sidecar_path(dir: &Path, drive_letter: char) -> PathBuf {
+    dir.join(format!("vol_{}.guid", drive_letter.to_ascii_uppercase()))
+}
+
+/// Atomically persists the Win32 Volume GUID sidecar paired with `vol_<drive>.idx`.
+pub(crate) fn save_volume_guid_sidecar(
+    dir: &Path,
+    drive_letter: char,
+    volume_guid: &str,
+) -> Result<(), std::io::Error> {
+    let trimmed = volume_guid.trim();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+    fs::create_dir_all(dir)?;
+    let target_path = volume_guid_sidecar_path(dir, drive_letter);
+    let tmp_path = dir.join(format!(
+        "vol_{}.guid.tmp",
+        drive_letter.to_ascii_uppercase()
+    ));
+    fs::write(&tmp_path, trimmed.as_bytes())?;
+    atomic_replace_file(&tmp_path, &target_path)
+}
+
+/// Loads the persisted Win32 Volume GUID sidecar for `drive_letter`, if present and non-empty.
+pub(crate) fn load_volume_guid_sidecar(dir: &Path, drive_letter: char) -> Option<String> {
+    let raw = fs::read_to_string(volume_guid_sidecar_path(dir, drive_letter)).ok()?;
+    let trimmed = raw.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
 /// Loads and validates a volume index from an arbitrary stream using bounded chunked decoding and
 /// incremental CRC32 verification.
 pub fn load_volume_index_from<R: Read>(reader: R) -> Result<LoadedIndexData, PersistenceError> {

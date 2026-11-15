@@ -6,7 +6,7 @@
 
 use cairn_protocol::codec::{encode_frame_into, try_decode_frame, CodecError};
 use cairn_protocol::message::{
-    ClientRequest, Envelope, QueryDefaults, ResponsePayload, SortColumn,
+    ClientRequest, Envelope, QueryDefaults, ResponsePayload, SortSpec, SourceId,
     ERROR_CODE_ADMIN_ONLY_QUERY, ERROR_CODE_HANDSHAKE_REQUIRED,
     ERROR_CODE_PROTOCOL_VERSION_MISMATCH, ERROR_CODE_UNAUTHORIZED, PIPE_NAME, PRODUCT_VERSION,
     WIRE_GUARD,
@@ -230,16 +230,14 @@ impl CairnClient {
         query_id: u64,
         raw_query: &str,
         defaults: QueryDefaults,
-        sort_column: SortColumn,
-        sort_asc: bool,
+        sort_spec: &SortSpec,
         first_page_limit: usize,
     ) -> Result<Envelope<ResponsePayload>, ClientError> {
         self.send_request(&ClientRequest::Query {
             query_id,
             raw_query: raw_query.to_string(),
             defaults,
-            sort_column,
-            sort_asc,
+            sort_spec: sort_spec.clone(),
             first_page_limit,
         })
         .await
@@ -306,6 +304,87 @@ impl CairnClient {
     /// Clears the entire full-text content index (CNT-07).
     pub async fn clear_content_index(&mut self) -> Result<Envelope<ResponsePayload>, ClientError> {
         self.send_request(&ClientRequest::ClearContentIndex).await
+    }
+
+    /// Triggers an asynchronous rescan of one volume (`Some(drive_index)`) or all indexed sources.
+    pub async fn rescan(
+        &mut self,
+        volume_id: Option<u16>,
+    ) -> Result<Envelope<ResponsePayload>, ClientError> {
+        self.send_request(&ClientRequest::Rescan { volume_id })
+            .await
+    }
+
+    /// Lists all active indexed sources (NTFS volumes and folder sources).
+    pub async fn get_sources(&mut self) -> Result<Envelope<ResponsePayload>, ClientError> {
+        self.send_request(&ClientRequest::GetSources).await
+    }
+
+    /// Registers a folder path as an indexed folder source and persists the configuration.
+    pub async fn add_folder_source(
+        &mut self,
+        path: &str,
+    ) -> Result<Envelope<ResponsePayload>, ClientError> {
+        self.send_request(&ClientRequest::AddFolderSource {
+            path: path.to_string(),
+        })
+        .await
+    }
+
+    /// Unregisters a folder source by path and persists the configuration.
+    pub async fn remove_folder_source(
+        &mut self,
+        path: &str,
+    ) -> Result<Envelope<ResponsePayload>, ClientError> {
+        self.send_request(&ClientRequest::RemoveFolderSource {
+            path: path.to_string(),
+        })
+        .await
+    }
+
+    /// Triggers a targeted rescan of a single indexed source.
+    pub async fn rescan_source(
+        &mut self,
+        source_id: SourceId,
+    ) -> Result<Envelope<ResponsePayload>, ClientError> {
+        self.send_request(&ClientRequest::RescanSource { source_id })
+            .await
+    }
+
+    /// Reads the current status of the optional extended-property side-table index.
+    pub async fn get_property_index_status(
+        &mut self,
+    ) -> Result<Envelope<ResponsePayload>, ClientError> {
+        self.send_request(&ClientRequest::GetPropertyIndexStatus)
+            .await
+    }
+
+    /// Enables or disables extended-property indexing and persists the setting.
+    pub async fn set_property_index_enabled(
+        &mut self,
+        enabled: bool,
+    ) -> Result<Envelope<ResponsePayload>, ClientError> {
+        self.send_request(&ClientRequest::SetPropertyIndexEnabled { enabled })
+            .await
+    }
+
+    /// Reads bounded index journal entries recorded strictly after `after_seq`.
+    pub async fn get_index_journal(
+        &mut self,
+        after_seq: u64,
+        limit: usize,
+    ) -> Result<Envelope<ResponsePayload>, ClientError> {
+        self.send_request(&ClientRequest::GetIndexJournal { after_seq, limit })
+            .await
+    }
+
+    /// Enables or disables bounded index journal recording and persists the setting.
+    pub async fn set_index_journal_enabled(
+        &mut self,
+        enabled: bool,
+    ) -> Result<Envelope<ResponsePayload>, ClientError> {
+        self.send_request(&ClientRequest::SetIndexJournalEnabled { enabled })
+            .await
     }
 
     /// Retrieves service configuration TOML string.
@@ -568,20 +647,30 @@ mod tests {
     /// service must receive the text the user typed plus the flags separately.
     #[tokio::test]
     #[cfg(windows)]
-    async fn query_sends_defaults_as_a_separate_field() {
+    async fn query_sends_defaults_and_sort_spec_over_wire_and_decodes_rows() {
+        use cairn_protocol::message::{
+            FileRowData, PropertyKind, QueryDegradedReason, RecordPropertyData, SortColumn,
+            SortDirection, SortKey, SortSpec,
+        };
+
         let (mut server, mut client) = stub_pipe_pair(r"\\.\pipe\cairn.client.stub.query").await;
         let defaults = QueryDefaults {
             case_sensitive: true,
             match_path: true,
             exclude_hidden: true,
+            exclude_system: true,
             ..Default::default()
         };
+        let requested_sort = SortSpec {
+            keys: vec![
+                SortKey::new(SortColumn::Size, SortDirection::Descending),
+                SortKey::new(SortColumn::Name, SortDirection::Ascending),
+            ],
+        };
         let raw = "报告 季度";
-        let task = tokio::spawn(async move {
-            client
-                .query(4, raw, defaults, SortColumn::Name, true, 10)
-                .await
-        });
+        let expected_sort = requested_sort.clone();
+        let task =
+            tokio::spawn(async move { client.query(4, raw, defaults, &expected_sort, 10).await });
 
         server.connect().await.expect("stub connect");
         let mut buf = [0u8; 4096];
@@ -594,7 +683,7 @@ mod tests {
             ClientRequest::Query {
                 raw_query,
                 defaults: received,
-                sort_column,
+                sort_spec,
                 first_page_limit,
                 ..
             } => {
@@ -604,28 +693,68 @@ mod tests {
                     "toggles must not be spliced into the text"
                 );
                 assert_eq!(received, defaults);
-                assert_eq!(sort_column, SortColumn::Name);
+                assert_eq!(sort_spec, requested_sort);
                 assert_eq!(first_page_limit, 10);
             }
             other => panic!("Expected a Query request, got {other:?}"),
         }
 
+        let sample_row = FileRowData {
+            frn: 42,
+            name: "报告.docx".to_string(),
+            path: r"C:\docs\报告.docx".to_string(),
+            size: 4096,
+            modified_ts: 1_700_000_000,
+            created_ts: 1_690_000_000,
+            is_dir: false,
+            flags: 0,
+            name_highlights: vec![(0, 2)],
+            path_highlights: vec![],
+            snippets: vec!["第一季度摘要".to_string(), "第二季度总结".to_string()],
+            properties: Some(RecordPropertyData {
+                length_ms: Some(12_000),
+                author: Some("Alice".to_string()),
+                tags: Some("finance".to_string()),
+                dimensions: Some((1920, 1080)),
+                framerate_mfps: Some(30_000),
+            }),
+        };
+        let fallback_sort = SortSpec::default();
+        let degraded_reason = QueryDegradedReason::PropertyIndexDisabled {
+            requested: vec![PropertyKind::Author],
+        };
         let frame = encode_frame(&Envelope {
             volumes: Vec::new(),
             payload: ResponsePayload::QueryResult {
                 query_id: 4,
                 session_id: 1,
-                total_matches: 0,
-                total_bytes: 0,
-                first_page: Vec::new(),
+                total_matches: 1,
+                total_bytes: 4096,
+                first_page: vec![sample_row.clone()],
+                applied_sort: fallback_sort.clone(),
+                degraded: Some(degraded_reason.clone()),
             },
         })
         .expect("encode stub answer");
         server.write_all(&frame).await.expect("stub write");
         server.flush().await.expect("stub flush");
-        task.await
+        let env = task
+            .await
             .expect("query task")
             .expect("query must succeed over the stub");
+        match env.payload {
+            ResponsePayload::QueryResult {
+                first_page,
+                applied_sort,
+                degraded,
+                ..
+            } => {
+                assert_eq!(first_page, vec![sample_row]);
+                assert_eq!(applied_sort, fallback_sort);
+                assert_eq!(degraded, Some(degraded_reason));
+            }
+            other => panic!("Expected QueryResult, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -763,5 +892,201 @@ mod tests {
             matches!(result, Err(ClientError::Timeout)),
             "expected Timeout, got {result:?}"
         );
+    }
+
+    #[tokio::test]
+    #[cfg(windows)]
+    async fn platform_control_methods_round_trip_each_request_and_response() {
+        use cairn_protocol::message::SourceId;
+        use cairn_protocol::status::{
+            ContentIndexState, IndexJournalEntry, IndexJournalStatus, JournalChangeKind,
+            PropertyIndexStatus, SourceKind, SourceStatusSummary, VolumeState,
+        };
+        use tokio::net::windows::named_pipe::ServerOptions;
+
+        let pipe = r"\\.\pipe\cairn.client.stub.platform_controls";
+        let mut server = ServerOptions::new()
+            .first_pipe_instance(true)
+            .create(pipe)
+            .expect("create server");
+        let pipe_name = pipe.to_string();
+        let client_fut = tokio::spawn(async move {
+            let mut client = CairnClient::connect_to(&pipe_name).await?;
+            let r1 = client.rescan(Some(2)).await?;
+            let r2 = client.get_sources().await?;
+            let r3 = client.add_folder_source(r"D:\Work").await?;
+            let r4 = client.remove_folder_source(r"D:\Work").await?;
+            let r5 = client.rescan_source(SourceId(1_000)).await?;
+            let r6 = client.get_property_index_status().await?;
+            let r7 = client.set_property_index_enabled(true).await?;
+            let r8 = client.get_index_journal(10, 50).await?;
+            let r9 = client.set_index_journal_enabled(false).await?;
+            Ok::<_, ClientError>((r1, r2, r3, r4, r5, r6, r7, r8, r9))
+        });
+
+        server.connect().await.expect("accept");
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 4096];
+        let sample_source = SourceStatusSummary {
+            source_id: SourceId(1_000),
+            kind: SourceKind::Folder,
+            root_path: r"D:\Work".to_string(),
+            volume_guid: String::new(),
+            status: VolumeState::Synced,
+            indexed_count: 12,
+            live_watch_enabled: true,
+        };
+        let sample_prop_status = PropertyIndexStatus {
+            state: ContentIndexState::Ready,
+            enabled: true,
+            indexed_records: 8,
+            side_table_bytes: 512,
+            last_updated_ts: 1_700_000_000,
+        };
+        let sample_journal_status = IndexJournalStatus {
+            enabled: true,
+            entry_count: 1,
+            resident_bytes: 128,
+            max_entries: 200_000,
+            max_bytes: 32 * 1024 * 1024,
+            oldest_seq: 11,
+            newest_seq: 11,
+        };
+
+        loop {
+            let req = loop {
+                if let Some((consumed, req)) = try_decode_frame::<ClientRequest>(&buf).unwrap() {
+                    buf.drain(0..consumed);
+                    break Some(req);
+                }
+                let n = server.read(&mut tmp).await.unwrap();
+                if n == 0 {
+                    break None;
+                }
+                buf.extend_from_slice(&tmp[..n]);
+            };
+            let Some(req) = req else {
+                break;
+            };
+            let reply = match req {
+                ClientRequest::Hello { .. } => ResponsePayload::HelloAck {
+                    server_version: WIRE_GUARD as u32,
+                    caller_is_admin: true,
+                },
+                ClientRequest::Rescan { volume_id } => {
+                    assert_eq!(volume_id, Some(2));
+                    ResponsePayload::RescanAck {
+                        volume_id,
+                        success: true,
+                    }
+                }
+                ClientRequest::GetSources => ResponsePayload::SourcesResult {
+                    sources: vec![sample_source.clone()],
+                },
+                ClientRequest::AddFolderSource { path } => {
+                    assert_eq!(path, r"D:\Work");
+                    ResponsePayload::SourcesResult {
+                        sources: vec![sample_source.clone()],
+                    }
+                }
+                ClientRequest::RemoveFolderSource { path } => {
+                    assert_eq!(path, r"D:\Work");
+                    ResponsePayload::SourcesResult { sources: vec![] }
+                }
+                ClientRequest::RescanSource { source_id } => {
+                    assert_eq!(source_id, SourceId(1_000));
+                    ResponsePayload::RescanSourceAck {
+                        source_id,
+                        success: true,
+                    }
+                }
+                ClientRequest::GetPropertyIndexStatus => ResponsePayload::PropertyIndexStatus {
+                    status: PropertyIndexStatus::default(),
+                },
+                ClientRequest::SetPropertyIndexEnabled { enabled } => {
+                    assert!(enabled);
+                    ResponsePayload::PropertyIndexStatus {
+                        status: sample_prop_status.clone(),
+                    }
+                }
+                ClientRequest::GetIndexJournal { after_seq, limit } => {
+                    assert_eq!((after_seq, limit), (10, 50));
+                    ResponsePayload::IndexJournalResult {
+                        status: sample_journal_status.clone(),
+                        entries: vec![IndexJournalEntry {
+                            seq: 11,
+                            timestamp_ts: 1_700_000_005,
+                            source_id: SourceId(1_000),
+                            frn: 7,
+                            kind: JournalChangeKind::Created,
+                            path: r"D:\Work\a.txt".to_string(),
+                            old_path: None,
+                        }],
+                    }
+                }
+                ClientRequest::SetIndexJournalEnabled { enabled } => {
+                    assert!(!enabled);
+                    ResponsePayload::IndexJournalStatus {
+                        status: IndexJournalStatus {
+                            enabled: false,
+                            ..sample_journal_status.clone()
+                        },
+                    }
+                }
+                other => panic!("unexpected request: {other:?}"),
+            };
+            let frame = encode_frame(&Envelope {
+                volumes: Vec::new(),
+                payload: reply,
+            })
+            .unwrap();
+            server.write_all(&frame).await.unwrap();
+            server.flush().await.unwrap();
+        }
+
+        let (r1, r2, r3, r4, r5, r6, r7, r8, r9) =
+            client_fut.await.unwrap().expect("platform calls succeed");
+        assert!(matches!(
+            r1.payload,
+            ResponsePayload::RescanAck {
+                volume_id: Some(2),
+                success: true
+            }
+        ));
+        assert!(matches!(
+            r2.payload,
+            ResponsePayload::SourcesResult { ref sources } if sources.len() == 1
+        ));
+        assert!(matches!(
+            r3.payload,
+            ResponsePayload::SourcesResult { ref sources } if sources.len() == 1
+        ));
+        assert!(matches!(
+            r4.payload,
+            ResponsePayload::SourcesResult { ref sources } if sources.is_empty()
+        ));
+        assert!(matches!(
+            r5.payload,
+            ResponsePayload::RescanSourceAck {
+                source_id: SourceId(1_000),
+                success: true
+            }
+        ));
+        assert!(matches!(
+            r6.payload,
+            ResponsePayload::PropertyIndexStatus { ref status } if !status.enabled
+        ));
+        assert!(matches!(
+            r7.payload,
+            ResponsePayload::PropertyIndexStatus { ref status } if status.enabled
+        ));
+        assert!(matches!(
+            r8.payload,
+            ResponsePayload::IndexJournalResult { ref entries, .. } if entries.len() == 1
+        ));
+        assert!(matches!(
+            r9.payload,
+            ResponsePayload::IndexJournalStatus { ref status } if !status.enabled
+        ));
     }
 }

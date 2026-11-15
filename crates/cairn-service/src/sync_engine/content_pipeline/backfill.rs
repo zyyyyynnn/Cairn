@@ -293,7 +293,7 @@ impl MultiVolumeEngine {
             .into_iter()
             .filter_map(|(drive, index, frn, path)| {
                 let metadata = std::fs::symlink_metadata(path).ok()?;
-                let (is_dir, is_reparse) = directory_and_reparse(&metadata);
+                let (is_dir, _) = directory_and_reparse(&metadata);
                 Some(RefreshedMetadata {
                     drive,
                     metadata: RefreshedRecordMetadata {
@@ -302,8 +302,8 @@ impl MultiVolumeEngine {
                         size: if is_dir { 0 } else { metadata.len() },
                         created_ts: crate::filetime::system_time_to_filetime(metadata.created()),
                         modified_ts: crate::filetime::system_time_to_filetime(metadata.modified()),
-                        is_dir,
-                        is_reparse,
+                        win32_attributes:
+                            crate::sync_engine::folder_source::metadata_win32_attributes(&metadata),
                     },
                 })
             })

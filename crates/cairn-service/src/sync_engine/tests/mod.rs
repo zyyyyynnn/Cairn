@@ -3,12 +3,22 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::VolumeIndex;
+use cairn_core::sort::{SortColumn, SortDirection, SortSpec};
 use cairn_ntfs::mft::ExtractedItem;
 
 mod content_query;
 mod engine;
 mod search;
 mod volume_index;
+
+fn sort(column: SortColumn, asc: bool) -> SortSpec {
+    let dir = if asc {
+        SortDirection::Ascending
+    } else {
+        SortDirection::Descending
+    };
+    SortSpec::single(column, dir)
+}
 
 fn index_item(frn: u64, parent_frn: u64, name: &str, is_dir: bool) -> ExtractedItem {
     ExtractedItem {

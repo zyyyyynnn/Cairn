@@ -5,26 +5,33 @@
 //! Multi-volume synchronization engine and index lifecycle manager.
 
 use cairn_content::ContentSearcher;
+use cairn_core::property_store::{PropertySideTables, SourceId, FOLDER_SOURCE_ID_BASE};
 use cairn_core::IndexMemoryFootprint;
 use cairn_ntfs::volume::enumerate_fixed_drives;
+use cairn_ntfs::volume_identity::{enumerate_volumes, VolumeIdentity};
 use cairn_protocol::status::{
-    ContentIndexState, ContentIndexStatus, VolumeState, VolumeStatusSummary,
+    ContentIndexState, ContentIndexStatus, IndexJournalEntry, IndexJournalStatus,
+    PropertyIndexStatus, SourceStatusSummary, VolumeState, VolumeStatusSummary,
 };
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::ServiceConfig;
 use crate::persistence;
 
 mod config_apply;
 pub mod content_pipeline;
+pub mod folder_source;
+pub mod index_journal;
 pub mod journal_reconciliation;
 pub(crate) mod path_exclusions;
 pub mod post_scan;
 #[cfg(test)]
 mod presorted;
+pub mod property_pipeline;
 mod search;
 mod startup_scan;
 mod treemap_build;
@@ -35,20 +42,36 @@ pub use journal_reconciliation::*;
 pub use post_scan::*;
 pub use search::{AllFilesView, MatchSet, SearchOutcome, SearchResultItem};
 pub use treemap_build::TreeUnavailable;
-pub use volume_index::{CompactPolicy, CompactionReport, VolumeIndex};
+pub use volume_index::{CompactPolicy, CompactionReport, RefreshedRecordMetadata, VolumeIndex};
 
 #[cfg(test)]
 mod tests;
 
+pub(crate) fn unix_now_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
 pub struct MultiVolumeEngine {
+    // Lock order invariant: volumes -> folder_sources -> property_tables -> index_journal.
     volumes: RwLock<HashMap<char, VolumeIndex>>,
-    index_dir: std::path::PathBuf,
-    content_dir: std::path::PathBuf,
+    folder_sources: Arc<RwLock<HashMap<SourceId, folder_source::FolderSource>>>,
+    folder_watchers: Mutex<HashMap<SourceId, folder_source::FolderWatcherHandle>>,
+    next_folder_source_id: AtomicU32,
+    property_tables: RwLock<PropertySideTables>,
+    property_status: RwLock<PropertyIndexStatus>,
+    property_cancel: Arc<AtomicBool>,
+    property_extract_lock: Mutex<()>,
+    index_journal: Arc<Mutex<index_journal::IndexJournal>>,
+    index_dir: PathBuf,
+    content_dir: PathBuf,
     /// Directories written by this process (MFT cache, Tantivy index, configuration and logs).
     /// Content extraction must never read them back: a Tantivy commit rewrites `meta.json`, and
     /// indexing that file would feed the index's own writes back in as new user content.
-    self_data_dirs: Vec<std::path::PathBuf>,
-    config_path: std::path::PathBuf,
+    self_data_dirs: Vec<PathBuf>,
+    config_path: PathBuf,
     config: RwLock<ServiceConfig>,
     /// Serializes configuration applies from the comparison through the content-pipeline
     /// transition, so a switch command cannot be overtaken by the change that reverses it.
@@ -174,9 +197,18 @@ impl MultiVolumeEngine {
                     .any(|&ex| ex.eq_ignore_ascii_case(&d))
             })
             .collect();
+        let identities_by_drive: HashMap<char, VolumeIdentity> = if active_drives.is_empty() {
+            HashMap::new()
+        } else {
+            enumerate_volumes()
+                .into_iter()
+                .filter_map(|id| id.drive_letter.map(|ch| (ch.to_ascii_uppercase(), id)))
+                .collect()
+        };
 
         for d in active_drives {
             let mut vol = VolumeIndex::new(d);
+            let live_identity = identities_by_drive.get(&d.to_ascii_uppercase());
             if let Some(roots) = excluded_roots.get(&d) {
                 vol.set_excluded_roots(roots.iter().copied());
             }
@@ -186,137 +218,177 @@ impl MultiVolumeEngine {
                 match persistence::load_volume_index(&cache_file) {
                     Ok(loaded) => {
                         vol.restore_from_loaded(loaded);
-
-                        // Caches written before folder sizes were persisted still store zeroes for
-                        // every directory. Aggregate once and immediately rewrite the flag, so only
-                        // the first launch after the upgrade pays for it.
-                        if !vol.directory_sizes_valid() {
-                            vol.recompute_directory_sizes();
-                            match vol.save_to_dir(index_dir) {
-                                Ok(_) => tracing::info!(
-                                    "Migrated cached index for {}: computed directory sizes",
-                                    d
-                                ),
-                                Err(error) => tracing::warn!(
-                                    "Cached index for {} has computed directory sizes that could not be persisted: {}",
-                                    d,
-                                    error
-                                ),
-                            }
+                        let saved_guid = persistence::load_volume_guid_sidecar(index_dir, d);
+                        if let Some(ref guid) = saved_guid {
+                            vol.volume_guid = guid.clone();
                         }
 
-                        // Validate against live volume if accessible and catch up USN (IDX-04, IDX-05, IDX-07)
-                        #[cfg(windows)]
-                        if enumerate_fixed_drives().contains(&d) {
-                            match cairn_ntfs::RawVolumeHandle::open(d) {
-                                Ok(handle) => match handle.query_usn_journal() {
-                                    Ok(usn_data) => {
-                                        // A saved position must lie inside the journal's current
-                                        // [first, next] window. Checking only the lower bound left a
-                                        // cache whose USN was ahead of the journal (a reset/replaced
-                                        // journal or a stale cache) permanently CatchingUp: every
-                                        // read started past the tail and the index could never catch
-                                        // up. Treat any out-of-window position as a rebuild.
-                                        if !Self::cached_position_is_usable(
-                                            vol.journal_id,
-                                            vol.last_usn,
-                                            &usn_data,
-                                        ) {
-                                            tracing::warn!(
-                                                "USN journal mismatch or out of range for {} (cached journal {}, last_usn {}; current journal {}, first {}, next {}): will rebuild",
-                                                d,
+                        let identity_mismatch = if let Some(identity) = live_identity {
+                            if saved_guid.is_some() {
+                                !vol.matches_volume_identity(identity)
+                            } else if vol.volume_serial != 0 && identity.volume_serial != 0 {
+                                vol.volume_serial != identity.volume_serial
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        };
+
+                        if identity_mismatch {
+                            tracing::warn!(
+                                "Volume {} identity changed since cached index was written: rebuilding",
+                                d
+                            );
+                            vol.clear();
+                            vol.status.set(VolumeState::Rebuilding);
+                            loaded_ok = false;
+                        } else {
+                            if let Some(identity) = live_identity {
+                                vol.set_identity(identity.clone());
+                                if saved_guid.is_none() {
+                                    let _ = persistence::save_volume_guid_sidecar(
+                                        index_dir,
+                                        d,
+                                        &vol.volume_guid,
+                                    );
+                                }
+                            }
+
+                            // Caches written before folder sizes were persisted still store zeroes for
+                            // every directory. Aggregate once and immediately rewrite the flag, so only
+                            // the first launch after the upgrade pays for it.
+                            if !vol.directory_sizes_valid() {
+                                vol.recompute_directory_sizes();
+                                match vol.save_to_dir(index_dir) {
+                                    Ok(_) => tracing::info!(
+                                        "Migrated cached index for {}: computed directory sizes",
+                                        d
+                                    ),
+                                    Err(error) => tracing::warn!(
+                                        "Cached index for {} has computed directory sizes that could not be persisted: {}",
+                                        d,
+                                        error
+                                    ),
+                                }
+                            }
+
+                            // Validate against live volume if accessible and catch up USN (IDX-04, IDX-05, IDX-07)
+                            #[cfg(windows)]
+                            if enumerate_fixed_drives().contains(&d) {
+                                match cairn_ntfs::RawVolumeHandle::open(d) {
+                                    Ok(handle) => match handle.query_usn_journal() {
+                                        Ok(usn_data) => {
+                                            // A saved position must lie inside the journal's current
+                                            // [first, next] window. Checking only the lower bound left a
+                                            // cache whose USN was ahead of the journal (a reset/replaced
+                                            // journal or a stale cache) permanently CatchingUp: every
+                                            // read started past the tail and the index could never catch
+                                            // up. Treat any out-of-window position as a rebuild.
+                                            if !Self::cached_position_is_usable(
                                                 vol.journal_id,
                                                 vol.last_usn,
-                                                usn_data.journal_id,
-                                                usn_data.first_usn,
-                                                usn_data.next_usn
-                                            );
-                                            vol.clear();
-                                            vol.status.set(VolumeState::Rebuilding);
-                                            loaded_ok = false;
-                                        } else if Self::backlog_is_too_large(
-                                            vol.last_usn,
-                                            usn_data.next_usn,
-                                        ) {
-                                            tracing::warn!(
-                                                "USN backlog for {} is {} bytes; rebuilding instead of replaying",
-                                                d,
-                                                usn_data.next_usn.saturating_sub(vol.last_usn)
-                                            );
-                                            vol.clear();
-                                            vol.status.set(VolumeState::Rebuilding);
-                                            loaded_ok = false;
-                                        } else {
-                                            // Replay the change journal from the saved position up to
-                                            // the journal tail (IDX-04). An index whose backlog is not
-                                            // exhausted is reported as CatchingUp, never as Synced,
-                                            // because stale results must be annotated (IDX-07).
-                                            let mut buf = vec![0u8; 512 * 1024];
-                                            match replay_usn_backlog(
-                                                &handle,
-                                                &mut vol,
-                                                &mut buf,
-                                                usn_data.journal_id,
+                                                &usn_data,
+                                            ) {
+                                                tracing::warn!(
+                                                    "USN journal mismatch or out of range for {} (cached journal {}, last_usn {}; current journal {}, first {}, next {}): will rebuild",
+                                                    d,
+                                                    vol.journal_id,
+                                                    vol.last_usn,
+                                                    usn_data.journal_id,
+                                                    usn_data.first_usn,
+                                                    usn_data.next_usn
+                                                );
+                                                vol.clear();
+                                                vol.status.set(VolumeState::Rebuilding);
+                                                loaded_ok = false;
+                                            } else if Self::backlog_is_too_large(
+                                                vol.last_usn,
                                                 usn_data.next_usn,
                                             ) {
-                                                Ok(()) => {
-                                                    loaded_ok = true;
-                                                    tracing::info!(
-                                                        "Loaded cached index for {}: {} records, state {:?}",
-                                                        d,
-                                                        vol.records().len(),
-                                                        vol.status
-                                                    );
-                                                }
-                                                Err(e) => {
-                                                    tracing::warn!(
-                                                        "USN catchup read for {}: failed ({:?}), will rebuild",
-                                                        d,
-                                                        e
-                                                    );
-                                                    vol.clear();
-                                                    vol.status.set(VolumeState::Rebuilding);
-                                                    loaded_ok = false;
+                                                tracing::warn!(
+                                                    "USN backlog for {} is {} bytes; rebuilding instead of replaying",
+                                                    d,
+                                                    usn_data.next_usn.saturating_sub(vol.last_usn)
+                                                );
+                                                vol.clear();
+                                                vol.status.set(VolumeState::Rebuilding);
+                                                loaded_ok = false;
+                                            } else {
+                                                // Replay the change journal from the saved position up to
+                                                // the journal tail (IDX-04). An index whose backlog is not
+                                                // exhausted is reported as CatchingUp, never as Synced,
+                                                // because stale results must be annotated (IDX-07).
+                                                let mut buf = vec![0u8; 512 * 1024];
+                                                match replay_usn_backlog(
+                                                    &handle,
+                                                    &mut vol,
+                                                    &mut buf,
+                                                    usn_data.journal_id,
+                                                    usn_data.next_usn,
+                                                ) {
+                                                    Ok(()) => {
+                                                        loaded_ok = true;
+                                                        tracing::info!(
+                                                            "Loaded cached index for {}: {} records, state {:?}",
+                                                            d,
+                                                            vol.records().len(),
+                                                            vol.status
+                                                        );
+                                                    }
+                                                    Err(e) => {
+                                                        tracing::warn!(
+                                                            "USN catchup read for {}: failed ({:?}), will rebuild",
+                                                            d,
+                                                            e
+                                                        );
+                                                        vol.clear();
+                                                        vol.status.set(VolumeState::Rebuilding);
+                                                        loaded_ok = false;
+                                                    }
                                                 }
                                             }
                                         }
-                                    }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                "USN query failed for {}: ({:?}), falling back to SnapshotMode (IDX-08)",
+                                                d,
+                                                e
+                                            );
+                                            vol.status.set(VolumeState::SnapshotMode);
+                                            vol.usn_enabled = false;
+                                            loaded_ok = true;
+                                        }
+                                    },
                                     Err(e) => {
+                                        // The cached index is retained but its freshness cannot be
+                                        // established, so it is Offline rather than Synced (IDX-07).
                                         tracing::warn!(
-                                            "USN query failed for {}: ({:?}), falling back to SnapshotMode (IDX-08)",
+                                            "Cannot open live handle for {} ({:?}), retaining cached index as Offline",
                                             d,
                                             e
                                         );
-                                        vol.status.set(VolumeState::SnapshotMode);
-                                        vol.usn_enabled = false;
+                                        vol.status.set(VolumeState::Offline);
                                         loaded_ok = true;
                                     }
-                                },
-                                Err(e) => {
-                                    // The cached index is retained but its freshness cannot be
-                                    // established, so it is Offline rather than Synced (IDX-07).
-                                    tracing::warn!(
-                                        "Cannot open live handle for {} ({:?}), retaining cached index as Offline",
-                                        d,
-                                        e
-                                    );
-                                    vol.status.set(VolumeState::Offline);
-                                    loaded_ok = true;
                                 }
+                            } else {
+                                // The drive is not present anymore: the cached index can only be stale.
+                                tracing::info!(
+                                    "Volume {} is no longer enumerated: marked Offline",
+                                    d
+                                );
+                                vol.status.set(VolumeState::Offline);
+                                loaded_ok = true;
                             }
-                        } else {
-                            // The drive is not present anymore: the cached index can only be stale.
-                            tracing::info!("Volume {} is no longer enumerated: marked Offline", d);
-                            vol.status.set(VolumeState::Offline);
-                            loaded_ok = true;
-                        }
-                        #[cfg(not(windows))]
-                        {
-                            // No change journal exists here, so the cached index is served as a
-                            // snapshot whose freshness nobody has proven (IDX-07).
-                            vol.status.set(VolumeState::SnapshotMode);
-                            vol.usn_enabled = false;
-                            loaded_ok = true;
+                            #[cfg(not(windows))]
+                            {
+                                // No change journal exists here, so the cached index is served as a
+                                // snapshot whose freshness nobody has proven (IDX-07).
+                                vol.status.set(VolumeState::SnapshotMode);
+                                vol.usn_enabled = false;
+                                loaded_ok = true;
+                            }
                         }
                     }
                     Err(e) => {
@@ -333,6 +405,9 @@ impl MultiVolumeEngine {
             }
 
             if !loaded_ok && vol.status.state() != VolumeState::Offline {
+                if let Some(identity) = live_identity {
+                    vol.set_identity(identity.clone());
+                }
                 let mut scan_succeeded = false;
                 #[cfg(windows)]
                 {
@@ -388,8 +463,31 @@ impl MultiVolumeEngine {
         }
 
         let content_enabled = config.content_index_enabled;
-        Self {
+        let property_enabled = config.property_index_enabled;
+        let journal_enabled = config.index_journal_enabled;
+        let engine = Self {
             volumes: RwLock::new(map),
+            folder_sources: Arc::new(RwLock::new(HashMap::new())),
+            folder_watchers: Mutex::new(HashMap::new()),
+            next_folder_source_id: AtomicU32::new(FOLDER_SOURCE_ID_BASE),
+            property_tables: RwLock::new(PropertySideTables::new(property_enabled)),
+            property_status: RwLock::new(if property_enabled {
+                PropertyIndexStatus {
+                    enabled: true,
+                    state: ContentIndexState::Backfilling {
+                        processed: 0,
+                        total: 0,
+                    },
+                    ..Default::default()
+                }
+            } else {
+                PropertyIndexStatus::default()
+            }),
+            property_cancel: Arc::new(AtomicBool::new(!property_enabled)),
+            property_extract_lock: Mutex::new(()),
+            index_journal: Arc::new(Mutex::new(index_journal::IndexJournal::new(
+                journal_enabled,
+            ))),
             index_dir: index_dir.to_path_buf(),
             content_dir: content_dir.to_path_buf(),
             self_data_dirs,
@@ -415,7 +513,9 @@ impl MultiVolumeEngine {
             #[cfg(test)]
             worker_binary: None,
             config_trusted: AtomicBool::new(true),
-        }
+        };
+        engine.ensure_folder_sources_loaded();
+        engine
     }
 
     /// Adds the data root that holds this indexer's content index, MFT cache, configuration and
@@ -573,7 +673,325 @@ impl MultiVolumeEngine {
         f(&lock)
     }
 
-    /// Aggregates resident heap allocations across all indexed volumes.
+    pub(crate) fn with_sources_for_rows<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(
+            &HashMap<char, VolumeIndex>,
+            &HashMap<SourceId, folder_source::FolderSource>,
+            &PropertySideTables,
+        ) -> R,
+    {
+        let volumes = self.volumes.read().unwrap();
+        let folders = self.folder_sources.read().unwrap();
+        let properties = self.property_tables.read().unwrap();
+        f(&volumes, &folders, &properties)
+    }
+
+    /// Ensures configured directory sources are loaded and watched in memory.
+    pub fn ensure_folder_sources_loaded(&self) {
+        let cfg = self.config.read().unwrap().clone();
+        self.sync_folder_sources_from_config(&cfg.folder_sources, &cfg.excluded_paths);
+    }
+
+    pub(super) fn sync_folder_sources_from_config(
+        &self,
+        configured_roots: &[String],
+        excluded_paths: &[String],
+    ) {
+        let mut desired: Vec<(PathBuf, String)> = Vec::new();
+        let mut desired_keys: HashSet<String> = HashSet::new();
+        for raw in configured_roots {
+            if let Ok((path, display)) = folder_source::normalize_folder_root(Path::new(raw)) {
+                let key = display.to_ascii_lowercase();
+                if desired_keys.insert(key) {
+                    desired.push((path, display));
+                }
+            }
+        }
+
+        let (removed_ids, present_keys) = {
+            let mut folders = self.folder_sources.write().unwrap();
+            let mut removed = Vec::new();
+            folders.retain(|&sid, src| {
+                let keep = desired_keys.contains(&src.display_root().to_ascii_lowercase());
+                if !keep {
+                    removed.push(sid);
+                }
+                keep
+            });
+            let mut present = HashSet::new();
+            for src in folders.values_mut() {
+                src.set_excluded_paths(excluded_paths);
+                present.insert(src.display_root().to_ascii_lowercase());
+            }
+            (removed, present)
+        };
+
+        if !removed_ids.is_empty() {
+            {
+                let mut tables = self.property_tables.write().unwrap();
+                for &sid in &removed_ids {
+                    tables.clear_source(sid);
+                }
+            }
+            let dropped_handles: Vec<folder_source::FolderWatcherHandle> = {
+                let mut watchers = self.folder_watchers.lock().unwrap();
+                removed_ids
+                    .iter()
+                    .filter_map(|sid| watchers.remove(sid))
+                    .collect()
+            };
+            drop(dropped_handles);
+        }
+
+        for (root_path, display) in desired {
+            let key = display.to_ascii_lowercase();
+            if present_keys.contains(&key) {
+                continue;
+            }
+            let sid = SourceId(self.next_folder_source_id.fetch_add(1, Ordering::Relaxed));
+            let Ok(mut source) = folder_source::FolderSource::new(sid, &root_path) else {
+                continue;
+            };
+            if let Err(err) = source.rescan(excluded_paths) {
+                tracing::warn!(
+                    "Initial scan for folder source {} failed: {}",
+                    root_path.display(),
+                    err
+                );
+            }
+            let inserted = {
+                let mut folders = self.folder_sources.write().unwrap();
+                if folders
+                    .values()
+                    .any(|s| s.display_root().eq_ignore_ascii_case(&display))
+                {
+                    false
+                } else {
+                    folders.insert(sid, source);
+                    true
+                }
+            };
+            if inserted {
+                self.start_folder_watcher_for(sid, root_path);
+            }
+        }
+    }
+
+    fn start_folder_watcher_for(&self, source_id: SourceId, root_path: PathBuf) {
+        if !root_path.is_dir() {
+            let mut folders = self.folder_sources.write().unwrap();
+            if let Some(src) = folders.get_mut(&source_id) {
+                src.set_live_watch_enabled(false);
+            }
+            return;
+        }
+        let handle_opt = {
+            #[cfg(windows)]
+            {
+                let sources = Arc::clone(&self.folder_sources);
+                let journal = Arc::clone(&self.index_journal);
+                folder_source::spawn_folder_watcher(root_path, move |events| {
+                    let needs_rescan = {
+                        let mut folders = sources.write().unwrap();
+                        let Some(source) = folders.get_mut(&source_id) else {
+                            return;
+                        };
+                        let mut journal_lock = journal.lock().unwrap();
+                        source.apply_folder_events(
+                            &events,
+                            Some(&mut *journal_lock),
+                            unix_now_secs(),
+                        )
+                    };
+                    if needs_rescan {
+                        let mut folders = sources.write().unwrap();
+                        if let Some(source) = folders.get_mut(&source_id) {
+                            let excluded = source.excluded_paths().to_vec();
+                            let _ = source.rescan(&excluded);
+                        }
+                    }
+                })
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = &root_path;
+                None::<folder_source::FolderWatcherHandle>
+            }
+        };
+        let active = handle_opt.is_some();
+        {
+            let mut folders = self.folder_sources.write().unwrap();
+            if let Some(src) = folders.get_mut(&source_id) {
+                src.set_live_watch_enabled(active);
+            }
+        }
+        let previous = {
+            let mut watchers = self.folder_watchers.lock().unwrap();
+            if let Some(handle) = handle_opt {
+                watchers.insert(source_id, handle)
+            } else {
+                watchers.remove(&source_id)
+            }
+        };
+        drop(previous);
+    }
+
+    pub fn add_folder_source(
+        &self,
+        path: &Path,
+        persist: bool,
+    ) -> Result<SourceStatusSummary, String> {
+        let (root_path, display) = folder_source::normalize_folder_root(path)?;
+        let meta = std::fs::symlink_metadata(&root_path)
+            .map_err(|err| format!("folder source {} is invalid: {err}", root_path.display()))?;
+        if !meta.is_dir() {
+            return Err(format!(
+                "folder source {} is not a directory",
+                root_path.display()
+            ));
+        }
+
+        self.apply_config_change(persist, |current| {
+            let mut next = current.clone();
+            let already_listed = next.folder_sources.iter().any(|existing| {
+                folder_source::normalize_folder_root(Path::new(existing))
+                    .map(|(_, norm)| norm.eq_ignore_ascii_case(&display))
+                    .unwrap_or(false)
+            });
+            if !already_listed {
+                next.folder_sources.push(display.clone());
+            }
+            Ok(next)
+        })?;
+
+        let folders = self.folder_sources.read().unwrap();
+        folders
+            .values()
+            .find(|src| src.display_root().eq_ignore_ascii_case(&display))
+            .map(|src| src.to_summary())
+            .ok_or_else(|| format!("folder source {} was not registered", display))
+    }
+
+    pub fn remove_folder_source(&self, path: &Path, persist: bool) -> Result<bool, String> {
+        let (_, display) = folder_source::normalize_folder_root(path)?;
+        let mut removed = false;
+        self.apply_config_change(persist, |current| {
+            let mut next = current.clone();
+            let before = next.folder_sources.len();
+            next.folder_sources.retain(|existing| {
+                folder_source::normalize_folder_root(Path::new(existing))
+                    .map(|(_, norm)| !norm.eq_ignore_ascii_case(&display))
+                    .unwrap_or(!existing.eq_ignore_ascii_case(&display))
+            });
+            removed = next.folder_sources.len() != before;
+            Ok(next)
+        })?;
+        Ok(removed)
+    }
+
+    pub fn rescan_source(&self, source_id: SourceId) -> Result<usize, String> {
+        if let Some(drive) = source_id.drive_letter() {
+            return self.rescan_volume(drive);
+        }
+        let excluded_paths = self.config.read().unwrap().excluded_paths.clone();
+        let (result, watch_root) = {
+            let mut folders = self.folder_sources.write().unwrap();
+            let Some(source) = folders.get_mut(&source_id) else {
+                return Err(format!("source {} is not indexed", source_id.0));
+            };
+            let res = source.rescan(&excluded_paths);
+            (res, source.root_path.clone())
+        };
+        if result.is_ok() {
+            let has_watcher = self
+                .folder_watchers
+                .lock()
+                .unwrap()
+                .contains_key(&source_id);
+            if !has_watcher {
+                self.start_folder_watcher_for(source_id, watch_root);
+            }
+        }
+        result
+    }
+
+    pub fn rescan_folder_sources(&self) -> usize {
+        let ids: Vec<SourceId> = self
+            .folder_sources
+            .read()
+            .unwrap()
+            .keys()
+            .copied()
+            .collect();
+        ids.into_iter()
+            .filter(|&id| self.rescan_source(id).is_ok())
+            .count()
+    }
+
+    pub fn get_sources(&self) -> Vec<SourceStatusSummary> {
+        let excluded_drives = self.config.read().unwrap().excluded_drives.clone();
+        let volumes = self.volumes.read().unwrap();
+        let folders = self.folder_sources.read().unwrap();
+        let mut summaries: Vec<SourceStatusSummary> = volumes
+            .values()
+            .filter(|vol| {
+                !excluded_drives
+                    .iter()
+                    .any(|&ex| ex.eq_ignore_ascii_case(&vol.drive_letter))
+            })
+            .map(|vol| vol.to_source_summary())
+            .collect();
+        summaries.extend(folders.values().map(|folder| folder.to_summary()));
+        summaries.sort_by_key(|s| s.source_id.0);
+        summaries
+    }
+
+    pub fn get_index_journal(&self, after_seq: u64, limit: usize) -> Vec<IndexJournalEntry> {
+        self.index_journal.lock().unwrap().query(after_seq, limit)
+    }
+
+    pub fn index_journal_status(&self) -> IndexJournalStatus {
+        self.index_journal.lock().unwrap().status()
+    }
+
+    pub fn set_index_journal_enabled(&self, enabled: bool) -> IndexJournalStatus {
+        let _guard = self.config_apply_lock.lock().unwrap();
+        {
+            let mut cfg = self.config.write().unwrap();
+            cfg.index_journal_enabled = enabled;
+        }
+        let mut journal = self.index_journal.lock().unwrap();
+        journal.set_enabled(enabled);
+        journal.status()
+    }
+
+    pub fn set_index_journal_enabled_persisted(
+        &self,
+        enabled: bool,
+        persist: bool,
+    ) -> Result<IndexJournalStatus, String> {
+        self.apply_config_change(persist, |current| {
+            let mut next = current.clone();
+            next.index_journal_enabled = enabled;
+            Ok(next)
+        })?;
+        Ok(self.index_journal_status())
+    }
+
+    #[doc(hidden)]
+    pub fn mark_content_ready_for_test(&self, indexed_documents: u64) {
+        let bytes = self
+            .get_or_create_content_searcher()
+            .map_or(0, |s| s.index_size_bytes());
+        let mut status = self.content_status.write().unwrap();
+        status.state = ContentIndexState::Ready;
+        status.indexed_documents = indexed_documents;
+        status.index_bytes = bytes;
+        status.last_updated_ts = unix_now_secs();
+    }
+
+    /// Aggregates resident heap allocations across all indexed sources and side tables.
     pub fn memory_footprint(&self) -> IndexMemoryFootprint {
         let mut total = IndexMemoryFootprint::default();
         {
@@ -582,9 +1000,16 @@ impl MultiVolumeEngine {
                 total.accumulate(&vol.memory_footprint());
             }
         }
-        // The journal buffer is resident for the engine, not for one volume, and is
-        // read before the volume lock is taken again.
+        {
+            let folders = self.folder_sources.read().unwrap();
+            for folder in folders.values() {
+                total.accumulate(&folder.memory_footprint());
+            }
+        }
+        total.property_store_bytes += self.property_tables.read().unwrap().allocated_bytes();
+        // The journal buffers are engine-wide allocations read outside volume/folder locks.
         total.scratch_bytes += self.usn_read_buf.lock().unwrap().capacity();
+        total.scratch_bytes += self.index_journal.lock().unwrap().status().resident_bytes;
         total
     }
 }

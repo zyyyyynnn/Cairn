@@ -4,18 +4,26 @@
 
 //! Indexed record table of one volume: ingestion, journal changes, folder totals and compaction.
 
+use super::index_journal::IndexJournal;
 use super::volume_status::VolumeStatus;
 use crate::persistence::{headroom_for_arena, headroom_for_records, LoadedIndexData};
 use cairn_core::arena::NamePool;
 use cairn_core::frn_index::{FrnLookup, IndexMemoryFootprint};
-use cairn_core::model::FileRecord;
-use cairn_core::path_cache::DirectoryPathCache;
+use cairn_core::model::{
+    flags_from_win32_attributes, FileRecord, FLAG_DIRECTORY, FLAG_INDEXED_ATTRIBUTES_MASK,
+};
+use cairn_core::path_cache::{root_path_for_drive, DirectoryPathCache};
+use cairn_core::property_store::{PropertySideTables, RecordPropertyData, SourceId};
+use cairn_core::query::SourceIndex;
 use cairn_core::sort::{PresortedIndices, SortColumn};
 use cairn_core::treemap::DirectorySizeIndex;
 use cairn_ntfs::mft::ExtractedItem;
 use cairn_ntfs::usn::{file_record_flags, UsnChange};
+use cairn_ntfs::volume_identity::VolumeIdentity;
 use cairn_protocol::message::FileRowData;
-use cairn_protocol::status::{VolumeState, VolumeStatusSummary};
+use cairn_protocol::status::{
+    JournalChangeKind, SourceKind, SourceStatusSummary, VolumeState, VolumeStatusSummary,
+};
 use std::collections::{HashMap, HashSet};
 use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
@@ -112,14 +120,14 @@ pub struct CompactionReport {
 }
 
 /// Incremental metadata refresh outcome applied inside [`VolumeIndex::apply_refreshed_metadata`].
-pub(crate) struct RefreshedRecordMetadata {
-    pub(crate) index: u32,
-    pub(crate) frn: u64,
-    pub(crate) size: u64,
-    pub(crate) created_ts: i64,
-    pub(crate) modified_ts: i64,
-    pub(crate) is_dir: bool,
-    pub(crate) is_reparse: bool,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RefreshedRecordMetadata {
+    pub index: u32,
+    pub frn: u64,
+    pub size: u64,
+    pub created_ts: i64,
+    pub modified_ts: i64,
+    pub win32_attributes: u32,
 }
 
 /// Compaction verdict for a record's ancestor chain. A tombstone is not part of it: a dead parent
@@ -331,7 +339,7 @@ impl VolumeIndex {
         &self,
         dir: &std::path::Path,
     ) -> Result<std::path::PathBuf, crate::persistence::PersistenceError> {
-        crate::persistence::save_volume_index_atomic(
+        let saved = crate::persistence::save_volume_index_atomic(
             dir,
             self.drive_letter,
             self.volume_serial,
@@ -340,7 +348,15 @@ impl VolumeIndex {
             &self.records,
             &self.arena,
             self.directory_sizes_valid,
-        )
+        )?;
+        if !self.volume_guid.is_empty() && !self.volume_guid.starts_with("VOL_") {
+            crate::persistence::save_volume_guid_sidecar(
+                dir,
+                self.drive_letter,
+                &self.volume_guid,
+            )?;
+        }
+        Ok(saved)
     }
 
     /// Read-only slice of indexed records.
@@ -501,7 +517,16 @@ impl VolumeIndex {
             Some(SortColumn::Name) | Some(SortColumn::Path) => names,
             Some(SortColumn::Size) => sizes,
             Some(SortColumn::DateModified) => dates,
-            Some(SortColumn::DateCreated) | Some(SortColumn::Extension) | None => false,
+            Some(
+                SortColumn::DateCreated
+                | SortColumn::Extension
+                | SortColumn::Length
+                | SortColumn::Author
+                | SortColumn::Tags
+                | SortColumn::Dimensions
+                | SortColumn::Framerate,
+            )
+            | None => false,
         };
         if !affects {
             return;
@@ -531,7 +556,13 @@ impl VolumeIndex {
             SortColumn::Size => &self.presorted.by_size,
             SortColumn::DateModified => &self.presorted.by_date_modified,
             SortColumn::Path => &self.presorted.by_path,
-            SortColumn::DateCreated | SortColumn::Extension => return None,
+            SortColumn::DateCreated
+            | SortColumn::Extension
+            | SortColumn::Length
+            | SortColumn::Author
+            | SortColumn::Tags
+            | SortColumn::Dimensions
+            | SortColumn::Framerate => return None,
         };
         (!order.is_empty()).then_some(order.as_slice())
     }
@@ -548,7 +579,13 @@ impl VolumeIndex {
             SortColumn::Size => &self.presorted.by_size,
             SortColumn::DateModified => &self.presorted.by_date_modified,
             SortColumn::Path => &self.presorted.by_path,
-            SortColumn::DateCreated | SortColumn::Extension => return None,
+            SortColumn::DateCreated
+            | SortColumn::Extension
+            | SortColumn::Length
+            | SortColumn::Author
+            | SortColumn::Tags
+            | SortColumn::Dimensions
+            | SortColumn::Framerate => return None,
         };
         (!order.is_empty()).then_some(order.as_slice())
     }
@@ -620,7 +657,13 @@ impl VolumeIndex {
             SortColumn::Size => !self.presorted.by_size.is_empty(),
             SortColumn::DateModified => !self.presorted.by_date_modified.is_empty(),
             SortColumn::Path => !self.presorted.by_path.is_empty(),
-            SortColumn::DateCreated | SortColumn::Extension => false,
+            SortColumn::DateCreated
+            | SortColumn::Extension
+            | SortColumn::Length
+            | SortColumn::Author
+            | SortColumn::Tags
+            | SortColumn::Dimensions
+            | SortColumn::Framerate => false,
         }
     }
 
@@ -635,6 +678,7 @@ impl VolumeIndex {
             folded_arena_bytes,
             frn_lookup_bytes: self.frn_to_idx.allocated_bytes(),
             presorted_bytes: self.presorted.allocated_bytes(),
+            property_store_bytes: 0,
             directory_sizes_bytes: 0,
             path_cache_bytes: self.path_cache.allocated_bytes(),
             scratch_bytes: 0,
@@ -649,7 +693,7 @@ impl VolumeIndex {
         self.records.push(record);
     }
 
-    pub(crate) fn apply_refreshed_metadata(&mut self, update: RefreshedRecordMetadata) {
+    pub fn apply_refreshed_metadata(&mut self, update: RefreshedRecordMetadata) {
         let Some(record) = self.records.get_mut(update.index as usize) else {
             return;
         };
@@ -658,22 +702,17 @@ impl VolumeIndex {
         }
         let was_dir = record.is_dir();
         let old_size = record.size;
-        let mut flags =
-            record.flags & !(cairn_core::FLAG_DIRECTORY | cairn_core::FLAG_REPARSE_POINT);
-        if update.is_dir {
-            flags |= cairn_core::FLAG_DIRECTORY;
-        }
-        if update.is_reparse {
-            flags |= cairn_core::FLAG_REPARSE_POINT;
-        }
+        let refreshed_flags = flags_from_win32_attributes(update.win32_attributes);
+        let is_dir = (refreshed_flags & FLAG_DIRECTORY) != 0;
+        let flags = (record.flags & !FLAG_INDEXED_ATTRIBUTES_MASK) | refreshed_flags;
         let modified_changed = record.modified_ts != update.modified_ts;
         record.flags = flags;
         record.created_ts = update.created_ts;
         record.modified_ts = update.modified_ts;
-        let kind_changed = was_dir != update.is_dir;
+        let kind_changed = was_dir != is_dir;
         if kind_changed {
-            record.size = if update.is_dir { 0 } else { update.size };
-            self.live_file_bytes = if update.is_dir {
+            record.size = if is_dir { 0 } else { update.size };
+            self.live_file_bytes = if is_dir {
                 self.live_file_bytes.saturating_sub(old_size)
             } else {
                 self.live_file_bytes.saturating_add(update.size)
@@ -685,90 +724,35 @@ impl VolumeIndex {
         if kind_changed {
             self.mark_presorted_sizes_changed(std::iter::once(update.index));
             self.mark_directory_sizes_dirty();
-        } else if !update.is_dir {
+        } else if !is_dir {
             self.update_file_size(update.index, update.size);
         }
     }
 
     /// Reconstructs full row data and highlights for a matched record index, encapsulating
     /// arena string extraction and path cache traversal.
-    pub fn build_file_row<F>(
+    pub fn build_file_row<F, P>(
         &self,
         record_idx: u32,
         folded_terms: &[Vec<u8>],
         snippet_lookup: F,
+        property_lookup: P,
     ) -> Option<FileRowData>
     where
-        F: FnOnce(u64) -> Option<String>,
+        F: FnOnce(u64) -> Vec<String>,
+        P: FnOnce(u64) -> Option<RecordPropertyData>,
     {
-        let rec = self.records.get(record_idx as usize)?;
-        let name = self.arena.get_name(rec.name_offset, rec.name_len);
-        let parent_path = self.path_cache.get_parent_path(
+        let root = root_path_for_drive(self.drive_letter);
+        build_file_row_from_parts(
             &self.records,
             &self.arena,
-            self.drive_letter,
+            &self.path_cache,
+            &root,
             record_idx,
-        );
-
-        let mut name_highlights = Vec::new();
-        let mut path_highlights = Vec::new();
-
-        if !folded_terms.is_empty() {
-            let folded_name = self.arena.get_folded(rec.name_offset, rec.name_len);
-            for term in folded_terms {
-                let term_bytes = term.as_slice();
-                if term_bytes.is_empty() {
-                    continue;
-                }
-                let mut curr = 0;
-                while let Some(pos) = memchr::memmem::find(&folded_name[curr..], term_bytes) {
-                    let start = curr + pos;
-                    let end = start + term_bytes.len();
-                    name_highlights.push((start, end));
-                    curr = end;
-                }
-            }
-
-            let path_bytes = parent_path.as_bytes();
-            let mut folded_path = path_bytes.to_vec();
-            folded_path.make_ascii_lowercase();
-            for term in folded_terms {
-                let term_bytes = term.as_slice();
-                if term_bytes.is_empty() {
-                    continue;
-                }
-                let mut curr = 0;
-                while let Some(pos) = memchr::memmem::find(&folded_path[curr..], term_bytes) {
-                    let start = curr + pos;
-                    let end = start + term_bytes.len();
-                    path_highlights.push((start, end));
-                    curr = end;
-                }
-            }
-
-            if name_highlights.len() > 1 {
-                name_highlights.sort_unstable();
-                name_highlights.dedup();
-            }
-            if path_highlights.len() > 1 {
-                path_highlights.sort_unstable();
-                path_highlights.dedup();
-            }
-        }
-
-        Some(FileRowData {
-            frn: rec.frn,
-            name: name.to_string(),
-            path: parent_path.to_string(),
-            size: rec.size,
-            modified_ts: rec.modified_ts,
-            created_ts: rec.created_ts,
-            is_dir: rec.is_dir(),
-            flags: rec.flags,
-            name_highlights,
-            path_highlights,
-            snippet: snippet_lookup(rec.frn),
-        })
+            folded_terms,
+            snippet_lookup,
+            property_lookup,
+        )
     }
 
     /// Ingests parsed extracted items (from MFT scan or test fixtures).
@@ -1023,13 +1007,45 @@ impl VolumeIndex {
     /// Applies a journal batch, aggregating folder sizes at most once for the whole batch. Live
     /// polling and cold-start replay use this so `k` kind changes cost one rebuild, not `k`.
     pub fn apply_usn_changes(&mut self, changes: impl IntoIterator<Item = UsnChange>) {
+        self.apply_usn_changes_with_journal(changes, None, 0);
+    }
+
+    /// Applies a journal batch and optionally appends normalized events to [`IndexJournal`].
+    pub fn apply_usn_changes_with_journal(
+        &mut self,
+        changes: impl IntoIterator<Item = UsnChange>,
+        mut journal: Option<&mut IndexJournal>,
+        now_unix: i64,
+    ) {
         for change in changes {
-            self.apply_usn_change_inner(change);
+            self.apply_usn_change_inner(change, journal.as_deref_mut(), now_unix);
         }
         self.ensure_directory_sizes();
     }
 
-    fn apply_usn_change_inner(&mut self, change: UsnChange) {
+    fn record_journal_event(
+        &self,
+        journal: &mut Option<&mut IndexJournal>,
+        frn: u64,
+        kind: JournalChangeKind,
+        path: String,
+        old_path: Option<String>,
+        now_unix: i64,
+    ) {
+        if let (Some(j), Some(sid)) = (
+            journal.as_deref_mut(),
+            SourceId::for_drive(self.drive_letter),
+        ) {
+            j.push(sid, frn, kind, path, old_path, now_unix);
+        }
+    }
+
+    fn apply_usn_change_inner(
+        &mut self,
+        change: UsnChange,
+        mut journal: Option<&mut IndexJournal>,
+        now_unix: i64,
+    ) {
         match change {
             UsnChange::Deleted { frn } => {
                 self.pending_renames.remove(&frn);
@@ -1041,6 +1057,14 @@ impl VolumeIndex {
                 let Some(indices) = self.frn_to_idx.get(frn) else {
                     return;
                 };
+                let deleted_path = journal.as_ref().map(|_| {
+                    self.path_cache.get_full_path(
+                        &self.records,
+                        &self.arena,
+                        self.drive_letter,
+                        indices[0],
+                    )
+                });
                 self.pending_content_deletions
                     .insert((self.content_volume_id(), frn));
                 if indices.len() == 1 {
@@ -1050,6 +1074,16 @@ impl VolumeIndex {
                     for idx in indices {
                         self.tombstone_record_at(idx);
                     }
+                }
+                if let Some(path) = deleted_path {
+                    self.record_journal_event(
+                        &mut journal,
+                        frn,
+                        JournalChangeKind::Deleted,
+                        path,
+                        None,
+                        now_unix,
+                    );
                 }
             }
             UsnChange::Created {
@@ -1109,6 +1143,22 @@ impl VolumeIndex {
                 self.live_count = self.live_count.saturating_add(1);
                 self.frn_to_idx.push(frn, new_idx);
                 self.mark_presorted_appended(std::iter::once(new_idx));
+                if journal.is_some() {
+                    let path = self.path_cache.get_full_path(
+                        &self.records,
+                        &self.arena,
+                        self.drive_letter,
+                        new_idx,
+                    );
+                    self.record_journal_event(
+                        &mut journal,
+                        frn,
+                        JournalChangeKind::Created,
+                        path,
+                        None,
+                        now_unix,
+                    );
+                }
                 // The journal record carries no size, and its timestamp is the event time rather
                 // than the file's. Read the file once on the next debounce pass, or every file
                 // created during a catch-up would be displayed as 0 B.
@@ -1159,6 +1209,14 @@ impl VolumeIndex {
                     });
 
                     if let Some(idx) = target_idx {
+                        let old_path = journal.as_ref().map(|_| {
+                            self.path_cache.get_full_path(
+                                &self.records,
+                                &self.arena,
+                                self.drive_letter,
+                                idx,
+                            )
+                        });
                         let (name_offset, name_len, ext_offset) = self.arena.insert(&name);
                         let parent_idx = self
                             .frn_to_idx
@@ -1191,6 +1249,22 @@ impl VolumeIndex {
                         rec.parent_idx = parent_idx;
 
                         self.path_cache.clear();
+                        if let Some(old_path) = old_path {
+                            let new_path = self.path_cache.get_full_path(
+                                &self.records,
+                                &self.arena,
+                                self.drive_letter,
+                                idx,
+                            );
+                            self.record_journal_event(
+                                &mut journal,
+                                frn,
+                                JournalChangeKind::Renamed,
+                                new_path,
+                                Some(old_path),
+                                now_unix,
+                            );
+                        }
                         // The content document stores the path; a rename has to replace it,
                         // and a rename out of the extension whitelist has to delete it.
                         self.pending_data_changes.insert(frn);
@@ -1242,9 +1316,28 @@ impl VolumeIndex {
                 }
                 if let Some(indices) = self.frn_to_idx.get(frn) {
                     let affected: Vec<u32> = indices.to_vec();
+                    let modified_idx = affected.first().copied();
                     self.mark_presorted_dates_changed(affected.iter().copied());
                     if kind_changed {
                         self.mark_presorted_sizes_changed(affected);
+                    }
+                    if journal.is_some() {
+                        if let Some(idx) = modified_idx {
+                            let path = self.path_cache.get_full_path(
+                                &self.records,
+                                &self.arena,
+                                self.drive_letter,
+                                idx,
+                            );
+                            self.record_journal_event(
+                                &mut journal,
+                                frn,
+                                JournalChangeKind::Modified,
+                                path,
+                                None,
+                                now_unix,
+                            );
+                        }
                     }
                 }
                 if kind_changed {
@@ -1260,6 +1353,24 @@ impl VolumeIndex {
             UsnChange::DataChanged { frn } => {
                 if self.excluded_frns.contains(&frn) {
                     return;
+                }
+                if journal.is_some() {
+                    if let Some(idx) = self.first_record_index_for_frn(frn) {
+                        let path = self.path_cache.get_full_path(
+                            &self.records,
+                            &self.arena,
+                            self.drive_letter,
+                            idx,
+                        );
+                        self.record_journal_event(
+                            &mut journal,
+                            frn,
+                            JournalChangeKind::Modified,
+                            path,
+                            None,
+                            now_unix,
+                        );
+                    }
                 }
                 self.pending_data_changes.insert(frn);
             }
@@ -1637,6 +1748,46 @@ impl VolumeIndex {
             .is_some()
     }
 
+    pub fn set_identity(&mut self, identity: VolumeIdentity) {
+        self.volume_guid = identity.volume_guid;
+        self.volume_serial = identity.volume_serial;
+    }
+
+    pub fn matches_volume_identity(&self, identity: &VolumeIdentity) -> bool {
+        self.volume_guid.eq_ignore_ascii_case(&identity.volume_guid)
+            && self.volume_serial == identity.volume_serial
+    }
+
+    pub fn has_tombstones(&self) -> bool {
+        self.live_count < self.records.len() as u64
+    }
+
+    pub fn is_active(&self, excluded_drives: &[char]) -> bool {
+        !excluded_drives
+            .iter()
+            .any(|drive| drive.eq_ignore_ascii_case(&self.drive_letter))
+            && (self.status.state().is_synced() || !self.records.is_empty())
+    }
+
+    pub fn as_source_index<'a>(
+        &'a self,
+        root_prefix: &'a str,
+        properties: &'a PropertySideTables,
+    ) -> SourceIndex<'a> {
+        let source_id =
+            SourceId::for_drive(self.drive_letter).expect("NTFS drive letter maps to a SourceId");
+        SourceIndex::new(
+            source_id,
+            root_prefix,
+            &self.records,
+            &self.arena,
+            &self.path_cache,
+            Some(&self.presorted),
+            properties,
+        )
+        .with_tombstones(self.has_tombstones())
+    }
+
     pub fn to_summary(&self) -> VolumeStatusSummary {
         VolumeStatusSummary {
             drive_letter: self.drive_letter,
@@ -1647,91 +1798,188 @@ impl VolumeIndex {
         }
     }
 
+    pub fn to_source_summary(&self) -> SourceStatusSummary {
+        let source_id = SourceId::for_drive(self.drive_letter).unwrap_or(SourceId(0));
+        SourceStatusSummary {
+            source_id,
+            kind: SourceKind::NtfsVolume,
+            root_path: format!("{}:\\", self.drive_letter),
+            volume_guid: self.volume_guid.clone(),
+            status: self.status.state(),
+            indexed_count: self.live_count,
+            live_watch_enabled: self.usn_enabled,
+        }
+    }
+
     /// Sums the space the matched set describes at its highest hit point: a matched directory
     /// contributes its recursive size once, and a match already covered by a matched ancestor
     /// directory adds nothing. A folder-only hit therefore reports the folder's space without
     /// any file being counted twice.
     pub(crate) fn calculate_matched_bytes(&self, matched_indices: &[u32]) -> u64 {
-        if matched_indices.is_empty() || self.records.is_empty() {
-            return 0;
-        }
+        calculate_matched_bytes_for_records(&self.records, matched_indices)
+    }
+}
 
-        let mut matched_dirs = BitSet::with_capacity(self.records.len());
-        let mut has_matched_dirs = false;
-        for &idx in matched_indices {
-            if let Some(record) = self.records.get(idx as usize) {
-                if record.is_dir() && !record.is_tombstone() {
-                    matched_dirs.insert(idx as usize);
-                    has_matched_dirs = true;
-                }
-            }
-        }
-
-        let mut seen = BitSet::with_capacity(self.records.len());
-        // Coverage is only consulted when a matched directory can cover a descendant; a
-        // file-only match set sums its own sizes without the lookup table.
-        let mut coverage = has_matched_dirs.then(|| vec![0u8; self.records.len()]);
-        let mut path = Vec::new();
-        let mut total: u64 = 0;
-
-        for &idx in matched_indices {
-            let index = idx as usize;
-            if index >= self.records.len() || !seen.insert(index) {
-                continue;
-            }
-            let record = &self.records[index];
-            if record.is_tombstone() {
-                continue;
-            }
-            // The volume root is its own parent; a record is never covered by itself.
-            let covered = record.parent_idx != index as u32
-                && coverage.as_mut().is_some_and(|coverage| {
-                    self.parent_is_covered(record.parent_idx, &matched_dirs, coverage, &mut path)
-                });
-            if !covered {
-                total = total.saturating_add(record.size);
-            }
-        }
-
-        total
+pub(crate) fn calculate_matched_bytes_for_records(
+    records: &[FileRecord],
+    matched_indices: &[u32],
+) -> u64 {
+    if matched_indices.is_empty() || records.is_empty() {
+        return 0;
     }
 
-    /// Whether `parent` or one of its ancestors is a matched live directory.
-    fn parent_is_covered(
-        &self,
-        mut parent: u32,
-        matched_dirs: &BitSet,
-        coverage: &mut [u8],
-        path: &mut Vec<u32>,
-    ) -> bool {
-        path.clear();
-        let mut steps = 0usize;
-        let covered = loop {
-            if parent == FileRecord::ROOT_PARENT || parent as usize >= self.records.len() {
-                break false;
+    let mut matched_dirs = BitSet::with_capacity(records.len());
+    let mut has_matched_dirs = false;
+    for &idx in matched_indices {
+        if let Some(record) = records.get(idx as usize) {
+            if record.is_dir() && !record.is_tombstone() {
+                matched_dirs.insert(idx as usize);
+                has_matched_dirs = true;
             }
-            steps += 1;
-            if steps > self.records.len() {
-                break false;
-            }
-            match coverage[parent as usize] {
-                1 => break true,
-                2 => break false,
-                _ => {}
-            }
-            if matched_dirs.contains(parent as usize) {
-                break true;
-            }
-            path.push(parent);
-            let record = &self.records[parent as usize];
-            if record.parent_idx == parent {
-                break false;
-            }
-            parent = record.parent_idx;
-        };
-        for &index in path.iter() {
-            coverage[index as usize] = if covered { 1 } else { 2 };
         }
-        covered
+    }
+
+    let mut seen = BitSet::with_capacity(records.len());
+    // Coverage is only consulted when a matched directory can cover a descendant; a
+    // file-only match set sums its own sizes without the lookup table.
+    let mut coverage = has_matched_dirs.then(|| vec![0u8; records.len()]);
+    let mut path = Vec::new();
+    let mut total: u64 = 0;
+
+    for &idx in matched_indices {
+        let index = idx as usize;
+        if index >= records.len() || !seen.insert(index) {
+            continue;
+        }
+        let record = &records[index];
+        if record.is_tombstone() {
+            continue;
+        }
+        // The volume root is its own parent; a record is never covered by itself.
+        let covered = record.parent_idx != index as u32
+            && coverage.as_mut().is_some_and(|coverage| {
+                parent_is_covered_in_records(
+                    records,
+                    record.parent_idx,
+                    &matched_dirs,
+                    coverage,
+                    &mut path,
+                )
+            });
+        if !covered {
+            total = total.saturating_add(record.size);
+        }
+    }
+
+    total
+}
+
+/// Whether `parent` or one of its ancestors is a matched live directory.
+fn parent_is_covered_in_records(
+    records: &[FileRecord],
+    mut parent: u32,
+    matched_dirs: &BitSet,
+    coverage: &mut [u8],
+    path: &mut Vec<u32>,
+) -> bool {
+    path.clear();
+    let mut steps = 0usize;
+    let covered = loop {
+        if parent == FileRecord::ROOT_PARENT || parent as usize >= records.len() {
+            break false;
+        }
+        steps += 1;
+        if steps > records.len() {
+            break false;
+        }
+        match coverage[parent as usize] {
+            1 => break true,
+            2 => break false,
+            _ => {}
+        }
+        if matched_dirs.contains(parent as usize) {
+            break true;
+        }
+        path.push(parent);
+        let record = &records[parent as usize];
+        if record.parent_idx == parent {
+            break false;
+        }
+        parent = record.parent_idx;
+    };
+    for &index in path.iter() {
+        coverage[index as usize] = if covered { 1 } else { 2 };
+    }
+    covered
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_file_row_from_parts<F, P>(
+    records: &[FileRecord],
+    arena: &NamePool,
+    path_cache: &DirectoryPathCache,
+    root_prefix: &Arc<str>,
+    record_idx: u32,
+    folded_terms: &[Vec<u8>],
+    snippet_lookup: F,
+    property_lookup: P,
+) -> Option<FileRowData>
+where
+    F: FnOnce(u64) -> Vec<String>,
+    P: FnOnce(u64) -> Option<RecordPropertyData>,
+{
+    let rec = records.get(record_idx as usize)?;
+    let name = arena.get_name(rec.name_offset, rec.name_len);
+    let parent_path = path_cache.get_parent_path_with_root(records, arena, root_prefix, record_idx);
+
+    let mut name_highlights = Vec::new();
+    let mut path_highlights = Vec::new();
+
+    if !folded_terms.is_empty() {
+        let folded_name = arena.get_folded(rec.name_offset, rec.name_len);
+        collect_term_highlights(folded_name, folded_terms, &mut name_highlights);
+
+        let mut folded_path = parent_path.as_bytes().to_vec();
+        folded_path.make_ascii_lowercase();
+        collect_term_highlights(&folded_path, folded_terms, &mut path_highlights);
+    }
+
+    Some(FileRowData {
+        frn: rec.frn,
+        name: name.to_string(),
+        path: parent_path.to_string(),
+        size: rec.size,
+        modified_ts: rec.modified_ts,
+        created_ts: rec.created_ts,
+        is_dir: rec.is_dir(),
+        flags: rec.flags,
+        name_highlights,
+        path_highlights,
+        snippets: snippet_lookup(rec.frn),
+        properties: property_lookup(rec.frn),
+    })
+}
+
+fn collect_term_highlights(
+    haystack: &[u8],
+    folded_terms: &[Vec<u8>],
+    out: &mut Vec<(usize, usize)>,
+) {
+    for term in folded_terms {
+        let term_bytes = term.as_slice();
+        if term_bytes.is_empty() {
+            continue;
+        }
+        let mut curr = 0;
+        while let Some(pos) = memchr::memmem::find(&haystack[curr..], term_bytes) {
+            let start = curr + pos;
+            let end = start + term_bytes.len();
+            out.push((start, end));
+            curr = end;
+        }
+    }
+    if out.len() > 1 {
+        out.sort_unstable();
+        out.dedup();
     }
 }

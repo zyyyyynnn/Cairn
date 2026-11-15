@@ -10,7 +10,8 @@ use crate::config::ServiceConfig;
 use crate::sync_engine::{MultiVolumeEngine, VolumeIndex};
 use cairn_content::ContentIndex;
 use cairn_core::engine::CancellationToken;
-use cairn_core::sort::SortColumn;
+use cairn_core::property_store::SourceId;
+use cairn_core::sort::{SortColumn, SortDirection, SortSpec};
 use cairn_core::syntax::QueryDefaults;
 use cairn_ntfs::mft::ExtractedItem;
 use cairn_ntfs::usn::{UsnChange, FILE_ATTRIBUTE_REPARSE_POINT};
@@ -18,6 +19,15 @@ use cairn_protocol::status::{ContentIndexState, ContentIndexTask};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
+
+fn sort(column: SortColumn, asc: bool) -> SortSpec {
+    let dir = if asc {
+        SortDirection::Ascending
+    } else {
+        SortDirection::Descending
+    };
+    SortSpec::single(column, dir)
+}
 
 /// Builds volume `C` from relative paths (directories first, file last) and returns the file
 /// FRNs in input order. Reparse points are expressed through `flags`, as the scanner does.
@@ -407,22 +417,52 @@ fn compaction_keeps_pending_work_replayed_before_startup() {
     );
 }
 
-/// A USN `Created` record can arrive without any attribute bits. The debounce pass reads the
-/// entry itself, so the record still learns that the path is a reparse point.
+/// A USN `Created` record can arrive without complete attribute bits. The debounce pass reads
+/// filesystem metadata and synchronizes `FLAG_INDEXED_ATTRIBUTES_MASK` (`Hidden`, `System`,
+/// `ReadOnly`, `ReparsePoint`) unconditionally against disk.
 #[cfg(windows)]
 #[test]
-fn the_debounce_refresh_marks_a_created_symlink_as_reparse() {
-    use std::os::windows::fs::symlink_file;
+fn the_debounce_refresh_marks_reparse_and_syncs_win32_attributes() {
+    use std::os::windows::ffi::OsStrExt;
     use std::path::Component;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{
+        SetFileAttributesW, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_SYSTEM,
+    };
+
+    let outside = tempfile::tempdir().expect("outside target");
+    let target_dir = outside.path().join("target_dir");
+    std::fs::create_dir_all(&target_dir).expect("target dir");
 
     let tree = tempfile::tempdir().expect("tree");
-    let target = tree.path().join("target.txt");
-    std::fs::write(&target, "payload").expect("target file");
-    let link = tree.path().join("link.txt");
-    if let Err(err) = symlink_file(&target, &link) {
-        eprintln!("skipping symlink refresh test: {err}");
-        return;
+    let junction_link = tree.path().join("junction_dir");
+    let mklink = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(&junction_link)
+        .arg(&target_dir)
+        .output()
+        .expect("run mklink /J");
+    assert!(
+        mklink.status.success(),
+        "mklink /J must work unprivileged on NTFS: {}",
+        String::from_utf8_lossy(&mklink.stderr)
+    );
+
+    let attr_file = tree.path().join("attr_file.txt");
+    std::fs::write(&attr_file, "payload").expect("attr file");
+    let wide_attr: Vec<u16> = attr_file
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: wide_attr is null-terminated.
+    unsafe {
+        SetFileAttributesW(
+            PCWSTR(wide_attr.as_ptr()),
+            FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM,
+        )
     }
+    .expect("SetFileAttributesW");
 
     let mut items = Vec::new();
     let mut parent_frn = 0u64;
@@ -446,15 +486,29 @@ fn the_debounce_refresh_marks_a_created_symlink_as_reparse() {
         next_frn += 1;
     }
 
+    let junction_frn = next_frn;
+    let attr_frn = next_frn + 1;
     items.push(ExtractedItem {
-        frn: next_frn,
+        frn: junction_frn,
         parent_frn,
-        name: "link.txt".to_string(),
+        name: "junction_dir".to_string(),
+        is_dir: true,
+        size: 0,
+        created_ts: 1,
+        modified_ts: 1,
+        flags: cairn_core::FLAG_DIRECTORY,
+        is_reparse_point: false,
+    });
+    items.push(ExtractedItem {
+        frn: attr_frn,
+        parent_frn,
+        name: "attr_file.txt".to_string(),
         is_dir: false,
         size: 0,
         created_ts: 1,
         modified_ts: 1,
-        flags: cairn_core::FLAG_HIDDEN,
+        // Stale READONLY bit must be cleared when disk attrs are HIDDEN | SYSTEM.
+        flags: cairn_core::FLAG_READONLY,
         is_reparse_point: false,
     });
 
@@ -465,31 +519,40 @@ fn the_debounce_refresh_marks_a_created_symlink_as_reparse() {
     let engine = MultiVolumeEngine::with_index_dir_and_drives(index_dir.path(), vec![]);
     engine.add_volume(volume);
     engine.update_volume('C', |volume| {
-        volume.apply_usn_changes([UsnChange::DataChanged { frn: next_frn }]);
+        volume.apply_usn_changes([
+            UsnChange::DataChanged { frn: junction_frn },
+            UsnChange::DataChanged { frn: attr_frn },
+        ]);
     });
 
     engine.process_pending_data_changes();
 
-    let record = engine
-        .with_volumes(|volumes| {
-            volumes
-                .get(&'C')
-                .expect("volume C")
-                .records()
-                .iter()
-                .find(|record| record.frn == next_frn)
-                .copied()
-        })
-        .expect("created record");
+    let (junction_rec, attr_rec) = engine.with_volumes(|volumes| {
+        let recs = volumes.get(&'C').expect("volume C").records();
+        let j = recs
+            .iter()
+            .find(|r| r.frn == junction_frn)
+            .copied()
+            .expect("junction record");
+        let a = recs
+            .iter()
+            .find(|r| r.frn == attr_frn)
+            .copied()
+            .expect("attr record");
+        (j, a)
+    });
     assert!(
-        record.is_reparse_point(),
-        "metadata refresh must add the reparse flag a missing USN attribute hid"
+        junction_rec.is_reparse_point(),
+        "metadata refresh must add the reparse flag from disk"
     );
-    assert!(!record.is_dir());
+    assert!(junction_rec.is_dir());
+    assert!(attr_rec.is_hidden(), "hidden bit must sync from disk");
+    assert!(attr_rec.is_system(), "system bit must sync from disk");
     assert!(
-        record.is_hidden(),
-        "refresh must keep flags it does not own"
+        !attr_rec.is_readonly(),
+        "cleared Win32 readonly bit must not survive refresh"
     );
+    assert!(!attr_rec.is_dir());
 }
 
 #[test]
@@ -785,8 +848,7 @@ fn test_content_query_intersection_with_mft() {
     let outcome = engine.execute_search_multi(
         "content:架构",
         &QueryDefaults::default(),
-        SortColumn::Name,
-        true,
+        &sort(SortColumn::Name, true),
         &cancel,
     );
     let results = engine.test_items(outcome.rows);
@@ -794,9 +856,10 @@ fn test_content_query_intersection_with_mft() {
     let snippets = outcome.snippets;
     assert_eq!(total, 1);
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].drive_letter, 'C');
+    assert_eq!(results[0].source_id.drive_letter(), Some('C'));
     assert_eq!(results[0].record_idx, 0); // 101
-    assert!(snippets.contains_key(&('C', 101)));
+    let c_source = SourceId::for_drive('C').unwrap();
+    assert!(snippets.contains_key(&(c_source.0, 101)));
 
     // Multi-volume isolation: Add volume D with an unrelated file having identical FRN 101
     let mut vol_d = VolumeIndex::new('D');
@@ -817,21 +880,19 @@ fn test_content_query_intersection_with_mft() {
     let outcome = engine.execute_search_multi(
         "content:架构",
         &QueryDefaults::default(),
-        SortColumn::Name,
-        true,
+        &sort(SortColumn::Name, true),
         &cancel,
     );
     let results_mv = engine.test_items(outcome.rows);
     let total_mv = outcome.total;
     assert_eq!(total_mv, 1);
-    assert_eq!(results_mv[0].drive_letter, 'C');
+    assert_eq!(results_mv[0].source_id.drive_letter(), Some('C'));
 
     // Query 2: Combined MFT filter and content "ext:md content:架构" -> matches 101
     let outcome = engine.execute_search_multi(
         "ext:md content:架构",
         &QueryDefaults::default(),
-        SortColumn::Name,
-        true,
+        &sort(SortColumn::Name, true),
         &cancel,
     );
     let results_combined = engine.test_items(outcome.rows);
@@ -843,8 +904,7 @@ fn test_content_query_intersection_with_mft() {
     let outcome = engine.execute_search_multi(
         "ext:txt content:架构",
         &QueryDefaults::default(),
-        SortColumn::Name,
-        true,
+        &sort(SortColumn::Name, true),
         &cancel,
     );
     let results_mismatch = engine.test_items(outcome.rows);
@@ -856,8 +916,7 @@ fn test_content_query_intersection_with_mft() {
     let outcome = engine.execute_search_multi(
         "content:不存在的词",
         &QueryDefaults::default(),
-        SortColumn::Name,
-        true,
+        &sort(SortColumn::Name, true),
         &cancel,
     );
     let results_none = engine.test_items(outcome.rows);
@@ -902,8 +961,7 @@ fn test_clear_content_index_roundtrip() {
     let outcome = engine.execute_search_multi(
         "content:关键词",
         &QueryDefaults::default(),
-        SortColumn::Name,
-        true,
+        &sort(SortColumn::Name, true),
         &cancel,
     );
     let total = outcome.total;
@@ -915,8 +973,7 @@ fn test_clear_content_index_roundtrip() {
     let outcome = engine.execute_search_multi(
         "content:关键词",
         &QueryDefaults::default(),
-        SortColumn::Name,
-        true,
+        &sort(SortColumn::Name, true),
         &cancel,
     );
     let total_after = outcome.total;
@@ -1496,8 +1553,7 @@ fn a_full_backfill_reaches_ready_and_indexes_existing_files() {
     let outcome = engine.execute_search_multi(
         "content:hello",
         &QueryDefaults::default(),
-        SortColumn::Name,
-        true,
+        &sort(SortColumn::Name, true),
         &cancel,
     );
     let total = outcome.total;
@@ -1539,8 +1595,7 @@ fn a_full_backfill_reaches_ready_and_indexes_existing_files() {
     let outcome = engine.execute_search_multi(
         "content:needle",
         &QueryDefaults::default(),
-        SortColumn::Name,
-        true,
+        &sort(SortColumn::Name, true),
         &cancel,
     );
     let total = outcome.total;
@@ -1569,8 +1624,7 @@ fn a_full_backfill_reaches_ready_and_indexes_existing_files() {
     let outcome = engine.execute_search_multi(
         "content:needle",
         &QueryDefaults::default(),
-        SortColumn::Name,
-        true,
+        &sort(SortColumn::Name, true),
         &cancel,
     );
     let total = outcome.total;
@@ -1603,8 +1657,7 @@ fn a_full_backfill_reaches_ready_and_indexes_existing_files() {
     let outcome = engine.execute_search_multi(
         "content:hello",
         &QueryDefaults::default(),
-        SortColumn::Name,
-        true,
+        &sort(SortColumn::Name, true),
         &cancel,
     );
     let total = outcome.total;

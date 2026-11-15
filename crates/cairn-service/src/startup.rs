@@ -103,6 +103,9 @@ impl ServiceRuntime {
             }
         });
 
+        engine.ensure_folder_sources_loaded();
+        engine.spawn_property_extraction();
+
         // 3. Periodic snapshot volumes rescan task (every 5 minutes) (IDX-08)
         let engine_snapshot = engine.clone();
         let snapshot_task = tokio::spawn(async move {
@@ -110,6 +113,20 @@ impl ServiceRuntime {
             loop {
                 interval.tick().await;
                 engine_snapshot.rescan_snapshot_volumes();
+            }
+        });
+
+        // 4. Periodic folder-source rescan task honoring folder_rescan_interval_secs (IDX-11)
+        let engine_folders = engine.clone();
+        let folder_rescan_task = tokio::spawn(async move {
+            loop {
+                let secs = engine_folders.get_config().folder_rescan_interval_secs;
+                if secs == 0 {
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    continue;
+                }
+                tokio::time::sleep(Duration::from_secs(secs)).await;
+                engine_folders.rescan_folder_sources();
             }
         });
 
@@ -129,7 +146,9 @@ impl ServiceRuntime {
         usn_task.abort();
         persist_task.abort();
         snapshot_task.abort();
+        folder_rescan_task.abort();
         engine.stop_content_worker();
+        engine.stop_property_extraction();
 
         info!("Saving all volume indexes to disk on service shutdown...");
         match engine.save_all_indexes() {

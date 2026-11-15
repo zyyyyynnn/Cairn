@@ -530,7 +530,9 @@ fn compact_drops_tombstones_and_excluded_subtrees_and_remaps_parents() {
         &cancel,
     );
     assert_eq!(matches, vec![2]);
-    let row = vol.build_file_row(2, &[], |_| None).expect("file row");
+    let row = vol
+        .build_file_row(2, &[], |_| Vec::new(), |_| None)
+        .expect("file row");
     assert_eq!(row.name, "notes.txt");
 
     assert!(

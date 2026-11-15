@@ -69,8 +69,7 @@ fn test_multi_volume_engine_save_load_lifecycle() {
     let outcome = loaded_engine.execute_search_multi(
         "file.txt",
         &QueryDefaults::default(),
-        SortColumn::Name,
-        true,
+        &sort(SortColumn::Name, true),
         &cancel,
     );
     let results = loaded_engine.test_items(outcome.rows);
@@ -172,8 +171,7 @@ fn the_exclusion_mask_matches_the_full_path_reference() {
     let outcome = engine.execute_search_multi(
         "",
         &QueryDefaults::default(),
-        SortColumn::Name,
-        true,
+        &sort(SortColumn::Name, true),
         &cancel,
     );
     let total = outcome.total;
@@ -201,8 +199,7 @@ fn the_query_total_bytes_follow_the_highest_matched_point() {
     let outcome = engine.execute_search_multi(
         "",
         &QueryDefaults::default(),
-        SortColumn::Name,
-        true,
+        &sort(SortColumn::Name, true),
         &cancel,
     );
     let total = outcome.total;
@@ -216,8 +213,7 @@ fn the_query_total_bytes_follow_the_highest_matched_point() {
     let outcome = engine.execute_search_multi(
         "a.txt",
         &QueryDefaults::default(),
-        SortColumn::Name,
-        true,
+        &sort(SortColumn::Name, true),
         &cancel,
     );
     let total = outcome.total;
@@ -230,8 +226,7 @@ fn the_query_total_bytes_follow_the_highest_matched_point() {
     let outcome = engine.execute_search_multi(
         "folder:",
         &QueryDefaults::default(),
-        SortColumn::Name,
-        true,
+        &sort(SortColumn::Name, true),
         &cancel,
     );
     let total = outcome.total;
@@ -242,8 +237,7 @@ fn the_query_total_bytes_follow_the_highest_matched_point() {
     let outcome = engine.execute_search_multi(
         "folder",
         &QueryDefaults::default(),
-        SortColumn::Name,
-        true,
+        &sort(SortColumn::Name, true),
         &cancel,
     );
     let total = outcome.total;
@@ -371,8 +365,7 @@ fn test_volume_cache_invalidation_does_not_silently_return_stale_data() {
     let outcome = engine.execute_search_multi(
         "stale_secret",
         &QueryDefaults::default(),
-        SortColumn::Name,
-        true,
+        &sort(SortColumn::Name, true),
         &cancel,
     );
     let results = engine.test_items(outcome.rows);
@@ -527,8 +520,7 @@ fn test_excluded_drives_filtering() {
     let outcome = engine.execute_search_multi(
         "",
         &QueryDefaults::default(),
-        SortColumn::Name,
-        true,
+        &sort(SortColumn::Name, true),
         &cancel,
     );
     let results = engine.test_items(outcome.rows);
@@ -658,8 +650,7 @@ fn test_excluded_paths_filtering_and_hot_apply() {
     let outcome = engine.execute_search_multi(
         "",
         &QueryDefaults::default(),
-        SortColumn::Name,
-        true,
+        &sort(SortColumn::Name, true),
         &cancel,
     );
     let results = engine.test_items(outcome.rows);
@@ -677,8 +668,7 @@ fn test_excluded_paths_filtering_and_hot_apply() {
     let outcome = engine.execute_search_multi(
         "deleted_file",
         &QueryDefaults::default(),
-        SortColumn::Name,
-        true,
+        &sort(SortColumn::Name, true),
         &cancel,
     );
     let results = engine.test_items(outcome.rows);
@@ -690,8 +680,7 @@ fn test_excluded_paths_filtering_and_hot_apply() {
     let outcome = engine.execute_search_multi(
         "confidential",
         &QueryDefaults::default(),
-        SortColumn::Name,
-        true,
+        &sort(SortColumn::Name, true),
         &cancel,
     );
     let results = engine.test_items(outcome.rows);
@@ -703,8 +692,7 @@ fn test_excluded_paths_filtering_and_hot_apply() {
     let outcome = engine.execute_search_multi(
         "package.json",
         &QueryDefaults::default(),
-        SortColumn::Name,
-        true,
+        &sort(SortColumn::Name, true),
         &cancel,
     );
     let results = engine.test_items(outcome.rows);
@@ -721,8 +709,7 @@ fn test_excluded_paths_filtering_and_hot_apply() {
     let outcome = engine.execute_search_multi(
         ".tmp",
         &QueryDefaults::default(),
-        SortColumn::Name,
-        true,
+        &sort(SortColumn::Name, true),
         &cancel,
     );
     let results = engine.test_items(outcome.rows);
@@ -767,15 +754,14 @@ fn test_snapshot_mode_fallback_and_search() {
     let outcome = engine.execute_search_multi(
         "snapshot_file",
         &QueryDefaults::default(),
-        SortColumn::Name,
-        true,
+        &sort(SortColumn::Name, true),
         &cancel,
     );
     let results = engine.test_items(outcome.rows);
     let total = outcome.total;
     assert_eq!(total, 1);
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].drive_letter, 'E');
+    assert_eq!(results[0].source_id.drive_letter(), Some('E'));
 
     // rescan_snapshot_volumes should execute cleanly without panic
     engine.rescan_snapshot_volumes();
@@ -878,7 +864,7 @@ fn a_rebuild_is_visible_in_the_cached_summary() {
     let mut volume = VolumeIndex::new('C');
     volume.status.reconcile(0, 0, 0);
     engine.add_volume(volume);
-    let _ = engine.get_volume_summaries();
+    assert_eq!(engine.get_volume_summaries()[0].status, VolumeState::Synced);
 
     let previous = engine
         .mark_volume_rebuilding('C')

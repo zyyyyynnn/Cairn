@@ -8,7 +8,7 @@ use super::{
     BackfillMarker, BatchOutcome, ContentCommand, CONTENT_BACKFILL_MARKER,
     CONTENT_BACKFILL_MARKER_TMP, CONTENT_BACKFILL_SCHEMA,
 };
-use cairn_content::{ContentIndex, ContentIndexError, ContentSearcher};
+use cairn_content::{ContentIndexError, ContentSearcher, ContentWriter};
 use cairn_protocol::status::{ContentIndexState, ContentIndexStatus};
 use std::io::Write;
 use std::path::PathBuf;
@@ -55,7 +55,7 @@ impl MultiVolumeEngine {
     pub fn clear_content_index(&self) -> Result<(), ContentIndexError> {
         self.drop_content_searcher();
         self.remove_backfill_marker();
-        let index = ContentIndex::open_or_create(&self.content_dir)?;
+        let index = ContentWriter::open_or_create(&self.content_dir)?;
         let cleared = index.clear();
         let finished = index.finish();
         cleared?;
