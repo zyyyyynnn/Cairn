@@ -19,8 +19,9 @@
 
 use crate::app::{element_id, layout, CairnApp};
 use crate::shell::accessibility::{self, ControlElement, KeyControl};
+use crate::shell::assets::RADIO_DOT_ICON_PATH;
 use crate::shell::command_groups::{menu_groups, GroupCommand, MenuGroup};
-use crate::shell::commands::{self, WINDOW_CONTEXT, WINDOW_CONTROL_CONTEXT};
+use crate::shell::commands::{self, ToggleSidebar, WINDOW_CONTEXT, WINDOW_CONTROL_CONTEXT};
 use crate::shell::theme::{self, ShellTokens};
 use crate::shell::window_resize::{WindowResizeTracker, SETTLE_POLL};
 use gpui_kit::assets::IconName as AssetIconName;
@@ -30,11 +31,12 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{
-    h_flex, v_flex, Icon, IconName, InteractiveElementExt as _, Sizable as _,
+    h_flex, v_flex, Icon, IconName, InteractiveElementExt as _, Side, Sizable as _,
 };
 use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::*;
 use std::ops::Range;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
@@ -131,6 +133,9 @@ fn render_window_control(
 
 static FIRST_ROWS_FRAME: AtomicBool = AtomicBool::new(false);
 
+/// Runtime click handler for dynamically generated submenu rows (for example indexed sources).
+pub type MenuSelectHandler = Rc<dyn Fn(&mut CairnApp, &mut Window, &mut Context<CairnApp>)>;
+
 /// One row of a command-group menu, already resolved to what this frame shows.
 ///
 /// Labels, checkmarks and availability are read out of the window *before* the menu is built, so the
@@ -139,11 +144,16 @@ static FIRST_ROWS_FRAME: AtomicBool = AtomicBool::new(false);
 pub struct MenuEntry {
     pub label: SharedString,
     pub checked: bool,
+    /// `true` when the active state represents a mutually exclusive 1-of-N choice, so the gutter
+    /// renders a radio dot instead of a checkmark.
+    pub radio: bool,
     pub disabled: bool,
     /// The Action this row dispatches, when the keymap already owns the row's click behaviour.
     pub action: Option<Box<dyn Action>>,
     /// The command to run when there is no Action of its own, i.e. every choice in a family.
     pub command: Option<GroupCommand>,
+    /// Runtime click handler for dynamically generated submenu rows (for example indexed sources).
+    pub on_select: Option<MenuSelectHandler>,
     /// The Action whose key binding draws this row's hint while `command` owns the click.
     ///
     /// A menu row whose key is a broader gesture than the command names it here instead of
@@ -167,7 +177,7 @@ pub fn build_menu(
     action_context: FocusHandle,
     view: Entity<CairnApp>,
 ) -> PopupMenu {
-    let mut menu = menu.action_context(action_context);
+    let mut menu = menu.action_context(action_context).check_side(Side::Left);
     for (ix, entry) in entries.iter().enumerate() {
         if entry.separates && ix > 0 {
             menu = menu.separator();
@@ -194,16 +204,39 @@ pub fn build_menu(
             )
         } else if let Some(submenu) = entry.submenu.clone() {
             menu.item(PopupMenuItem::submenu(label, submenu).disabled(entry.disabled))
+        } else if let Some(on_select) = entry.on_select.clone() {
+            let entity = view.clone();
+            let mut item = PopupMenuItem::new(label)
+                .checked(entry.checked)
+                .disabled(entry.disabled);
+            if entry.radio && entry.checked {
+                item = item.icon(Icon::default().path(RADIO_DOT_ICON_PATH));
+            }
+            menu.item(item.on_click(move |_, window, cx| {
+                entity.update(cx, |this, cx| on_select(this, window, cx));
+            }))
         } else {
             match (&entry.action, entry.command) {
                 (Some(action), _) => {
-                    menu.menu_with_check(label, entry.checked, action.boxed_clone())
+                    if entry.radio && entry.checked {
+                        menu.item(
+                            PopupMenuItem::new(label)
+                                .checked(true)
+                                .icon(Icon::default().path(RADIO_DOT_ICON_PATH))
+                                .action(action.boxed_clone()),
+                        )
+                    } else {
+                        menu.menu_with_check(label, entry.checked, action.boxed_clone())
+                    }
                 }
                 (None, Some(command)) => {
                     let entity = view.clone();
                     let mut item = PopupMenuItem::new(label)
                         .checked(entry.checked)
                         .disabled(entry.disabled);
+                    if entry.radio && entry.checked {
+                        item = item.icon(Icon::default().path(RADIO_DOT_ICON_PATH));
+                    }
                     if let Some(hint) = entry.hint.as_ref() {
                         // `PopupMenuItem` runs the click handler before the action, so the action
                         // only contributes the binding that draws the hint.
@@ -425,6 +458,9 @@ impl Render for CairnApp {
                 .rows_scroll
                 .set_offset(Point::new(cur_x, px(-clamped)));
         }
+        if (self.results.table.scroll_top - clamped).abs() > 0.5 {
+            self.results.snippet_preview = None;
+        }
         self.results.table.scroll_top = clamped;
         let visible = self.visible_rows(row_height);
         if crate::shell::perf::enabled()
@@ -516,6 +552,7 @@ impl Render for CairnApp {
             .on_action(cx.listener(Self::open_edit_menu))
             .on_action(cx.listener(Self::open_view_menu))
             .on_action(cx.listener(Self::open_search_menu))
+            .on_action(cx.listener(Self::open_index_menu))
             .on_action(cx.listener(Self::open_tools_menu))
             .on_action(cx.listener(Self::open_help_menu))
             .on_action(
@@ -534,6 +571,10 @@ impl Render for CairnApp {
             .on_action(cx.listener(Self::delete_selected))
             .on_action(cx.listener(Self::rename_selected))
             .on_action(cx.listener(Self::restore_selected))
+            .on_action(cx.listener(Self::toggle_sidebar_action))
+            .on_action(cx.listener(Self::zoom_in))
+            .on_action(cx.listener(Self::zoom_out))
+            .on_action(cx.listener(Self::reset_zoom))
             // Input modality for focus painting. Any key means the keyboard is driving, and any
             // pointer press means it is not; the result region draws its ring from this rather than
             // from focus alone.
@@ -697,7 +738,7 @@ impl CairnApp {
     // results it qualifies; drawing it here as well spent the emphasis budget twice on one condition
     // and gave the reading order two places to look first.
     /// The Everything-style menu bar. It sits on the title-bar row immediately beside the brand, so
-    /// the six menus are the window's first commands rather than a second band below the chrome.
+    /// the seven menus are the window's first commands rather than a second band below the chrome.
     fn render_menu_bar(
         &self,
         view: &Entity<CairnApp>,
@@ -966,6 +1007,13 @@ impl CairnApp {
                                     .accessibility_label(self.cached_control_name(
                                         accessibility::control("sidebar-toggle"),
                                     ))
+                                    .tooltip_with_action(
+                                        self.cached_control_name(accessibility::control(
+                                            "sidebar-toggle",
+                                        )),
+                                        &ToggleSidebar,
+                                        Some(WINDOW_CONTEXT),
+                                    )
                                     .on_click(move |_, _window, cx| {
                                         toggle_view.update(cx, |this, cx| this.toggle_sidebar(cx));
                                     }),

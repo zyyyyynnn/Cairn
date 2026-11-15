@@ -4,16 +4,13 @@
 
 //! The Everything-style menu bar the title bar owns (UI-01, UI-03).
 //!
-//! Six top-level menus sit on the same row as the brand: 文件, 编辑, 查看, 搜索, 工具 and 帮助.
+//! Seven top-level menus sit on the same row as the brand: 文件, 编辑, 查看, 搜索, 索引, 工具 and 帮助.
 //! Every command a toolbar, a shortcut or the result context menu can run is listed here once, so
-//! the menu item and the keyboard binding cannot disagree about what a command is. The 工具 menu is
-//! the home of the user preferences (theme, language, autostart) and index status; the index is a
-//! status row plus the one service switch this window writes.
+//! the menu item and the keyboard binding cannot disagree about what a command is.
 //!
 //! This module holds no behaviour and no translated text. A [`GroupCommand`] names a window
 //! command; the view runs it through the same owner method the keyboard already reaches, and reads
-//! its label through Fluent at the call site. A [`GroupCommand::Heading`] is a section label, not a
-//! command, and renders as plain text inside the popup.
+//! its label through Fluent at the call site.
 
 use crate::shell::commands::{
     CopyFileNames, CopyFullPaths, CutQueryText, DeleteSelected, EscapeQuery, OpenSelected,
@@ -24,7 +21,7 @@ use crate::shell::commands::{
 use crate::shell::settings::{
     LANGUAGE_EN_US, LANGUAGE_SYSTEM, LANGUAGE_ZH_CN, THEME_DARK, THEME_LIGHT, THEME_SYSTEM,
 };
-use crate::table::model::{SortColumn, SortColumnLabel};
+use crate::table::model::{SortColumn, SortColumnLabel, TableColumn};
 use gpui_kit::gpui::Action;
 
 /// One top-level menu in the title bar. One popup is open at a time, the way a desktop menu bar
@@ -35,6 +32,7 @@ pub enum MenuGroup {
     Edit,
     View,
     Search,
+    Index,
     Tools,
     Help,
 }
@@ -47,6 +45,7 @@ impl MenuGroup {
             MenuGroup::Edit => "edit",
             MenuGroup::View => "view",
             MenuGroup::Search => "search",
+            MenuGroup::Index => "index",
             MenuGroup::Tools => "tools",
             MenuGroup::Help => "help",
         }
@@ -59,6 +58,7 @@ impl MenuGroup {
             MenuGroup::Edit => "menu_edit",
             MenuGroup::View => "menu_view",
             MenuGroup::Search => "menu_search",
+            MenuGroup::Index => "menu_index",
             MenuGroup::Tools => "menu_tools",
             MenuGroup::Help => "menu_help",
         }
@@ -68,13 +68,15 @@ impl MenuGroup {
     #[cfg(test)]
     pub fn open_action(self) -> Box<dyn Action> {
         use crate::shell::commands::{
-            OpenEditMenu, OpenFileMenu, OpenHelpMenu, OpenSearchMenu, OpenToolsMenu, OpenViewMenu,
+            OpenEditMenu, OpenFileMenu, OpenHelpMenu, OpenIndexMenu, OpenSearchMenu, OpenToolsMenu,
+            OpenViewMenu,
         };
         match self {
             MenuGroup::File => Box::new(OpenFileMenu),
             MenuGroup::Edit => Box::new(OpenEditMenu),
             MenuGroup::View => Box::new(OpenViewMenu),
             MenuGroup::Search => Box::new(OpenSearchMenu),
+            MenuGroup::Index => Box::new(OpenIndexMenu),
             MenuGroup::Tools => Box::new(OpenToolsMenu),
             MenuGroup::Help => Box::new(OpenHelpMenu),
         }
@@ -137,6 +139,20 @@ impl ZoomPreset {
             })
             .unwrap_or(ZoomPreset::Standard)
     }
+
+    pub fn step_up(zoom: f32) -> ZoomPreset {
+        match Self::nearest(zoom) {
+            ZoomPreset::Compact => ZoomPreset::Standard,
+            ZoomPreset::Standard | ZoomPreset::Relaxed => ZoomPreset::Relaxed,
+        }
+    }
+
+    pub fn step_down(zoom: f32) -> ZoomPreset {
+        match Self::nearest(zoom) {
+            ZoomPreset::Relaxed => ZoomPreset::Standard,
+            ZoomPreset::Standard | ZoomPreset::Compact => ZoomPreset::Compact,
+        }
+    }
 }
 
 /// One command a menu lists. Every variant reaches an owner method the keyboard or a table header
@@ -167,27 +183,32 @@ pub enum GroupCommand {
     ToggleWholeWord,
     ToggleMatchPath,
     ToggleRegex,
-    // ---- ordering (查看) ------------------------------------------------------------
+    ToggleExcludeHidden,
+    ToggleExcludeSystem,
+    // ---- ordering -------------------------------------------------------------------
     SortBy(SortColumn),
     ReverseOrder,
-    // ---- optional columns (查看) ----------------------------------------------------
-    ToggleCreatedColumn,
+    // ---- table columns --------------------------------------------------------------
+    ToggleColumn(TableColumn),
     // ---- appearance (查看) ----------------------------------------------------------
     SetTheme(&'static str),
     SetZoom(ZoomPreset),
-    // ---- preferences and index state (工具) ----------------------------------------
-    Heading(&'static str),
-    /// A labelled submenu and its rows. Everything keeps file types, sorting, theme and zoom in
-    /// submenus so the top-level menu stays short enough to fit on one screen.
-    Submenu(&'static str, &'static [GroupCommand]),
+    // ---- preferences (工具) and shared submenus -------------------------------------
+    /// A labelled submenu and its sectioned rows. Sections are separated inside the nested popup.
+    Submenu(&'static str, &'static [&'static [GroupCommand]]),
     SetLanguage(&'static str),
     ToggleAutostart,
-    /// The single "Search file contents" switch. Its label is stable; the checkmark carries the
-    /// enabled state, and the details row carries progress and readiness.
+    // ---- index (索引) ---------------------------------------------------------------
+    /// Opens the read-only Index Journal viewer dialog.
+    OpenIndexJournal,
+    /// Dynamic rescan submenu listing all locations plus individual indexed sources.
+    RescanMenu,
+    /// Triggers a full rescan across all indexed sources.
+    RescanAll,
+    /// Submenu grouping the content-search switch, status facts, and recovery actions.
+    ContentIndexMenu,
+    /// The single "Search file contents" switch.
     ToggleContentSearch,
-    /// The popup that carries the content-search facts and the two recovery actions. It is a
-    /// command of its own, so the trigger and its rows share one hide/show decision (CNT-01).
-    ContentSearchDetailsMenu,
     /// Whether the content index is off, backfilling, ready or failed.
     ContentSearchDetails,
     /// How much space the content index takes on disk.
@@ -198,6 +219,12 @@ pub enum GroupCommand {
     RetryContentSearch,
     /// Removes the indexed contents without touching the file-name index.
     ClearContentSearch,
+    /// Submenu grouping extended-property indexing switch and status facts.
+    PropertyIndexMenu,
+    /// Master switch for extended-property indexing.
+    TogglePropertyIndex,
+    PropertyIndexStatus,
+    PropertyIndexUsage,
     // ---- help -----------------------------------------------------------------------
     /// Checks the latest stable release, downloads and verifies the installer, then hands the
     /// verified installer to the elevated setup flow.
@@ -205,22 +232,37 @@ pub enum GroupCommand {
     About,
 }
 
-/// The rows the content-search details popup carries: the three facts about the index, then the
-/// two actions that can change it. One list, so the menu and its coverage check cannot disagree
-/// about what the popup holds.
-pub(crate) const CONTENT_SEARCH_DETAILS_CHILDREN: &[GroupCommand] = &[
-    GroupCommand::ContentSearchDetails,
-    GroupCommand::ContentSearchUsage,
-    GroupCommand::ContentSearchUpdated,
-    GroupCommand::RetryContentSearch,
-    GroupCommand::ClearContentSearch,
+/// Static children for the Rescan submenu; individual indexed sources follow dynamically in the view.
+pub(crate) const RESCAN_SECTIONS: &[&[GroupCommand]] = &[&[GroupCommand::RescanAll]];
+
+/// Sections inside the Content Index submenu: toggle, live facts, and conditional recovery actions.
+pub(crate) const CONTENT_INDEX_SECTIONS: &[&[GroupCommand]] = &[
+    &[GroupCommand::ToggleContentSearch],
+    &[
+        GroupCommand::ContentSearchDetails,
+        GroupCommand::ContentSearchUsage,
+        GroupCommand::ContentSearchUpdated,
+    ],
+    &[
+        GroupCommand::RetryContentSearch,
+        GroupCommand::ClearContentSearch,
+    ],
+];
+
+/// Sections inside the Property Index submenu: toggle and live status/storage facts.
+pub(crate) const PROPERTY_INDEX_SECTIONS: &[&[GroupCommand]] = &[
+    &[GroupCommand::TogglePropertyIndex],
+    &[
+        GroupCommand::PropertyIndexStatus,
+        GroupCommand::PropertyIndexUsage,
+    ],
 ];
 
 impl GroupCommand {
     /// The Fluent message that names this command, visible and announced alike. A command the result
     /// context menu already speaks reuses that message, so one action never carries two wordings.
     ///
-    /// The two index rows are named dynamically by the owner; this is their fallback name for the
+    /// Live index fact rows are formatted dynamically by the owner; this is their fallback name for
     /// coverage checks.
     pub fn label_key(self) -> &'static str {
         match self {
@@ -244,22 +286,30 @@ impl GroupCommand {
             GroupCommand::ToggleWholeWord => "toggle_whole_word_label",
             GroupCommand::ToggleMatchPath => "toggle_match_path_label",
             GroupCommand::ToggleRegex => "toggle_regex_label",
+            GroupCommand::ToggleExcludeHidden => "toggle_exclude_hidden_label",
+            GroupCommand::ToggleExcludeSystem => "toggle_exclude_system_label",
             GroupCommand::SortBy(column) => column.label_key(),
             GroupCommand::ReverseOrder => "sort_reverse",
-            GroupCommand::ToggleCreatedColumn => "menu_show_created",
+            GroupCommand::ToggleColumn(col) => col.label_key(),
             GroupCommand::SetTheme(mode) => theme_label_key(mode),
             GroupCommand::SetZoom(preset) => preset.label_key(),
-            GroupCommand::Heading(key) => key,
             GroupCommand::Submenu(label, _) => label,
             GroupCommand::SetLanguage(code) => language_label_key(code),
             GroupCommand::ToggleAutostart => "settings_autostart",
+            GroupCommand::OpenIndexJournal => "menu_index_journal_open",
+            GroupCommand::RescanMenu => "menu_rescan",
+            GroupCommand::RescanAll => "menu_rescan_all",
+            GroupCommand::ContentIndexMenu => "menu_content_index",
             GroupCommand::ToggleContentSearch => "menu_content_search",
-            GroupCommand::ContentSearchDetailsMenu => "menu_content_search_details",
             GroupCommand::ContentSearchDetails => "menu_content_search_state",
-            GroupCommand::ContentSearchUsage => "menu_content_search_usage",
-            GroupCommand::ContentSearchUpdated => "menu_content_search_updated",
+            GroupCommand::ContentSearchUsage => "menu_content_search_usage_unknown",
+            GroupCommand::ContentSearchUpdated => "menu_content_search_never_updated",
             GroupCommand::RetryContentSearch => "menu_content_search_retry",
             GroupCommand::ClearContentSearch => "menu_content_search_clear",
+            GroupCommand::PropertyIndexMenu => "menu_property_index_menu",
+            GroupCommand::TogglePropertyIndex => "menu_property_index",
+            GroupCommand::PropertyIndexStatus => "menu_property_index_status",
+            GroupCommand::PropertyIndexUsage => "menu_property_index_usage_unknown",
             GroupCommand::CheckForUpdates => "menu_check_updates",
             GroupCommand::About => "menu_about",
         }
@@ -340,17 +390,24 @@ impl GroupCommand {
             .map(|entry| entry.shortcut)
     }
 
-    /// Headings are section labels, not rows a person can run. The menu builder draws them through
-    /// `PopupMenu::label` instead of creating a disabled-looking command.
-    pub const fn is_heading(self) -> bool {
-        matches!(self, GroupCommand::Heading(_))
+    /// `true` when this command is a 1-of-N mutually exclusive selection rendered with a radio dot.
+    pub const fn is_radio_choice(self) -> bool {
+        matches!(
+            self,
+            GroupCommand::SortBy(_)
+                | GroupCommand::SetTheme(_)
+                | GroupCommand::SetZoom(_)
+                | GroupCommand::SetLanguage(_)
+        )
     }
 
-    /// The children of a submenu, or an empty slice for every other row.
-    pub const fn submenu_children(self) -> &'static [GroupCommand] {
+    /// Sectioned rows of a static submenu, or an empty slice for non-submenu commands.
+    pub const fn submenu_sections(self) -> &'static [&'static [GroupCommand]] {
         match self {
-            GroupCommand::Submenu(_, children) => children,
-            GroupCommand::ContentSearchDetailsMenu => CONTENT_SEARCH_DETAILS_CHILDREN,
+            GroupCommand::Submenu(_, sections) => sections,
+            GroupCommand::RescanMenu => RESCAN_SECTIONS,
+            GroupCommand::ContentIndexMenu => CONTENT_INDEX_SECTIONS,
+            GroupCommand::PropertyIndexMenu => PROPERTY_INDEX_SECTIONS,
             _ => &[],
         }
     }
@@ -418,60 +475,102 @@ pub static DEFAULT_GROUPS: &[MenuGroupSpec] = &[
             &[GroupCommand::Submenu(
                 "menu_sort",
                 &[
-                    GroupCommand::SortBy(SortColumn::Name),
-                    GroupCommand::SortBy(SortColumn::Path),
-                    GroupCommand::SortBy(SortColumn::Size),
-                    GroupCommand::SortBy(SortColumn::DateModified),
-                    GroupCommand::ReverseOrder,
+                    &[
+                        GroupCommand::SortBy(SortColumn::Name),
+                        GroupCommand::SortBy(SortColumn::Path),
+                        GroupCommand::SortBy(SortColumn::Size),
+                        GroupCommand::SortBy(SortColumn::DateModified),
+                    ],
+                    &[GroupCommand::ReverseOrder],
                 ],
             )],
-            &[GroupCommand::ToggleCreatedColumn],
+            &[GroupCommand::Submenu(
+                "menu_columns",
+                &[
+                    &[
+                        GroupCommand::ToggleColumn(TableColumn::Name),
+                        GroupCommand::ToggleColumn(TableColumn::Path),
+                        GroupCommand::ToggleColumn(TableColumn::Size),
+                        GroupCommand::ToggleColumn(TableColumn::DateModified),
+                    ],
+                    &[
+                        GroupCommand::ToggleColumn(TableColumn::Optional(
+                            crate::table::model::OptionalColumn::DateCreated,
+                        )),
+                        GroupCommand::ToggleColumn(TableColumn::Optional(
+                            crate::table::model::OptionalColumn::Length,
+                        )),
+                        GroupCommand::ToggleColumn(TableColumn::Optional(
+                            crate::table::model::OptionalColumn::Author,
+                        )),
+                        GroupCommand::ToggleColumn(TableColumn::Optional(
+                            crate::table::model::OptionalColumn::Tags,
+                        )),
+                        GroupCommand::ToggleColumn(TableColumn::Optional(
+                            crate::table::model::OptionalColumn::Dimensions,
+                        )),
+                        GroupCommand::ToggleColumn(TableColumn::Optional(
+                            crate::table::model::OptionalColumn::Framerate,
+                        )),
+                    ],
+                ],
+            )],
             &[GroupCommand::Submenu(
                 "settings_theme",
-                &[
+                &[&[
                     GroupCommand::SetTheme(THEME_SYSTEM),
                     GroupCommand::SetTheme(THEME_LIGHT),
                     GroupCommand::SetTheme(THEME_DARK),
-                ],
+                ]],
             )],
             &[GroupCommand::Submenu(
                 "settings_section_zoom",
-                &[
+                &[&[
                     GroupCommand::SetZoom(ZoomPreset::Compact),
                     GroupCommand::SetZoom(ZoomPreset::Standard),
                     GroupCommand::SetZoom(ZoomPreset::Relaxed),
-                ],
+                ]],
             )],
         ],
     },
     MenuGroupSpec {
         group: MenuGroup::Search,
-        sections: &[&[
-            GroupCommand::ToggleCase,
-            GroupCommand::ToggleWholeWord,
-            GroupCommand::ToggleMatchPath,
-            GroupCommand::ToggleRegex,
-        ]],
+        sections: &[
+            &[
+                GroupCommand::ToggleCase,
+                GroupCommand::ToggleWholeWord,
+                GroupCommand::ToggleMatchPath,
+                GroupCommand::ToggleRegex,
+            ],
+            &[
+                GroupCommand::ToggleExcludeHidden,
+                GroupCommand::ToggleExcludeSystem,
+            ],
+        ],
+    },
+    MenuGroupSpec {
+        group: MenuGroup::Index,
+        sections: &[
+            &[GroupCommand::OpenIndexJournal],
+            &[GroupCommand::RescanMenu],
+            &[
+                GroupCommand::ContentIndexMenu,
+                GroupCommand::PropertyIndexMenu,
+            ],
+        ],
     },
     MenuGroupSpec {
         group: MenuGroup::Tools,
         sections: &[
             &[GroupCommand::Submenu(
                 "settings_section_language",
-                &[
+                &[&[
                     GroupCommand::SetLanguage(LANGUAGE_SYSTEM),
                     GroupCommand::SetLanguage(LANGUAGE_ZH_CN),
                     GroupCommand::SetLanguage(LANGUAGE_EN_US),
-                ],
+                ]],
             )],
-            &[
-                GroupCommand::Heading("menu_startup"),
-                GroupCommand::ToggleAutostart,
-            ],
-            &[
-                GroupCommand::ToggleContentSearch,
-                GroupCommand::ContentSearchDetailsMenu,
-            ],
+            &[GroupCommand::ToggleAutostart],
         ],
     },
     MenuGroupSpec {
@@ -499,8 +598,10 @@ pub fn group_spec(group: MenuGroup) -> &'static MenuGroupSpec {
 pub fn all_commands() -> Vec<GroupCommand> {
     fn visit(command: GroupCommand, out: &mut Vec<GroupCommand>) {
         out.push(command);
-        for child in command.submenu_children() {
-            visit(*child, out);
+        for section in command.submenu_sections() {
+            for child in *section {
+                visit(*child, out);
+            }
         }
     }
 
@@ -521,16 +622,16 @@ mod tests {
 
     use super::{
         all_commands, group_spec, menu_groups, GroupCommand, MenuGroup, ZoomPreset,
-        CONTENT_SEARCH_DETAILS_CHILDREN,
+        CONTENT_INDEX_SECTIONS, PROPERTY_INDEX_SECTIONS, RESCAN_SECTIONS,
     };
     use crate::shell::i18n::I18nManager;
-    use crate::table::model::SortColumn;
+    use crate::table::model::{SortColumn, TableColumn};
     use cairn_ui::theme::{MAX_ZOOM, MIN_ZOOM};
 
     #[test]
     fn every_group_label_is_a_localized_message() {
         let i18n = I18nManager::default();
-        assert_eq!(menu_groups().len(), 6, "the title bar owns six menus");
+        assert_eq!(menu_groups().len(), 7, "the title bar owns seven menus");
         for spec in menu_groups() {
             let text = i18n.get_text(spec.group.label_key());
             assert!(
@@ -575,57 +676,106 @@ mod tests {
         );
     }
 
-    /// The Tools menu offers the content-search switch and its details popup. The search-scope
-    /// submenu is gone: the installed service is the only index source.
     #[test]
-    fn the_tools_menu_offers_the_content_search_without_a_scope_choice() {
+    fn index_and_tools_menus_separate_index_operations_from_preferences() {
         let tools = group_spec(MenuGroup::Tools);
+        let tool_commands: Vec<GroupCommand> = tools
+            .sections
+            .iter()
+            .flat_map(|section| section.iter().copied())
+            .collect();
+        assert_eq!(
+            tool_commands.len(),
+            2,
+            "Tools keeps only language and autostart"
+        );
+        assert!(tool_commands.contains(&GroupCommand::ToggleAutostart));
+        assert!(tool_commands
+            .iter()
+            .any(|cmd| matches!(cmd, GroupCommand::Submenu("settings_section_language", _))));
 
-        let mut content_switches = 0usize;
-        let mut detail_menus = 0usize;
-        for section in tools.sections {
-            for command in *section {
-                match command {
-                    GroupCommand::ToggleContentSearch => content_switches += 1,
-                    GroupCommand::ContentSearchDetailsMenu => detail_menus += 1,
-                    _ => {}
-                }
-            }
-        }
-        assert_eq!(content_switches, 1, "content search is a single switch");
-        assert_eq!(detail_menus, 1, "the content details live in one popup");
+        let index = group_spec(MenuGroup::Index);
+        let index_commands: Vec<GroupCommand> = index
+            .sections
+            .iter()
+            .flat_map(|section| section.iter().copied())
+            .collect();
+        assert_eq!(
+            index_commands,
+            vec![
+                GroupCommand::OpenIndexJournal,
+                GroupCommand::RescanMenu,
+                GroupCommand::ContentIndexMenu,
+                GroupCommand::PropertyIndexMenu,
+            ]
+        );
     }
 
-    /// ui.md §1.9: the popup beside the content-search switch carries how much is indexed, when
-    /// it was last updated, and the two recovery actions. Each of them is named exactly once, so
-    /// the popup cannot grow a second row that means the same thing.
     #[test]
-    fn the_content_search_details_popup_carries_the_documented_rows() {
-        let children = GroupCommand::ContentSearchDetailsMenu.submenu_children();
+    fn index_submenus_carry_their_documented_switches_facts_and_actions() {
+        let rescan_children: Vec<GroupCommand> = GroupCommand::RescanMenu
+            .submenu_sections()
+            .iter()
+            .flat_map(|section| section.iter().copied())
+            .collect();
+        assert_eq!(GroupCommand::RescanMenu.submenu_sections(), RESCAN_SECTIONS);
+        assert_eq!(rescan_children, vec![GroupCommand::RescanAll]);
+
+        let content_children: Vec<GroupCommand> = GroupCommand::ContentIndexMenu
+            .submenu_sections()
+            .iter()
+            .flat_map(|section| section.iter().copied())
+            .collect();
         assert_eq!(
-            children, CONTENT_SEARCH_DETAILS_CHILDREN,
-            "the popup and its row list are the same list"
+            GroupCommand::ContentIndexMenu.submenu_sections(),
+            CONTENT_INDEX_SECTIONS
+        );
+        assert_eq!(
+            content_children,
+            vec![
+                GroupCommand::ToggleContentSearch,
+                GroupCommand::ContentSearchDetails,
+                GroupCommand::ContentSearchUsage,
+                GroupCommand::ContentSearchUpdated,
+                GroupCommand::RetryContentSearch,
+                GroupCommand::ClearContentSearch,
+            ]
         );
 
-        let mut facts = 0usize;
-        let mut actions = 0usize;
-        for child in children {
-            match child {
-                GroupCommand::ContentSearchDetails
-                | GroupCommand::ContentSearchUsage
-                | GroupCommand::ContentSearchUpdated => facts += 1,
-                GroupCommand::RetryContentSearch | GroupCommand::ClearContentSearch => actions += 1,
-                other => panic!("{other:?} does not belong in the content-search details popup"),
-            }
-        }
+        let property_children: Vec<GroupCommand> = GroupCommand::PropertyIndexMenu
+            .submenu_sections()
+            .iter()
+            .flat_map(|section| section.iter().copied())
+            .collect();
         assert_eq!(
-            facts, 3,
-            "the popup states the state, the size and the last update"
+            GroupCommand::PropertyIndexMenu.submenu_sections(),
+            PROPERTY_INDEX_SECTIONS
         );
         assert_eq!(
-            actions, 2,
-            "the popup offers exactly the two recovery actions"
+            property_children,
+            vec![
+                GroupCommand::TogglePropertyIndex,
+                GroupCommand::PropertyIndexStatus,
+                GroupCommand::PropertyIndexUsage,
+            ]
         );
+    }
+
+    #[test]
+    fn radio_choices_match_only_mutually_exclusive_option_families() {
+        assert!(GroupCommand::SortBy(SortColumn::Name).is_radio_choice());
+        assert!(GroupCommand::SetTheme(crate::shell::settings::THEME_SYSTEM).is_radio_choice());
+        assert!(GroupCommand::SetZoom(ZoomPreset::Standard).is_radio_choice());
+        assert!(
+            GroupCommand::SetLanguage(crate::shell::settings::LANGUAGE_SYSTEM).is_radio_choice()
+        );
+
+        assert!(!GroupCommand::ReverseOrder.is_radio_choice());
+        assert!(!GroupCommand::ToggleColumn(TableColumn::Path).is_radio_choice());
+        assert!(!GroupCommand::ToggleCase.is_radio_choice());
+        assert!(!GroupCommand::ToggleAutostart.is_radio_choice());
+        assert!(!GroupCommand::ToggleContentSearch.is_radio_choice());
+        assert!(!GroupCommand::TogglePropertyIndex.is_radio_choice());
     }
 
     /// An item that resolves to no text is a silent failure, and a command the user cannot name is a
@@ -682,20 +832,28 @@ mod tests {
             match command {
                 GroupCommand::SortBy(_)
                 | GroupCommand::ReverseOrder
-                | GroupCommand::ToggleCreatedColumn
+                | GroupCommand::ToggleColumn(_)
                 | GroupCommand::SetTheme(_)
                 | GroupCommand::SetZoom(_)
-                | GroupCommand::Heading(_)
                 | GroupCommand::Submenu(_, _)
                 | GroupCommand::SetLanguage(_)
                 | GroupCommand::ToggleAutostart
+                | GroupCommand::ToggleExcludeHidden
+                | GroupCommand::ToggleExcludeSystem
+                | GroupCommand::OpenIndexJournal
+                | GroupCommand::RescanMenu
+                | GroupCommand::RescanAll
+                | GroupCommand::ContentIndexMenu
                 | GroupCommand::ToggleContentSearch
-                | GroupCommand::ContentSearchDetailsMenu
                 | GroupCommand::ContentSearchDetails
                 | GroupCommand::ContentSearchUsage
                 | GroupCommand::ContentSearchUpdated
                 | GroupCommand::RetryContentSearch
                 | GroupCommand::ClearContentSearch
+                | GroupCommand::PropertyIndexMenu
+                | GroupCommand::TogglePropertyIndex
+                | GroupCommand::PropertyIndexStatus
+                | GroupCommand::PropertyIndexUsage
                 | GroupCommand::EmptyRecycleBin
                 | GroupCommand::CheckForUpdates
                 | GroupCommand::About => {
@@ -733,20 +891,28 @@ mod tests {
             GroupCommand::EmptyRecycleBin,
             GroupCommand::SortBy(SortColumn::Name),
             GroupCommand::ReverseOrder,
-            GroupCommand::ToggleCreatedColumn,
+            GroupCommand::ToggleColumn(TableColumn::Name),
             GroupCommand::SetTheme(crate::shell::settings::THEME_SYSTEM),
             GroupCommand::SetZoom(ZoomPreset::Standard),
-            GroupCommand::Heading("menu_startup"),
             GroupCommand::Submenu("menu_sort", &[]),
             GroupCommand::SetLanguage(crate::shell::settings::LANGUAGE_SYSTEM),
             GroupCommand::ToggleAutostart,
+            GroupCommand::ToggleExcludeHidden,
+            GroupCommand::ToggleExcludeSystem,
+            GroupCommand::OpenIndexJournal,
+            GroupCommand::RescanMenu,
+            GroupCommand::RescanAll,
+            GroupCommand::ContentIndexMenu,
             GroupCommand::ToggleContentSearch,
-            GroupCommand::ContentSearchDetailsMenu,
             GroupCommand::ContentSearchDetails,
             GroupCommand::ContentSearchUsage,
             GroupCommand::ContentSearchUpdated,
             GroupCommand::RetryContentSearch,
             GroupCommand::ClearContentSearch,
+            GroupCommand::PropertyIndexMenu,
+            GroupCommand::TogglePropertyIndex,
+            GroupCommand::PropertyIndexStatus,
+            GroupCommand::PropertyIndexUsage,
             GroupCommand::CheckForUpdates,
             GroupCommand::About,
         ];
@@ -851,6 +1017,64 @@ mod tests {
         assert_eq!(ZoomPreset::nearest(0.75), ZoomPreset::Compact);
         assert_eq!(ZoomPreset::nearest(1.25), ZoomPreset::Relaxed);
         assert_eq!(ZoomPreset::nearest(1.0), ZoomPreset::Standard);
+        assert_eq!(
+            ZoomPreset::step_up(ZoomPreset::Compact.value()),
+            ZoomPreset::Standard
+        );
+        assert_eq!(
+            ZoomPreset::step_up(ZoomPreset::Standard.value()),
+            ZoomPreset::Relaxed
+        );
+        assert_eq!(
+            ZoomPreset::step_up(ZoomPreset::Relaxed.value()),
+            ZoomPreset::Relaxed
+        );
+        assert_eq!(
+            ZoomPreset::step_down(ZoomPreset::Relaxed.value()),
+            ZoomPreset::Standard
+        );
+        assert_eq!(
+            ZoomPreset::step_down(ZoomPreset::Standard.value()),
+            ZoomPreset::Compact
+        );
+        assert_eq!(
+            ZoomPreset::step_down(ZoomPreset::Compact.value()),
+            ZoomPreset::Compact
+        );
+    }
+
+    #[test]
+    fn search_menu_includes_hidden_and_system_exclusion_toggles() {
+        let search = group_spec(MenuGroup::Search);
+        let commands: Vec<GroupCommand> = search
+            .sections
+            .iter()
+            .flat_map(|section| section.iter().copied())
+            .collect();
+        assert!(commands.contains(&GroupCommand::ToggleExcludeHidden));
+        assert!(commands.contains(&GroupCommand::ToggleExcludeSystem));
+    }
+
+    #[test]
+    fn view_menu_offers_all_table_columns_with_name_locked() {
+        use crate::table::model::TableColumn;
+
+        let view = group_spec(MenuGroup::View);
+        let commands: Vec<GroupCommand> = view
+            .sections
+            .iter()
+            .flat_map(|section| section.iter().copied())
+            .flat_map(|cmd| {
+                let mut flat = vec![cmd];
+                for sub_section in cmd.submenu_sections() {
+                    flat.extend(sub_section.iter().copied());
+                }
+                flat
+            })
+            .collect();
+        for col in TableColumn::ALL {
+            assert!(commands.contains(&GroupCommand::ToggleColumn(col)));
+        }
     }
 
     #[test]
@@ -865,6 +1089,7 @@ mod tests {
                 MenuGroup::Edit,
                 MenuGroup::View,
                 MenuGroup::Search,
+                MenuGroup::Index,
                 MenuGroup::Tools,
                 MenuGroup::Help,
             ]

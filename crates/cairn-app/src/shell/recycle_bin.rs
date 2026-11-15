@@ -242,7 +242,8 @@ pub(crate) fn row_for(item: &RecycleBinItem) -> FileRowData {
         flags: 0,
         name_highlights: Vec::new(),
         path_highlights: Vec::new(),
-        snippet: None,
+        snippets: Vec::new(),
+        properties: None,
     }
 }
 
@@ -328,7 +329,13 @@ pub(crate) fn sort_items(
                     .then_with(|| a.fs_path.cmp(&b.fs_path))
             });
         }
-        SortColumn::DateModified | SortColumn::DateCreated => {
+        SortColumn::DateModified
+        | SortColumn::DateCreated
+        | SortColumn::Length
+        | SortColumn::Author
+        | SortColumn::Tags
+        | SortColumn::Dimensions
+        | SortColumn::Framerate => {
             items.sort_by(|a, b| {
                 a.deleted_ts
                     .cmp(&b.deleted_ts)
@@ -549,8 +556,7 @@ impl CairnApp {
         if self.recycle_bin.error().is_some() || self.recycle_bin.is_loading() {
             return;
         }
-        let column = self.results.table.sort_column;
-        let ascending = self.results.table.sort_asc;
+        let (column, ascending) = self.results.table.primary_sort();
         self.sync_bin_selection_keys();
         self.recycle_bin.sort(column, ascending);
         self.apply_recycle_bin_filter(true, cx);
@@ -601,11 +607,8 @@ impl CairnApp {
             Ok(items) => {
                 let mut items: Vec<std::sync::Arc<RecycleBinItem>> =
                     items.into_iter().map(std::sync::Arc::new).collect();
-                sort_items(
-                    &mut items,
-                    self.results.table.sort_column,
-                    self.results.table.sort_asc,
-                );
+                let (sort_col, sort_asc) = self.results.table.primary_sort();
+                sort_items(&mut items, sort_col, sort_asc);
                 self.recycle_bin.install_listing(items);
                 if self.recycle_bin.all().is_empty() && !self.query.search_input.text.is_empty() {
                     self.query.search_input.clear();

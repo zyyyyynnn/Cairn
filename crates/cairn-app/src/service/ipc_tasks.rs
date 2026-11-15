@@ -11,10 +11,32 @@ use crate::service::config_submission::{
     self, IndexScopeChange, SubmissionOutcome, SubmissionState,
 };
 use crate::service::service_issue::{should_try_silent_start, ServiceIssue};
-use cairn_protocol::status::VolumeStatusSummary;
+use cairn_protocol::message::{ResponsePayload, SourceId};
+use cairn_protocol::status::{
+    ContentIndexState, SourceKind, SourceStatusSummary, VolumeStatusSummary,
+};
 use gpui_kit::gpui::{AsyncApp, Context};
 use std::sync::OnceLock;
 use std::time::Duration;
+
+pub(crate) fn source_id_for_drive(
+    sources: &[SourceStatusSummary],
+    drive: char,
+) -> Option<SourceId> {
+    let drive_upper = drive.to_ascii_uppercase();
+    sources
+        .iter()
+        .find(|source| {
+            source.kind == SourceKind::NtfsVolume
+                && source
+                    .root_path
+                    .chars()
+                    .next()
+                    .is_some_and(|ch| ch.to_ascii_uppercase() == drive_upper)
+        })
+        .map(|source| source.source_id)
+        .or_else(|| SourceId::for_drive(drive_upper))
+}
 
 #[derive(Clone, Copy)]
 enum ContentAction {
@@ -303,6 +325,9 @@ impl CairnApp {
             self.request_result_set(ResultSetChange::Probe, cx);
         }
         self.refresh_content_status(cx);
+        self.refresh_property_index_status(cx);
+        self.refresh_index_journal_status(cx);
+        self.refresh_sources(cx);
     }
 
     /// Records a failed probe. Checks SCM registration off the main UI thread, and when the
@@ -629,6 +654,417 @@ impl CairnApp {
         })
         .detach();
     }
+
+    fn spawn_service_task<T, Fut, OnDone>(
+        &mut self,
+        cx: &mut Context<Self>,
+        work: impl FnOnce(cairn_client::ServiceSession) -> Fut + Send + 'static,
+        on_done: OnDone,
+    ) where
+        T: Send + 'static,
+        Fut: std::future::Future<Output = T> + Send + 'static,
+        OnDone: FnOnce(&mut CairnApp, Option<T>, &mut Context<Self>) + 'static,
+    {
+        let session = self.service.session.clone();
+        cx.spawn(async move |this, cx: &mut AsyncApp| {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            get_tokio_runtime().spawn(async move {
+                let _ = tx.send(work(session).await);
+            });
+            let result = rx.await.ok();
+            let _ = this.update(cx, |this: &mut CairnApp, cx| {
+                on_done(this, result, cx);
+            });
+        })
+        .detach();
+    }
+
+    pub fn refresh_property_index_status(&mut self, cx: &mut Context<Self>) {
+        if self.service.property_status_loading {
+            return;
+        }
+        self.service.property_status_loading = true;
+        self.spawn_service_task(
+            cx,
+            |session| async move { session.get_property_index_status().await },
+            |this, result, cx| {
+                this.service.property_status_loading = false;
+                match result {
+                    Some(Ok(envelope)) => match envelope.payload {
+                        ResponsePayload::PropertyIndexStatus { status } => {
+                            this.service.property_status = status;
+                            this.service.property_status_error = None;
+                        }
+                        ResponsePayload::Error { message, .. } => {
+                            this.service.property_status_error = Some(message);
+                        }
+                        _ => {
+                            this.service.property_status_error =
+                                Some("unexpected property index status payload".to_string());
+                        }
+                    },
+                    Some(Err(err)) => {
+                        this.service.property_status_error = Some(err.to_string());
+                    }
+                    None => {
+                        this.service.property_status_error =
+                            Some("property index status task stopped".to_string());
+                    }
+                }
+                let follow_up = matches!(
+                    this.service.property_status.state,
+                    ContentIndexState::Backfilling { .. }
+                ) && this.service.property_status_error.is_none();
+                this.repaint_shell_and_overlays(cx);
+                if follow_up {
+                    this.schedule_property_status_refresh(cx);
+                }
+            },
+        );
+    }
+
+    fn schedule_property_status_refresh(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx: &mut AsyncApp| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(700))
+                .await;
+            let _ = this.update(cx, |this: &mut CairnApp, cx| {
+                this.refresh_property_index_status(cx);
+            });
+        })
+        .detach();
+    }
+
+    pub fn set_property_index_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.service.property_action_pending {
+            return;
+        }
+        self.service.property_action_pending = true;
+        self.repaint_shell_and_overlays(cx);
+        self.spawn_service_task(
+            cx,
+            move |session| async move { session.set_property_index_enabled(enabled).await },
+            |this, result, cx| {
+                this.service.property_action_pending = false;
+                match result {
+                    Some(Ok(envelope)) => match envelope.payload {
+                        ResponsePayload::PropertyIndexStatus { status } => {
+                            this.service.property_status = status;
+                            this.service.property_status_error = None;
+                            if matches!(
+                                this.service.property_status.state,
+                                ContentIndexState::Backfilling { .. }
+                            ) {
+                                this.schedule_property_status_refresh(cx);
+                            }
+                        }
+                        ResponsePayload::Error { message, .. } => {
+                            let title = this.i18n.get_text("toast_property_index_failed_title");
+                            this.show_error_toast(title, message, cx);
+                        }
+                        _ => {
+                            let title = this.i18n.get_text("toast_property_index_failed_title");
+                            this.show_error_toast(
+                                title,
+                                "unexpected property index update response",
+                                cx,
+                            );
+                        }
+                    },
+                    Some(Err(err)) => {
+                        let title = this.i18n.get_text("toast_property_index_failed_title");
+                        this.show_error_toast(title, err.to_string(), cx);
+                    }
+                    None => {
+                        let title = this.i18n.get_text("toast_property_index_failed_title");
+                        this.show_error_toast(title, "property index task stopped", cx);
+                    }
+                }
+                this.repaint_shell_and_overlays(cx);
+            },
+        );
+    }
+
+    pub fn refresh_index_journal_status(&mut self, cx: &mut Context<Self>) {
+        if self.service.journal_status_loading {
+            return;
+        }
+        self.service.journal_status_loading = true;
+        self.spawn_service_task(
+            cx,
+            |session| async move { session.get_index_journal(0, 0).await },
+            |this, result, cx| {
+                this.service.journal_status_loading = false;
+                match result {
+                    Some(Ok(envelope)) => match envelope.payload {
+                        ResponsePayload::IndexJournalResult { status, .. }
+                        | ResponsePayload::IndexJournalStatus { status } => {
+                            this.service.journal_status = status;
+                            this.service.journal_status_error = None;
+                        }
+                        ResponsePayload::Error { message, .. } => {
+                            this.service.journal_status_error = Some(message);
+                        }
+                        _ => {
+                            this.service.journal_status_error =
+                                Some("unexpected index journal payload".to_string());
+                        }
+                    },
+                    Some(Err(err)) => {
+                        this.service.journal_status_error = Some(err.to_string());
+                    }
+                    None => {
+                        this.service.journal_status_error =
+                            Some("index journal status task stopped".to_string());
+                    }
+                }
+                this.repaint_shell_and_overlays(cx);
+            },
+        );
+    }
+
+    pub fn refresh_index_journal_dialog(&mut self, cx: &mut Context<Self>) {
+        const JOURNAL_DIALOG_LIMIT: usize = 200;
+
+        if self.service.journal_entries_loading {
+            return;
+        }
+        self.service.journal_entries_loading = true;
+        self.service.journal_entries_error = None;
+        let initial_after = self
+            .service
+            .journal_status
+            .newest_seq
+            .saturating_sub(JOURNAL_DIALOG_LIMIT as u64);
+        self.repaint_shell_and_overlays(cx);
+        self.spawn_service_task(
+            cx,
+            move |session| async move {
+                let first = session
+                    .get_index_journal(initial_after, JOURNAL_DIALOG_LIMIT)
+                    .await;
+                let Ok(envelope) = first else {
+                    return first;
+                };
+                if let ResponsePayload::IndexJournalResult { ref status, .. } = envelope.payload {
+                    let latest_after = status
+                        .newest_seq
+                        .saturating_sub(JOURNAL_DIALOG_LIMIT as u64);
+                    if latest_after > initial_after {
+                        return session
+                            .get_index_journal(latest_after, JOURNAL_DIALOG_LIMIT)
+                            .await;
+                    }
+                }
+                Ok(envelope)
+            },
+            |this, result, cx| {
+                this.service.journal_entries_loading = false;
+                match result {
+                    Some(Ok(envelope)) => match envelope.payload {
+                        ResponsePayload::IndexJournalResult {
+                            status,
+                            mut entries,
+                        } => {
+                            entries.reverse();
+                            this.service.journal_status = status;
+                            this.service.journal_status_error = None;
+                            this.service.journal_entries = entries;
+                            this.service.journal_entries_error = None;
+                        }
+                        ResponsePayload::Error { message, .. } => {
+                            this.service.journal_entries_error = Some(message);
+                        }
+                        _ => {
+                            this.service.journal_entries_error =
+                                Some("unexpected index journal payload".to_string());
+                        }
+                    },
+                    Some(Err(err)) => {
+                        this.service.journal_entries_error = Some(err.to_string());
+                    }
+                    None => {
+                        this.service.journal_entries_error =
+                            Some("index journal task stopped".to_string());
+                    }
+                }
+                this.repaint_shell_and_overlays(cx);
+            },
+        );
+    }
+
+    pub fn set_index_journal_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.service.journal_action_pending {
+            return;
+        }
+        self.service.journal_action_pending = true;
+        self.repaint_shell_and_overlays(cx);
+        self.spawn_service_task(
+            cx,
+            move |session| async move { session.set_index_journal_enabled(enabled).await },
+            |this, result, cx| {
+                this.service.journal_action_pending = false;
+                match result {
+                    Some(Ok(envelope)) => match envelope.payload {
+                        ResponsePayload::IndexJournalStatus { status }
+                        | ResponsePayload::IndexJournalResult { status, .. } => {
+                            let is_enabled = status.enabled;
+                            this.service.journal_status = status;
+                            this.service.journal_status_error = None;
+                            this.service.journal_entries_error = None;
+                            if is_enabled {
+                                this.refresh_index_journal_dialog(cx);
+                            } else {
+                                this.service.journal_entries.clear();
+                            }
+                        }
+                        ResponsePayload::Error { message, .. } => {
+                            let title = this.i18n.get_text("toast_index_journal_failed_title");
+                            this.show_error_toast(title, message, cx);
+                        }
+                        _ => {
+                            let title = this.i18n.get_text("toast_index_journal_failed_title");
+                            this.show_error_toast(
+                                title,
+                                "unexpected index journal update response",
+                                cx,
+                            );
+                        }
+                    },
+                    Some(Err(err)) => {
+                        let title = this.i18n.get_text("toast_index_journal_failed_title");
+                        this.show_error_toast(title, err.to_string(), cx);
+                    }
+                    None => {
+                        let title = this.i18n.get_text("toast_index_journal_failed_title");
+                        this.show_error_toast(title, "index journal task stopped", cx);
+                    }
+                }
+                this.repaint_shell_and_overlays(cx);
+            },
+        );
+    }
+
+    pub fn refresh_sources(&mut self, cx: &mut Context<Self>) {
+        self.spawn_service_task(
+            cx,
+            |session| async move { session.get_sources().await },
+            |this, result, cx| {
+                if let Some(Ok(envelope)) = result {
+                    if let ResponsePayload::SourcesResult { sources } = envelope.payload {
+                        this.service.sources = sources;
+                        cx.notify();
+                    }
+                }
+            },
+        );
+    }
+
+    pub fn rescan_all(&mut self, cx: &mut Context<Self>) {
+        if self.service.service_control_pending {
+            return;
+        }
+        self.service.service_control_pending = true;
+        self.repaint_shell_and_overlays(cx);
+        self.spawn_service_task(
+            cx,
+            |session| async move { session.rescan(None).await },
+            |this, result, cx| {
+                this.service.service_control_pending = false;
+                match result {
+                    Some(Ok(envelope)) => match envelope.payload {
+                        ResponsePayload::RescanAck { success: true, .. } => {
+                            let title = this.i18n.get_text("toast_rescan_started_title");
+                            let body = this.i18n.get_text("toast_rescan_started_body");
+                            this.show_info_toast(title, body, cx);
+                            this.start_status_refresh(cx);
+                        }
+                        ResponsePayload::Error { message, .. } => {
+                            let title = this.i18n.get_text("toast_rescan_failed_title");
+                            this.show_error_toast(title, message, cx);
+                        }
+                        _ => {
+                            let title = this.i18n.get_text("toast_rescan_failed_title");
+                            this.show_error_toast(title, "service refused rescan", cx);
+                        }
+                    },
+                    Some(Err(err)) => {
+                        let title = this.i18n.get_text("toast_rescan_failed_title");
+                        this.show_error_toast(title, err.to_string(), cx);
+                    }
+                    None => {
+                        let title = this.i18n.get_text("toast_rescan_failed_title");
+                        this.show_error_toast(title, "rescan task stopped", cx);
+                    }
+                }
+                this.repaint_shell_and_overlays(cx);
+            },
+        );
+    }
+
+    pub fn rescan_drive(&mut self, drive: char, cx: &mut Context<Self>) {
+        let drive_upper = drive.to_ascii_uppercase();
+        let Some(source_id) = source_id_for_drive(&self.service.sources, drive_upper) else {
+            let title = self.i18n.get_text("toast_rescan_failed_title");
+            self.show_error_toast(
+                title,
+                format!("no source registered for {drive_upper}:\\"),
+                cx,
+            );
+            return;
+        };
+        let mut args = fluent_bundle::FluentArgs::new();
+        args.set("drive", drive_upper.to_string());
+        let label = self.i18n.get_text_with_args("drive_label", &args);
+        self.rescan_source(source_id, label, cx);
+    }
+
+    pub fn rescan_source(&mut self, source_id: SourceId, label: String, cx: &mut Context<Self>) {
+        if self.service.service_control_pending {
+            return;
+        }
+        self.service.service_control_pending = true;
+        self.repaint_shell_and_overlays(cx);
+        self.spawn_service_task(
+            cx,
+            move |session| async move { session.rescan_source(source_id).await },
+            move |this, result, cx| {
+                this.service.service_control_pending = false;
+                match result {
+                    Some(Ok(envelope)) => match envelope.payload {
+                        ResponsePayload::RescanSourceAck { success: true, .. } => {
+                            let title = this.i18n.get_text("toast_rescan_started_title");
+                            let mut args = fluent_bundle::FluentArgs::new();
+                            args.set("source", label.as_str());
+                            let body = this
+                                .i18n
+                                .get_text_with_args("toast_rescan_source_started_body", &args);
+                            this.show_info_toast(title, body, cx);
+                            this.start_status_refresh(cx);
+                            this.refresh_sources(cx);
+                        }
+                        ResponsePayload::Error { message, .. } => {
+                            let title = this.i18n.get_text("toast_rescan_failed_title");
+                            this.show_error_toast(title, message, cx);
+                        }
+                        _ => {
+                            let title = this.i18n.get_text("toast_rescan_failed_title");
+                            this.show_error_toast(title, "service refused source rescan", cx);
+                        }
+                    },
+                    Some(Err(err)) => {
+                        let title = this.i18n.get_text("toast_rescan_failed_title");
+                        this.show_error_toast(title, err.to_string(), cx);
+                    }
+                    None => {
+                        let title = this.i18n.get_text("toast_rescan_failed_title");
+                        this.show_error_toast(title, "source rescan task stopped", cx);
+                    }
+                }
+                this.repaint_shell_and_overlays(cx);
+            },
+        );
+    }
 }
 
 #[cfg(test)]
@@ -720,6 +1156,39 @@ mod tests {
             status_refresh_decision(false, false, false),
             StatusRefreshDecision::Stop,
             "a hidden table has nothing to refresh when loading ends"
+        );
+    }
+
+    #[test]
+    fn source_id_resolves_drive_from_sources_or_drive_fallback() {
+        use cairn_protocol::message::SourceId;
+        use cairn_protocol::status::{SourceKind, SourceStatusSummary, VolumeState};
+
+        let custom_c = SourceId(99);
+        let sources = vec![
+            SourceStatusSummary {
+                source_id: SourceId(200),
+                kind: SourceKind::Folder,
+                root_path: r"C:\Projects".to_string(),
+                volume_guid: String::new(),
+                status: VolumeState::Synced,
+                indexed_count: 10,
+                live_watch_enabled: true,
+            },
+            SourceStatusSummary {
+                source_id: custom_c,
+                kind: SourceKind::NtfsVolume,
+                root_path: r"C:\".to_string(),
+                volume_guid: "guid-c".to_string(),
+                status: VolumeState::Synced,
+                indexed_count: 100,
+                live_watch_enabled: true,
+            },
+        ];
+        assert_eq!(super::source_id_for_drive(&sources, 'c'), Some(custom_c));
+        assert_eq!(
+            super::source_id_for_drive(&sources, 'd'),
+            SourceId::for_drive('D')
         );
     }
 }

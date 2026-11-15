@@ -18,6 +18,7 @@ pub(crate) mod file_icon;
 #[cfg(windows)]
 pub(crate) mod hotkey;
 pub(crate) mod i18n;
+pub(crate) mod index_journal;
 pub(crate) mod menu_actions;
 pub(crate) mod menu_rules;
 pub(crate) mod motion;

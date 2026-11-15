@@ -9,6 +9,8 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 
+use crate::table::model::OptionalColumn;
+use cairn_protocol::message::FileRowData;
 use gpui_kit::gpui::SharedString;
 
 const MAX_MINUTE_CACHE_ENTRIES: usize = 512;
@@ -176,6 +178,74 @@ pub(crate) fn format_timestamp_cached(ts: i64) -> SharedString {
     UI_ROW_PRESENTATION_CACHE.with(|cache| cache.borrow_mut().format_timestamp(ts))
 }
 
+pub(crate) fn format_length_ms(ms: Option<u64>) -> String {
+    let Some(ms) = ms.filter(|&ms| ms > 0) else {
+        return String::new();
+    };
+    let total_secs = ms / 1000;
+    let hours = total_secs / 3600;
+    let mins = (total_secs % 3600) / 60;
+    let secs = total_secs % 60;
+    if hours > 0 {
+        format!("{hours}:{mins:02}:{secs:02}")
+    } else {
+        format!("{mins:02}:{secs:02}")
+    }
+}
+
+pub(crate) fn format_author(author: Option<&str>) -> &str {
+    author
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("")
+}
+
+pub(crate) fn format_tags(tags: Option<&str>) -> &str {
+    tags.map(str::trim).filter(|s| !s.is_empty()).unwrap_or("")
+}
+
+pub(crate) fn format_dimensions(dims: Option<(u32, u32)>) -> String {
+    match dims {
+        Some((w, h)) if w > 0 && h > 0 => format!("{w} × {h}"),
+        _ => String::new(),
+    }
+}
+
+pub(crate) fn format_framerate_mfps(mfps: Option<u32>) -> String {
+    let Some(mfps) = mfps.filter(|&r| r > 0) else {
+        return String::new();
+    };
+    let whole = mfps / 1000;
+    let rem = mfps % 1000;
+    if rem == 0 {
+        format!("{whole} fps")
+    } else {
+        let frac = format!("{rem:03}");
+        format!("{whole}.{} fps", frac.trim_end_matches('0'))
+    }
+}
+
+pub(crate) fn format_optional_cell(row: &FileRowData, col: OptionalColumn) -> SharedString {
+    if col == OptionalColumn::DateCreated {
+        return format_timestamp_cached(row.created_ts);
+    }
+    let Some(props) = row.properties.as_ref() else {
+        return SharedString::default();
+    };
+    match col {
+        OptionalColumn::DateCreated => unreachable!(),
+        OptionalColumn::Length => SharedString::from(format_length_ms(props.length_ms)),
+        OptionalColumn::Author => {
+            SharedString::from(format_author(props.author.as_deref()).to_string())
+        }
+        OptionalColumn::Tags => SharedString::from(format_tags(props.tags.as_deref()).to_string()),
+        OptionalColumn::Dimensions => SharedString::from(format_dimensions(props.dimensions)),
+        OptionalColumn::Framerate => {
+            SharedString::from(format_framerate_mfps(props.framerate_mfps))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
@@ -245,5 +315,31 @@ mod tests {
         ] {
             assert_eq!(cache.format_timestamp(filetime).as_ref(), expected);
         }
+    }
+
+    #[test]
+    fn property_formatters_render_values_and_blank_fallback() {
+        assert_eq!(format_length_ms(None), "");
+        assert_eq!(format_length_ms(Some(0)), "");
+        assert_eq!(format_length_ms(Some(65_000)), "01:05");
+        assert_eq!(format_length_ms(Some(3_723_000)), "1:02:03");
+
+        assert_eq!(format_author(None), "");
+        assert_eq!(format_author(Some("   ")), "");
+        assert_eq!(format_author(Some(" Alice ")), "Alice");
+
+        assert_eq!(format_tags(None), "");
+        assert_eq!(format_tags(Some("")), "");
+        assert_eq!(format_tags(Some("design, rust")), "design, rust");
+
+        assert_eq!(format_dimensions(None), "");
+        assert_eq!(format_dimensions(Some((0, 1080))), "");
+        assert_eq!(format_dimensions(Some((3840, 2160))), "3840 × 2160");
+
+        assert_eq!(format_framerate_mfps(None), "");
+        assert_eq!(format_framerate_mfps(Some(0)), "");
+        assert_eq!(format_framerate_mfps(Some(60_000)), "60 fps");
+        assert_eq!(format_framerate_mfps(Some(29_970)), "29.97 fps");
+        assert_eq!(format_framerate_mfps(Some(23_976)), "23.976 fps");
     }
 }

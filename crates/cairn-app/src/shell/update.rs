@@ -9,33 +9,24 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::app::{layout, CairnApp};
+use crate::app::CairnApp;
 use crate::service::elevation::{
     launch_elevated_installer, lock_verified_installer, ElevationError,
 };
 use crate::service::ipc_tasks::get_tokio_runtime;
-use crate::shell::dialogs;
-use crate::shell::theme::ShellTokens;
-use cairn_ui::theme::dialog_surface;
+use crate::shell::toast::ToastAction;
 use fluent_bundle::FluentArgs;
-use gpui_kit::assets::IconName as AssetIconName;
-use gpui_kit::component::button::ButtonVariant;
-use gpui_kit::component::dialog::DialogEntrance;
-use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::v_flex;
-use gpui_kit::component::ActiveTheme as _;
-use gpui_kit::component::Sizable as _;
-use gpui_kit::component::WindowExt as _;
 use gpui_kit::gpui::*;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
+pub(crate) const REPOSITORY_URL: &str = "https://github.com/zyyyyynnn/Cairn";
 const RELEASES_API: &str = "https://api.github.com/repos/zyyyyynnn/Cairn/releases/latest";
 const SETUP_ASSET: &str = "CairnSetup.exe";
 const SUMS_ASSET: &str = "SHA256SUMS.txt";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Debug builds may resolve a lower current version, so the available-update dialog can be
+/// Debug builds may resolve a lower current version, so the available-update toast can be
 /// inspected without publishing a test release. Release builds always use the package version.
 fn current_version() -> String {
     #[cfg(debug_assertions)]
@@ -68,14 +59,6 @@ struct ReleaseInfo {
     version: String,
     setup_url: String,
     sums_url: String,
-}
-
-#[derive(Clone)]
-enum UpdateAlertAction {
-    Close,
-    CheckAgain,
-    Download(ReleaseInfo),
-    Install(ReleaseInfo, PathBuf, String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -342,16 +325,9 @@ impl CairnApp {
             return;
         }
         self.is_checking_update = true;
-        cx.notify();
-
-        let menu_view = cx.entity();
-        window.defer(cx, move |window, cx| {
-            menu_view.update(cx, |this, cx| {
-                if this.is_checking_update {
-                    this.show_group(crate::shell::command_groups::MenuGroup::Help, window, cx);
-                }
-            });
-        });
+        let checking_title = self.i18n.get_text("update_checking_title");
+        let checking_body = self.i18n.get_text("update_checking_body");
+        self.show_persistent_info_toast(checking_title, checking_body, cx);
 
         let handle = window.window_handle();
         let view = cx.entity().downgrade();
@@ -361,10 +337,10 @@ impl CairnApp {
         });
         cx.spawn(async move |_this, cx| {
             let result = rx.await.unwrap_or(Err(UpdateError::Network));
-            let _ = cx.update_window(handle, |_, window, cx| {
+            let _ = cx.update_window(handle, |_, _window, cx| {
                 if let Some(view) = view.upgrade() {
                     view.update(cx, |this, cx| {
-                        this.finish_update_check(window, cx, result);
+                        this.finish_update_check(cx, result);
                     });
                 }
             });
@@ -374,54 +350,34 @@ impl CairnApp {
 
     fn finish_update_check(
         &mut self,
-        window: &mut Window,
         cx: &mut Context<Self>,
         result: Result<Option<ReleaseInfo>, UpdateError>,
     ) {
         self.is_checking_update = false;
-        if self.open_group == Some(crate::shell::command_groups::MenuGroup::Help) {
-            self.close_group();
-        }
         cx.notify();
         match result {
             Err(UpdateError::Incomplete) => {
                 let title = self.i18n.get_text("update_incomplete_title");
                 let body = self.i18n.get_text("update_incomplete_body");
-                self.open_update_alert(
-                    window,
-                    cx,
-                    title,
-                    body,
-                    self.i18n.get_text("update_retry"),
-                    Some(self.i18n.get_text("update_close")),
-                    UpdateAlertAction::CheckAgain,
-                );
+                let retry =
+                    ToastAction::new(self.i18n.get_text("update_retry"), |this, window, cx| {
+                        this.start_update_check(window, cx);
+                    });
+                self.show_error_toast_with_action(title, body, retry, cx);
             }
             Err(_) => {
                 let title = self.i18n.get_text("update_check_failed_title");
                 let body = self.i18n.get_text("update_check_failed_body");
-                self.open_update_alert(
-                    window,
-                    cx,
-                    title,
-                    body,
-                    self.i18n.get_text("update_retry"),
-                    Some(self.i18n.get_text("update_close")),
-                    UpdateAlertAction::CheckAgain,
-                );
+                let retry =
+                    ToastAction::new(self.i18n.get_text("update_retry"), |this, window, cx| {
+                        this.start_update_check(window, cx);
+                    });
+                self.show_error_toast_with_action(title, body, retry, cx);
             }
             Ok(None) => {
                 let title = self.i18n.get_text("update_up_to_date_title");
                 let body = self.i18n.get_text("update_no_releases_body");
-                self.open_update_alert(
-                    window,
-                    cx,
-                    title,
-                    body,
-                    self.i18n.get_text("update_close"),
-                    None,
-                    UpdateAlertAction::Close,
-                );
+                self.show_info_toast(title, body, cx);
             }
             Ok(Some(release)) if is_newer(&release.version, &current_version()) => {
                 let title = self.i18n.get_text("update_available_title");
@@ -431,15 +387,11 @@ impl CairnApp {
                 let body = self
                     .i18n
                     .get_text_with_args("update_available_body", &body_args);
-                self.open_update_alert(
-                    window,
-                    cx,
-                    title,
-                    body,
-                    self.i18n.get_text("update_download_action"),
-                    Some(self.i18n.get_text("update_later")),
-                    UpdateAlertAction::Download(release),
-                );
+                let action_label = self.i18n.get_text("update_download_action");
+                let action = ToastAction::labeled(action_label, move |this, window, cx| {
+                    this.start_update_download(window, cx, release.clone());
+                });
+                self.show_info_toast_with_action(title, body, action, cx);
             }
             Ok(Some(release)) => {
                 let current = current_version();
@@ -449,89 +401,9 @@ impl CairnApp {
                 let body = self
                     .i18n
                     .get_text_with_args("update_up_to_date_body", &args);
-                self.open_update_alert(
-                    window,
-                    cx,
-                    title,
-                    body,
-                    self.i18n.get_text("update_close"),
-                    None,
-                    UpdateAlertAction::Close,
-                );
+                self.show_info_toast(title, body, cx);
             }
         }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn open_update_alert(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-        title: String,
-        body: String,
-        ok: String,
-        cancel: Option<String>,
-        action: UpdateAlertAction,
-    ) {
-        let view = cx.entity();
-        window.open_alert_dialog(cx, move |alert, window, app| {
-            let actions = dialogs::DialogActions::new(ok.clone(), ButtonVariant::Primary);
-            let actions = match cancel.clone() {
-                Some(cancel) => actions.with_cancel(cancel),
-                None => actions,
-            };
-            let surface = dialog_surface(app.theme());
-            let alert = dialogs::alert_surface(alert, window, app, surface, actions)
-                .child(dialogs::body(title.clone(), body.clone(), window));
-            let view = view.clone();
-            match action.clone() {
-                UpdateAlertAction::Close => alert.on_ok(|_, _, _| true),
-                UpdateAlertAction::CheckAgain => alert
-                    .confirm()
-                    .on_ok(move |_, window, cx| {
-                        let view = view.clone();
-                        window.defer(cx, move |window, cx| {
-                            view.update(cx, |this, cx| this.start_update_check(window, cx));
-                        });
-                        true
-                    })
-                    .on_cancel(|_, _, _| true),
-                UpdateAlertAction::Download(release) => alert
-                    .confirm()
-                    .on_ok(move |_, window, cx| {
-                        let view = view.clone();
-                        let release = release.clone();
-                        window.defer(cx, move |window, cx| {
-                            view.update(cx, |this, cx| {
-                                this.start_update_download(window, cx, release.clone());
-                            });
-                        });
-                        true
-                    })
-                    .on_cancel(|_, _, _| true),
-                UpdateAlertAction::Install(release, path, expected) => alert
-                    .confirm()
-                    .on_ok(move |_, window, cx| {
-                        let view = view.clone();
-                        let release = release.clone();
-                        let path = path.clone();
-                        let expected = expected.clone();
-                        window.defer(cx, move |window, cx| {
-                            view.update(cx, |this, cx| {
-                                this.install_downloaded(
-                                    window,
-                                    cx,
-                                    release.clone(),
-                                    path.clone(),
-                                    expected.clone(),
-                                );
-                            });
-                        });
-                        true
-                    })
-                    .on_cancel(|_, _, _| true),
-            }
-        });
     }
 
     fn start_update_download(
@@ -542,7 +414,7 @@ impl CairnApp {
     ) {
         let title = self.i18n.get_text("update_installing_title");
         let body = self.i18n.get_text("update_installing_body");
-        show_busy_dialog(window, cx, title, body);
+        self.show_persistent_info_toast(title, body, cx);
 
         let handle = window.window_handle();
         let view = cx.entity().downgrade();
@@ -553,10 +425,10 @@ impl CairnApp {
         });
         cx.spawn(async move |_this, cx| {
             let result = rx.await.unwrap_or(Err(UpdateError::Download));
-            let _ = cx.update_window(handle, |_, window, cx| {
+            let _ = cx.update_window(handle, |_, _window, cx| {
                 if let Some(view) = view.upgrade() {
                     view.update(cx, |this, cx| {
-                        this.finish_update_download(window, cx, release.clone(), result);
+                        this.finish_update_download(cx, release.clone(), result);
                     });
                 }
             });
@@ -566,51 +438,27 @@ impl CairnApp {
 
     fn finish_update_download(
         &mut self,
-        window: &mut Window,
         cx: &mut Context<Self>,
         release: ReleaseInfo,
         result: Result<(PathBuf, String), UpdateError>,
     ) {
         match result {
-            Ok((path, expected)) => self.install_downloaded(window, cx, release, path, expected),
+            Ok((path, expected)) => self.install_downloaded(cx, release, path, expected),
             Err(UpdateError::Verify) => {
-                window.close_dialog(cx);
                 let title = self.i18n.get_text("update_verify_failed_title");
                 let body = self.i18n.get_text("update_verify_failed_body");
-                let ok = self.i18n.get_text("update_retry");
-                let cancel = self.i18n.get_text("update_close");
-                self.open_update_alert(
-                    window,
-                    cx,
-                    title,
-                    body,
-                    ok,
-                    Some(cancel),
-                    UpdateAlertAction::Download(release),
-                );
+                self.show_download_retry_toast(title, body, release, cx);
             }
             Err(_) => {
-                window.close_dialog(cx);
                 let title = self.i18n.get_text("update_download_failed_title");
                 let body = self.i18n.get_text("update_download_failed_body");
-                let ok = self.i18n.get_text("update_retry");
-                let cancel = self.i18n.get_text("update_close");
-                self.open_update_alert(
-                    window,
-                    cx,
-                    title,
-                    body,
-                    ok,
-                    Some(cancel),
-                    UpdateAlertAction::Download(release),
-                );
+                self.show_download_retry_toast(title, body, release, cx);
             }
         }
     }
 
     fn install_downloaded(
         &mut self,
-        window: &mut Window,
         cx: &mut Context<Self>,
         release: ReleaseInfo,
         path: PathBuf,
@@ -621,20 +469,9 @@ impl CairnApp {
             Err(error) => {
                 tracing::warn!("downloaded installer changed after verification: {error}");
                 let _ = std::fs::remove_file(&path);
-                window.close_dialog(cx);
                 let title = self.i18n.get_text("update_verify_failed_title");
                 let body = self.i18n.get_text("update_verify_failed_body");
-                let ok = self.i18n.get_text("update_retry");
-                let cancel = self.i18n.get_text("update_close");
-                self.open_update_alert(
-                    window,
-                    cx,
-                    title,
-                    body,
-                    ok,
-                    Some(cancel),
-                    UpdateAlertAction::Download(release),
-                );
+                self.show_download_retry_toast(title, body, release, cx);
                 return;
             }
         };
@@ -647,41 +484,53 @@ impl CairnApp {
             Err(ElevationError::Cancelled) => {
                 drop(installer);
                 remove_pending_version();
-                window.close_dialog(cx);
                 let title = self.i18n.get_text("update_cancelled_title");
                 let body = self.i18n.get_text("update_cancelled_body");
-                let ok = self.i18n.get_text("update_retry");
-                let cancel = self.i18n.get_text("update_close");
-                self.open_update_alert(
-                    window,
-                    cx,
-                    title,
-                    body,
-                    ok,
-                    Some(cancel),
-                    UpdateAlertAction::Install(release, path, expected_sha256),
-                );
+                let retry =
+                    ToastAction::labeled(self.i18n.get_text("update_retry"), move |this, _, cx| {
+                        this.install_downloaded(
+                            cx,
+                            release.clone(),
+                            path.clone(),
+                            expected_sha256.clone(),
+                        );
+                    });
+                self.show_info_toast_with_action(title, body, retry, cx);
             }
             Err(ElevationError::Failed { message, .. }) => {
                 tracing::warn!("update installer could not start: {message}");
                 drop(installer);
                 remove_pending_version();
-                window.close_dialog(cx);
                 let title = self.i18n.get_text("update_install_failed_title");
                 let body = self.i18n.get_text("update_install_failed_body");
-                let ok = self.i18n.get_text("update_retry");
-                let cancel = self.i18n.get_text("update_close");
-                self.open_update_alert(
-                    window,
-                    cx,
-                    title,
-                    body,
-                    ok,
-                    Some(cancel),
-                    UpdateAlertAction::Install(release, path, expected_sha256),
-                );
+                let retry =
+                    ToastAction::new(self.i18n.get_text("update_retry"), move |this, _, cx| {
+                        this.install_downloaded(
+                            cx,
+                            release.clone(),
+                            path.clone(),
+                            expected_sha256.clone(),
+                        );
+                    });
+                self.show_error_toast_with_action(title, body, retry, cx);
             }
         }
+    }
+
+    fn show_download_retry_toast(
+        &mut self,
+        title: String,
+        body: String,
+        release: ReleaseInfo,
+        cx: &mut Context<Self>,
+    ) {
+        let retry = ToastAction::new(
+            self.i18n.get_text("update_retry"),
+            move |this, window, cx| {
+                this.start_update_download(window, cx, release.clone());
+            },
+        );
+        self.show_error_toast_with_action(title, body, retry, cx);
     }
 }
 
@@ -689,42 +538,6 @@ fn version_args(version: &str) -> FluentArgs<'_> {
     let mut args = FluentArgs::new();
     args.set("version", version);
     args
-}
-
-fn show_busy_dialog(window: &mut Window, cx: &mut App, title: String, body: String) {
-    window.open_dialog(cx, move |dialog, window, cx| {
-        let tokens = ShellTokens::current(cx);
-        dialog
-            .w(window.rem_size() * layout::DIALOG_WIDTH)
-            .margin_top(dialogs::top_offset(window))
-            .bg(dialog_surface(cx.theme()))
-            .overlay_closable(false)
-            .close_button(false)
-            .keyboard(false)
-            .entrance(DialogEntrance::FadeSlide)
-            .child(
-                v_flex()
-                    .h_full()
-                    .items_center()
-                    .justify_center()
-                    .gap(rems(layout::SPACE_12))
-                    .child(dialogs::title(title.clone(), window))
-                    .child(
-                        Spinner::new()
-                            .icon(AssetIconName::LoaderCircle)
-                            .large()
-                            .color(tokens.foreground),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .line_height(relative(1.5))
-                            .text_center()
-                            .text_color(tokens.muted_foreground)
-                            .child(body.clone()),
-                    ),
-            )
-    });
 }
 
 #[cfg(test)]

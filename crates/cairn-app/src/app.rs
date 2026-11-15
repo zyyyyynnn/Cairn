@@ -24,7 +24,10 @@ use crate::shell::settings::AppSettings;
 use crate::shell::status_bar::StatusBarModel;
 use crate::shell::window_resize::Observed;
 use crate::table::model::{ColumnBoundary, ColumnWidths, TableState};
-use cairn_protocol::status::ContentIndexStatus;
+use cairn_protocol::status::{
+    ContentIndexStatus, IndexJournalEntry, IndexJournalStatus, PropertyIndexStatus,
+    SourceStatusSummary,
+};
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::menu::PopupMenu;
 use gpui_kit::gpui::*;
@@ -106,21 +109,11 @@ pub mod layout {
     pub const DATE_COLUMN: f32 = 33.0 * STEP; // 132px
     /// Fixed width of the optional created-time lane.
     pub const CREATED_COLUMN: f32 = DATE_COLUMN;
-
-    /// Extra table extent the created-time column requires, so the band scrolls instead of
-    /// squeezing the four core lanes below their floors.
-    pub fn optional_columns_width(show_created: bool) -> f32 {
-        if show_created {
-            CREATED_COLUMN
-        } else {
-            0.0
-        }
-    }
-    /// The narrowest table that can show all four lanes at their own floors. The heading row and the
-    /// rows share this extent, and the band scrolls to it horizontally, so a wide zoom in a short
-    /// window moves the columns out of view instead of cutting the last one off at the frame edge.
-    /// Derived from the lanes so it cannot disagree with them.
-    pub const TABLE_MIN_WIDTH: f32 = NAME_MIN_COLUMN + PATH_MIN_COLUMN + SIZE_COLUMN + DATE_COLUMN;
+    pub const LENGTH_COLUMN: f32 = 22.0 * STEP; // 88px
+    pub const AUTHOR_COLUMN: f32 = 32.0 * STEP; // 128px
+    pub const TAGS_COLUMN: f32 = 34.0 * STEP; // 136px
+    pub const DIMENSIONS_COLUMN: f32 = 26.0 * STEP; // 104px
+    pub const FRAMERATE_COLUMN: f32 = 21.0 * STEP; // 84px
     /// How far one keyboard step moves the columns, as a fraction of the width the window actually
     /// shows of the table.
     ///
@@ -288,6 +281,8 @@ pub struct QueryDomain {
     /// The service's refusal of the current query, if it answered with one. Cleared when a new
     /// query starts and when a result set arrives, so the band never outlives its query.
     pub rejection: Option<crate::search::query_orchestration::QueryRejection>,
+    /// Non-fatal degradation notice reported by the service for the current query.
+    pub degraded: Option<cairn_protocol::message::QueryDegradedReason>,
     /// The current query stopped before the service answered. The rows already shown stay; the
     /// empty band states the stop instead of claiming a no-match.
     pub cancelled: bool,
@@ -316,6 +311,8 @@ pub struct ResultsDomain {
     pub column_widths: ColumnWidths,
     /// Set between a header boundary's mouse down and its release.
     pub(crate) column_drag: Option<ColumnDrag>,
+    /// Active content-snippet preview popover state, when open on a row.
+    pub(crate) snippet_preview: Option<crate::table::snippets::SnippetPreviewState>,
     /// `true` while the last input was a keystroke. The result region paints its focus ring from
     /// this, so a pointer click selects a row without drawing a second, redundant border around
     /// the entire table.
@@ -353,6 +350,19 @@ pub struct ServiceDomain {
     /// A local submission failure (config write/pipe), kept separate from the service's own
     /// content-index error so the page can show both without overwriting one with the other.
     pub content_action_error: Option<String>,
+    pub property_status: PropertyIndexStatus,
+    pub property_status_loading: bool,
+    pub property_status_error: Option<String>,
+    pub property_action_pending: bool,
+    pub journal_status: IndexJournalStatus,
+    pub journal_status_loading: bool,
+    pub journal_status_error: Option<String>,
+    pub journal_action_pending: bool,
+    pub journal_entries: Vec<IndexJournalEntry>,
+    pub journal_entries_loading: bool,
+    pub journal_entries_error: Option<String>,
+    pub sources: Vec<SourceStatusSummary>,
+    pub service_control_pending: bool,
 }
 
 /// The Treemap address field's retained state. The field is an ecosystem
@@ -474,8 +484,8 @@ impl CairnApp {
         // `TableState` keeps its fetched window private, so the restored sort state is assigned
         // through its public fields instead of a struct literal.
         let mut table = TableState::default();
-        table.sort_column = settings.columns.sort_column.parse().unwrap_or_default();
-        table.sort_asc = settings.columns.sort_asc;
+        table.sort_spec = crate::table::model::SortSpec::parse_clause(&settings.columns.sort_spec)
+            .unwrap_or_default();
         let column_widths = ColumnWidths {
             name: (settings.columns.name_width / COLUMN_WIDTH_STORAGE_UNIT)
                 .max(layout::NAME_MIN_COLUMN),
@@ -566,6 +576,7 @@ impl CairnApp {
                 query_id: 0,
                 active_session_id: None,
                 rejection: None,
+                degraded: None,
                 cancelled: false,
                 is_fetching_more: false,
                 is_searching: false,
@@ -579,6 +590,7 @@ impl CairnApp {
                 table,
                 column_widths,
                 column_drag: None,
+                snippet_preview: None,
                 keyboard_navigation: false,
             },
             service: ServiceDomain {
@@ -593,6 +605,19 @@ impl CairnApp {
                 content_status_error: None,
                 content_action_pending: false,
                 content_action_error: None,
+                property_status: PropertyIndexStatus::default(),
+                property_status_loading: false,
+                property_status_error: None,
+                property_action_pending: false,
+                journal_status: IndexJournalStatus::default(),
+                journal_status_loading: false,
+                journal_status_error: None,
+                journal_action_pending: false,
+                journal_entries: Vec::new(),
+                journal_entries_loading: false,
+                journal_entries_error: None,
+                sources: Vec::new(),
+                service_control_pending: false,
                 // Deferred off the critical path: connection success confirms installation, and
                 // failure checks SCM off-thread.
                 service_installed: false,
@@ -970,6 +995,9 @@ impl EntityInputHandler for CairnApp {
 }
 
 #[cfg(test)]
+pub(crate) use tests::test_row;
+
+#[cfg(test)]
 mod tests {
     use core::prelude::rust_2021::test;
 
@@ -980,7 +1008,7 @@ mod tests {
     use cairn_protocol::status::{VolumeState, VolumeStatusSummary};
     use gpui_kit::AppContext;
 
-    fn test_row(name: &str) -> FileRowData {
+    pub(crate) fn test_row(name: &str) -> FileRowData {
         FileRowData {
             frn: 1,
             name: name.to_string(),
@@ -992,7 +1020,8 @@ mod tests {
             flags: 0,
             name_highlights: Vec::new(),
             path_highlights: Vec::new(),
-            snippet: None,
+            snippets: Vec::new(),
+            properties: None,
         }
     }
 

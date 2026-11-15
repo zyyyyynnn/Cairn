@@ -1185,6 +1185,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires elevated Administrator privileges"]
     fn staging_root_is_locked_to_administrators() {
         for precreated in [false, true] {
             let temp = tempfile::tempdir().expect("temp dir");
@@ -1192,20 +1193,11 @@ mod tests {
             if precreated {
                 std::fs::create_dir(&root).expect("create root");
             }
-            match secure_staging_root(&root) {
-                Ok(()) => {
-                    std::fs::write(root.join("probe"), b"ok").expect(
-                        "the elevated process keeps access to a staging root it has secured",
-                    );
-                }
-                Err(error) if matches!(error.raw_os_error(), Some(5) | Some(1307)) => {
-                    eprintln!("staging ACL test skipped: the test process is not elevated");
-                    return;
-                }
-                Err(error) => {
-                    panic!("staging ACL could not be applied (precreated={precreated}): {error}")
-                }
-            }
+            secure_staging_root(&root).unwrap_or_else(|error| {
+                panic!("staging ACL could not be applied (precreated={precreated}): {error}")
+            });
+            std::fs::write(root.join("probe"), b"ok")
+                .expect("the elevated process keeps access to a staging root it has secured");
 
             for logs_precreated in [false, true] {
                 let logs = root.join(if logs_precreated {
@@ -1216,16 +1208,13 @@ mod tests {
                 if logs_precreated {
                     std::fs::create_dir(&logs).expect("create logs");
                 }
-                match secure_staging_root(&logs) {
-                    Ok(()) => {
-                        std::fs::write(logs.join("probe.log"), b"ok").expect(
-                            "the elevated process keeps access to a logs directory it has secured",
-                        );
-                    }
-                    Err(error) => panic!(
+                secure_staging_root(&logs).unwrap_or_else(|error| {
+                    panic!(
                         "logs ACL could not be applied (root_precreated={precreated}, logs_precreated={logs_precreated}): {error}"
-                    ),
-                }
+                    )
+                });
+                std::fs::write(logs.join("probe.log"), b"ok")
+                    .expect("the elevated process keeps access to a logs directory it has secured");
             }
         }
     }
@@ -1242,10 +1231,7 @@ mod tests {
             .arg(&target)
             .status()
             .expect("run mklink");
-        if !status.success() {
-            eprintln!("junction test skipped: mklink is unavailable");
-            return;
-        }
+        assert!(status.success(), "mklink /J failed with status {status}");
         let error = secure_staging_root(&link).expect_err("a junction must be rejected");
         assert!(
             error.to_string().contains("reparse point"),

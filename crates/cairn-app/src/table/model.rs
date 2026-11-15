@@ -40,30 +40,36 @@ pub struct ColumnWidths {
     pub date: f32,
 }
 
-/// The draggable boundary between two neighbouring lanes.
+/// The draggable boundary between two visible neighbouring flex lanes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ColumnBoundary {
-    NamePath,
-    PathSize,
-    SizeDate,
+pub struct ColumnBoundary {
+    pub left: usize,
+    pub right: usize,
+}
+
+#[cfg(test)]
+impl ColumnBoundary {
+    pub const NAME_PATH: Self = Self { left: 0, right: 1 };
+    pub const PATH_SIZE: Self = Self { left: 1, right: 2 };
+    pub const SIZE_DATE: Self = Self { left: 2, right: 3 };
 }
 
 impl ColumnBoundary {
-    /// Stable element-id suffix, one per boundary.
+    /// Stable element-id suffix, one per visible lane pair.
     pub const fn key(self) -> &'static str {
-        match self {
-            Self::NamePath => "name-path",
-            Self::PathSize => "path-size",
-            Self::SizeDate => "size-date",
+        match (self.left, self.right) {
+            (0, 1) => "name-path",
+            (0, 2) => "name-size",
+            (0, 3) => "name-date",
+            (1, 2) => "path-size",
+            (1, 3) => "path-date",
+            (2, 3) => "size-date",
+            _ => "custom",
         }
     }
 
-    fn indices(self) -> (usize, usize) {
-        match self {
-            Self::NamePath => (0, 1),
-            Self::PathSize => (1, 2),
-            Self::SizeDate => (2, 3),
-        }
+    pub const fn indices(self) -> (usize, usize) {
+        (self.left, self.right)
     }
 }
 
@@ -97,7 +103,7 @@ impl ColumnWidths {
     }
 }
 
-pub use cairn_core::sort::SortColumn;
+pub use cairn_core::sort::{SortColumn, SortDirection, SortSpec};
 
 /// The Fluent message naming a sort column, shared by its table header and its 排序 item so one
 /// column never carries two wordings.
@@ -121,6 +127,11 @@ impl SortColumnLabel for SortColumn {
             SortColumn::DateModified => "col_modified",
             SortColumn::DateCreated => "col_created",
             SortColumn::Extension => "col_ext",
+            SortColumn::Length => "col_length",
+            SortColumn::Author => "col_author",
+            SortColumn::Tags => "col_tags",
+            SortColumn::Dimensions => "col_dimensions",
+            SortColumn::Framerate => "col_framerate",
         }
     }
 
@@ -138,6 +149,111 @@ impl SortColumnLabel for SortColumn {
             SortColumn::DateModified => "col_deleted",
             _ => self.label_key(),
         }
+    }
+}
+
+/// Optional columns revealed on demand in index queries (hidden in local Recycle Bin / block views).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum OptionalColumn {
+    DateCreated,
+    Length,
+    Author,
+    Tags,
+    Dimensions,
+    Framerate,
+}
+
+impl OptionalColumn {
+    pub const ALL: [OptionalColumn; 6] = [
+        OptionalColumn::DateCreated,
+        OptionalColumn::Length,
+        OptionalColumn::Author,
+        OptionalColumn::Tags,
+        OptionalColumn::Dimensions,
+        OptionalColumn::Framerate,
+    ];
+
+    pub const fn sort_column(self) -> SortColumn {
+        match self {
+            OptionalColumn::DateCreated => SortColumn::DateCreated,
+            OptionalColumn::Length => SortColumn::Length,
+            OptionalColumn::Author => SortColumn::Author,
+            OptionalColumn::Tags => SortColumn::Tags,
+            OptionalColumn::Dimensions => SortColumn::Dimensions,
+            OptionalColumn::Framerate => SortColumn::Framerate,
+        }
+    }
+
+    pub fn width_rem(self) -> f32 {
+        use crate::app::layout;
+        match self {
+            OptionalColumn::DateCreated => layout::CREATED_COLUMN,
+            OptionalColumn::Length => layout::LENGTH_COLUMN,
+            OptionalColumn::Author => layout::AUTHOR_COLUMN,
+            OptionalColumn::Tags => layout::TAGS_COLUMN,
+            OptionalColumn::Dimensions => layout::DIMENSIONS_COLUMN,
+            OptionalColumn::Framerate => layout::FRAMERATE_COLUMN,
+        }
+    }
+
+    pub const fn uses_tabular_figures(self) -> bool {
+        matches!(
+            self,
+            OptionalColumn::DateCreated
+                | OptionalColumn::Length
+                | OptionalColumn::Dimensions
+                | OptionalColumn::Framerate
+        )
+    }
+}
+
+/// Column visibility items shared by the View menu and the table header context menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TableColumn {
+    Name,
+    Path,
+    Size,
+    DateModified,
+    Optional(OptionalColumn),
+}
+
+impl TableColumn {
+    pub const BASE: [TableColumn; 4] = [
+        TableColumn::Name,
+        TableColumn::Path,
+        TableColumn::Size,
+        TableColumn::DateModified,
+    ];
+
+    pub const ALL: [TableColumn; 10] = [
+        TableColumn::Name,
+        TableColumn::Path,
+        TableColumn::Size,
+        TableColumn::DateModified,
+        TableColumn::Optional(OptionalColumn::DateCreated),
+        TableColumn::Optional(OptionalColumn::Length),
+        TableColumn::Optional(OptionalColumn::Author),
+        TableColumn::Optional(OptionalColumn::Tags),
+        TableColumn::Optional(OptionalColumn::Dimensions),
+        TableColumn::Optional(OptionalColumn::Framerate),
+    ];
+
+    pub const fn is_locked(self) -> bool {
+        matches!(self, Self::Name)
+    }
+
+    pub const fn sort_column(self) -> SortColumn {
+        match self {
+            Self::Name => SortColumn::Name,
+            Self::Path => SortColumn::Path,
+            Self::Size => SortColumn::Size,
+            Self::DateModified => SortColumn::DateModified,
+            Self::Optional(col) => col.sort_column(),
+        }
+    }
+
+    pub fn label_key(self) -> &'static str {
+        self.sort_column().label_key()
     }
 }
 
@@ -201,8 +317,7 @@ pub struct TableState {
     /// The row a Shift range extends from. Kept apart from `focused_idx`, which moves with every
     /// extension, so extending out and back still covers the same range.
     pub selection_anchor: Option<usize>,
-    pub sort_column: SortColumn,
-    pub sort_asc: bool,
+    pub sort_spec: SortSpec,
     /// Pixels scrolled down from the first row of the band.
     pub scroll_top: f32,
     /// Measured height of the scrollable row band, in pixels.
@@ -658,13 +773,51 @@ impl TableState {
             .or_else(|| self.selected_indices.iter().copied().min())
     }
 
+    pub fn primary_sort(&self) -> (SortColumn, bool) {
+        let primary = self.sort_spec.primary();
+        (
+            primary.column,
+            primary.direction == SortDirection::Ascending,
+        )
+    }
+
     pub fn toggle_sort(&mut self, col: SortColumn) {
-        if self.sort_column == col {
-            self.sort_asc = !self.sort_asc;
-        } else {
-            self.sort_column = col;
-            self.sort_asc = true;
+        self.sort_spec
+            .set_or_toggle_primary(col, SortDirection::Ascending);
+    }
+
+    pub fn shift_toggle_sort(&mut self, col: SortColumn) {
+        self.sort_spec
+            .shift_toggle_column(col, SortDirection::Ascending);
+    }
+
+    pub fn reverse_primary_sort(&mut self) {
+        if let Some(primary) = self.sort_spec.keys.first_mut() {
+            primary.direction = primary.direction.flipped();
         }
+    }
+
+    /// 1-based sort priority rank and ascending flag when `col` participates in `sort_spec`.
+    pub fn sort_rank(&self, col: SortColumn) -> Option<(usize, bool)> {
+        self.sort_spec
+            .keys
+            .iter()
+            .enumerate()
+            .find(|(_, key)| key.column == col)
+            .map(|(ix, key)| (ix + 1, key.direction == SortDirection::Ascending))
+    }
+
+    /// Removes `col` from `sort_spec`, restoring default `name-asc` when it was the sole key.
+    pub fn remove_sort_column(&mut self, col: SortColumn) -> bool {
+        let before = self.sort_spec.keys.len();
+        self.sort_spec.keys.retain(|key| key.column != col);
+        if self.sort_spec.keys.len() == before {
+            return false;
+        }
+        if self.sort_spec.keys.is_empty() {
+            self.sort_spec = SortSpec::default();
+        }
+        true
     }
 }
 
@@ -1102,7 +1255,7 @@ mod tests {
     #[test]
     fn dragging_a_boundary_trades_width_between_its_two_lanes() {
         let before = widths();
-        let after = before.resized(ColumnBoundary::NamePath, 3.0, MINIMA);
+        let after = before.resized(ColumnBoundary::NAME_PATH, 3.0, MINIMA);
         assert_eq!(after.name, 23.0);
         assert_eq!(after.path, 19.5);
         assert_eq!(after.size, before.size, "a drag touches only two lanes");
@@ -1112,18 +1265,18 @@ mod tests {
 
     #[test]
     fn a_drag_stops_when_either_neighbour_reaches_its_minimum() {
-        let collapsed_name = widths().resized(ColumnBoundary::NamePath, -100.0, MINIMA);
+        let collapsed_name = widths().resized(ColumnBoundary::NAME_PATH, -100.0, MINIMA);
         assert_eq!(collapsed_name.name, MINIMA[0]);
         assert_eq!(collapsed_name.path, 30.5);
 
-        let collapsed_path = widths().resized(ColumnBoundary::NamePath, 100.0, MINIMA);
+        let collapsed_path = widths().resized(ColumnBoundary::NAME_PATH, 100.0, MINIMA);
         assert_eq!(collapsed_path.path, MINIMA[1]);
         assert_eq!(collapsed_path.name, 34.5);
     }
 
     #[test]
     fn the_numeric_boundaries_move_their_own_lanes() {
-        let after = widths().resized(ColumnBoundary::SizeDate, -0.5, MINIMA);
+        let after = widths().resized(ColumnBoundary::SIZE_DATE, -0.5, MINIMA);
         assert_eq!(after.size, 6.375);
         assert_eq!(after.date, 10.5);
         assert_eq!(after.name, 20.0);
@@ -1427,7 +1580,7 @@ mod tests {
             2,
         );
         table.select_row(1, false);
-        let sort = (table.sort_column, table.sort_asc);
+        let sort = table.primary_sort();
 
         assert!(table.rename_row(r"C:\work\second.txt", "renamed.md"));
 
@@ -1446,7 +1599,7 @@ mod tests {
         assert_eq!(table.selected_indices, std::collections::HashSet::from([1]));
         assert_eq!(table.total_rows(), 2, "a rename keeps the result count");
         assert_eq!(
-            (table.sort_column, table.sort_asc),
+            table.primary_sort(),
             sort,
             "a rename never reorders the table"
         );
@@ -1467,12 +1620,11 @@ mod tests {
     fn sort_toggles_direction_only_on_the_active_column() {
         let mut table = TableState::default();
         table.toggle_sort(SortColumn::Size);
-        assert_eq!(table.sort_column, SortColumn::Size);
-        assert!(table.sort_asc);
+        assert_eq!(table.primary_sort(), (SortColumn::Size, true));
         table.toggle_sort(SortColumn::Size);
-        assert!(!table.sort_asc);
+        assert_eq!(table.primary_sort(), (SortColumn::Size, false));
         table.toggle_sort(SortColumn::Name);
-        assert!(table.sort_asc);
+        assert_eq!(table.primary_sort(), (SortColumn::Name, true));
     }
 
     /// Every expected string here was produced by .NET's `DateTimeOffset.FromUnixTimeSeconds` over the
@@ -1513,5 +1665,26 @@ mod tests {
         let page5 = (1000..1050).map(|i| row(&format!("f{i}"))).collect();
         table.apply_page(1000, page5);
         assert_eq!(table.loaded_range(), 1000..1050);
+    }
+
+    #[test]
+    fn shift_sort_tracks_precedence_and_hiding_column_prunes_keys() {
+        use super::OptionalColumn;
+
+        let mut table = TableState::default();
+        table.toggle_sort(SortColumn::Size);
+        table.shift_toggle_sort(SortColumn::Length);
+        assert_eq!(table.sort_rank(SortColumn::Size), Some((1, true)));
+        assert_eq!(table.sort_rank(SortColumn::Length), Some((2, true)));
+
+        table.shift_toggle_sort(SortColumn::Length);
+        assert_eq!(table.sort_rank(SortColumn::Length), Some((2, false)));
+
+        assert!(table.remove_sort_column(OptionalColumn::Length.sort_column()));
+        assert_eq!(table.sort_rank(SortColumn::Length), None);
+        assert_eq!(table.sort_rank(SortColumn::Size), Some((1, true)));
+
+        assert!(table.remove_sort_column(SortColumn::Size));
+        assert_eq!(table.primary_sort(), (SortColumn::Name, true));
     }
 }

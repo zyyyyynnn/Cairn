@@ -211,6 +211,7 @@ impl CairnApp {
         // A refusal or stop of the query that preceded the block does not
         // describe these rows.
         self.query.rejection = None;
+        self.query.degraded = None;
         self.query.cancelled = false;
         self.leave_drive_view();
         self.query.scope_drive = None;
@@ -218,7 +219,8 @@ impl CairnApp {
         let mut listing = BlockListing::new(parent, count, rows);
         // The header arrow persists across the hand-off, so the rows arrive in
         // the order the table claims.
-        listing.sort(self.results.table.sort_column, self.results.table.sort_asc);
+        let (column, ascending) = self.results.table.primary_sort();
+        listing.sort(column, ascending);
         self.block_listing = Some(listing);
         self.query.search_input.set_text("");
         self.install_block_listing_rows(cx);
@@ -246,7 +248,7 @@ impl CairnApp {
 
     /// Reorders the listing to the table's current sort and restarts at its top.
     pub(crate) fn sort_block_listing(&mut self, cx: &mut Context<Self>) {
-        let (column, ascending) = (self.results.table.sort_column, self.results.table.sort_asc);
+        let (column, ascending) = self.results.table.primary_sort();
         let Some(listing) = self.block_listing.as_mut() else {
             return;
         };
@@ -329,7 +331,8 @@ pub(crate) fn block_listing_rows(
             flags: 0,
             name_highlights: Vec::new(),
             path_highlights: Vec::new(),
-            snippet: None,
+            snippets: Vec::new(),
+            properties: None,
         })
         .collect()
 }
@@ -376,6 +379,14 @@ fn sort_rows(rows: &mut [FileRowData], column: SortColumn, ascending: bool) {
             ext(a)
                 .cmp(&ext(b))
                 .then_with(|| cairn_core::sort::natural_cmp(&a.name, &b.name))
+        }),
+        SortColumn::Length
+        | SortColumn::Author
+        | SortColumn::Tags
+        | SortColumn::Dimensions
+        | SortColumn::Framerate => rows.sort_by(|a, b| {
+            cairn_core::sort::natural_cmp(&a.name, &b.name)
+                .then_with(|| cairn_core::sort::natural_cmp(&a.path, &b.path))
         }),
     }
     if !ascending {

@@ -89,6 +89,14 @@ pub fn open_file(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Opens an HTTP or HTTPS URL in the user's default browser via the Windows shell.
+pub fn open_url(url: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if !url.starts_with("https://") && !url.starts_with("http://") {
+        return Err("refusing to open non-HTTP URL".into());
+    }
+    open_file(url)
+}
+
 /// Opens the parent directory in Windows Explorer and selects (highlights) the item.
 pub fn open_folder_and_select(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(windows)]
@@ -1521,5 +1529,18 @@ mod tests {
             vec!["CAFÉ.txt".to_string()],
             "the disk keeps the requested casing"
         );
+    }
+
+    #[test]
+    fn open_url_rejects_non_http_schemes() {
+        for rejected in [
+            "",
+            "C:\\Windows\\System32\\cmd.exe",
+            "file:///C:/Windows",
+            "javascript:alert(1)",
+            "ftp://example.com",
+        ] {
+            assert!(open_url(rejected).is_err(), "must reject {rejected:?}");
+        }
     }
 }

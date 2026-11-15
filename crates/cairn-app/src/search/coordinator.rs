@@ -7,7 +7,7 @@
 
 use std::time::{Duration, Instant};
 
-use cairn_protocol::message::{QueryDefaults, SortColumn};
+use cairn_protocol::message::{QueryDefaults, SortSpec};
 
 /// Default cooldown / coalesce window for rapid typing bursts.
 pub(crate) const SEARCH_COALESCE_WINDOW: Duration = Duration::from_millis(50);
@@ -32,8 +32,7 @@ impl Clock for MonotonicClock {
 pub(crate) struct SearchCommand {
     pub query: String,
     pub defaults: QueryDefaults,
-    pub sort_column: SortColumn,
-    pub sort_asc: bool,
+    pub sort_spec: SortSpec,
     pub page_size: usize,
     pub reset_scroll_on_apply: bool,
 }
@@ -271,17 +270,8 @@ mod tests {
     fn cmd(text: &str, reset_scroll: bool) -> SearchCommand {
         SearchCommand {
             query: text.to_string(),
-            defaults: QueryDefaults {
-                case_sensitive: false,
-                whole_words: false,
-                match_path: false,
-                is_regex: false,
-                content: false,
-                exclude_hidden: false,
-                exclude_system: false,
-            },
-            sort_column: SortColumn::Name,
-            sort_asc: true,
+            defaults: QueryDefaults::default(),
+            sort_spec: SortSpec::default(),
             page_size: 100,
             reset_scroll_on_apply: reset_scroll,
         }

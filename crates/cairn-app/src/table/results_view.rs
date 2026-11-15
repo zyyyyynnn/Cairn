@@ -2,282 +2,33 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Results table view: headers, rows, placeholders, and empty / offline states.
+//! Results table region: viewport scrolling containers, virtual row band, and state overlays.
 
-use crate::app::{element_id, join_row_path, layout, split_name_highlights, CairnApp};
-use crate::service::service_issue::{self, ServiceBandAction, ServiceIssue};
+use crate::app::{layout, CairnApp};
 use crate::shell::accessibility::{self, ControlElement};
-use crate::shell::command_groups::GroupCommand;
 use crate::shell::commands::RESULTS_CONTEXT;
-use crate::shell::file_icon::file_kind_icon;
-use crate::shell::menu_rules::IndexMenuState;
-use crate::shell::state_view::{icon_action, render_state_band};
-use crate::shell::theme::{self, ShellTokens};
-use crate::table::model::{ColumnBoundary, SortColumn, SortColumnLabel};
-use crate::table::presentation::format_timestamp_cached;
+use crate::shell::theme::ShellTokens;
+use crate::table::rows::{rows_to_paint, RowBand};
 use crate::table::surface::{result_surface, ResultSurface, ResultSurfaceInputs};
 use crate::view::announce_shortcut;
-use cairn_core::format_size_bytes;
-use cairn_core::treemap::FileKind;
-use cairn_protocol::message::FileRowData;
-use cairn_protocol::status::ContentIndexState;
-use fluent_bundle::FluentArgs;
-use gpui_kit::assets::IconName as AssetIconName;
-use gpui_kit::base::Disableable as _;
-use gpui_kit::component::input::Input;
-use gpui_kit::component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
-use gpui_kit::component::{
-    h_flex, v_flex, Icon, IconName, InteractiveElementExt as _, Sizable as _,
-};
+use gpui_kit::component::{h_flex, v_flex, InteractiveElementExt as _};
 use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::*;
 use std::ops::Range;
-use std::rc::Rc;
-
-/// Placeholder geometry for unfetched scroll windows.
-const PLACEHOLDER_BAR_HEIGHT: f32 = 0.75;
-const PLACEHOLDER_DATE_WIDTH: f32 = 7.0;
-/// The resize affordance is a physical hit strip; the painted line is a hairline inside it.
-const RESIZE_HIT_WIDTH: Pixels = px(8.0);
-const RESIZE_LINE_OFFSET: Pixels = px(3.0);
-/// Wide enough for the row commands without letting a long path set the menu's width.
-const CONTEXT_MENU_MIN_WIDTH: f32 = 12.0;
-/// Why a `content:` query has no rows to show. Silence would read as "no file matches", which is
-/// only true once the content index is ready.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ContentQueryNotice {
-    Loading,
-    /// The status read itself failed; the lifecycle is unknown, not `Disabled`.
-    Unreadable,
-    Disabled,
-    Backfilling,
-    Error,
-}
-
-/// A disconnected service shows its own offline band, so this only explains states where a query
-/// actually reached the service.
-fn content_query_notice(state: &IndexMenuState<'_>) -> Option<ContentQueryNotice> {
-    if !state.service_connected {
-        return None;
-    }
-    if state.content_loading {
-        return Some(ContentQueryNotice::Loading);
-    }
-    if state.content_action_failed {
-        return Some(ContentQueryNotice::Error);
-    }
-    if state.content_failed {
-        return Some(ContentQueryNotice::Unreadable);
-    }
-    match state.content_state {
-        ContentIndexState::Ready => None,
-        ContentIndexState::Disabled => Some(ContentQueryNotice::Disabled),
-        ContentIndexState::Backfilling { .. } => Some(ContentQueryNotice::Backfilling),
-        ContentIndexState::Error(_) => Some(ContentQueryNotice::Error),
-    }
-}
-
-/// Viewport-local top of the first rendered row.
-///
-/// The window start is absolute and, for a full index, can name row one million. Multiplying it
-/// by the row height before layout loses sub-row precision in f32: every row lands on a coarse
-/// rounding grid and the gaps visibly alternate. Subtracting in f64 leaves only the small residual
-/// between the window start and the scroll offset for the layout engine to see.
-fn rows_band_local_top(first: usize, scroll_top: f32, row_height: f32) -> f32 {
-    (first as f64 * row_height as f64 - scroll_top as f64) as f32
-}
-
-/// Rows to paint, the viewport-local top they start at, and whether they are pinned.
-///
-/// A scrollbar drag can move the viewport completely past the fetched window. Painting that band
-/// as placeholders leaves nothing on screen while the page request is in flight, which reads as a
-/// white flash at drag speed. Keep the closest edge of the window already in memory on screen
-/// instead: its tail when the viewport moved below it, its head when it moved above. The page for
-/// the new viewport replaces these rows as soon as it lands.
-///
-/// Such rows are pinned: they do not belong to the rows the scroll position names, so they are
-/// painted for visual continuity only. The caller must not wire pointer interaction or a band
-/// position onto them.
-struct PaintedRows {
-    range: Range<usize>,
-    top: f32,
-    pinned: bool,
-}
-
-/// Per-band values every real row shares: the result-set size for its ARIA position, the lane
-/// tokens, the row height, and whether this paint shows the rows the scroll position names rather
-/// than a pinned preview of another window edge.
-struct RowBand<'a> {
-    total: usize,
-    tokens: &'a ShellTokens,
-    row_height: Pixels,
-    interactive: bool,
-}
-
-fn rows_to_paint(
-    visible: Range<usize>,
-    loaded: Range<usize>,
-    scroll_top: f32,
-    viewport_height: f32,
-    row_height: f32,
-) -> PaintedRows {
-    let overlaps = visible.start < loaded.end && visible.end > loaded.start;
-    if overlaps || loaded.is_empty() {
-        let top = rows_band_local_top(visible.start, scroll_top, row_height);
-        return PaintedRows {
-            range: visible,
-            top,
-            pinned: false,
-        };
-    }
-
-    let count = visible.len().max(1);
-    if visible.start >= loaded.end {
-        let start = loaded.end.saturating_sub(count).max(loaded.start);
-        let top = viewport_height - (loaded.end - start) as f32 * row_height;
-        PaintedRows {
-            range: start..loaded.end,
-            top,
-            pinned: true,
-        }
-    } else {
-        let end = loaded.start.saturating_add(count).min(loaded.end);
-        PaintedRows {
-            range: loaded.start..end,
-            top: 0.0,
-            pinned: true,
-        }
-    }
-}
-
-/// The file kind behind a result row's icon.
-///
-/// A recovered suffix matters when the display name hides or differs from it. In that case the
-/// suffix is carried through the taxonomy's name entry point with a synthetic name instead of a
-/// second extension table. When the name already ends in the same suffix — or no suffix was
-/// recovered — the taxonomy's own name rules stay in charge, so `CMakeLists.txt` stays source code
-/// and a bare dotfile stays configuration.
-fn row_file_kind(name: &str, resolved_extension: &str) -> FileKind {
-    let name_extension = name.rsplit_once('.').map(|(_, extension)| extension);
-    let name_names_the_suffix =
-        name_extension.is_some_and(|extension| extension.eq_ignore_ascii_case(resolved_extension));
-    if resolved_extension.is_empty() || name_names_the_suffix {
-        return FileKind::classify_file(name);
-    }
-    let kind = FileKind::classify_file(&format!("file.{resolved_extension}"));
-    if kind == FileKind::Other {
-        // An unknown recovered suffix cannot improve on what the name itself says.
-        FileKind::classify_file(name)
-    } else {
-        kind
-    }
-}
-
-/// The icon a result row shows: a directory is always a folder; a file is
-/// classified by its name and the recovered Shell suffix, then mapped through
-/// the shared file-kind icon table.
-fn result_row_icon(name: &str, resolved_extension: &str, is_dir: bool) -> AssetIconName {
-    if is_dir {
-        return AssetIconName::Folder;
-    }
-    file_kind_icon(row_file_kind(name, resolved_extension))
-}
-
-/// One proportional text lane. `flex_basis` at zero makes the grow factors divide the surplus
-/// exactly, so the header and every row resolve the same five-to-four split between name and path
-/// and the numeric lanes keep their fixed channels (Design Guides: repeat column geometry through
-/// the whole region).
-pub(crate) trait ColumnLane {
-    fn lane_grow(self, grow: f32) -> Self;
-}
-
-impl ColumnLane for Div {
-    fn lane_grow(self, grow: f32) -> Self {
-        self.flex_grow(grow).flex_basis(px(0.0))
-    }
-}
-
-impl<E> ColumnLane for gpui_kit::gpui::Stateful<E>
-where
-    gpui_kit::gpui::Stateful<E>: Styled,
-{
-    fn lane_grow(self, grow: f32) -> Self {
-        self.flex_grow(grow).flex_basis(px(0.0))
-    }
-}
-
-/// The commands the result context menu lists, in the order it lists them. They are the same
-/// [`GroupCommand`]s the command bar holds, so a row cannot offer a command the bar has lost.
-/// 删除 opens its own section: it is destructive, where 打开/复制 are reads and 属性 is a look-up.
-const RESULT_COMMANDS: &[GroupCommand] = &[
-    GroupCommand::OpenSelected,
-    GroupCommand::RenameSelected,
-    GroupCommand::RevealLocation,
-    GroupCommand::CopyPaths,
-    GroupCommand::CopyNames,
-    GroupCommand::SelectAll,
-    GroupCommand::DeleteSelected,
-    GroupCommand::ShowProperties,
-];
-
-/// A bin row has no live path to reveal and no useful payload properties sheet. It offers the
-/// row's own restore command instead, then the copy commands, then the permanent delete.
-/// Restoring every item is a location action and stays in the File menu.
-const BIN_COMMANDS: &[GroupCommand] = &[
-    GroupCommand::OpenSelected,
-    GroupCommand::RestoreSelected,
-    GroupCommand::CopyPaths,
-    GroupCommand::CopyNames,
-    GroupCommand::SelectAll,
-    GroupCommand::DeleteSelected,
-];
-
-/// Which lane a heading cell occupies. The names are the row's own parts, so a heading and a cell
-/// cannot be given different widths by accident.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum HeaderLane {
-    Name,
-    Path,
-    Size,
-    Date,
-    Created,
-}
 
 impl CairnApp {
-    /// The heading row plus whatever the band under it holds: the rows, the empty state, or the
-    /// reason there are no rows to show.
-    ///
-    /// The heading row and the rows share one horizontal extent inside a box that scrolls sideways.
-    /// Each lane already refuses to shrink below its own floor, so once the window is narrower than
-    /// the four floors plus the sidebar the last column is cut off at the frame edge; scrolling
-    /// reaches it instead. The extent is [`layout::TABLE_MIN_WIDTH`] when the window is tight and
-    /// stretches to the viewport when it is not, so a wide window shows no trailing gap. The two
-    /// state bands sit outside that extent: they have no columns to line up with, and a sentence you
-    /// have to scroll sideways to finish reading is not a recovery instruction.
-    ///
-    /// That overflow needs to be *said*, and one offset has to answer all three of the ways a person
-    /// can act on it, so the region owns them together: the scrollbar drawn at the region's own edge,
-    /// the four keys of [`RESULTS_CONTEXT`], and the wheel. All three read and write
-    /// `crate::app::CairnApp::table_scroll` (SPEC UI-03; Design Guides *Designing data-heavy
-    /// interfaces*: "keep headers and primary row identity visually stable").
     pub(crate) fn render_results(
         &mut self,
         tokens: &ShellTokens,
         visible: Range<usize>,
         row_height: Pixels,
         results_hold_focus: bool,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let search_focused = self.query.search_focus.is_focused(window);
         let header = self.render_table_header(tokens, cx);
-        // The rows are the content that overflows sideways, so they scroll. The two state bands are
-        // not: a recovery sentence laid out at the columns' full extent runs past the frame and only
-        // becomes readable by scrolling sideways, which is the opposite of what the band exists to
-        // say. A band fills the width the window actually shows instead.
-        // Once any rows exist the table wins even if the index is still catching up: the cached
-        // results are usable, and the single "synchronizing" capsule describes their freshness.
-        // A background refresh of an index that already shows rows must leave those rows in place.
         let surface = result_surface(ResultSurfaceInputs {
             total_rows: self.results.table.total_rows(),
             recycle_bin_open: self.recycle_bin.is_open(),
@@ -292,36 +43,21 @@ impl CairnApp {
             has_query: self.has_query(),
         });
         let rows = (surface == ResultSurface::Rows)
-            .then(|| self.render_rows_band(tokens, visible, row_height, cx));
+            .then(|| self.render_rows_band(tokens, visible, row_height, search_focused, cx));
         let state = match surface {
             ResultSurface::Empty => Some(self.render_empty_state(tokens, cx)),
             ResultSurface::Offline => Some(self.render_service_offline_state(tokens, cx)),
             ResultSurface::Rows | ResultSurface::Loading => None,
         };
 
-        // The header is outside this wrapper, so a refresh never blanks or
-        // re-fades the column labels. The fade overlay dissolves over
-        // MASK_DISSOLVE, with a cleanup timer scheduled at the entrance source.
         let has_content = rows.is_some();
         let has_state = state.is_some();
         let rows = rows.map(|body| body.into_any_element());
         let state = state.map(|body| body.into_any_element());
-
-        // Whether the columns need the sideways route at all, read from the handle that measured
-        // it last frame: the row is spent on a scrollbar only when the content is genuinely wider
-        // than the viewport.
         let overflows_sideways = self.results.table_scroll.max_offset().x > px(0.0);
 
         let viewport = div()
-            // `overflow_x_scroll` and its offset live on the interactive element, so the scrolling box
-            // needs its own identity. It carries no focus and answers no keys: the region around it
-            // does, because the scrollbar that belongs to this box must not travel with its content.
             .id("result-table-viewport")
-            // The viewport always fills the width it is given. Without this, a state band (empty,
-            // offline) left the box sized by the header's intrinsic width, so the
-            // columns jumped left and right as a query resolved to zero rows. Height still comes
-            // from the row: with rows this box shares the leftover body; without them it ends at
-            // the heading and the band below takes the space.
             .flex_1()
             .min_w_0()
             .min_h_0()
@@ -329,22 +65,13 @@ impl CairnApp {
             .flex_col()
             .overflow_x_scroll()
             .track_scroll(&self.results.table_scroll)
-            // A vertical wheel over this box must stay vertical. Without the lock GPUI feeds a
-            // one-axis container the *other* axis' delta, so scrolling down through the rows slid the
-            // columns sideways instead (`gpui-pre-0.3.9/src/elements/div.rs`, scroll listener's
-            // remap arm; the component layer locks the same axis for the same reason).
             .lock_scroll_axis()
             .child(
                 v_flex()
                     .w_full()
-                    .min_w(rems(
-                        layout::TABLE_MIN_WIDTH
-                            + layout::optional_columns_width(self.show_created()),
-                    ))
+                    .min_w(rems(self.table_min_width()))
                     .flex_1()
                     .min_h_0()
-                    // The heading row owns the separator under it; the scrolling band must not draw
-                    // the same edge a second time.
                     .child(header)
                     .when_some(rows, |this, rows| this.child(rows)),
             );
@@ -354,8 +81,6 @@ impl CairnApp {
             .aria_label(accessibility::name(control, &self.i18n))
             .key_context(RESULTS_CONTEXT)
             .track_focus(&self.results.results_focus)
-            // Any key in the region means the keyboard is driving, so the focus ring belongs on
-            // the table. A pointer press clears the flag before the next frame.
             .on_key_down(cx.listener(|this, _: &KeyDownEvent, _, cx| {
                 if !this.results.keyboard_navigation {
                     this.results.keyboard_navigation = true;
@@ -366,6 +91,7 @@ impl CairnApp {
             .on_action(cx.listener(Self::scroll_table_right))
             .on_action(cx.listener(Self::scroll_table_start))
             .on_action(cx.listener(Self::scroll_table_end))
+            .on_action(cx.listener(Self::preview_snippet))
             .flex_1()
             .min_w_0()
             .min_h_0()
@@ -374,17 +100,12 @@ impl CairnApp {
             .flex_col()
             .child(
                 h_flex()
-                    // With rows the band takes the leftover height; with a state band the heading row
-                    // stays at its own height and the state under it takes the space.
                     .when(has_content, |this| this.flex_1())
                     .min_w_0()
                     .min_h_0()
                     .items_stretch()
                     .relative()
                     .child(viewport)
-                    // The gutter is permanent, not conditional on the first page.
-                    // Reserving its width keeps the
-                    // header and every column from jumping when rows land.
                     .child(
                         v_flex()
                             .flex_shrink_0()
@@ -392,8 +113,6 @@ impl CairnApp {
                             .w(Scrollbar::width())
                             .when(has_content, |this| this.bg(tokens.background))
                             .when(!has_content, |this| this.bg(tokens.muted))
-                            // The heading owns the top of the region, so its gutter keeps the
-                            // header surface and the scrollbar track starts underneath it.
                             .child(
                                 div()
                                     .flex_shrink_0()
@@ -426,18 +145,12 @@ impl CairnApp {
                 )
             })
             .when_some(state, |this, band| this.child(band))
-            // Keyboard focus has to be visible, and the ring must not move the columns it surrounds,
-            // so it is painted over the region's edge instead of becoming a border on the region. It
-            // carries no id and no listener, so drawing it last costs the content nothing it needs to
-            // be hit by.
             .when(surface == ResultSurface::Loading, |this| {
                 this.child(
                     div()
                         .id("table-loading-overlay")
                         .absolute()
                         .inset_0()
-                        // The horizontal scrollbar is a row of this region, so the cover stops
-                        // above it: a control that can still be hit must not be hidden.
                         .when(overflows_sideways, |this| this.bottom(Scrollbar::width()))
                         .bg(tokens.muted),
                 )
@@ -481,301 +194,15 @@ impl CairnApp {
             })
     }
 
-    /// The empty and no-match states. With an empty box the "所有文件" query is still a query, so a
-    /// zero-row answer means the index itself has nothing to show, not "start typing". A narrowed
-    /// query keeps the ordinary no-match message. Clearing is owned by the search box's own clear
-    /// control, so the band never repeats that command as a second button.
-    fn render_empty_state(&self, tokens: &ShellTokens, cx: &mut Context<Self>) -> ControlElement {
-        if self.recycle_bin.error().is_some() {
-            let control = accessibility::control("recycle-bin-error");
-            let message = self.i18n.get_text("recycle_bin_unavailable_title");
-            let retry = accessibility::control("recycle-bin-retry");
-            let retry_label = accessibility::name(retry, &self.i18n);
-            let action = icon_action(retry, AssetIconName::RotateCcw, retry_label)
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.open_recycle_bin(window, cx);
-                }))
-                .into_any_element();
-            return render_state_band(
-                tokens,
-                control,
-                message,
-                Icon::new(IconName::CircleAlert)
-                    .size_8()
-                    .text_color(tokens.danger)
-                    .into_any_element(),
-                Some(action),
-            );
-        }
-
-        let control = accessibility::control("result-state");
-        if self.recycle_bin.is_open() {
-            let bin_empty = self.recycle_bin.all().is_empty();
-            let (message_key, icon) = if bin_empty {
-                (
-                    "recycle_bin_empty_title",
-                    Icon::new(AssetIconName::Recycle)
-                        .size_8()
-                        .text_color(tokens.muted_foreground)
-                        .into_any_element(),
-                )
-            } else {
-                (
-                    "recycle_bin_no_matches_title",
-                    Icon::new(IconName::Search)
-                        .size_8()
-                        .text_color(tokens.muted_foreground)
-                        .into_any_element(),
-                )
-            };
-            let message = self.i18n.get_text(message_key);
-            return render_state_band(tokens, control, message, icon, None);
-        }
-
-        if self.block_listing.is_some() {
-            // The rows are this location's members: an empty table is either a
-            // block whose members are gone or a filter with no match, never an
-            // empty index.
-            let block_empty = self
-                .block_listing
-                .as_ref()
-                .is_some_and(|listing| listing.count() == 0);
-            let (message_key, icon) = if block_empty {
-                (
-                    "treemap_block_empty_title",
-                    Icon::new(AssetIconName::Folder)
-                        .size_8()
-                        .text_color(tokens.muted_foreground)
-                        .into_any_element(),
-                )
-            } else {
-                (
-                    "treemap_block_no_matches_title",
-                    Icon::new(AssetIconName::Search)
-                        .size_8()
-                        .text_color(tokens.muted_foreground)
-                        .into_any_element(),
-                )
-            };
-            let message = self.i18n.get_text(message_key);
-            return render_state_band(tokens, control, message, icon, None);
-        }
-
-        // A refused query never reached the content index, so its own refusal owns the band;
-        // retrying the same text would be refused again, hence no recovery action.
-        if let Some(rejection) = self.query.rejection {
-            let mut args = FluentArgs::new();
-            args.set("limit", cairn_core::syntax::MAX_CONTENT_TERMS as i64);
-            let message = self.i18n.get_text_with_args(rejection.message_key(), &args);
-            return render_state_band(
-                tokens,
-                control,
-                message,
-                Icon::new(IconName::CircleAlert)
-                    .size_8()
-                    .text_color(tokens.danger)
-                    .into_any_element(),
-                None,
-            );
-        }
-
-        // A cancelled search is not a no-match: it stopped before the service answered.
-        if self.query.cancelled {
-            let message = self.i18n.get_text("search_cancelled_title");
-            return render_state_band(
-                tokens,
-                control,
-                message,
-                Icon::new(AssetIconName::Search)
-                    .size_8()
-                    .text_color(tokens.muted_foreground)
-                    .into_any_element(),
-                None,
-            );
-        }
-
-        let has_query = self.has_query();
-        let notice = if self.has_content_query() {
-            content_query_notice(&self.index_menu_state())
-        } else {
-            None
-        };
-        let (message_key, icon) = match notice {
-            Some(ContentQueryNotice::Loading) => (
-                "empty_content_loading_title",
-                Icon::new(AssetIconName::Timer)
-                    .size_8()
-                    .text_color(tokens.muted_foreground)
-                    .into_any_element(),
-            ),
-            Some(ContentQueryNotice::Unreadable) => (
-                "empty_content_unreadable_title",
-                Icon::new(AssetIconName::TriangleAlert)
-                    .size_8()
-                    .text_color(tokens.warning_ink)
-                    .into_any_element(),
-            ),
-            Some(ContentQueryNotice::Disabled) => (
-                "empty_content_disabled_title",
-                Icon::new(AssetIconName::Info)
-                    .size_8()
-                    .text_color(tokens.muted_foreground)
-                    .into_any_element(),
-            ),
-            Some(ContentQueryNotice::Backfilling) => (
-                "empty_content_backfilling_title",
-                Icon::new(AssetIconName::Timer)
-                    .size_8()
-                    .text_color(tokens.warning_ink)
-                    .into_any_element(),
-            ),
-            Some(ContentQueryNotice::Error) => (
-                "empty_content_error_title",
-                Icon::new(AssetIconName::CircleAlert)
-                    .size_8()
-                    .text_color(tokens.danger)
-                    .into_any_element(),
-            ),
-            // A ready content index answering zero rows is a genuine no-match, but it is a
-            // no-match inside a scope narrower than "all files". Say that scope once instead of
-            // letting a filename-only explanation imply whole-body coverage.
-            None if has_query && self.has_content_query() => (
-                "empty_content_scope_line",
-                Icon::new(AssetIconName::Search)
-                    .size_8()
-                    .text_color(tokens.muted_foreground)
-                    .into_any_element(),
-            ),
-            None if has_query => (
-                "empty_no_matches",
-                Icon::new(AssetIconName::Search)
-                    .size_8()
-                    .text_color(tokens.muted_foreground)
-                    .into_any_element(),
-            ),
-            None => (
-                "empty_index_empty_title",
-                Icon::new(AssetIconName::Search)
-                    .size_8()
-                    .text_color(tokens.muted_foreground)
-                    .into_any_element(),
-            ),
-        };
-        let message = self.i18n.get_text(message_key);
-        let action = match notice {
-            Some(ContentQueryNotice::Disabled)
-            | Some(ContentQueryNotice::Error)
-            | Some(ContentQueryNotice::Unreadable) => {
-                let label_key = match notice {
-                    Some(ContentQueryNotice::Disabled) => "index_enable_action",
-                    Some(ContentQueryNotice::Error) => "menu_content_search_retry",
-                    _ => "index_status_retry",
-                };
-                let pending = !matches!(notice, Some(ContentQueryNotice::Unreadable))
-                    && self.service.content_action_pending;
-                let control = accessibility::control("content-search-action");
-                let label = self.i18n.get_text(label_key);
-                let icon = match notice {
-                    Some(ContentQueryNotice::Disabled) => AssetIconName::Play,
-                    _ => AssetIconName::RotateCcw,
-                };
-                Some(
-                    icon_action(control, icon, label)
-                        .disabled(pending)
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            match notice {
-                                Some(ContentQueryNotice::Unreadable) => {
-                                    this.refresh_content_status(cx)
-                                }
-                                _ => this.set_content_index_enabled(true, cx),
-                            }
-                            this.query.search_focus.focus(window, cx);
-                        }))
-                        .into_any_element(),
-                )
-            }
-            Some(ContentQueryNotice::Loading) | Some(ContentQueryNotice::Backfilling) | None => {
-                None
-            }
-        };
-        render_state_band(tokens, control, message, icon, action)
-    }
-
-    fn render_service_offline_state(
-        &self,
-        tokens: &ShellTokens,
-        cx: &mut Context<Self>,
-    ) -> ControlElement {
-        let issue = self
-            .service
-            .service_issue
-            .unwrap_or(ServiceIssue::NotRunning);
-        let control = accessibility::control(issue.accessibility_key());
-        let message = self.i18n.get_text(issue.message_key());
-        let retry = accessibility::control("service-retry-button");
-        let retry_label = accessibility::name(retry, &self.i18n);
-        let start = accessibility::control("service-start-button");
-        let start_label = accessibility::name(start, &self.i18n);
-        let probe_label = self.i18n.get_text("service_probe_label");
-        let start_face = if self.service.is_probing_service {
-            probe_label.clone()
-        } else {
-            start_label.clone()
-        };
-        let retry_face = if self.service.is_probing_service {
-            probe_label
-        } else {
-            retry_label.clone()
-        };
-        // Starting the service is a UAC action, so it is offered only when SCM says the service
-        // exists. A missing service gets install guidance instead of an elevation prompt, and an
-        // issue the app cannot clear gets its sentence alone: a control that cannot change the
-        // outcome is worse than no control.
-        let action = match service_issue::band_action(issue, self.service.service_installed) {
-            ServiceBandAction::Start => Some(
-                icon_action(start, AssetIconName::Play, start_face)
-                    .loading(self.service.is_probing_service)
-                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                        this.start_service(cx);
-                    }))
-                    .into_any_element(),
-            ),
-            ServiceBandAction::Retry => Some(
-                icon_action(retry, AssetIconName::RotateCcw, retry_face)
-                    .loading(self.service.is_probing_service)
-                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                        this.retry_service_connection(cx);
-                    }))
-                    .into_any_element(),
-            ),
-            ServiceBandAction::None => None,
-        };
-        render_state_band(
-            tokens,
-            control,
-            message,
-            Icon::new(IconName::CircleAlert)
-                .size_8()
-                .text_color(tokens.danger)
-                .into_any_element(),
-            action,
-        )
-    }
-
     fn render_rows_band(
         &mut self,
         tokens: &ShellTokens,
         visible: Range<usize>,
         row_height: Pixels,
+        search_focused: bool,
         cx: &mut Context<Self>,
     ) -> ControlElement {
         let extent = px(self.results.table.scroll_extent(f32::from(row_height)));
-        // The fetched window can start millions of rows into the result set. Laying those rows
-        // out inside the scrolled content would place them tens of millions of pixels from the
-        // origin, where f32 rounds every row to a coarser grid and the row rhythm visibly drifts
-        // (26/28/32 px gaps on a 28 px row). Only the scroll range stays absolute; the rows are
-        // drawn over the viewport and their top is the small residual between the window start
-        // and the scroll offset.
         let painted = rows_to_paint(
             visible.clone(),
             self.results.table.loaded_range(),
@@ -788,6 +215,7 @@ impl CairnApp {
             tokens,
             row_height,
             !painted.pinned,
+            search_focused,
             cx,
         );
         let band_top = painted.top;
@@ -795,19 +223,14 @@ impl CairnApp {
         let first = visible.start;
 
         let control = accessibility::control("result-band");
-        let band = accessibility::element(control)
+        accessibility::element(control)
             .aria_label(accessibility::name(control, &self.i18n))
             .aria_orientation(Orientation::Vertical)
-            // A pinned band paints rows from the loaded window edge, not the rows this scroll
-            // position names; its first visible index would be a false position report. Each
-            // painted row still carries its own real absolute index.
             .when(!pinned, |band| band.aria_numeric_value(first as f64))
             .flex_1()
             .min_h_0()
             .relative()
             .bg(tokens.background)
-            // The tall spacer is the only scroll content; it gives the scrollbar the full result
-            // extent while the rows are painted at viewport-local coordinates above it.
             .child(
                 div()
                     .id("result-rows-scroll")
@@ -815,8 +238,6 @@ impl CairnApp {
                     .inset_0()
                     .overflow_y_scroll()
                     .track_scroll(&self.results.rows_scroll)
-                    // The rows overlay owns wheel input; this stays locked so a sideways sweep
-                    // that reaches the spacer is never remapped into a vertical scroll.
                     .lock_scroll_axis()
                     .child(div().absolute().left_0().right_0().top_0().h(extent)),
             )
@@ -828,11 +249,8 @@ impl CairnApp {
                     .on_scroll(cx.listener(|this, event: &ScrollEvent, window, cx| {
                         let delta = event.delta.pixel_delta(window.line_height());
                         if delta.y.is_zero() {
-                            // A purely sideways gesture belongs to the viewport below.
                             return;
                         }
-                        // GPUI adds the wheel delta to the negative scroll offset; scrolling
-                        // down reports a negative delta and moves the band towards later rows.
                         let current = this.scrolled_pixels();
                         let max = this
                             .results
@@ -840,6 +258,7 @@ impl CairnApp {
                             .max_scroll_top(f32::from(layout::row_height(window)));
                         let next = (current - f32::from(delta.y)).clamp(0.0, max);
                         if next != current {
+                            this.results.snippet_preview = None;
                             this.results.table.scroll_top = next;
                             this.results
                                 .rows_scroll
@@ -849,8 +268,6 @@ impl CairnApp {
                         }
                         cx.stop_propagation();
                     }))
-                    // Empty space below the last row is still the result band. A press there is
-                    // an outside click for the selection; a press on a row stops propagation above.
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, _, cx| this.dismiss_result_selection(cx)),
@@ -865,9 +282,7 @@ impl CairnApp {
                             .flex_col()
                             .children(rows),
                     ),
-            );
-
-        band
+            )
     }
 
     fn collect_visible_rows(
@@ -876,6 +291,7 @@ impl CairnApp {
         tokens: &ShellTokens,
         row_height: Pixels,
         interactive: bool,
+        search_focused: bool,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let band = RowBand {
@@ -883,6 +299,7 @@ impl CairnApp {
             tokens,
             row_height,
             interactive,
+            search_focused,
         };
         let is_fetching = self.query.is_fetching_more;
         visible
@@ -894,900 +311,13 @@ impl CairnApp {
             })
             .collect()
     }
-
-    fn render_result_row(
-        &self,
-        ix: usize,
-        row: &FileRowData,
-        band: &RowBand<'_>,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let total = band.total;
-        let tokens = band.tokens;
-        let row_height = band.row_height;
-        let is_selected = self.results.table.selected_indices.contains(&ix);
-        let is_focused = self.results.table.focused_idx == Some(ix);
-        let full_path = join_row_path(&row.path, &row.name);
-        let i18n = Rc::clone(&self.i18n);
-        let created_cell = self
-            .show_created()
-            .then(|| self.render_created_cell(row, tokens, is_selected));
-
-        let mut row_el = accessibility::element_at(accessibility::control("result-row"), ix)
-            .aria_label(full_path.clone())
-            // The badge is visible; the snippet behind it is the part assistive technology cannot
-            // infer from the file name. Describe the row with it instead of hiding the reason.
-            .when_some(
-                row.snippet
-                    .clone()
-                    .filter(|snippet| !snippet.trim().is_empty()),
-                |this, snippet| this.aria_description(snippet),
-            )
-            .aria_selected(is_selected)
-            .aria_row_index(ix + 1)
-            .aria_position_in_set(ix + 1)
-            .aria_size_of_set(total)
-            .flex()
-            .items_center()
-            .h(row_height)
-            .bg(tokens.row_background(is_selected))
-            .text_color(if is_selected {
-                tokens.foreground
-            } else {
-                tokens.muted_foreground
-            })
-            .text_sm()
-            .child(self.render_name_cell(row, &full_path, tokens, is_selected))
-            .child(self.render_path_cell(row, &full_path, tokens, is_selected))
-            .child(self.render_size_cell(row, tokens, is_selected))
-            .child(self.render_date_cell(row, tokens, is_selected))
-            .when_some(created_cell, |this, cell| this.child(cell));
-
-        // A pinned row is a preview of the loaded window edge, not the row at this scroll
-        // position. Pointer and context-menu handlers would act on an identity the viewport is
-        // not showing, so the preview stays readable but inert.
-        if band.interactive {
-            row_el = row_el
-                .hover(|s| s.bg(tokens.row_hover))
-                .active(|s| s.bg(tokens.row_hover))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                        // The editor owns presses on the row it renames: the input keeps its
-                        // focus, and a double-click must not open the file being renamed.
-                        if this
-                            .rename
-                            .draft
-                            .as_ref()
-                            .is_some_and(|draft| draft.path == full_path)
-                        {
-                            cx.stop_propagation();
-                            return;
-                        }
-                        this.select_row_by_pointer(
-                            ix,
-                            event.modifiers.control,
-                            event.modifiers.shift,
-                            event.click_count == 2,
-                            layout::row_height(window),
-                            cx,
-                        );
-                        // A press on a row makes the table the keyboard surface, so F2 and the
-                        // navigation keys act on the row that was just chosen.
-                        this.results.results_focus.focus(window, cx);
-                        // The rows band clears the selection on empty-space presses; a press on a
-                        // row selects it and must not bubble back out as an outside click.
-                        cx.stop_propagation();
-                    }),
-                )
-                .on_mouse_down(
-                    MouseButton::Right,
-                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                        this.focus_row_for_context(ix, cx);
-                        cx.notify();
-                    }),
-                );
-        }
-
-        if is_focused {
-            row_el = row_el.aria_active_descendant();
-        }
-        if !band.interactive {
-            return row_el.into_any_element();
-        }
-        let in_bin = self.recycle_bin.is_open();
-        let commands = if in_bin {
-            BIN_COMMANDS
-        } else {
-            RESULT_COMMANDS
-        };
-        // The menu opens after the right-click selected this row, so its
-        // availability is read when it builds rather than from the selection
-        // that happened to exist during this render.
-        let app = cx.entity();
-        // The commands the row owns, in the order the context menu lists them. Every one of them is
-        // also on the keyboard or in the command bar, so the menu is a shortcut and not the only door.
-        row_el
-            .context_menu(move |menu, window, cx| {
-                // `PopupMenu::min_w` takes `Pixels`, not a `Length`, so the rem step is resolved against
-                // this window's base font — the same one every other region in the shell scales with.
-                let mut menu = menu.min_w(window.rem_size() * CONTEXT_MENU_MIN_WIDTH);
-                let rename_available = app.read(cx).rename_target_ix().is_some();
-                for (ix, command) in commands.iter().enumerate() {
-                    // Destructive delete and the properties look-up each open a section;
-                    // the bin omits properties, so only delete separates there.
-                    if ix > 0
-                        && matches!(
-                            command,
-                            GroupCommand::DeleteSelected | GroupCommand::ShowProperties
-                        )
-                    {
-                        menu = menu.separator();
-                    }
-                    let label = i18n.get_text(command.label_key_in(in_bin));
-                    let action = command
-                        .action()
-                        .expect("a result command is an Action the root already handles");
-                    menu = if *command == GroupCommand::RenameSelected {
-                        menu.menu_with_disabled(label, action, !rename_available)
-                    } else {
-                        menu.menu(label, action)
-                    };
-                }
-                menu
-            })
-            .into_any_element()
-    }
-
-    /// A name cell is one truncated text run, not a row of independent spans: only a single run can
-    /// put the ellipsis where the lane actually ends. The full name is available on hover, so a
-    /// clipped value is never the only copy. The element id is the row's full path, which stays the
-    /// same while the row is visible and is unique even when names repeat across folders.
-    ///
-    /// The row being renamed swaps this run for the in-place input, so the editor occupies the name
-    /// lane itself instead of floating over the table.
-    fn render_name_cell(
-        &self,
-        row: &FileRowData,
-        full_path: &str,
-        tokens: &ShellTokens,
-        is_selected: bool,
-    ) -> Stateful<Div> {
-        let renaming = self
-            .rename
-            .draft
-            .as_ref()
-            .is_some_and(|draft| draft.path == full_path);
-        let tooltip = SharedString::from(row.name.as_str());
-        let extension = if self.recycle_bin.is_open() {
-            self.recycle_bin
-                .icon_extension(crate::shell::recycle_bin::bin_icon_key(
-                    &row.name,
-                    &row.path,
-                    row.modified_ts,
-                    row.size,
-                    row.is_dir,
-                ))
-                .unwrap_or("")
-        } else {
-            ""
-        };
-        let content_match = row
-            .snippet
-            .clone()
-            .filter(|snippet| !snippet.trim().is_empty());
-
-        let cell = div()
-            .id(element_id("result-name", full_path))
-            .lane_grow(self.results.column_widths.name)
-            .min_w(rems(layout::NAME_MIN_COLUMN))
-            .pl(rems(layout::CONTENT_INSET - layout::SPACE_4))
-            .pr(rems(layout::INNER_SPACING))
-            .flex()
-            .items_center()
-            .gap(rems(layout::INNER_SPACING));
-        let cell = if renaming {
-            cell
-        } else {
-            cell.tooltip(crate::shell::tooltip::text(tooltip.clone()))
-        };
-        let cell = cell.child(
-            Icon::new(result_row_icon(&row.name, extension, row.is_dir))
-                .small()
-                // The glyph already distinguishes the file kind. Selection is the only thing
-                // that should raise the icon, together with the row's text.
-                .text_color(if is_selected {
-                    tokens.foreground
-                } else {
-                    tokens.muted_foreground
-                }),
-        );
-        let cell = if renaming {
-            let control = accessibility::control("rename-input");
-            cell.child(
-                Input::new(&self.rename.input)
-                    .id(control.element)
-                    .xsmall()
-                    .appearance(false)
-                    .bordered(false)
-                    .focus_bordered(false)
-                    // The result row renders `text_sm`, so the editor uses the same 0.875rem
-                    // step and line box; a body-size input would sit visibly larger than the
-                    // name it replaces.
-                    .text_size(rems(0.875))
-                    .line_height(rems(1.25))
-                    .p(rems(0.0))
-                    .h_full()
-                    .flex_1()
-                    .min_w_0()
-                    .aria_label(accessibility::component_name(control, &self.i18n)),
-            )
-        } else {
-            cell.child(result_text(&row.name, &row.name_highlights, tokens))
-        };
-        cell
-            // A content hit and a filename hit otherwise look identical. The badge names the
-            // reason the row matched; the snippet is available on hover without adding a second
-            // line or changing the virtual row height. Editing hides it so the name lane belongs
-            // to the input alone.
-            .when(!renaming, |this| {
-                this.when_some(content_match, |this, snippet| {
-                    let tip = SharedString::from(snippet);
-                    this.child(
-                        div()
-                            .id(element_id("result-content-match", full_path))
-                            .tooltip(crate::shell::tooltip::text(tip.clone()))
-                            .flex_shrink_0()
-                            .px(rems(layout::SPACE_4))
-                            .rounded(tokens.radius)
-                            .bg(tokens.muted)
-                            .text_sm()
-                            .text_color(tokens.muted_foreground)
-                            .child(self.cached_text("result_content_match")),
-                    )
-                })
-            })
-    }
-
-    /// The path lane behaves like the name lane: a single ellipsized run plus the complete value on
-    /// hover. Its id shares the row's full path, so moving the pointer between the two cells keeps
-    /// the hovered row's identity stable.
-    fn render_path_cell(
-        &self,
-        row: &FileRowData,
-        full_path: &str,
-        tokens: &ShellTokens,
-        is_selected: bool,
-    ) -> Stateful<Div> {
-        let tooltip = SharedString::from(row.path.as_str());
-
-        div()
-            .id(element_id("result-path", full_path))
-            .tooltip(crate::shell::tooltip::text(tooltip.clone()))
-            .lane_grow(self.results.column_widths.path)
-            .min_w(rems(layout::PATH_MIN_COLUMN))
-            .px(rems(layout::INNER_SPACING))
-            .flex()
-            .items_center()
-            .overflow_hidden()
-            .text_color(if is_selected {
-                tokens.foreground
-            } else {
-                tokens.muted_foreground
-            })
-            .child(result_text(&row.path, &row.path_highlights, tokens))
-    }
-
-    /// Sizes share the heading's leading edge; tabular figures let the digits compare down the
-    /// column even though the column is left-aligned (SPEC UI-02).
-    fn render_size_cell(&self, row: &FileRowData, tokens: &ShellTokens, is_selected: bool) -> Div {
-        div()
-            .lane_grow(self.results.column_widths.size)
-            .min_w(rems(layout::SIZE_COLUMN))
-            .px(rems(layout::INNER_SPACING))
-            .flex()
-            .items_center()
-            .font_features(theme::tabular_figures())
-            .text_color(if is_selected {
-                tokens.foreground
-            } else {
-                tokens.muted_foreground
-            })
-            .child(format_size_bytes(row.size))
-    }
-
-    fn render_date_cell(&self, row: &FileRowData, tokens: &ShellTokens, is_selected: bool) -> Div {
-        div()
-            .lane_grow(self.results.column_widths.date)
-            .min_w(rems(layout::DATE_COLUMN))
-            .px(rems(layout::INNER_SPACING))
-            .flex()
-            .items_center()
-            .font_features(theme::tabular_figures())
-            .text_color(if is_selected {
-                tokens.foreground
-            } else {
-                tokens.muted_foreground
-            })
-            .child(format_timestamp_cached(row.modified_ts))
-    }
-
-    fn render_created_cell(
-        &self,
-        row: &FileRowData,
-        tokens: &ShellTokens,
-        is_selected: bool,
-    ) -> Div {
-        div()
-            .w(rems(layout::CREATED_COLUMN))
-            .flex_shrink_0()
-            .px(rems(layout::INNER_SPACING))
-            .flex()
-            .items_center()
-            .font_features(theme::tabular_figures())
-            .text_color(if is_selected {
-                tokens.foreground
-            } else {
-                tokens.muted_foreground
-            })
-            .child(format_timestamp_cached(row.created_ts))
-    }
-
-    /// A row the service has not delivered yet: an explicit loading state, so a scrollbar ahead of
-    /// the fetched window never reads as an empty result. The words say which of the two states this
-    /// is; the bar beside them is the shape of the row that will land there.
-    ///
-    /// Fast scrolling across unfetched windows renders this quiet placeholder without flickering.
-    fn render_placeholder_row(
-        &self,
-        ix: usize,
-        is_fetching: bool,
-        tokens: &ShellTokens,
-        row_height: Pixels,
-    ) -> AnyElement {
-        let control = accessibility::control("result-placeholder");
-        let message = if is_fetching {
-            accessibility::name_at(control, 0, &self.i18n)
-        } else {
-            accessibility::name_at(control, 1, &self.i18n)
-        };
-
-        const PLACEHOLDER_NAME_WIDTHS: [f32; 8] = [8.0, 11.0, 6.5, 9.5, 12.0, 7.5, 10.0, 8.5];
-        const PLACEHOLDER_PATH_WIDTHS: [f32; 8] = [14.0, 18.0, 12.0, 16.5, 20.0, 13.5, 17.0, 15.0];
-        const PLACEHOLDER_SIZE_WIDTHS: [f32; 4] = [3.2, 2.5, 4.0, 2.8];
-
-        let name_w = rems(PLACEHOLDER_NAME_WIDTHS[ix % PLACEHOLDER_NAME_WIDTHS.len()]);
-        let path_w = rems(PLACEHOLDER_PATH_WIDTHS[ix % PLACEHOLDER_PATH_WIDTHS.len()]);
-        let size_w = rems(PLACEHOLDER_SIZE_WIDTHS[ix % PLACEHOLDER_SIZE_WIDTHS.len()]);
-        let bar_bg = tokens.muted;
-
-        accessibility::element_at(control, ix)
-            .aria_label(message)
-            .h(row_height)
-            .flex()
-            .items_center()
-            .w_full()
-            .child(
-                div()
-                    .lane_grow(self.results.column_widths.name)
-                    .min_w(rems(layout::NAME_MIN_COLUMN))
-                    .pl(rems(layout::CONTENT_INSET - layout::SPACE_4))
-                    .pr(rems(layout::INNER_SPACING))
-                    .flex()
-                    .items_center()
-                    .gap(rems(layout::INNER_SPACING))
-                    .child(
-                        div()
-                            .size_4()
-                            .flex_shrink_0()
-                            .rounded(tokens.radius)
-                            .bg(bar_bg),
-                    )
-                    .child(
-                        div()
-                            .h(rems(PLACEHOLDER_BAR_HEIGHT))
-                            .w(name_w)
-                            .max_w_full()
-                            .rounded(tokens.radius)
-                            .bg(bar_bg),
-                    ),
-            )
-            .child(
-                div()
-                    .lane_grow(self.results.column_widths.path)
-                    .min_w(rems(layout::PATH_MIN_COLUMN))
-                    .px(rems(layout::INNER_SPACING))
-                    .flex()
-                    .items_center()
-                    .child(
-                        div()
-                            .h(rems(PLACEHOLDER_BAR_HEIGHT))
-                            .w(path_w)
-                            .max_w_full()
-                            .rounded(tokens.radius)
-                            .bg(bar_bg),
-                    ),
-            )
-            .child(
-                div()
-                    .lane_grow(self.results.column_widths.size)
-                    .min_w(rems(layout::SIZE_COLUMN))
-                    .px(rems(layout::INNER_SPACING))
-                    .flex()
-                    .items_center()
-                    .child(
-                        div()
-                            .h(rems(PLACEHOLDER_BAR_HEIGHT))
-                            .w(size_w)
-                            .rounded(tokens.radius)
-                            .bg(bar_bg),
-                    ),
-            )
-            .child(
-                div()
-                    .lane_grow(self.results.column_widths.date)
-                    .min_w(rems(layout::DATE_COLUMN))
-                    .px(rems(layout::INNER_SPACING))
-                    .flex()
-                    .items_center()
-                    .child(
-                        div()
-                            .h(rems(PLACEHOLDER_BAR_HEIGHT))
-                            .w(rems(PLACEHOLDER_DATE_WIDTH))
-                            .rounded(tokens.radius)
-                            .bg(bar_bg),
-                    ),
-            )
-            .when(self.show_created(), |this| {
-                this.child(
-                    div()
-                        .w(rems(layout::CREATED_COLUMN))
-                        .flex_shrink_0()
-                        .px(rems(layout::INNER_SPACING))
-                        .flex()
-                        .items_center()
-                        .child(
-                            div()
-                                .h(rems(PLACEHOLDER_BAR_HEIGHT))
-                                .w(rems(PLACEHOLDER_DATE_WIDTH))
-                                .rounded(tokens.radius)
-                                .bg(bar_bg),
-                        ),
-                )
-            })
-            .into_any_element()
-    }
-
-    /// The heading row shares the result row's lanes exactly: same widths, same insets, same
-    /// centerline, resolved from the same [`layout`] constants. It is drawn here rather than by
-    /// `Table` for the reason recorded on [`CairnApp::render_rows_band`], and it stays clickable
-    /// because sorting is a command, not a caption.
-    fn show_created(&self) -> bool {
-        !self.recycle_bin.is_open() && self.settings.columns.show_created
-    }
-
-    fn render_table_header(&self, tokens: &ShellTokens, cx: &mut Context<Self>) -> AnyElement {
-        let control = accessibility::control("table-header");
-        let mut header = accessibility::element(control)
-            .aria_label(accessibility::name(control, &self.i18n))
-            .h(rems(layout::HEADER_HEIGHT))
-            .flex()
-            .items_center()
-            .flex_shrink_0()
-            .bg(tokens.table_head)
-            .text_color(tokens.table_head_foreground)
-            .border_b_1()
-            .border_color(tokens.border)
-            .text_sm()
-            // A release can land outside the narrow handle, so the row owns the save as well.
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _: &MouseUpEvent, _, cx| this.finish_column_resize(cx)),
-            )
-            .child(self.render_column_header(SortColumn::Name, HeaderLane::Name, tokens, cx))
-            .child(self.render_column_header(SortColumn::Path, HeaderLane::Path, tokens, cx))
-            .child(self.render_column_header(SortColumn::Size, HeaderLane::Size, tokens, cx))
-            .child(self.render_column_header(
-                SortColumn::DateModified,
-                HeaderLane::Date,
-                tokens,
-                cx,
-            ));
-        if self.show_created() {
-            header = header.child(self.render_column_header(
-                SortColumn::DateCreated,
-                HeaderLane::Created,
-                tokens,
-                cx,
-            ));
-        }
-        header.into_any_element()
-    }
-
-    /// The band on the trailing edge of a heading cell that resizes that lane and its right
-    /// neighbour. It is invisible until hovered, so the heading row keeps its single hairline.
-    fn render_column_resize_handle(
-        &self,
-        boundary: ColumnBoundary,
-        tokens: &ShellTokens,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let id = element_id("column-resize", boundary.key());
-        let group = SharedString::from(id.clone());
-
-        div()
-            .id(id)
-            .group(group.clone())
-            .occlude()
-            .absolute()
-            .right_0()
-            .top_0()
-            .h_full()
-            .w(RESIZE_HIT_WIDTH)
-            .cursor_col_resize()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                    this.results.column_drag = Some(crate::app::ColumnDrag {
-                        boundary,
-                        widths: this.results.column_widths,
-                        start_x: event.position.x,
-                    });
-                    this.results.keyboard_navigation = false;
-                    cx.notify();
-                }),
-            )
-            .on_click(|_, _, cx| cx.stop_propagation())
-            .child(
-                div()
-                    .absolute()
-                    .right(RESIZE_LINE_OFFSET)
-                    .top_0()
-                    .h_full()
-                    .w(theme::HAIRLINE)
-                    .bg(tokens.border.opacity(0.0))
-                    .group_hover(group, |style| style.bg(tokens.border)),
-            )
-            .into_any_element()
-    }
-
-    fn render_column_header(
-        &self,
-        column: SortColumn,
-        lane: HeaderLane,
-        tokens: &ShellTokens,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let label_key = column.label_key_in(self.recycle_bin.is_open());
-        let control = accessibility::control_at(&element_id("column-header", label_key));
-        let label = accessibility::name(control, &self.i18n);
-        let is_active = self.results.table.sort_column == column;
-
-        let boundary = match lane {
-            HeaderLane::Name => Some(ColumnBoundary::NamePath),
-            HeaderLane::Path => Some(ColumnBoundary::PathSize),
-            HeaderLane::Size => Some(ColumnBoundary::SizeDate),
-            HeaderLane::Date | HeaderLane::Created => None,
-        };
-
-        let cell = accessibility::element(control)
-            .aria_label(label.clone())
-            .aria_selected(is_active)
-            .relative()
-            .h(rems(layout::HEADER_HEIGHT))
-            .flex()
-            .items_center()
-            .gap(rems(layout::SPACE_4))
-            .text_color(tokens.table_head_foreground)
-            // The chevron alone marks the active sort. Bolding that one label made a single
-            // header heavier than its peers and visually off the shared type line.
-            .hover(|s| s.bg(tokens.row_hover))
-            .active(|s| s.bg(tokens.row_hover))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                // Sorting the index reorders rows under the selection, so the stale selection is
-                // dropped. The bin tracks selection by item identity instead, and sorting there
-                // must keep that selection.
-                if !this.recycle_bin.is_open() {
-                    this.dismiss_result_selection(cx);
-                }
-                this.toggle_table_sort(column, cx);
-            }))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .child(label),
-            )
-            .children(is_active.then(|| sort_indicator(self.results.table.sort_asc, tokens)));
-
-        // Every lane is a grow ratio over the widths in `ColumnWidths`, with its old extent as the
-        // floor. Heading labels share their values' leading edge; tabular figures keep the size
-        // digits comparable.
-        let cell = match lane {
-            HeaderLane::Name => cell
-                .lane_grow(self.results.column_widths.name)
-                .min_w(rems(layout::NAME_MIN_COLUMN))
-                .pl(rems(layout::CONTENT_INSET - layout::SPACE_4))
-                .pr(rems(layout::INNER_SPACING)),
-            HeaderLane::Path => cell
-                .lane_grow(self.results.column_widths.path)
-                .min_w(rems(layout::PATH_MIN_COLUMN))
-                .px(rems(layout::INNER_SPACING)),
-            HeaderLane::Size => cell
-                .lane_grow(self.results.column_widths.size)
-                .min_w(rems(layout::SIZE_COLUMN))
-                .px(rems(layout::INNER_SPACING)),
-            HeaderLane::Date => cell
-                .lane_grow(self.results.column_widths.date)
-                .min_w(rems(layout::DATE_COLUMN))
-                .px(rems(layout::INNER_SPACING)),
-            HeaderLane::Created => cell
-                .w(rems(layout::CREATED_COLUMN))
-                .min_w(rems(layout::CREATED_COLUMN))
-                .flex_shrink_0()
-                .px(rems(layout::INNER_SPACING)),
-        };
-
-        let cell = match boundary {
-            Some(boundary) => cell.child(self.render_column_resize_handle(boundary, tokens, cx)),
-            None => cell,
-        };
-        // The optional lanes do not exist in the Recycle Bin, so the column menu would offer
-        // toggles that cannot change what this table shows.
-        if self.recycle_bin.is_open() {
-            return cell.into_any_element();
-        }
-        let app = cx.entity();
-        let created_label = self.i18n.get_text("menu_show_created");
-        let menu_created = self.settings.columns.show_created;
-        cell.context_menu(move |menu, _, _| {
-            let created_app = app.clone();
-            menu.item(
-                PopupMenuItem::new(created_label.clone())
-                    .checked(menu_created)
-                    .on_click(move |_, _, cx| {
-                        created_app.update(cx, |this, cx| this.toggle_created_column(cx));
-                    }),
-            )
-        })
-        .into_any_element()
-    }
-}
-
-/// Sort direction indicator: vector icon aligning with the Lucide icon system.
-fn sort_indicator(ascending: bool, tokens: &ShellTokens) -> impl IntoElement {
-    Icon::new(if ascending {
-        IconName::ChevronUp
-    } else {
-        IconName::ChevronDown
-    })
-    .xsmall()
-    .text_color(tokens.table_head_foreground)
-}
-
-/// One single-line value in the table: the text, its query highlights, and an ellipsis where the
-/// lane ends. A highlighted value has to stay one text run so truncation applies to the whole name
-/// or path rather than to each span separately; `with_highlights` supplies the per-range weight and
-/// color for matched substrings.
-fn result_text(text: &str, highlights: &[(usize, usize)], tokens: &ShellTokens) -> Div {
-    let value = StyledText::new(SharedString::from(text));
-    let value = if highlights.is_empty() {
-        value
-    } else {
-        let mut offset = 0;
-        let runs = split_name_highlights(text, highlights)
-            .into_iter()
-            .filter_map(|span| {
-                let start = offset;
-                offset += span.text.len();
-                span.is_highlight.then_some(start..offset)
-            })
-            .map(|range| {
-                (
-                    range,
-                    HighlightStyle {
-                        color: Some(tokens.foreground),
-                        font_weight: Some(FontWeight::SEMIBOLD),
-                        ..Default::default()
-                    },
-                )
-            });
-        value.with_highlights(runs)
-    };
-
-    div()
-        .flex_1()
-        .min_w_0()
-        .overflow_hidden()
-        .whitespace_nowrap()
-        .text_ellipsis()
-        .child(value)
 }
 
 #[cfg(test)]
 mod tests {
     use core::prelude::rust_2021::test;
 
-    use super::{
-        content_query_notice, result_row_icon, rows_band_local_top, rows_to_paint,
-        ContentQueryNotice, BIN_COMMANDS, RESULT_COMMANDS,
-    };
-    use crate::shell::command_groups::GroupCommand;
-    use crate::table::model::{SortColumn, SortColumnLabel};
-    use cairn_protocol::status::ContentIndexState;
-
-    use gpui_kit::assets::IconName as AssetIconName;
-
-    #[test]
-    fn result_rows_use_the_file_semantics_they_can_show() {
-        assert_eq!(
-            result_row_icon("Deploy.lnk", "", false),
-            AssetIconName::FileSymlink
-        );
-        assert_eq!(
-            result_row_icon("BOOKMARKS.URL", "", false),
-            AssetIconName::FileSymlink
-        );
-        assert_eq!(
-            result_row_icon("budget.xlsx", "", false),
-            AssetIconName::FileSpreadsheet
-        );
-        assert_eq!(
-            result_row_icon("photo.PNG", "", false),
-            AssetIconName::FileImage
-        );
-        assert_eq!(
-            result_row_icon("Cairn.exe", "", false),
-            AssetIconName::AppWindow
-        );
-        assert_eq!(
-            result_row_icon("build.ps1", "", false),
-            AssetIconName::FileTerminal
-        );
-        assert_eq!(
-            result_row_icon("notes.unknown", "", false),
-            AssetIconName::File
-        );
-        assert_eq!(result_row_icon("Reports", "", true), AssetIconName::Folder);
-
-        assert_eq!(
-            result_row_icon("Grok Bot", "lnk", false),
-            AssetIconName::FileSymlink,
-            "a Shell row hides the .lnk suffix from its display name"
-        );
-        assert_eq!(
-            result_row_icon("Screenshot", "png", false),
-            AssetIconName::FileImage,
-            "a display name that hides its suffix still resolves through the recovered extension"
-        );
-        assert_eq!(
-            result_row_icon(".gitignore", "gitignore", false),
-            AssetIconName::FileBraces,
-            "a bare dotfile keeps the taxonomy's configuration meaning"
-        );
-        assert_eq!(
-            result_row_icon("CMakeLists.txt", "txt", false),
-            AssetIconName::FileCode,
-            "a name the taxonomy already knows outranks its ordinary suffix"
-        );
-    }
-
-    #[test]
-    fn the_result_menu_offers_in_place_rename_but_the_bin_does_not() {
-        assert!(
-            RESULT_COMMANDS.contains(&GroupCommand::RenameSelected),
-            "the live result row offers rename"
-        );
-        assert!(
-            !BIN_COMMANDS.contains(&GroupCommand::RenameSelected),
-            "a bin payload has no live name to rename"
-        );
-    }
-
-    #[test]
-    fn the_recycle_bin_headers_name_the_values_they_hold() {
-        assert_eq!(SortColumn::Name.label_key_in(true), "col_name");
-        assert_eq!(SortColumn::Path.label_key_in(true), "col_original_location");
-        assert_eq!(SortColumn::DateModified.label_key_in(true), "col_deleted");
-        assert_eq!(SortColumn::Path.label_key_in(false), "col_path");
-        assert_eq!(SortColumn::DateModified.label_key_in(false), "col_modified");
-    }
-
-    #[test]
-    fn a_bin_delete_is_words_apart_from_the_reversible_delete() {
-        assert_eq!(
-            GroupCommand::DeleteSelected.label_key_in(true),
-            "ctx_delete_permanently"
-        );
-        assert_eq!(
-            GroupCommand::DeleteSelected.label_key_in(false),
-            "ctx_delete"
-        );
-        assert_eq!(
-            GroupCommand::CopyPaths.label_key_in(true),
-            "ctx_copy_original_location"
-        );
-        assert_eq!(
-            GroupCommand::RestoreSelected.label_key_in(true),
-            "ctx_restore"
-        );
-    }
-
-    #[test]
-    fn a_content_query_explains_an_index_that_cannot_answer() {
-        let mut state = crate::shell::menu_rules::IndexMenuState {
-            service_connected: true,
-            content_loading: false,
-            content_failed: false,
-            content_action_failed: false,
-            content_action_pending: false,
-            content_state: &ContentIndexState::Ready,
-        };
-
-        state.service_connected = false;
-        assert_eq!(
-            content_query_notice(&state),
-            None,
-            "the offline band owns the disconnected state"
-        );
-
-        state.service_connected = true;
-        state.content_loading = true;
-        assert_eq!(
-            content_query_notice(&state),
-            Some(ContentQueryNotice::Loading)
-        );
-
-        state.content_loading = false;
-        state.content_failed = true;
-        assert_eq!(
-            content_query_notice(&state),
-            Some(ContentQueryNotice::Unreadable),
-            "a status read failure must not look like a disabled index"
-        );
-
-        state.content_failed = false;
-        state.content_action_failed = true;
-        assert_eq!(
-            content_query_notice(&state),
-            Some(ContentQueryNotice::Error),
-            "an action failure must retry the action, not re-read the status"
-        );
-
-        state.content_action_failed = false;
-        state.content_state = &ContentIndexState::Disabled;
-        assert_eq!(
-            content_query_notice(&state),
-            Some(ContentQueryNotice::Disabled)
-        );
-
-        let backfilling = ContentIndexState::Backfilling {
-            processed: 3,
-            total: 10,
-        };
-        state.content_state = &backfilling;
-        assert_eq!(
-            content_query_notice(&state),
-            Some(ContentQueryNotice::Backfilling)
-        );
-
-        let failed = ContentIndexState::Error("worker failed".into());
-        state.content_state = &failed;
-        assert_eq!(
-            content_query_notice(&state),
-            Some(ContentQueryNotice::Error)
-        );
-
-        state.content_state = &ContentIndexState::Ready;
-        assert_eq!(
-            content_query_notice(&state),
-            None,
-            "a ready index makes zero rows a genuine no-match"
-        );
-    }
+    use crate::table::rows::{rows_band_local_top, rows_to_paint};
 
     #[test]
     fn rows_are_positioned_from_a_local_residual_at_any_depth() {
@@ -1796,23 +326,13 @@ mod tests {
         assert_eq!(rows_band_local_top(100, 2810.0, row_height), -10.0);
         assert_eq!(rows_band_local_top(97, 2810.0, row_height), -94.0);
 
-        // A full index reaches tens of millions of pixels. The scroll offset is already f32 and
-        // may round, but the residual handed to layout must stay inside the overscan band and the
-        // rows after it must keep the exact row pitch.
         let scroll_top = 1_300_000.0f32 * row_height - 10.0;
         let start_row = (scroll_top / row_height).floor() as usize;
         let first = start_row.saturating_sub(3);
         let local = rows_band_local_top(first, scroll_top, row_height);
-        assert!(
-            (-4.0 * row_height..=0.0).contains(&local),
-            "local top {local} escaped the overscan band"
-        );
+        assert!((-4.0 * row_height..=0.0).contains(&local));
         let later = rows_band_local_top(first + 3, scroll_top, row_height);
-        assert_eq!(
-            later - local,
-            3.0 * row_height,
-            "deep rows must keep the exact row pitch"
-        );
+        assert_eq!(later - local, 3.0 * row_height);
     }
 
     #[test]
@@ -1828,26 +348,17 @@ mod tests {
         let row_height = 28.0;
         let viewport = 440.0;
 
-        // Scrolled below the window: its tail stays on screen, bottom-aligned to the band.
         let visible = 1000..1016;
         let loaded = 0..200;
         let painted = rows_to_paint(visible.clone(), loaded, 28_000.0, viewport, row_height);
-        assert_eq!(
-            painted.range.end, 200,
-            "the tail of the window is the closest data"
-        );
+        assert_eq!(painted.range.end, 200);
         assert_eq!(painted.range.len(), visible.len());
-        assert!(
-            painted.pinned,
-            "rows from another scroll position are a preview"
-        );
+        assert!(painted.pinned);
         assert_eq!(
             painted.top + painted.range.len() as f32 * row_height,
-            viewport,
-            "the pinned tail must end at the band's bottom edge"
+            viewport
         );
 
-        // Scrolled above the window: its head stays on screen, top-aligned.
         let painted = rows_to_paint(0..16, 200..400, 0.0, viewport, row_height);
         assert_eq!(painted.range, 200..216);
         assert_eq!(painted.top, 0.0);

@@ -7,6 +7,7 @@
 
 use crate::app::{element_id, layout, CairnApp};
 use crate::shell::accessibility;
+use crate::shell::commands::{TreemapResetZoom, TreemapZoomIn, TreemapZoomOut, TREEMAP_CONTEXT};
 use crate::shell::file_icon::file_kind_icon;
 use crate::shell::os::{open_file, show_properties_dialog};
 use crate::shell::state_view::{icon_action, render_state_band};
@@ -310,6 +311,30 @@ impl CairnApp {
             canvas_element = canvas_element.track_focus(focus);
         }
         let canvas_element = canvas_element
+            .key_context(TREEMAP_CONTEXT)
+            .on_action(cx.listener(move |this, _: &TreemapResetZoom, window, cx| {
+                if let Some(ref mut st) = this.treemap_state {
+                    st.zoom.reset_view();
+                    st.request_focus(window, cx);
+                    cx.notify();
+                }
+            }))
+            .on_action(cx.listener(move |this, _: &TreemapZoomIn, window, cx| {
+                if let Some(ref mut st) = this.treemap_state {
+                    if st.zoom.zoom_center(1.0, canvas_size) {
+                        st.request_focus(window, cx);
+                        cx.notify();
+                    }
+                }
+            }))
+            .on_action(cx.listener(move |this, _: &TreemapZoomOut, window, cx| {
+                if let Some(ref mut st) = this.treemap_state {
+                    if st.zoom.zoom_center(-1.0, canvas_size) {
+                        st.request_focus(window, cx);
+                        cx.notify();
+                    }
+                }
+            }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _event: &MouseDownEvent, window, cx| {
@@ -375,35 +400,6 @@ impl CairnApp {
                 cx.stop_propagation();
             }))
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
-                if event.keystroke.modifiers.control {
-                    match event.keystroke.key.as_str() {
-                        "0" => {
-                            if let Some(ref mut st) = this.treemap_state {
-                                st.zoom.reset_view();
-                                st.request_focus(window, cx);
-                                cx.notify();
-                            }
-                        }
-                        "=" | "+" => {
-                            if let Some(ref mut st) = this.treemap_state {
-                                if st.zoom.zoom_center(1.0, canvas_size) {
-                                    st.request_focus(window, cx);
-                                    cx.notify();
-                                }
-                            }
-                        }
-                        "-" | "_" => {
-                            if let Some(ref mut st) = this.treemap_state {
-                                if st.zoom.zoom_center(-1.0, canvas_size) {
-                                    st.request_focus(window, cx);
-                                    cx.notify();
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                    return;
-                }
                 if event.keystroke.modifiers.alt && event.keystroke.key.as_str() == "enter" {
                     if let Some(ref st) = this.treemap_state {
                         if let Some(path) = st.selected_real_path() {

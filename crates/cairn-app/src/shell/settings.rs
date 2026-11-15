@@ -4,6 +4,7 @@
 
 //! Client user preferences persistence in `%APPDATA%\Cairn\settings.toml` (SET-01, UI-02).
 
+use crate::table::model::{OptionalColumn, TableColumn};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -63,8 +64,8 @@ fn default_modified_width() -> f32 {
     160.0
 }
 
-fn default_sort_column() -> String {
-    "name".to_string()
+fn default_sort_spec() -> String {
+    "name-asc".to_string()
 }
 
 fn default_true() -> bool {
@@ -83,12 +84,70 @@ pub struct ColumnSettings {
     pub size_width: f32,
     #[serde(default = "default_modified_width")]
     pub modified_width: f32,
-    #[serde(default = "default_sort_column")]
-    pub sort_column: String,
+    #[serde(default = "default_sort_spec")]
+    pub sort_spec: String,
     #[serde(default = "default_true")]
-    pub sort_asc: bool,
+    pub show_path: bool,
+    #[serde(default = "default_true")]
+    pub show_size: bool,
+    #[serde(default = "default_true")]
+    pub show_modified: bool,
     #[serde(default)]
     pub show_created: bool,
+    #[serde(default)]
+    pub show_length: bool,
+    #[serde(default)]
+    pub show_author: bool,
+    #[serde(default)]
+    pub show_tags: bool,
+    #[serde(default)]
+    pub show_dimensions: bool,
+    #[serde(default)]
+    pub show_framerate: bool,
+}
+
+impl ColumnSettings {
+    pub fn is_column_shown(&self, col: TableColumn) -> bool {
+        match col {
+            TableColumn::Name => true,
+            TableColumn::Path => self.show_path,
+            TableColumn::Size => self.show_size,
+            TableColumn::DateModified => self.show_modified,
+            TableColumn::Optional(opt) => self.is_optional_shown(opt),
+        }
+    }
+
+    pub fn set_column_shown(&mut self, col: TableColumn, shown: bool) {
+        match col {
+            TableColumn::Name => {}
+            TableColumn::Path => self.show_path = shown,
+            TableColumn::Size => self.show_size = shown,
+            TableColumn::DateModified => self.show_modified = shown,
+            TableColumn::Optional(opt) => self.set_optional_shown(opt, shown),
+        }
+    }
+
+    pub fn is_optional_shown(&self, col: OptionalColumn) -> bool {
+        match col {
+            OptionalColumn::DateCreated => self.show_created,
+            OptionalColumn::Length => self.show_length,
+            OptionalColumn::Author => self.show_author,
+            OptionalColumn::Tags => self.show_tags,
+            OptionalColumn::Dimensions => self.show_dimensions,
+            OptionalColumn::Framerate => self.show_framerate,
+        }
+    }
+
+    pub fn set_optional_shown(&mut self, col: OptionalColumn, shown: bool) {
+        match col {
+            OptionalColumn::DateCreated => self.show_created = shown,
+            OptionalColumn::Length => self.show_length = shown,
+            OptionalColumn::Author => self.show_author = shown,
+            OptionalColumn::Tags => self.show_tags = shown,
+            OptionalColumn::Dimensions => self.show_dimensions = shown,
+            OptionalColumn::Framerate => self.show_framerate = shown,
+        }
+    }
 }
 
 impl Default for ColumnSettings {
@@ -98,9 +157,16 @@ impl Default for ColumnSettings {
             path_width: default_path_width(),
             size_width: default_size_width(),
             modified_width: default_modified_width(),
-            sort_column: default_sort_column(),
-            sort_asc: true,
+            sort_spec: default_sort_spec(),
+            show_path: true,
+            show_size: true,
+            show_modified: true,
             show_created: false,
+            show_length: false,
+            show_author: false,
+            show_tags: false,
+            show_dimensions: false,
+            show_framerate: false,
         }
     }
 }
@@ -116,6 +182,10 @@ pub struct AppSettings {
     #[serde(default)]
     pub autostart: bool,
     #[serde(default)]
+    pub exclude_hidden: bool,
+    #[serde(default)]
+    pub exclude_system: bool,
+    #[serde(default)]
     pub columns: ColumnSettings,
 }
 
@@ -126,6 +196,8 @@ impl Default for AppSettings {
             theme: default_theme(),
             zoom_level: default_zoom_level(),
             autostart: false,
+            exclude_hidden: false,
+            exclude_system: false,
             columns: ColumnSettings::default(),
         }
     }
@@ -227,6 +299,7 @@ impl AppSettings {
         Ok(settings)
     }
 
+    #[cfg_attr(test, allow(dead_code))]
     pub fn save(&self) -> std::io::Result<()> {
         let path = default_settings_path();
         self.save_to_path(&path)
@@ -263,8 +336,7 @@ mod tests {
         assert_eq!(default_settings.zoom_level, 1.0);
         assert!(!default_settings.autostart);
         assert_eq!(default_settings.columns.name_width, 310.0);
-        assert_eq!(default_settings.columns.sort_column, "name");
-        assert!(default_settings.columns.sort_asc);
+        assert_eq!(default_settings.columns.sort_spec, "name-asc");
 
         let serialized = toml::to_string_pretty(&default_settings).unwrap();
         let parsed: AppSettings = toml::from_str(&serialized).unwrap();
@@ -273,20 +345,35 @@ mod tests {
 
     #[test]
     fn optional_columns_are_hidden_by_default_and_roundtrip() {
+        use crate::table::model::OptionalColumn;
+
         let default_settings = AppSettings::default();
-        assert!(!default_settings.columns.show_created);
+        for col in OptionalColumn::ALL {
+            assert!(!default_settings.columns.is_optional_shown(col));
+        }
 
         let mut settings = AppSettings::default();
-        settings.columns.show_created = true;
+        for col in OptionalColumn::ALL {
+            settings.columns.set_optional_shown(col, true);
+        }
+        settings.columns.sort_spec = "size-desc,name-asc".to_string();
         let serialized = toml::to_string_pretty(&settings).unwrap();
         let parsed: AppSettings = toml::from_str(&serialized).unwrap();
-        assert!(parsed.columns.show_created);
+        for col in OptionalColumn::ALL {
+            assert!(parsed.columns.is_optional_shown(col));
+        }
+        assert_eq!(parsed.columns.sort_spec, "size-desc,name-asc");
     }
 
     #[test]
     fn a_settings_file_without_optional_columns_keeps_them_hidden() {
+        use crate::table::model::OptionalColumn;
+
         let legacy: AppSettings = toml::from_str("").unwrap();
-        assert!(!legacy.columns.show_created);
+        for col in OptionalColumn::ALL {
+            assert!(!legacy.columns.is_optional_shown(col));
+        }
+        assert_eq!(legacy.columns.sort_spec, "name-asc");
     }
 
     #[test]
@@ -324,8 +411,7 @@ mod tests {
             zoom_level: 1.25,
             columns: ColumnSettings {
                 name_width: 350.0,
-                sort_column: "size".to_string(),
-                sort_asc: false,
+                sort_spec: "size-desc".to_string(),
                 ..Default::default()
             },
             ..Default::default()
@@ -363,5 +449,50 @@ mod tests {
 
         let loaded = AppSettings::load_from_path(&path).unwrap();
         assert!(loaded.autostart);
+    }
+
+    #[test]
+    fn exclusion_flags_default_to_false_and_roundtrip() {
+        let default_settings = AppSettings::default();
+        assert!(!default_settings.exclude_hidden);
+        assert!(!default_settings.exclude_system);
+
+        let partial: AppSettings = toml::from_str("").unwrap();
+        assert!(!partial.exclude_hidden);
+        assert!(!partial.exclude_system);
+
+        let custom = AppSettings {
+            exclude_hidden: true,
+            exclude_system: true,
+            ..Default::default()
+        };
+        let encoded = toml::to_string_pretty(&custom).unwrap();
+        let decoded: AppSettings = toml::from_str(&encoded).unwrap();
+        assert!(decoded.exclude_hidden);
+        assert!(decoded.exclude_system);
+    }
+
+    #[test]
+    fn base_columns_default_visible_and_name_stays_locked() {
+        use crate::table::model::TableColumn;
+
+        let mut cols = ColumnSettings::default();
+        assert!(cols.show_path);
+        assert!(cols.show_size);
+        assert!(cols.show_modified);
+        assert!(cols.is_column_shown(TableColumn::Name));
+        assert!(cols.is_column_shown(TableColumn::Path));
+        assert!(cols.is_column_shown(TableColumn::Size));
+        assert!(cols.is_column_shown(TableColumn::DateModified));
+
+        cols.set_column_shown(TableColumn::Name, false);
+        assert!(cols.is_column_shown(TableColumn::Name));
+
+        cols.set_column_shown(TableColumn::Path, false);
+        assert!(!cols.show_path);
+        assert!(!cols.is_column_shown(TableColumn::Path));
+
+        let parsed: ColumnSettings = toml::from_str("").unwrap();
+        assert!(parsed.show_path && parsed.show_size && parsed.show_modified);
     }
 }

@@ -366,6 +366,15 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         requirement: "UI-01",
     },
     KeyControl {
+        key: "toolbar-menu-index",
+        element: "toolbar-menu:index",
+        indexed: false,
+        role: Role::Button,
+        messages: &["menu_index"],
+        named_by: "",
+        requirement: "UI-01",
+    },
+    KeyControl {
         key: "toolbar-menu-tools",
         element: "toolbar-menu:tools",
         indexed: false,
@@ -449,6 +458,51 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         messages: &["col_created"],
         named_by: "",
         requirement: "UI-02, UI-11",
+    },
+    KeyControl {
+        key: "column-length",
+        element: "column-header:col_length",
+        indexed: false,
+        role: Role::ColumnHeader,
+        messages: &["col_length"],
+        named_by: "",
+        requirement: "UI-02, IDX-10",
+    },
+    KeyControl {
+        key: "column-author",
+        element: "column-header:col_author",
+        indexed: false,
+        role: Role::ColumnHeader,
+        messages: &["col_author"],
+        named_by: "",
+        requirement: "UI-02, IDX-10",
+    },
+    KeyControl {
+        key: "column-tags",
+        element: "column-header:col_tags",
+        indexed: false,
+        role: Role::ColumnHeader,
+        messages: &["col_tags"],
+        named_by: "",
+        requirement: "UI-02, IDX-10",
+    },
+    KeyControl {
+        key: "column-dimensions",
+        element: "column-header:col_dimensions",
+        indexed: false,
+        role: Role::ColumnHeader,
+        messages: &["col_dimensions"],
+        named_by: "",
+        requirement: "UI-02, IDX-10",
+    },
+    KeyControl {
+        key: "column-framerate",
+        element: "column-header:col_framerate",
+        indexed: false,
+        role: Role::ColumnHeader,
+        messages: &["col_framerate"],
+        named_by: "",
+        requirement: "UI-02, IDX-10",
     },
     // The Recycle Bin reuses the path and date lanes for a different value. The
     // header still has to name what the lane holds, so each value has its own
@@ -872,6 +926,7 @@ pub fn surface(id: &'static str) -> ControlElement {
 /// the render path already holds.
 pub const CONTROL_SHORTCUTS: &[(&str, &[&str])] = &[
     ("search-input", &["ctrl-f"]),
+    ("sidebar-toggle", &["ctrl-\\"]),
     // Advertised on the region, and bound only in `crate::shell::commands::RESULTS_CONTEXT`: the four keys
     // move the columns while the table holds focus, and move the caret while the query box does.
     ("result-table", &["left", "right", "home", "end"]),
@@ -1006,6 +1061,7 @@ mod tests {
             ("toolbar-menu-edit", Role::Button),
             ("toolbar-menu-view", Role::Button),
             ("toolbar-menu-search", Role::Button),
+            ("toolbar-menu-index", Role::Button),
             ("toolbar-menu-tools", Role::Button),
             ("toolbar-menu-help", Role::Button),
             ("table-header", Role::Row),
@@ -1049,6 +1105,7 @@ mod tests {
             "toolbar-menu-edit",
             "toolbar-menu-view",
             "toolbar-menu-search",
+            "toolbar-menu-index",
             "toolbar-menu-tools",
             "toolbar-menu-help",
             "table-header",
@@ -1289,7 +1346,7 @@ mod tests {
 
         // SPEC UI-03 names these keys, so they must still be on a control; without them the check
         // below would pass while the window promises nothing.
-        for required in ["ctrl-f", "ctrl-i", "ctrl-b", "ctrl-u", "ctrl-r"] {
+        for required in ["ctrl-f", "ctrl-i", "ctrl-b", "ctrl-u", "ctrl-r", "ctrl-\\"] {
             assert!(
                 advertised.contains(&required),
                 "{required} is in this list but no control announces it any more"

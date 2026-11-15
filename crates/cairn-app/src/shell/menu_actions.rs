@@ -14,14 +14,14 @@ use crate::shell::commands::*;
 use crate::shell::dialogs;
 use crate::shell::menu_rules::IndexMenuState;
 use crate::shell::os::{
-    open_file, open_folder_and_select, set_clipboard_text, show_properties_dialog,
+    open_file, open_folder_and_select, open_url, set_clipboard_text, show_properties_dialog,
 };
 use crate::shell::reveal::{reveal_targets, MAX_REVEAL_TARGETS};
 use crate::shell::status_bar::format_count;
 use crate::table::model::{format_timestamp, SELECT_ALL_LIMIT};
 use crate::view;
 use cairn_core::format_size_bytes;
-use cairn_protocol::status::ContentIndexState;
+use cairn_protocol::status::{ContentIndexState, SourceKind};
 use fluent_bundle::FluentArgs;
 use gpui_kit::component::button::ButtonVariant;
 use gpui_kit::component::dialog::AlertDialog;
@@ -29,6 +29,7 @@ use gpui_kit::component::menu::PopupMenu;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::gpui::*;
+use std::rc::Rc;
 
 /// Which search flag a toggle command flips, so the five toggle Actions share one code path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,6 +60,103 @@ pub fn copy_lines(lines: &[String]) {
     let _ = set_clipboard_text(&lines.join("\r\n"));
 }
 
+fn build_submenu_popup(
+    app: &CairnApp,
+    view: &Entity<CairnApp>,
+    child_entries: Vec<view::MenuEntry>,
+    window: &mut Window,
+    cx: &mut Context<CairnApp>,
+) -> Option<Entity<PopupMenu>> {
+    if child_entries.is_empty() {
+        return None;
+    }
+    let action_context = app.root_focus.clone();
+    let submenu_view = view.clone();
+    Some(PopupMenu::build(window, cx, move |menu, _window, _cx| {
+        view::build_menu(
+            menu,
+            &child_entries,
+            action_context.clone(),
+            submenu_view.clone(),
+        )
+    }))
+}
+
+fn rescan_submenu_entries(
+    app: &CairnApp,
+    view: &Entity<CairnApp>,
+    window: &mut Window,
+    cx: &mut Context<CairnApp>,
+) -> Vec<view::MenuEntry> {
+    let mut entries = menu_entries_from_sections(
+        app,
+        view,
+        GroupCommand::RescanMenu.submenu_sections(),
+        window,
+        cx,
+    );
+    let disabled = app.index_menu_state().service_action_is_disabled();
+    for (ix, source) in app.service.sources.iter().enumerate() {
+        let source_id = source.source_id;
+        let label = match source.kind {
+            SourceKind::NtfsVolume => source
+                .root_path
+                .chars()
+                .next()
+                .filter(|ch| ch.is_ascii_alphabetic())
+                .map(|ch| {
+                    let mut args = FluentArgs::new();
+                    args.set("drive", ch.to_ascii_uppercase().to_string());
+                    app.i18n.get_text_with_args("drive_label", &args)
+                })
+                .unwrap_or_else(|| source.root_path.clone()),
+            SourceKind::Folder => source.root_path.clone(),
+        };
+        let toast_label = label.clone();
+        entries.push(view::MenuEntry {
+            label: label.into(),
+            checked: false,
+            radio: false,
+            disabled,
+            action: None,
+            command: None,
+            on_select: Some(Rc::new(move |this, _, cx| {
+                this.close_group();
+                this.rescan_source(source_id, toast_label.clone(), cx);
+            })),
+            hint: None,
+            submenu: None,
+            loading: false,
+            separates: ix == 0,
+        });
+    }
+    entries
+}
+
+/// Builds the rows of one sectioned menu or submenu, omitting empty trailing/leading separators.
+fn menu_entries_from_sections(
+    app: &CairnApp,
+    view: &Entity<CairnApp>,
+    sections: &'static [&'static [GroupCommand]],
+    window: &mut Window,
+    cx: &mut Context<CairnApp>,
+) -> Vec<view::MenuEntry> {
+    let mut items = Vec::new();
+    let mut had_visible_section = false;
+    for section in sections {
+        let mut entries = menu_entries(app, view, section, window, cx);
+        if entries.is_empty() {
+            continue;
+        }
+        if had_visible_section {
+            entries[0].separates = true;
+        }
+        had_visible_section = true;
+        items.extend(entries);
+    }
+    items
+}
+
 /// Builds the rows of one menu. A submenu's own popup is created here because its items carry the
 /// same actions and checked state as the top-level rows; the caller can then hand the whole list to
 /// one `PopupMenu::build`.
@@ -74,36 +172,28 @@ fn menu_entries(
         .filter(|command| !app.command_is_hidden(**command))
         .map(|command| {
             let command = *command;
-            let heading = command.is_heading();
-            let children = command.submenu_children();
-            let submenu = if children.is_empty() {
-                None
+            let submenu = if command == GroupCommand::RescanMenu {
+                let child_entries = rescan_submenu_entries(app, view, window, cx);
+                build_submenu_popup(app, view, child_entries, window, cx)
             } else {
-                let child_entries = menu_entries(app, view, children, window, cx);
-                let action_context = app.root_focus.clone();
-                let submenu_view = view.clone();
-                Some(PopupMenu::build(window, cx, move |menu, _window, _cx| {
-                    view::build_menu(
-                        menu,
-                        &child_entries,
-                        action_context.clone(),
-                        submenu_view.clone(),
-                    )
-                }))
+                let sections = command.submenu_sections();
+                if sections.is_empty() {
+                    None
+                } else {
+                    let child_entries = menu_entries_from_sections(app, view, sections, window, cx);
+                    build_submenu_popup(app, view, child_entries, window, cx)
+                }
             };
             let has_submenu = submenu.is_some();
             view::MenuEntry {
                 label: app.command_label(command).into(),
-                checked: !heading && !has_submenu && app.command_is_checked(command),
-                disabled: !heading && app.command_is_disabled(command),
+                checked: !has_submenu && app.command_is_checked(command),
+                radio: !has_submenu && command.is_radio_choice(),
+                disabled: app.command_is_disabled(command),
                 action: command.action(),
-                // A heading is drawn by `PopupMenu::label`, and a submenu row owns a nested popup
-                // instead of a command.
-                command: if heading || has_submenu {
-                    None
-                } else {
-                    Some(command)
-                },
+                // A submenu row owns a nested popup instead of dispatching a command.
+                command: if has_submenu { None } else { Some(command) },
+                on_select: None,
                 hint: command.hint_action(),
                 submenu,
                 loading: command == GroupCommand::CheckForUpdates && app.is_checking_update,
@@ -191,6 +281,7 @@ impl CairnApp {
         // ring meaningful, and a pointer press must not suppress keyboard navigation. Focus
         // follows the selection so F2 and the row actions act on the chosen row.
         self.results.keyboard_navigation = true;
+        self.results.snippet_preview = None;
         let before = self.results.table.focused_idx;
         if forwards {
             self.results.table.move_selection_down(extend);
@@ -254,6 +345,7 @@ impl CairnApp {
 
     pub fn scroll_table(&mut self, request: TableScroll, cx: &mut Context<Self>) {
         self.results.keyboard_navigation = true;
+        self.results.snippet_preview = None;
         let offset = self.results.table_scroll.offset();
         let furthest = self.results.table_scroll.max_offset().x;
         let step = self.results.table_scroll.bounds().size.width * layout::TABLE_SCROLL_STEP_FACTOR;
@@ -335,6 +427,7 @@ impl CairnApp {
             return;
         }
         self.results.table.clear_selection();
+        self.results.snippet_preview = None;
         self.results.keyboard_navigation = false;
         cx.notify();
     }
@@ -402,6 +495,9 @@ impl CairnApp {
         // before it reaches a location or the window itself.
         if self.toast.is_some() {
             self.dismiss_toast(cx);
+            return;
+        }
+        if self.dismiss_snippet_preview(window, cx) {
             return;
         }
         // The drive visualization only hides the query band; its scope is still
@@ -540,17 +636,15 @@ impl CairnApp {
     }
 
     fn build_group_menu(&mut self, group: MenuGroup, window: &mut Window, cx: &mut Context<Self>) {
+        if group == MenuGroup::Index
+            && self.service.is_service_connected
+            && self.service.sources.is_empty()
+        {
+            self.refresh_sources(cx);
+        }
         self.group_menu_entered = false;
         let view = cx.entity();
-        let this = &*self;
-        let mut items = Vec::new();
-        for (section_ix, section) in group_spec(group).sections.iter().enumerate() {
-            let mut entries = menu_entries(this, &view, section, window, cx);
-            if let Some(first) = entries.first_mut() {
-                first.separates = section_ix > 0;
-            }
-            items.extend(entries);
-        }
+        let items = menu_entries_from_sections(self, &view, group_spec(group).sections, window, cx);
         let action_context = self.root_focus.clone();
         let menu = PopupMenu::build(window, cx, move |menu, _window, _cx| {
             view::build_menu(menu, &items, action_context.clone(), view.clone())
@@ -615,6 +709,15 @@ impl CairnApp {
         self.toggle_group(MenuGroup::Search, window, cx);
     }
 
+    pub fn open_index_menu(
+        &mut self,
+        _: &OpenIndexMenu,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_group(MenuGroup::Index, window, cx);
+    }
+
     pub fn open_tools_menu(
         &mut self,
         _: &OpenToolsMenu,
@@ -640,6 +743,8 @@ impl CairnApp {
             // The two facts the popup carries beside that state.
             GroupCommand::ContentSearchUsage => self.content_search_usage_label(),
             GroupCommand::ContentSearchUpdated => self.content_search_updated_label(),
+            GroupCommand::PropertyIndexStatus => self.property_index_status_label(),
+            GroupCommand::PropertyIndexUsage => self.property_index_usage_label(),
             _ => self
                 .i18n
                 .get_text(command.label_key_in(self.recycle_bin.is_open())),
@@ -660,6 +765,15 @@ impl CairnApp {
             content_action_failed: self.service.content_action_error.is_some(),
             content_action_pending: self.service.content_action_pending,
             content_state: &self.service.content_status.state,
+            property_loading: self.service.property_status_loading,
+            property_failed: self.service.property_status_error.is_some(),
+            property_action_pending: self.service.property_action_pending,
+            property_state: &self.service.property_status,
+            journal_loading: self.service.journal_status_loading,
+            journal_failed: self.service.journal_status_error.is_some(),
+            journal_action_pending: self.service.journal_action_pending,
+            journal_status: &self.service.journal_status,
+            service_control_pending: self.service.service_control_pending,
         }
     }
 
@@ -724,6 +838,50 @@ impl CairnApp {
             .get_text_with_args("menu_content_search_updated", &args)
     }
 
+    fn property_index_status_label(&self) -> String {
+        if !self.service.is_service_connected || self.service.property_status_error.is_some() {
+            return self.i18n.get_text("menu_property_index_unavailable");
+        }
+        if self.service.property_status_loading {
+            return self.i18n.get_text("menu_property_index_loading");
+        }
+        match &self.service.property_status.state {
+            ContentIndexState::Disabled if !self.service.property_status.enabled => {
+                self.i18n.get_text("menu_property_index_off")
+            }
+            ContentIndexState::Backfilling { processed, total } => {
+                let mut args = FluentArgs::new();
+                args.set("processed", *processed);
+                args.set("total", *total);
+                self.i18n
+                    .get_text_with_args("menu_property_index_backfilling", &args)
+            }
+            ContentIndexState::Ready | ContentIndexState::Disabled => {
+                let mut args = FluentArgs::new();
+                args.set(
+                    "count",
+                    format_count(self.service.property_status.indexed_records as usize),
+                );
+                self.i18n
+                    .get_text_with_args("menu_property_index_ready", &args)
+            }
+            ContentIndexState::Error(_) => self.i18n.get_text("menu_property_index_failed"),
+        }
+    }
+
+    fn property_index_usage_label(&self) -> String {
+        if !self.service.is_service_connected || self.service.property_status_error.is_some() {
+            return self.i18n.get_text("menu_property_index_usage_unknown");
+        }
+        let mut args = FluentArgs::new();
+        args.set(
+            "size",
+            format_size_bytes(self.service.property_status.side_table_bytes as u64),
+        );
+        self.i18n
+            .get_text_with_args("menu_property_index_usage", &args)
+    }
+
     /// Rows that would describe an action the current state cannot take are omitted rather than
     /// shown disabled row after row. In particular a failed index offers one retry, not a second
     /// "enable" entry that would quietly mean the same request.
@@ -747,8 +905,9 @@ impl CairnApp {
             | GroupCommand::EmptyRecycleBin => !self.recycle_bin.is_open(),
             // A bin payload is identified by the shell's own listing, not by a live filesystem
             // name, so there is nothing to rename there.
-            GroupCommand::RenameSelected | GroupCommand::ToggleCreatedColumn => {
-                self.recycle_bin.is_open()
+            GroupCommand::RenameSelected => self.recycle_bin.is_open(),
+            GroupCommand::Submenu("menu_columns", _) | GroupCommand::ToggleColumn(_) => {
+                self.recycle_bin.is_open() || self.block_listing.is_some()
             }
             GroupCommand::RevealLocation | GroupCommand::ShowProperties => {
                 self.recycle_bin.is_open()
@@ -760,7 +919,9 @@ impl CairnApp {
             // remains available.
             GroupCommand::ToggleWholeWord
             | GroupCommand::ToggleMatchPath
-            | GroupCommand::ToggleRegex => {
+            | GroupCommand::ToggleRegex
+            | GroupCommand::ToggleExcludeHidden
+            | GroupCommand::ToggleExcludeSystem => {
                 self.recycle_bin.is_open() || self.block_listing.is_some()
             }
 
@@ -775,9 +936,11 @@ impl CairnApp {
             GroupCommand::ToggleWholeWord => self.query.whole_word,
             GroupCommand::ToggleMatchPath => self.query.match_path,
             GroupCommand::ToggleRegex => self.query.use_regex,
-            GroupCommand::SortBy(column) => self.results.table.sort_column == column,
-            GroupCommand::ReverseOrder => !self.results.table.sort_asc,
-            GroupCommand::ToggleCreatedColumn => self.settings.columns.show_created,
+            GroupCommand::ToggleExcludeHidden => self.settings.exclude_hidden,
+            GroupCommand::ToggleExcludeSystem => self.settings.exclude_system,
+            GroupCommand::SortBy(column) => self.results.table.primary_sort().0 == column,
+            GroupCommand::ReverseOrder => !self.results.table.primary_sort().1,
+            GroupCommand::ToggleColumn(col) => self.settings.columns.is_column_shown(col),
             GroupCommand::SetTheme(mode) => self.settings.theme == mode,
             GroupCommand::SetLanguage(code) => self.settings.language == code,
             GroupCommand::SetZoom(preset) => ZoomPreset::nearest(self.zoom_level) == preset,
@@ -785,6 +948,7 @@ impl CairnApp {
             // The checkmark means the switch is on, including while the index is still filling;
             // the details row carries progress and readiness.
             GroupCommand::ToggleContentSearch => index.content_index_is_on(),
+            GroupCommand::TogglePropertyIndex => index.property_index_is_on(),
             _ => false,
         }
     }
@@ -821,7 +985,15 @@ impl CairnApp {
             GroupCommand::RetryContentSearch | GroupCommand::ClearContentSearch => {
                 index.content_switch_is_disabled()
             }
+            GroupCommand::TogglePropertyIndex => index.property_switch_is_disabled(),
+            GroupCommand::PropertyIndexStatus | GroupCommand::PropertyIndexUsage => {
+                index.property_facts_are_disabled()
+            }
+            GroupCommand::RescanMenu | GroupCommand::RescanAll => {
+                index.service_action_is_disabled()
+            }
             GroupCommand::ClearQuery => !self.can_clear_query(),
+            GroupCommand::ToggleColumn(col) => col.is_locked(),
             GroupCommand::CheckForUpdates => self.is_checking_update,
             _ => false,
         }
@@ -862,14 +1034,27 @@ impl CairnApp {
             GroupCommand::EmptyRecycleBin => self.empty_bin(window, cx),
             GroupCommand::SortBy(column) => self.toggle_table_sort(column, cx),
             GroupCommand::ReverseOrder => self.toggle_sort_direction(cx),
-            GroupCommand::ToggleCreatedColumn => self.toggle_created_column(cx),
+            GroupCommand::ToggleColumn(col) => self.toggle_table_column(col, cx),
             GroupCommand::SetTheme(mode) => self.set_theme_mode(mode, cx),
             GroupCommand::SetZoom(preset) => self.set_zoom(preset.value(), cx),
-            GroupCommand::Heading(_) | GroupCommand::Submenu(_, _) => {}
+            GroupCommand::Submenu(_, _)
+            | GroupCommand::RescanMenu
+            | GroupCommand::ContentIndexMenu
+            | GroupCommand::PropertyIndexMenu => {}
             GroupCommand::SetLanguage(code) => self.set_language(code, cx),
+            GroupCommand::ToggleExcludeHidden => self.toggle_exclude_hidden(cx),
+            GroupCommand::ToggleExcludeSystem => self.toggle_exclude_system(cx),
             GroupCommand::ToggleAutostart => {
                 let enabled = !self.settings.autostart;
                 self.set_autostart(enabled, cx);
+            }
+            GroupCommand::OpenIndexJournal => {
+                self.close_group();
+                self.open_index_journal_dialog(window, cx);
+            }
+            GroupCommand::RescanAll => {
+                self.close_group();
+                self.rescan_all(cx);
             }
             GroupCommand::ToggleContentSearch => {
                 // The stable row label names the feature; the checkmark carries whether it is
@@ -877,11 +1062,15 @@ impl CairnApp {
                 let enabled = !self.index_menu_state().content_index_is_on();
                 self.set_content_index_enabled(enabled, cx);
             }
-            GroupCommand::ContentSearchDetailsMenu => {}
             GroupCommand::ContentSearchDetails => {}
             GroupCommand::ContentSearchUsage => {}
             GroupCommand::ContentSearchUpdated => {}
             GroupCommand::RetryContentSearch => self.set_content_index_enabled(true, cx),
+            GroupCommand::TogglePropertyIndex => {
+                let enabled = !self.index_menu_state().property_index_is_on();
+                self.set_property_index_enabled(enabled, cx);
+            }
+            GroupCommand::PropertyIndexStatus | GroupCommand::PropertyIndexUsage => {}
             GroupCommand::ClearContentSearch => {
                 self.close_group();
                 let title = self.i18n.get_text("index_clear");
@@ -908,9 +1097,9 @@ impl CairnApp {
             }
             GroupCommand::About => {
                 self.close_group();
-                let title = format!("Cairn {}", env!("CARGO_PKG_VERSION"));
-                let message = self.i18n.get_text("menu_about_body");
-                self.show_info_toast(title, message, cx);
+                if let Err(err) = open_url(crate::shell::update::REPOSITORY_URL) {
+                    tracing::warn!("Failed to open repository URL: {err}");
+                }
             }
             // Every variant below owns an Action and dispatched above. Listing them keeps this
             // match exhaustive, so a new command must be classified instead of failing at click.
@@ -1177,6 +1366,7 @@ impl CairnApp {
     }
 
     pub fn focus_row_for_context(&mut self, ix: usize, cx: &mut Context<Self>) {
+        self.results.snippet_preview = None;
         if !self.results.table.selected_indices.contains(&ix) {
             self.results.table.select_row(ix, false);
         }
@@ -1194,6 +1384,7 @@ impl CairnApp {
         cx: &mut Context<Self>,
     ) {
         self.results.keyboard_navigation = false;
+        self.results.snippet_preview = None;
         if extend_selection {
             let anchor = self
                 .results
@@ -1480,7 +1671,8 @@ mod visibility_tests {
                                 flags: 0,
                                 name_highlights: Vec::new(),
                                 path_highlights: Vec::new(),
-                                snippet: None,
+                                snippets: Vec::new(),
+                                properties: None,
                             }],
                             1,
                         );
@@ -1488,6 +1680,68 @@ mod visibility_tests {
                         this.select_next_row(&SelectNextRow, window, cx);
                         assert_eq!(this.results.table.focused_idx, Some(0));
                         assert!(this.results.results_focus.is_focused(window));
+                    });
+
+                    cx.quit();
+                    app
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn service_menu_commands_reflect_property_and_journal_state() {
+        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
+            gpui_kit::init(cx);
+            let _ = gpui_kit::open_window(
+                gpui_kit::gpui::WindowOptions {
+                    show: false,
+                    focus: false,
+                    ..gpui_kit::gpui::WindowOptions::default()
+                },
+                cx,
+                |window, cx| {
+                    let app = cx.new(|cx| CairnApp::new(window, cx));
+
+                    app.update(cx, |this, _cx| {
+                        this.service.is_service_connected = true;
+                        this.service.property_status =
+                            cairn_protocol::status::PropertyIndexStatus {
+                                state: ContentIndexState::Ready,
+                                enabled: true,
+                                indexed_records: 42,
+                                side_table_bytes: 2048,
+                                last_updated_ts: 100,
+                            };
+                        this.service.journal_status = cairn_protocol::status::IndexJournalStatus {
+                            enabled: true,
+                            entry_count: 7,
+                            resident_bytes: 512,
+                            max_entries: 1024,
+                            max_bytes: 65536,
+                            oldest_seq: 1,
+                            newest_seq: 7,
+                        };
+                        assert!(this.command_is_checked(GroupCommand::TogglePropertyIndex));
+                        assert!(!this.command_is_disabled(GroupCommand::RescanMenu));
+                        assert!(!this.command_is_disabled(GroupCommand::RescanAll));
+                        assert!(!this.command_is_disabled(GroupCommand::OpenIndexJournal));
+
+                        let prop_label = this.command_label(GroupCommand::PropertyIndexStatus);
+                        let prop_usage = this.command_label(GroupCommand::PropertyIndexUsage);
+                        assert!(prop_label.contains("42"));
+                        assert!(prop_usage.contains("2"));
+
+                        this.service.service_control_pending = true;
+                        assert!(this.command_is_disabled(GroupCommand::RescanMenu));
+                        assert!(this.command_is_disabled(GroupCommand::RescanAll));
+
+                        this.service.service_control_pending = false;
+                        this.service.is_service_connected = false;
+                        assert!(this.command_is_disabled(GroupCommand::TogglePropertyIndex));
+                        assert!(this.command_is_disabled(GroupCommand::RescanMenu));
+                        assert!(this.command_is_disabled(GroupCommand::RescanAll));
+                        assert!(!this.command_is_disabled(GroupCommand::OpenIndexJournal));
                     });
 
                     cx.quit();
@@ -1519,9 +1773,20 @@ mod visibility_tests {
                             GroupCommand::ToggleWholeWord,
                             GroupCommand::ToggleMatchPath,
                             GroupCommand::ToggleRegex,
+                            GroupCommand::ToggleExcludeHidden,
+                            GroupCommand::ToggleExcludeSystem,
                         ] {
                             assert!(this.command_is_hidden(command));
                         }
+                        for col in crate::table::model::TableColumn::ALL {
+                            assert!(this.command_is_hidden(GroupCommand::ToggleColumn(col)));
+                        }
+                        assert!(!this.command_is_disabled(GroupCommand::ToggleColumn(
+                            crate::table::model::TableColumn::Path
+                        )));
+                        assert!(this.command_is_disabled(GroupCommand::ToggleColumn(
+                            crate::table::model::TableColumn::Name
+                        )));
                         assert!(!this.command_is_hidden(GroupCommand::ToggleCase));
                     });
 
