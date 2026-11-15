@@ -4,6 +4,10 @@
 
 //! Size and Date filter evaluation against file records.
 
+use crate::model::{
+    FLAG_ARCHIVE, FLAG_COMPRESSED, FLAG_DIRECTORY, FLAG_HIDDEN, FLAG_READONLY, FLAG_REPARSE_POINT,
+    FLAG_SPARSE, FLAG_SYSTEM,
+};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -36,22 +40,26 @@ impl SizeFilter {
     }
 
     pub fn parse(s: &str) -> Option<Self> {
+        Self::parse_with(s, parse_size_val)
+    }
+
+    /// Parses a comparison or range expression using `parse_val` for each scalar operand.
+    pub fn parse_with(s: &str, parse_val: fn(&str) -> Option<u64>) -> Option<Self> {
         let trimmed = s.trim();
         if trimmed.is_empty() {
             return None;
         }
 
-        // Check for range `a..b` or `a-b`
         if let Some((left, right)) = trimmed.split_once("..") {
-            let min = parse_size_val(left)?;
-            let max = parse_size_val(right)?;
+            let min = parse_val(left)?;
+            let max = parse_val(right)?;
             return Some(Self {
                 op: SizeOp::Range(min, max),
             });
         }
         if let Some((left, right)) = trimmed.split_once('-') {
             if !left.is_empty() && !right.is_empty() {
-                if let (Some(min), Some(max)) = (parse_size_val(left), parse_size_val(right)) {
+                if let (Some(min), Some(max)) = (parse_val(left), parse_val(right)) {
                     return Some(Self {
                         op: SizeOp::Range(min, max),
                     });
@@ -60,47 +68,302 @@ impl SizeFilter {
         }
 
         if let Some(rest) = trimmed.strip_prefix(">=") {
-            let val = parse_size_val(rest)?;
             Some(Self {
-                op: SizeOp::Gte(val),
+                op: SizeOp::Gte(parse_val(rest)?),
             })
         } else if let Some(rest) = trimmed.strip_prefix('>') {
-            let val = parse_size_val(rest)?;
             Some(Self {
-                op: SizeOp::Gt(val),
+                op: SizeOp::Gt(parse_val(rest)?),
             })
         } else if let Some(rest) = trimmed.strip_prefix("<=") {
-            let val = parse_size_val(rest)?;
             Some(Self {
-                op: SizeOp::Lte(val),
+                op: SizeOp::Lte(parse_val(rest)?),
             })
         } else if let Some(rest) = trimmed.strip_prefix('<') {
-            let val = parse_size_val(rest)?;
             Some(Self {
-                op: SizeOp::Lt(val),
+                op: SizeOp::Lt(parse_val(rest)?),
             })
         } else if let Some(rest) = trimmed.strip_prefix("!=") {
-            let val = parse_size_val(rest)?;
             Some(Self {
-                op: SizeOp::Neq(val),
+                op: SizeOp::Neq(parse_val(rest)?),
             })
         } else if let Some(rest) = trimmed.strip_prefix("==") {
-            let val = parse_size_val(rest)?;
             Some(Self {
-                op: SizeOp::Eq(val),
+                op: SizeOp::Eq(parse_val(rest)?),
             })
         } else if let Some(rest) = trimmed.strip_prefix('=') {
-            let val = parse_size_val(rest)?;
             Some(Self {
-                op: SizeOp::Eq(val),
+                op: SizeOp::Eq(parse_val(rest)?),
             })
         } else {
-            let val = parse_size_val(trimmed)?;
             Some(Self {
-                op: SizeOp::Eq(val),
+                op: SizeOp::Eq(parse_val(trimmed)?),
             })
         }
     }
+}
+
+/// Parses an unsigned integer comparison or range filter (`len:`, `depth:`, `childcount:`).
+pub fn parse_u64_filter(s: &str) -> Option<SizeFilter> {
+    SizeFilter::parse_with(s, parse_plain_u64)
+}
+
+fn parse_plain_u64(s: &str) -> Option<u64> {
+    s.trim().parse::<u64>().ok()
+}
+
+/// Parses duration values (`length:`, `duration:`) into milliseconds.
+pub fn parse_duration_filter(s: &str) -> Option<SizeFilter> {
+    SizeFilter::parse_with(s, parse_duration_ms)
+}
+
+fn parse_duration_ms(s: &str) -> Option<u64> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.contains(':') {
+        let parts: Vec<&str> = trimmed.split(':').collect();
+        if !(2..=3).contains(&parts.len()) {
+            return None;
+        }
+        let secs_f: f64 = parts.last()?.trim().parse().ok()?;
+        let mut total_secs = secs_f;
+        if parts.len() == 2 {
+            let mins: f64 = parts[0].trim().parse().ok()?;
+            total_secs += mins * 60.0;
+        } else {
+            let hrs: f64 = parts[0].trim().parse().ok()?;
+            let mins: f64 = parts[1].trim().parse().ok()?;
+            total_secs += hrs * 3600.0 + mins * 60.0;
+        }
+        if total_secs < 0.0 || !total_secs.is_finite() {
+            return None;
+        }
+        return Some((total_secs * 1000.0).round() as u64);
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    if let Some(num) = lower.strip_suffix("ms") {
+        let v: f64 = num.trim().parse().ok()?;
+        return (v >= 0.0 && v.is_finite()).then_some(v.round() as u64);
+    }
+
+    // Support compound forms such as `1m30s` or `1h2m3s`.
+    if lower.contains(['h', 'm', 's']) {
+        let mut total_ms = 0.0f64;
+        let mut num_start = 0usize;
+        let bytes = lower.as_bytes();
+        let mut i = 0usize;
+        while i < bytes.len() {
+            let ch = bytes[i];
+            if matches!(ch, b'h' | b'm' | b's') {
+                let num_slice = lower[num_start..i].trim();
+                let val: f64 = num_slice.parse().ok()?;
+                if val < 0.0 || !val.is_finite() {
+                    return None;
+                }
+                let unit_ms = match ch {
+                    b'h' => 3_600_000.0,
+                    b'm' => 60_000.0,
+                    b's' => 1_000.0,
+                    _ => unreachable!(),
+                };
+                total_ms += val * unit_ms;
+                i += 1;
+                // Skip optional "hr"/"min"/"sec" suffix tails.
+                while i < bytes.len() && bytes[i].is_ascii_alphabetic() {
+                    i += 1;
+                }
+                num_start = i;
+            } else {
+                i += 1;
+            }
+        }
+        if num_start == bytes.len() && total_ms.is_finite() {
+            return Some(total_ms.round() as u64);
+        }
+        return None;
+    }
+
+    let bare_secs: f64 = lower.parse().ok()?;
+    (bare_secs >= 0.0 && bare_secs.is_finite()).then_some((bare_secs * 1000.0).round() as u64)
+}
+
+/// Parses framerate filters (`framerate:`, `fps:`) scaled by 1000 (`milli-fps`).
+pub fn parse_framerate_filter(s: &str) -> Option<SizeFilter> {
+    SizeFilter::parse_with(s, parse_framerate_mfps)
+}
+
+fn parse_framerate_mfps(s: &str) -> Option<u64> {
+    let lower = s.trim().to_ascii_lowercase();
+    let num = lower.strip_suffix("fps").unwrap_or(&lower).trim();
+    let fps: f64 = num.parse().ok()?;
+    if fps < 0.0 || !fps.is_finite() {
+        return None;
+    }
+    Some((fps * 1000.0).round() as u64)
+}
+
+/// Bitmask attribute matcher for `attrib:` queries (`R`, `H`, `S`, `D`, `A`, `C`, `P`, `L`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AttribFilter {
+    pub required_mask: u16,
+    pub forbidden_mask: u16,
+}
+
+impl AttribFilter {
+    pub fn parse(raw: &str) -> Option<Self> {
+        let s = raw.trim();
+        if s.is_empty() {
+            return None;
+        }
+        let mut required_mask = 0u16;
+        let mut forbidden_mask = 0u16;
+        let mut negate_next = false;
+
+        for ch in s.chars() {
+            match ch {
+                '-' | '!' => negate_next = true,
+                '+' => negate_next = false,
+                _ => {
+                    let bit = match ch.to_ascii_uppercase() {
+                        'R' => FLAG_READONLY,
+                        'H' => FLAG_HIDDEN,
+                        'S' => FLAG_SYSTEM,
+                        'D' => FLAG_DIRECTORY,
+                        'A' => FLAG_ARCHIVE,
+                        'C' => FLAG_COMPRESSED,
+                        'P' => FLAG_SPARSE,
+                        'L' => FLAG_REPARSE_POINT,
+                        _ => return None,
+                    };
+                    if negate_next {
+                        forbidden_mask |= bit;
+                    } else {
+                        required_mask |= bit;
+                    }
+                }
+            }
+        }
+
+        if required_mask == 0 && forbidden_mask == 0 {
+            return None;
+        }
+        Some(Self {
+            required_mask,
+            forbidden_mask,
+        })
+    }
+
+    #[inline]
+    pub const fn matches(self, flags: u16) -> bool {
+        (flags & self.required_mask) == self.required_mask && (flags & self.forbidden_mask) == 0
+    }
+}
+
+/// Resolution filter for `dimensions:`, `width:`, and `height:`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DimensionsFilter {
+    pub width: Option<SizeFilter>,
+    pub height: Option<SizeFilter>,
+}
+
+impl DimensionsFilter {
+    pub fn parse(raw: &str) -> Option<Self> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        match trimmed.to_ascii_lowercase().as_str() {
+            "4k" | "uhd" => {
+                return Some(Self {
+                    width: Some(SizeFilter {
+                        op: SizeOp::Gte(3840),
+                    }),
+                    height: Some(SizeFilter {
+                        op: SizeOp::Gte(2160),
+                    }),
+                });
+            }
+            "1080p" | "fhd" => {
+                return Some(Self {
+                    width: Some(SizeFilter {
+                        op: SizeOp::Eq(1920),
+                    }),
+                    height: Some(SizeFilter {
+                        op: SizeOp::Eq(1080),
+                    }),
+                });
+            }
+            "720p" | "hd" => {
+                return Some(Self {
+                    width: Some(SizeFilter {
+                        op: SizeOp::Eq(1280),
+                    }),
+                    height: Some(SizeFilter {
+                        op: SizeOp::Eq(720),
+                    }),
+                });
+            }
+            _ => {}
+        }
+
+        let (op_prefix, body) = if let Some(rest) = trimmed.strip_prefix(">=") {
+            (">=", rest)
+        } else if let Some(rest) = trimmed.strip_prefix("<=") {
+            ("<=", rest)
+        } else if let Some(rest) = trimmed.strip_prefix("!=") {
+            ("!=", rest)
+        } else if let Some(rest) = trimmed.strip_prefix("==") {
+            ("==", rest)
+        } else if let Some(rest) = trimmed.strip_prefix('>') {
+            (">", rest)
+        } else if let Some(rest) = trimmed.strip_prefix('<') {
+            ("<", rest)
+        } else if let Some(rest) = trimmed.strip_prefix('=') {
+            ("=", rest)
+        } else {
+            ("", trimmed)
+        };
+
+        let sep = ['x', 'X', '*', '×'];
+        let (w_raw, h_raw) = body.split_once(sep)?;
+        let w_trim = w_raw.trim();
+        let h_trim = h_raw.trim();
+
+        let width = if w_trim == "*" || w_trim.is_empty() {
+            None
+        } else {
+            Some(parse_u64_filter(&format!("{op_prefix}{w_trim}"))?)
+        };
+        let height = if h_trim == "*" || h_trim.is_empty() {
+            None
+        } else {
+            Some(parse_u64_filter(&format!("{op_prefix}{h_trim}"))?)
+        };
+        if width.is_none() && height.is_none() {
+            return None;
+        }
+        Some(Self { width, height })
+    }
+
+    #[inline]
+    pub fn matches(&self, w: u32, h: u32) -> bool {
+        let w_ok = self.width.as_ref().is_none_or(|f| f.matches(w as u64));
+        let h_ok = self.height.as_ref().is_none_or(|f| f.matches(h as u64));
+        w_ok && h_ok
+    }
+}
+
+/// Duplicate / uniqueness mode (`QRY-10`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DupeMode {
+    Name,
+    Size,
+    NamePart,
+    NameAndSize,
+    UniqueName,
 }
 
 fn parse_size_val(s: &str) -> Option<u64> {

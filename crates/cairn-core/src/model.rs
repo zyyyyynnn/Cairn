@@ -6,12 +6,62 @@
 
 pub const FLAG_DIRECTORY: u16 = 1 << 0;
 pub const FLAG_TOMBSTONE: u16 = 1 << 1;
+pub const FLAG_READONLY: u16 = 1 << 2;
 pub const FLAG_HIDDEN: u16 = 1 << 3;
 pub const FLAG_SYSTEM: u16 = 1 << 4;
 pub const FLAG_ARCHIVE: u16 = 1 << 5;
 pub const FLAG_COMPRESSED: u16 = 1 << 6;
 pub const FLAG_SPARSE: u16 = 1 << 7;
 pub const FLAG_REPARSE_POINT: u16 = 1 << 8;
+
+/// Attribute bits owned by filesystem metadata (everything except `FLAG_TOMBSTONE`).
+pub const FLAG_INDEXED_ATTRIBUTES_MASK: u16 = FLAG_DIRECTORY
+    | FLAG_READONLY
+    | FLAG_HIDDEN
+    | FLAG_SYSTEM
+    | FLAG_ARCHIVE
+    | FLAG_COMPRESSED
+    | FLAG_SPARSE
+    | FLAG_REPARSE_POINT;
+
+pub const WIN32_ATTR_READONLY: u32 = 0x0000_0001;
+pub const WIN32_ATTR_HIDDEN: u32 = 0x0000_0002;
+pub const WIN32_ATTR_SYSTEM: u32 = 0x0000_0004;
+pub const WIN32_ATTR_DIRECTORY: u32 = 0x0000_0010;
+pub const WIN32_ATTR_ARCHIVE: u32 = 0x0000_0020;
+pub const WIN32_ATTR_SPARSE_FILE: u32 = 0x0000_0200;
+pub const WIN32_ATTR_REPARSE_POINT: u32 = 0x0000_0400;
+pub const WIN32_ATTR_COMPRESSED: u32 = 0x0000_0800;
+
+/// Maps Win32/NTFS `FILE_ATTRIBUTE_*` bitflags into compact [`FileRecord::flags`] bits.
+pub const fn flags_from_win32_attributes(attributes: u32) -> u16 {
+    let mut flags = 0u16;
+    if attributes & WIN32_ATTR_DIRECTORY != 0 {
+        flags |= FLAG_DIRECTORY;
+    }
+    if attributes & WIN32_ATTR_READONLY != 0 {
+        flags |= FLAG_READONLY;
+    }
+    if attributes & WIN32_ATTR_HIDDEN != 0 {
+        flags |= FLAG_HIDDEN;
+    }
+    if attributes & WIN32_ATTR_SYSTEM != 0 {
+        flags |= FLAG_SYSTEM;
+    }
+    if attributes & WIN32_ATTR_ARCHIVE != 0 {
+        flags |= FLAG_ARCHIVE;
+    }
+    if attributes & WIN32_ATTR_COMPRESSED != 0 {
+        flags |= FLAG_COMPRESSED;
+    }
+    if attributes & WIN32_ATTR_SPARSE_FILE != 0 {
+        flags |= FLAG_SPARSE;
+    }
+    if attributes & WIN32_ATTR_REPARSE_POINT != 0 {
+        flags |= FLAG_REPARSE_POINT;
+    }
+    flags
+}
 
 use serde::{Deserialize, Serialize};
 
@@ -66,6 +116,11 @@ impl FileRecord {
     }
 
     #[inline(always)]
+    pub fn is_readonly(&self) -> bool {
+        (self.flags & FLAG_READONLY) != 0
+    }
+
+    #[inline(always)]
     pub fn is_hidden(&self) -> bool {
         (self.flags & FLAG_HIDDEN) != 0
     }
@@ -73,6 +128,21 @@ impl FileRecord {
     #[inline(always)]
     pub fn is_system(&self) -> bool {
         (self.flags & FLAG_SYSTEM) != 0
+    }
+
+    #[inline(always)]
+    pub fn is_archive(&self) -> bool {
+        (self.flags & FLAG_ARCHIVE) != 0
+    }
+
+    #[inline(always)]
+    pub fn is_compressed(&self) -> bool {
+        (self.flags & FLAG_COMPRESSED) != 0
+    }
+
+    #[inline(always)]
+    pub fn is_sparse(&self) -> bool {
+        (self.flags & FLAG_SPARSE) != 0
     }
 
     #[inline(always)]

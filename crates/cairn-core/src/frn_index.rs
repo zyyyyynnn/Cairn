@@ -11,7 +11,7 @@ const OVERFLOW_FLAG: u32 = 1 << 31;
 const OVERFLOW_MASK: u32 = !OVERFLOW_FLAG;
 
 /// Estimates the heap allocation of a `std::collections::HashMap<K, V>` backing table.
-pub(crate) fn hashmap_table_bytes<K, V>(capacity: usize) -> usize {
+pub fn hashmap_table_bytes<K, V>(capacity: usize) -> usize {
     if capacity == 0 {
         return 0;
     }
@@ -179,7 +179,7 @@ impl FrnLookup {
 }
 
 /// Resident heap-allocation ledger of a volume or multi-volume index. Transient build
-/// buffers (sort entries, per-request directory indexes) are deliberately excluded.
+/// buffers (sort entries, per-request directory indexes) are excluded from [`Self::total_bytes`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct IndexMemoryFootprint {
     pub record_count: usize,
@@ -189,25 +189,32 @@ pub struct IndexMemoryFootprint {
     pub folded_arena_bytes: usize,
     pub frn_lookup_bytes: usize,
     pub presorted_bytes: usize,
+    pub property_store_bytes: usize,
     pub directory_sizes_bytes: usize,
     pub path_cache_bytes: usize,
     pub scratch_bytes: usize,
 }
 
 impl IndexMemoryFootprint {
-    /// Total tracked heap bytes across all components.
+    /// Total resident heap bytes across all permanently retained index structures.
     pub fn total_bytes(&self) -> usize {
         self.records_bytes
             + self.arena_bytes
             + self.folded_arena_bytes
             + self.frn_lookup_bytes
             + self.presorted_bytes
-            + self.directory_sizes_bytes
+            + self.property_store_bytes
             + self.path_cache_bytes
             + self.scratch_bytes
     }
 
-    /// Average tracked bytes per indexed record (returns `0.0` when empty).
+    /// Transient on-demand allocations such as treemap directory size buffers, reported separately
+    /// from the resident footprint.
+    pub fn transient_bytes(&self) -> usize {
+        self.directory_sizes_bytes
+    }
+
+    /// Average tracked resident bytes per indexed record (returns `0.0` when empty).
     pub fn bytes_per_record(&self) -> f64 {
         if self.record_count == 0 {
             0.0
@@ -225,6 +232,7 @@ impl IndexMemoryFootprint {
         self.folded_arena_bytes += other.folded_arena_bytes;
         self.frn_lookup_bytes += other.frn_lookup_bytes;
         self.presorted_bytes += other.presorted_bytes;
+        self.property_store_bytes += other.property_store_bytes;
         self.directory_sizes_bytes += other.directory_sizes_bytes;
         self.path_cache_bytes += other.path_cache_bytes;
         self.scratch_bytes += other.scratch_bytes;

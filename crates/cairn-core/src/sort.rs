@@ -7,9 +7,11 @@
 use crate::arena::NamePool;
 use crate::engine::CancellationToken;
 use crate::model::FileRecord;
-use crate::path_cache::DirectoryPathCache;
+use crate::path_cache::{normalize_root, root_path_for_drive, DirectoryPathCache};
+use crate::property_store::{PropertyKind, PropertySideTables, SourceId};
 use rayon::prelude::*;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum SortColumn {
@@ -20,10 +22,15 @@ pub enum SortColumn {
     DateModified,
     DateCreated,
     Extension,
+    Length,
+    Author,
+    Tags,
+    Dimensions,
+    Framerate,
 }
 
 impl SortColumn {
-    /// The stable spelling shared by the CLI `--sort` value and the stored settings key.
+    /// Stable spelling shared by CLI `--sort`, wire serialization, and settings persistence.
     pub const fn key(self) -> &'static str {
         match self {
             SortColumn::Name => "name",
@@ -32,6 +39,23 @@ impl SortColumn {
             SortColumn::DateModified => "modified",
             SortColumn::DateCreated => "created",
             SortColumn::Extension => "ext",
+            SortColumn::Length => "length",
+            SortColumn::Author => "author",
+            SortColumn::Tags => "tags",
+            SortColumn::Dimensions => "dimensions",
+            SortColumn::Framerate => "framerate",
+        }
+    }
+
+    /// Returns the required [`PropertyKind`] when this column reads from [`PropertySideTables`].
+    pub const fn property_kind(self) -> Option<PropertyKind> {
+        match self {
+            SortColumn::Length => Some(PropertyKind::Length),
+            SortColumn::Author => Some(PropertyKind::Author),
+            SortColumn::Tags => Some(PropertyKind::Tags),
+            SortColumn::Dimensions => Some(PropertyKind::Dimensions),
+            SortColumn::Framerate => Some(PropertyKind::Framerate),
+            _ => None,
         }
     }
 }
@@ -44,7 +68,7 @@ impl fmt::Display for UnknownSortColumn {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "unknown sort column `{}`; expected name, path, size, modified, created, or ext",
+            "unknown sort column `{}`; expected name, path, size, modified, created, ext, length, author, tags, dimensions, or framerate",
             self.0
         )
     }
@@ -63,14 +87,17 @@ impl FromStr for SortColumn {
             "modified" | "datemodified" => Ok(SortColumn::DateModified),
             "created" | "datecreated" => Ok(SortColumn::DateCreated),
             "ext" | "extension" => Ok(SortColumn::Extension),
+            "length" | "duration" => Ok(SortColumn::Length),
+            "author" | "artist" => Ok(SortColumn::Author),
+            "tags" | "tag" => Ok(SortColumn::Tags),
+            "dimensions" | "resolution" => Ok(SortColumn::Dimensions),
+            "framerate" | "fps" => Ok(SortColumn::Framerate),
             _ => Err(UnknownSortColumn(value.to_string())),
         }
     }
 }
 
-/// The wire spelling is the released one: a positional postcard field must keep the same shape
-/// when the Rust type is narrowed, so the enum travels as its key string and an unknown value
-/// fails the frame instead of silently becoming the default.
+/// Wire serialization uses each column's stable lowercase key string and rejects unknown values.
 impl Serialize for SortColumn {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -90,11 +117,148 @@ impl<'de> Deserialize<'de> for SortColumn {
     }
 }
 
+/// A single column and direction within a [`SortSpec`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SortKey {
+    pub column: SortColumn,
+    pub direction: SortDirection,
+}
+
+impl SortKey {
+    pub const fn new(column: SortColumn, direction: SortDirection) -> Self {
+        Self { column, direction }
+    }
+}
+
+/// Ordered list of sort keys applied from highest to lowest precedence.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SortSpec {
+    pub keys: Vec<SortKey>,
+}
+
+impl Default for SortSpec {
+    fn default() -> Self {
+        Self::single(SortColumn::Name, SortDirection::Ascending)
+    }
+}
+
+impl SortSpec {
+    pub fn single(column: SortColumn, direction: SortDirection) -> Self {
+        Self {
+            keys: vec![SortKey::new(column, direction)],
+        }
+    }
+
+    pub fn primary(&self) -> SortKey {
+        self.keys
+            .first()
+            .copied()
+            .unwrap_or_else(|| SortKey::new(SortColumn::Name, SortDirection::Ascending))
+    }
+
+    /// Toggles direction when already sorted by `column` alone, or replaces with a single key.
+    pub fn set_or_toggle_primary(&mut self, column: SortColumn, initial: SortDirection) {
+        if self.keys.len() == 1 && self.keys[0].column == column {
+            self.keys[0].direction = self.keys[0].direction.flipped();
+        } else {
+            self.keys.clear();
+            self.keys.push(SortKey::new(column, initial));
+        }
+    }
+
+    /// Appends `column` as a tiebreaker key or flips its direction when already present.
+    pub fn shift_toggle_column(&mut self, column: SortColumn, initial: SortDirection) {
+        if let Some(existing) = self.keys.iter_mut().find(|k| k.column == column) {
+            existing.direction = existing.direction.flipped();
+        } else {
+            self.keys.push(SortKey::new(column, initial));
+        }
+    }
+
+    /// Parses comma/semicolon-separated sort clauses such as `-size,+name` or `size-desc,name-asc`.
+    pub fn parse_clause(raw: &str) -> Result<Self, UnknownSortColumn> {
+        let mut keys = Vec::new();
+        for part in raw.split([',', ';']) {
+            let trimmed = part.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let key = parse_sort_key_token(trimmed)?;
+            if !keys.iter().any(|k: &SortKey| k.column == key.column) {
+                keys.push(key);
+            }
+        }
+        if keys.is_empty() {
+            return Err(UnknownSortColumn(raw.to_string()));
+        }
+        Ok(Self { keys })
+    }
+
+    /// Formats the specification in canonical `column-dir,...` notation.
+    pub fn to_clause(&self) -> String {
+        self.keys
+            .iter()
+            .map(|k| {
+                let d = match k.direction {
+                    SortDirection::Ascending => "asc",
+                    SortDirection::Descending => "desc",
+                };
+                format!("{}-{d}", k.column.key())
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+}
+
+fn parse_sort_key_token(token: &str) -> Result<SortKey, UnknownSortColumn> {
+    if let Some(rest) = token.strip_prefix('-') {
+        return Ok(SortKey::new(
+            rest.trim().parse()?,
+            SortDirection::Descending,
+        ));
+    }
+    if let Some(rest) = token.strip_prefix('+') {
+        return Ok(SortKey::new(rest.trim().parse()?, SortDirection::Ascending));
+    }
+    let lower = token.to_ascii_lowercase();
+    for (suffix, dir) in [
+        (":desc", SortDirection::Descending),
+        (":descending", SortDirection::Descending),
+        ("-desc", SortDirection::Descending),
+        ("-descending", SortDirection::Descending),
+        (" desc", SortDirection::Descending),
+        (" descending", SortDirection::Descending),
+        (":asc", SortDirection::Ascending),
+        (":ascending", SortDirection::Ascending),
+        ("-asc", SortDirection::Ascending),
+        ("-ascending", SortDirection::Ascending),
+        (" asc", SortDirection::Ascending),
+        (" ascending", SortDirection::Ascending),
+    ] {
+        if let Some(prefix_len) = lower.len().checked_sub(suffix.len()) {
+            if &lower[prefix_len..] == suffix {
+                return Ok(SortKey::new(token[..prefix_len].trim().parse()?, dir));
+            }
+        }
+    }
+    Ok(SortKey::new(token.parse()?, SortDirection::Ascending))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum SortDirection {
     #[default]
     Ascending,
     Descending,
+}
+
+impl SortDirection {
+    #[inline]
+    pub const fn flipped(self) -> Self {
+        match self {
+            SortDirection::Ascending => SortDirection::Descending,
+            SortDirection::Descending => SortDirection::Ascending,
+        }
+    }
 }
 
 use std::cmp::Ordering;
@@ -227,50 +391,193 @@ fn cmp_name_entries(a: &NameSortEntry, b: &NameSortEntry, arena: &NamePool) -> O
     natural_cmp(na, nb)
 }
 
-/// The column's ascending order, including the name tiebreak the column builders use.
-fn cmp_indices(
-    col: SortColumn,
-    a: u32,
-    b: u32,
-    records: &[FileRecord],
-    arena: &NamePool,
-    path_cache: &DirectoryPathCache,
-    drive_letter: char,
-) -> Ordering {
+/// Immutable inputs required for sorting record indices across columns and properties.
+#[derive(Clone, Copy)]
+pub struct SortContext<'a> {
+    pub records: &'a [FileRecord],
+    pub arena: &'a NamePool,
+    pub path_cache: &'a DirectoryPathCache,
+    pub root: &'a Arc<str>,
+    pub source_id: SourceId,
+    pub properties: Option<&'a PropertySideTables>,
+}
+
+#[inline]
+fn cmp_name_only(records: &[FileRecord], arena: &NamePool, a: u32, b: u32) -> Ordering {
     let ra = &records[a as usize];
     let rb = &records[b as usize];
-    match col {
-        SortColumn::Name => cmp_name_entries(
-            &make_name_entry(ra, a, arena),
-            &make_name_entry(rb, b, arena),
-            arena,
-        ),
-        SortColumn::Size => ra.size.cmp(&rb.size).then_with(|| {
-            cmp_name_entries(
-                &make_name_entry(ra, a, arena),
-                &make_name_entry(rb, b, arena),
-                arena,
-            )
-        }),
-        SortColumn::DateModified => ra.modified_ts.cmp(&rb.modified_ts).then_with(|| {
-            cmp_name_entries(
-                &make_name_entry(ra, a, arena),
-                &make_name_entry(rb, b, arena),
-                arena,
-            )
-        }),
-        SortColumn::Path => {
-            let pa = path_cache.get_parent_path(records, arena, drive_letter, a);
-            let pb = path_cache.get_parent_path(records, arena, drive_letter, b);
-            pa.cmp(&pb).then_with(|| {
-                natural_cmp(
-                    arena.get_name(ra.name_offset, ra.name_len),
-                    arena.get_name(rb.name_offset, rb.name_len),
-                )
-            })
-        }
-        SortColumn::DateCreated | SortColumn::Extension => Ordering::Equal,
+    natural_cmp(
+        arena.get_name(ra.name_offset, ra.name_len),
+        arena.get_name(rb.name_offset, rb.name_len),
+    )
+}
+
+#[inline]
+fn cmp_opt_property<T>(
+    oa: Option<T>,
+    ob: Option<T>,
+    dir: SortDirection,
+    cmp: impl FnOnce(T, T) -> Ordering,
+) -> Ordering {
+    match (oa, ob) {
+        (Some(va), Some(vb)) => apply_sort_dir(cmp(va, vb), dir),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
     }
+}
+
+/// Compares record `a` from `ctx_a` against record `b` from `ctx_b` solely by `(col, dir)`.
+fn cmp_column_between(
+    ctx_a: &SortContext<'_>,
+    a: u32,
+    ctx_b: &SortContext<'_>,
+    b: u32,
+    col: SortColumn,
+    dir: SortDirection,
+) -> Ordering {
+    let ra = &ctx_a.records[a as usize];
+    let rb = &ctx_b.records[b as usize];
+    match col {
+        SortColumn::Name => {
+            let na = ctx_a.arena.get_name(ra.name_offset, ra.name_len);
+            let nb = ctx_b.arena.get_name(rb.name_offset, rb.name_len);
+            apply_sort_dir(natural_cmp(na, nb), dir)
+        }
+        SortColumn::Path => {
+            let pa = ctx_a.path_cache.get_parent_path_with_root(
+                ctx_a.records,
+                ctx_a.arena,
+                ctx_a.root,
+                a,
+            );
+            let pb = ctx_b.path_cache.get_parent_path_with_root(
+                ctx_b.records,
+                ctx_b.arena,
+                ctx_b.root,
+                b,
+            );
+            apply_sort_dir(pa.cmp(&pb), dir)
+        }
+        SortColumn::Size => apply_sort_dir(ra.size.cmp(&rb.size), dir),
+        SortColumn::DateModified => apply_sort_dir(ra.modified_ts.cmp(&rb.modified_ts), dir),
+        SortColumn::DateCreated => apply_sort_dir(ra.created_ts.cmp(&rb.created_ts), dir),
+        SortColumn::Extension => {
+            let ea = ctx_a
+                .arena
+                .get_ext(ra.name_offset, ra.name_len, ra.ext_offset);
+            let eb = ctx_b
+                .arena
+                .get_ext(rb.name_offset, rb.name_len, rb.ext_offset);
+            apply_sort_dir(cmp_ascii_ignore_case(ea, eb), dir)
+        }
+        SortColumn::Length
+        | SortColumn::Author
+        | SortColumn::Tags
+        | SortColumn::Dimensions
+        | SortColumn::Framerate => {
+            let pa = ctx_a
+                .properties
+                .and_then(|p| p.get(ctx_a.source_id, ra.frn));
+            let pb = ctx_b
+                .properties
+                .and_then(|p| p.get(ctx_b.source_id, rb.frn));
+            match col {
+                SortColumn::Length => cmp_opt_property(
+                    pa.and_then(|p| p.length_ms),
+                    pb.and_then(|p| p.length_ms),
+                    dir,
+                    |va, vb| va.cmp(&vb),
+                ),
+                SortColumn::Author => cmp_opt_property(
+                    pa.and_then(|p| p.author),
+                    pb.and_then(|p| p.author),
+                    dir,
+                    natural_cmp,
+                ),
+                SortColumn::Tags => cmp_opt_property(
+                    pa.and_then(|p| p.tags),
+                    pb.and_then(|p| p.tags),
+                    dir,
+                    natural_cmp,
+                ),
+                SortColumn::Dimensions => cmp_opt_property(
+                    pa.and_then(|p| p.dimensions),
+                    pb.and_then(|p| p.dimensions),
+                    dir,
+                    |(wa, ha), (wb, hb)| {
+                        (wa as u64 * ha as u64)
+                            .cmp(&(wb as u64 * hb as u64))
+                            .then_with(|| wa.cmp(&wb))
+                    },
+                ),
+                SortColumn::Framerate => cmp_opt_property(
+                    pa.and_then(|p| p.framerate_mfps),
+                    pb.and_then(|p| p.framerate_mfps),
+                    dir,
+                    |va, vb| va.cmp(&vb),
+                ),
+                _ => unreachable!(),
+            }
+        }
+    }
+}
+
+/// Compares record `a` from `ctx_a` against record `b` from `ctx_b` using an ordered multi-key [`SortSpec`].
+pub fn compare_cross_source_records(
+    ctx_a: &SortContext<'_>,
+    a: u32,
+    ctx_b: &SortContext<'_>,
+    b: u32,
+    spec: &SortSpec,
+) -> Ordering {
+    for key in &spec.keys {
+        let ord = cmp_column_between(ctx_a, a, ctx_b, b, key.column, key.direction);
+        if ord != Ordering::Equal {
+            return ord;
+        }
+    }
+    if spec.keys.iter().any(|k| k.column == SortColumn::Name) {
+        Ordering::Equal
+    } else {
+        cmp_column_between(
+            ctx_a,
+            a,
+            ctx_b,
+            b,
+            SortColumn::Name,
+            SortDirection::Ascending,
+        )
+    }
+}
+
+/// Compares `a` and `b` solely by `col` in `dir`, without tiebreak fallback.
+fn cmp_column_only(
+    ctx: &SortContext<'_>,
+    col: SortColumn,
+    dir: SortDirection,
+    a: u32,
+    b: u32,
+) -> Ordering {
+    cmp_column_between(ctx, a, ctx, b, col, dir)
+}
+
+/// The column's ascending order, including the name tiebreak the presorted column builders use.
+fn cmp_indices(col: SortColumn, a: u32, b: u32, ctx: &SortContext<'_>) -> Ordering {
+    if col == SortColumn::Name {
+        return cmp_name_entries(
+            &make_name_entry(&ctx.records[a as usize], a, ctx.arena),
+            &make_name_entry(&ctx.records[b as usize], b, ctx.arena),
+            ctx.arena,
+        );
+    }
+    cmp_column_only(ctx, col, SortDirection::Ascending, a, b).then_with(|| {
+        cmp_name_entries(
+            &make_name_entry(&ctx.records[a as usize], a, ctx.arena),
+            &make_name_entry(&ctx.records[b as usize], b, ctx.arena),
+            ctx.arena,
+        )
+    })
 }
 
 #[inline]
@@ -283,6 +590,57 @@ fn apply_sort_dir(ord: Ordering, dir: SortDirection) -> Ordering {
 }
 
 const PACKED_SORT_THRESHOLD: usize = 1024;
+
+fn build_presorted_by_key<K: Send + Sync>(
+    count: u32,
+    records: &[FileRecord],
+    arena: &NamePool,
+    make_key: impl Fn(u32, &FileRecord) -> K + Sync,
+    cmp_key: impl Fn(&K, &K) -> Ordering + Sync,
+) -> Vec<u32> {
+    let mut entries: Vec<(K, NameSortEntry)> = (0..count)
+        .into_par_iter()
+        .map(|idx| {
+            let rec = &records[idx as usize];
+            (make_key(idx, rec), make_name_entry(rec, idx, arena))
+        })
+        .collect();
+    entries.par_sort_unstable_by(|(ka, na), (kb, nb)| {
+        cmp_key(ka, kb)
+            .then_with(|| cmp_name_entries(na, nb, arena))
+            .then_with(|| na.idx.cmp(&nb.idx))
+    });
+    let mut out = Vec::with_capacity(count as usize);
+    out.extend(entries.into_iter().map(|(_, n)| n.idx));
+    out
+}
+
+fn packed_sort_by_key<K: Send + Sync>(
+    indices: &mut [u32],
+    records: &[FileRecord],
+    arena: &NamePool,
+    dir: SortDirection,
+    make_key: impl Fn(u32, &FileRecord) -> K + Sync,
+    cmp_key: impl Fn(&K, &K) -> Ordering + Sync,
+) {
+    let mut entries: Vec<(K, NameSortEntry)> = indices
+        .par_iter()
+        .map(|&idx| {
+            let rec = &records[idx as usize];
+            (make_key(idx, rec), make_name_entry(rec, idx, arena))
+        })
+        .collect();
+    entries.par_sort_unstable_by(|(ka, na), (kb, nb)| {
+        apply_sort_dir(
+            cmp_key(ka, kb).then_with(|| cmp_name_entries(na, nb, arena)),
+            dir,
+        )
+        .then_with(|| na.idx.cmp(&nb.idx))
+    });
+    for (dst, (_, n)) in indices.iter_mut().zip(entries) {
+        *dst = n.idx;
+    }
+}
 
 impl PresortedIndices {
     pub fn clear(&mut self) {
@@ -303,9 +661,7 @@ impl PresortedIndices {
             * std::mem::size_of::<u32>()
     }
 
-    /// Ensures a single requested column's presorted index is built on-demand. Only the name,
-    /// size, modified and path columns have presorted arrays; `DateCreated` and `Extension`
-    /// leave the indices untouched, so callers sort those columns directly.
+    /// Ensures a single resident presorted column (`Name`, `Size`, `DateModified`, or `Path`) is built.
     pub fn ensure_column(
         &mut self,
         col: SortColumn,
@@ -313,6 +669,19 @@ impl PresortedIndices {
         arena: &NamePool,
         path_cache: &DirectoryPathCache,
         drive_letter: char,
+    ) {
+        let root = root_path_for_drive(drive_letter);
+        self.ensure_column_with_root(col, records, arena, path_cache, &root);
+    }
+
+    /// Variant of [`Self::ensure_column`] accepting an arbitrary pre-normalized `root`.
+    pub fn ensure_column_with_root(
+        &mut self,
+        col: SortColumn,
+        records: &[FileRecord],
+        arena: &NamePool,
+        path_cache: &DirectoryPathCache,
+        root: &Arc<str>,
     ) {
         let count = records.len() as u32;
         if count == 0 {
@@ -328,57 +697,25 @@ impl PresortedIndices {
                 entries.par_sort_unstable_by(|a, b| {
                     cmp_name_entries(a, b, arena).then_with(|| a.idx.cmp(&b.idx))
                 });
-                let mut by_name: Vec<u32> = Vec::with_capacity(count as usize);
+                let mut by_name = Vec::with_capacity(count as usize);
                 by_name.extend(entries.into_iter().map(|e| e.idx));
                 self.by_name = by_name;
             }
             SortColumn::Size if self.by_size.is_empty() => {
-                let mut entries: Vec<(u64, NameSortEntry)> = (0..count)
-                    .into_par_iter()
-                    .map(|idx| {
-                        let rec = &records[idx as usize];
-                        (rec.size, make_name_entry(rec, idx, arena))
-                    })
-                    .collect();
-                entries.par_sort_unstable_by(|(sa, na), (sb, nb)| {
-                    sa.cmp(sb)
-                        .then_with(|| cmp_name_entries(na, nb, arena))
-                        .then_with(|| na.idx.cmp(&nb.idx))
-                });
-                let mut by_size: Vec<u32> = Vec::with_capacity(count as usize);
-                by_size.extend(entries.into_iter().map(|(_, n)| n.idx));
-                self.by_size = by_size;
+                self.by_size =
+                    build_presorted_by_key(count, records, arena, |_, r| r.size, Ord::cmp);
             }
             SortColumn::DateModified if self.by_date_modified.is_empty() => {
-                let mut entries: Vec<(i64, NameSortEntry)> = (0..count)
-                    .into_par_iter()
-                    .map(|idx| {
-                        let rec = &records[idx as usize];
-                        (rec.modified_ts, make_name_entry(rec, idx, arena))
-                    })
-                    .collect();
-                entries.par_sort_unstable_by(|(ma, na), (mb, nb)| {
-                    ma.cmp(mb)
-                        .then_with(|| cmp_name_entries(na, nb, arena))
-                        .then_with(|| na.idx.cmp(&nb.idx))
-                });
-                let mut by_date: Vec<u32> = Vec::with_capacity(count as usize);
-                by_date.extend(entries.into_iter().map(|(_, n)| n.idx));
-                self.by_date_modified = by_date;
+                self.by_date_modified =
+                    build_presorted_by_key(count, records, arena, |_, r| r.modified_ts, Ord::cmp);
             }
             SortColumn::Path if self.by_path.is_empty() => {
                 let mut by_path: Vec<u32> = (0..count).collect();
                 by_path.par_sort_unstable_by(|&a, &b| {
-                    let pa = path_cache.get_parent_path(records, arena, drive_letter, a);
-                    let pb = path_cache.get_parent_path(records, arena, drive_letter, b);
+                    let pa = path_cache.get_parent_path_with_root(records, arena, root, a);
+                    let pb = path_cache.get_parent_path_with_root(records, arena, root, b);
                     pa.cmp(&pb)
-                        .then_with(|| {
-                            let ra = &records[a as usize];
-                            let rb = &records[b as usize];
-                            let na = arena.get_name(ra.name_offset, ra.name_len);
-                            let nb = arena.get_name(rb.name_offset, rb.name_len);
-                            natural_cmp(na, nb)
-                        })
+                        .then_with(|| cmp_name_only(records, arena, a, b))
                         .then_with(|| a.cmp(&b))
                 });
                 self.by_path = by_path;
@@ -387,10 +724,7 @@ impl PresortedIndices {
         }
     }
 
-    /// Merges records whose key changed since the last build into the cached column. `changed`
-    /// holds both records new to the table and records whose old position must go: `removed`
-    /// answers whether a base index is one of the latter. The base stays sorted, so one pass
-    /// combines it with the sorted change list.
+    /// Merges changed/inserted records into the cached column, filtering out `removed` indices.
     #[allow(clippy::too_many_arguments)]
     pub fn merge_changed(
         &mut self,
@@ -402,16 +736,38 @@ impl PresortedIndices {
         path_cache: &DirectoryPathCache,
         drive_letter: char,
     ) {
+        let root = root_path_for_drive(drive_letter);
+        self.merge_changed_with_root(col, changed, removed, records, arena, path_cache, &root);
+    }
+
+    /// Variant of [`Self::merge_changed`] accepting an arbitrary pre-normalized `root`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn merge_changed_with_root(
+        &mut self,
+        col: SortColumn,
+        changed: &mut Vec<u32>,
+        removed: impl Fn(u32) -> bool,
+        records: &[FileRecord],
+        arena: &NamePool,
+        path_cache: &DirectoryPathCache,
+        root: &Arc<str>,
+    ) {
         let base = match col {
             SortColumn::Name => &mut self.by_name,
             SortColumn::Size => &mut self.by_size,
             SortColumn::DateModified => &mut self.by_date_modified,
             SortColumn::Path => &mut self.by_path,
-            SortColumn::DateCreated | SortColumn::Extension => return,
+            _ => return,
         };
-        changed.sort_unstable_by(|&a, &b| {
-            cmp_indices(col, a, b, records, arena, path_cache, drive_letter).then_with(|| a.cmp(&b))
-        });
+        let ctx = SortContext {
+            records,
+            arena,
+            path_cache,
+            root,
+            source_id: SourceId::default(),
+            properties: None,
+        };
+        changed.sort_unstable_by(|&a, &b| cmp_indices(col, a, b, &ctx).then_with(|| a.cmp(&b)));
         let base_len = base.len();
         let mut merged = Vec::with_capacity(base_len + changed.len());
         let (mut left, mut right) = (0usize, 0usize);
@@ -422,16 +778,8 @@ impl PresortedIndices {
             if left >= base_len || right >= changed.len() {
                 break;
             }
-            let ord = cmp_indices(
-                col,
-                base[left],
-                changed[right],
-                records,
-                arena,
-                path_cache,
-                drive_letter,
-            )
-            .then_with(|| base[left].cmp(&changed[right]));
+            let ord = cmp_indices(col, base[left], changed[right], &ctx)
+                .then_with(|| base[left].cmp(&changed[right]));
             if ord == Ordering::Greater {
                 merged.push(changed[right]);
                 right += 1;
@@ -451,30 +799,163 @@ impl PresortedIndices {
         changed.clear();
     }
 
-    /// Builds the four presorted columns (name, size, modified, path). Each column sorts in
-    /// parallel; the columns themselves are built one after another.
+    /// Builds the four resident presorted columns (`Name`, `Size`, `DateModified`, `Path`).
     pub fn build(
         records: &[FileRecord],
         arena: &NamePool,
         path_cache: &DirectoryPathCache,
         drive_letter: char,
     ) -> Self {
+        let root = root_path_for_drive(drive_letter);
+        Self::build_with_root(records, arena, path_cache, &root)
+    }
+
+    /// Variant of [`Self::build`] accepting an arbitrary pre-normalized `root`.
+    pub fn build_with_root(
+        records: &[FileRecord],
+        arena: &NamePool,
+        path_cache: &DirectoryPathCache,
+        root: &Arc<str>,
+    ) -> Self {
         let mut indices = Self::default();
-        indices.ensure_column(SortColumn::Name, records, arena, path_cache, drive_letter);
-        indices.ensure_column(SortColumn::Size, records, arena, path_cache, drive_letter);
-        indices.ensure_column(
-            SortColumn::DateModified,
-            records,
-            arena,
-            path_cache,
-            drive_letter,
-        );
-        indices.ensure_column(SortColumn::Path, records, arena, path_cache, drive_letter);
+        indices.ensure_column_with_root(SortColumn::Name, records, arena, path_cache, root);
+        indices.ensure_column_with_root(SortColumn::Size, records, arena, path_cache, root);
+        indices.ensure_column_with_root(SortColumn::DateModified, records, arena, path_cache, root);
+        indices.ensure_column_with_root(SortColumn::Path, records, arena, path_cache, root);
         indices
     }
 }
 
-/// Sorts query result indices according to requested column and direction.
+fn sort_single_column(
+    indices: &mut [u32],
+    ctx: &SortContext<'_>,
+    col: SortColumn,
+    dir: SortDirection,
+) {
+    if col.property_kind().is_some() {
+        indices.par_sort_unstable_by(|&a, &b| {
+            cmp_column_only(ctx, col, dir, a, b)
+                .then_with(|| cmp_name_only(ctx.records, ctx.arena, a, b))
+                .then_with(|| a.cmp(&b))
+        });
+        return;
+    }
+
+    if indices.len() >= PACKED_SORT_THRESHOLD {
+        match col {
+            SortColumn::Name => {
+                let mut entries: Vec<NameSortEntry> = indices
+                    .par_iter()
+                    .map(|&idx| make_name_entry(&ctx.records[idx as usize], idx, ctx.arena))
+                    .collect();
+                entries.par_sort_unstable_by(|a, b| {
+                    apply_sort_dir(cmp_name_entries(a, b, ctx.arena), dir)
+                        .then_with(|| a.idx.cmp(&b.idx))
+                });
+                for (dst, entry) in indices.iter_mut().zip(entries) {
+                    *dst = entry.idx;
+                }
+            }
+            SortColumn::Path => packed_sort_by_key(
+                indices,
+                ctx.records,
+                ctx.arena,
+                dir,
+                |idx, _| {
+                    ctx.path_cache
+                        .get_parent_path_with_root(ctx.records, ctx.arena, ctx.root, idx)
+                },
+                |pa, pb| pa.cmp(pb),
+            ),
+            SortColumn::Size => packed_sort_by_key(
+                indices,
+                ctx.records,
+                ctx.arena,
+                dir,
+                |_, r| r.size,
+                Ord::cmp,
+            ),
+            SortColumn::DateModified => packed_sort_by_key(
+                indices,
+                ctx.records,
+                ctx.arena,
+                dir,
+                |_, r| r.modified_ts,
+                Ord::cmp,
+            ),
+            SortColumn::DateCreated => packed_sort_by_key(
+                indices,
+                ctx.records,
+                ctx.arena,
+                dir,
+                |_, r| r.created_ts,
+                Ord::cmp,
+            ),
+            SortColumn::Extension => packed_sort_by_key(
+                indices,
+                ctx.records,
+                ctx.arena,
+                dir,
+                |idx, r| (r.ext_offset, idx),
+                |&(oa, ia), &(ob, ib)| {
+                    let ra = &ctx.records[ia as usize];
+                    let rb = &ctx.records[ib as usize];
+                    let ea = ctx.arena.get_ext(ra.name_offset, ra.name_len, oa);
+                    let eb = ctx.arena.get_ext(rb.name_offset, rb.name_len, ob);
+                    cmp_ascii_ignore_case(ea, eb)
+                },
+            ),
+            _ => unreachable!(),
+        }
+        return;
+    }
+
+    indices.par_sort_unstable_by(|&a, &b| {
+        let ord = cmp_column_only(ctx, col, SortDirection::Ascending, a, b).then_with(|| {
+            if col == SortColumn::Name {
+                Ordering::Equal
+            } else {
+                cmp_name_only(ctx.records, ctx.arena, a, b)
+            }
+        });
+        apply_sort_dir(ord, dir).then_with(|| a.cmp(&b))
+    });
+}
+
+/// Sorts result indices by an ordered multi-key [`SortSpec`].
+pub fn sort_indices_with_spec(
+    indices: &mut [u32],
+    ctx: &SortContext<'_>,
+    spec: &SortSpec,
+    cancel: &CancellationToken,
+) {
+    if indices.len() <= 1 || cancel.is_cancelled() {
+        return;
+    }
+    if spec.keys.len() <= 1 {
+        let key = spec.primary();
+        sort_single_column(indices, ctx, key.column, key.direction);
+        return;
+    }
+
+    let has_name = spec.keys.iter().any(|k| k.column == SortColumn::Name);
+    indices.par_sort_unstable_by(|&a, &b| {
+        for key in &spec.keys {
+            let ord = cmp_column_only(ctx, key.column, key.direction, a, b);
+            if ord != Ordering::Equal {
+                return ord;
+            }
+        }
+        let tie = if has_name {
+            Ordering::Equal
+        } else {
+            cmp_name_only(ctx.records, ctx.arena, a, b)
+        };
+        tie.then_with(|| a.cmp(&b))
+    });
+}
+
+/// Sorts query result indices by a single column and direction under a drive letter root.
 #[allow(clippy::too_many_arguments)]
 pub fn sort_indices(
     indices: &mut [u32],
@@ -489,181 +970,41 @@ pub fn sort_indices(
     if indices.len() <= 1 || cancel.is_cancelled() {
         return;
     }
+    let root = root_path_for_drive(drive_letter);
+    let ctx = SortContext {
+        records,
+        arena,
+        path_cache,
+        root: &root,
+        source_id: SourceId::default(),
+        properties: None,
+    };
+    sort_single_column(indices, &ctx, col, dir);
+}
 
-    if indices.len() >= PACKED_SORT_THRESHOLD {
-        match col {
-            SortColumn::Name => {
-                let mut entries: Vec<NameSortEntry> = indices
-                    .par_iter()
-                    .map(|&idx| make_name_entry(&records[idx as usize], idx, arena))
-                    .collect();
-                entries.par_sort_unstable_by(|a, b| {
-                    apply_sort_dir(cmp_name_entries(a, b, arena), dir)
-                        .then_with(|| a.idx.cmp(&b.idx))
-                });
-                for (dst, entry) in indices.iter_mut().zip(entries) {
-                    *dst = entry.idx;
-                }
-                return;
-            }
-            SortColumn::Path => {
-                let mut entries: Vec<(std::sync::Arc<str>, NameSortEntry)> = indices
-                    .par_iter()
-                    .map(|&idx| {
-                        let parent = path_cache.get_parent_path(records, arena, drive_letter, idx);
-                        (parent, make_name_entry(&records[idx as usize], idx, arena))
-                    })
-                    .collect();
-                entries.par_sort_unstable_by(|(pa, na), (pb, nb)| {
-                    apply_sort_dir(
-                        pa.cmp(pb).then_with(|| cmp_name_entries(na, nb, arena)),
-                        dir,
-                    )
-                    .then_with(|| na.idx.cmp(&nb.idx))
-                });
-                for (dst, (_, n)) in indices.iter_mut().zip(entries) {
-                    *dst = n.idx;
-                }
-                return;
-            }
-            SortColumn::Size => {
-                let mut entries: Vec<(u64, NameSortEntry)> = indices
-                    .par_iter()
-                    .map(|&idx| {
-                        let rec = &records[idx as usize];
-                        (rec.size, make_name_entry(rec, idx, arena))
-                    })
-                    .collect();
-                entries.par_sort_unstable_by(|(sa, na), (sb, nb)| {
-                    apply_sort_dir(
-                        sa.cmp(sb).then_with(|| cmp_name_entries(na, nb, arena)),
-                        dir,
-                    )
-                    .then_with(|| na.idx.cmp(&nb.idx))
-                });
-                for (dst, (_, n)) in indices.iter_mut().zip(entries) {
-                    *dst = n.idx;
-                }
-                return;
-            }
-            SortColumn::DateModified => {
-                let mut entries: Vec<(i64, NameSortEntry)> = indices
-                    .par_iter()
-                    .map(|&idx| {
-                        let rec = &records[idx as usize];
-                        (rec.modified_ts, make_name_entry(rec, idx, arena))
-                    })
-                    .collect();
-                entries.par_sort_unstable_by(|(ma, na), (mb, nb)| {
-                    apply_sort_dir(
-                        ma.cmp(mb).then_with(|| cmp_name_entries(na, nb, arena)),
-                        dir,
-                    )
-                    .then_with(|| na.idx.cmp(&nb.idx))
-                });
-                for (dst, (_, n)) in indices.iter_mut().zip(entries) {
-                    *dst = n.idx;
-                }
-                return;
-            }
-            SortColumn::DateCreated => {
-                let mut entries: Vec<(i64, NameSortEntry)> = indices
-                    .par_iter()
-                    .map(|&idx| {
-                        let rec = &records[idx as usize];
-                        (rec.created_ts, make_name_entry(rec, idx, arena))
-                    })
-                    .collect();
-                entries.par_sort_unstable_by(|(ca, na), (cb, nb)| {
-                    apply_sort_dir(
-                        ca.cmp(cb).then_with(|| cmp_name_entries(na, nb, arena)),
-                        dir,
-                    )
-                    .then_with(|| na.idx.cmp(&nb.idx))
-                });
-                for (dst, (_, n)) in indices.iter_mut().zip(entries) {
-                    *dst = n.idx;
-                }
-                return;
-            }
-            SortColumn::Extension => {
-                let mut entries: Vec<(u16, NameSortEntry)> = indices
-                    .par_iter()
-                    .map(|&idx| {
-                        let rec = &records[idx as usize];
-                        (rec.ext_offset, make_name_entry(rec, idx, arena))
-                    })
-                    .collect();
-                entries.par_sort_unstable_by(|(ea_off, na), (eb_off, nb)| {
-                    let ea = arena.get_ext(na.name_offset, na.name_len, *ea_off);
-                    let eb = arena.get_ext(nb.name_offset, nb.name_len, *eb_off);
-                    apply_sort_dir(
-                        cmp_ascii_ignore_case(ea, eb).then_with(|| cmp_name_entries(na, nb, arena)),
-                        dir,
-                    )
-                    .then_with(|| na.idx.cmp(&nb.idx))
-                });
-                for (dst, (_, n)) in indices.iter_mut().zip(entries) {
-                    *dst = n.idx;
-                }
-                return;
-            }
-        }
-    }
-
-    indices.par_sort_unstable_by(|&a, &b| {
-        let ra = &records[a as usize];
-        let rb = &records[b as usize];
-
-        let ord = match col {
-            SortColumn::Name => {
-                let na = arena.get_name(ra.name_offset, ra.name_len);
-                let nb = arena.get_name(rb.name_offset, rb.name_len);
-                natural_cmp(na, nb)
-            }
-            SortColumn::Path => {
-                let pa = path_cache.get_parent_path(records, arena, drive_letter, a);
-                let pb = path_cache.get_parent_path(records, arena, drive_letter, b);
-                pa.cmp(&pb).then_with(|| {
-                    let na = arena.get_name(ra.name_offset, ra.name_len);
-                    let nb = arena.get_name(rb.name_offset, rb.name_len);
-                    natural_cmp(na, nb)
-                })
-            }
-            SortColumn::Size => ra.size.cmp(&rb.size).then_with(|| {
-                let na = arena.get_name(ra.name_offset, ra.name_len);
-                let nb = arena.get_name(rb.name_offset, rb.name_len);
-                natural_cmp(na, nb)
-            }),
-            SortColumn::DateModified => ra.modified_ts.cmp(&rb.modified_ts).then_with(|| {
-                let na = arena.get_name(ra.name_offset, ra.name_len);
-                let nb = arena.get_name(rb.name_offset, rb.name_len);
-                natural_cmp(na, nb)
-            }),
-            SortColumn::DateCreated => ra.created_ts.cmp(&rb.created_ts).then_with(|| {
-                let na = arena.get_name(ra.name_offset, ra.name_len);
-                let nb = arena.get_name(rb.name_offset, rb.name_len);
-                natural_cmp(na, nb)
-            }),
-            SortColumn::Extension => {
-                let ea = arena.get_ext(ra.name_offset, ra.name_len, ra.ext_offset);
-                let eb = arena.get_ext(rb.name_offset, rb.name_len, rb.ext_offset);
-                cmp_ascii_ignore_case(ea, eb).then_with(|| {
-                    let na = arena.get_name(ra.name_offset, ra.name_len);
-                    let nb = arena.get_name(rb.name_offset, rb.name_len);
-                    natural_cmp(na, nb)
-                })
-            }
-        };
-
-        let primary = if dir == SortDirection::Descending {
-            ord.reverse()
-        } else {
-            ord
-        };
-
-        primary.then_with(|| a.cmp(&b))
-    });
+/// Sorts query result indices under an arbitrary source root prefix.
+#[allow(clippy::too_many_arguments)]
+pub fn sort_indices_for_root(
+    indices: &mut [u32],
+    records: &[FileRecord],
+    arena: &NamePool,
+    path_cache: &DirectoryPathCache,
+    root_prefix: &str,
+    source_id: SourceId,
+    properties: Option<&PropertySideTables>,
+    spec: &SortSpec,
+    cancel: &CancellationToken,
+) {
+    let root = normalize_root(root_prefix);
+    let ctx = SortContext {
+        records,
+        arena,
+        path_cache,
+        root: &root,
+        source_id,
+        properties,
+    };
+    sort_indices_with_spec(indices, &ctx, spec, cancel);
 }
 
 #[cfg(test)]
@@ -679,6 +1020,11 @@ mod tests {
             SortColumn::DateModified,
             SortColumn::DateCreated,
             SortColumn::Extension,
+            SortColumn::Length,
+            SortColumn::Author,
+            SortColumn::Tags,
+            SortColumn::Dimensions,
+            SortColumn::Framerate,
         ] {
             assert_eq!(column.key().parse::<SortColumn>(), Ok(column));
         }
@@ -688,6 +1034,8 @@ mod tests {
             Ok(SortColumn::DateModified)
         );
         assert_eq!("extension".parse::<SortColumn>(), Ok(SortColumn::Extension));
+        assert_eq!("duration".parse::<SortColumn>(), Ok(SortColumn::Length));
+        assert_eq!("fps".parse::<SortColumn>(), Ok(SortColumn::Framerate));
     }
 
     #[test]
@@ -921,6 +1269,7 @@ mod tests {
                             .get_parent_path(&records, &arena, 'C', a)
                             .cmp(&cache.get_parent_path(&records, &arena, 'C', b))
                             .then_with(|| natural_cmp(na, nb)),
+                        _ => unreachable!("loop covers non-property columns"),
                     };
                     let primary = if dir == SortDirection::Descending {
                         ord.reverse()
