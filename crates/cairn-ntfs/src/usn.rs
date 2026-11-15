@@ -4,7 +4,7 @@
 
 //! USN (Update Sequence Number) Change Journal monitoring and event parser.
 
-use cairn_core::{FLAG_DIRECTORY, FLAG_REPARSE_POINT};
+use cairn_core::flags_from_win32_attributes;
 use thiserror::Error;
 
 pub const FSCTL_QUERY_USN_JOURNAL: u32 = 0x000900F4;
@@ -23,17 +23,9 @@ pub const USN_REASON_CLOSE: u32 = 0x80000000;
 pub const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x00000010;
 pub const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x00000400;
 
-/// Translates the Win32 attributes carried by a USN record into the directory/reparse flag bits an
-/// indexed record keeps. Other attributes are not part of the compact record.
+/// Translates the Win32 attributes carried by a USN record into `FileRecord` flag bits.
 pub fn file_record_flags(attributes: u32) -> u16 {
-    let mut flags = 0u16;
-    if attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
-        flags |= FLAG_DIRECTORY;
-    }
-    if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-        flags |= FLAG_REPARSE_POINT;
-    }
-    flags
+    flags_from_win32_attributes(attributes)
 }
 
 #[derive(Error, Debug)]
@@ -227,6 +219,10 @@ pub fn parse_usn_records(buf: &[u8]) -> (i64, Vec<UsnChange>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cairn_core::{
+        FLAG_ARCHIVE, FLAG_DIRECTORY, FLAG_HIDDEN, FLAG_REPARSE_POINT, FLAG_SYSTEM,
+        WIN32_ATTR_ARCHIVE, WIN32_ATTR_HIDDEN, WIN32_ATTR_SYSTEM,
+    };
 
     #[test]
     fn test_delete_priority() {
@@ -289,6 +285,10 @@ mod tests {
         assert_eq!(
             file_record_flags(FILE_ATTRIBUTE_DIRECTORY) & FLAG_DIRECTORY,
             FLAG_DIRECTORY
+        );
+        assert_eq!(
+            file_record_flags(WIN32_ATTR_HIDDEN | WIN32_ATTR_SYSTEM | WIN32_ATTR_ARCHIVE),
+            FLAG_HIDDEN | FLAG_SYSTEM | FLAG_ARCHIVE
         );
     }
 

@@ -34,6 +34,14 @@ pub struct ParsedFileName {
     pub namespace: u8,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NonResidentAttrSpan {
+    pub attr_offset: usize,
+    pub runlist_offset: usize,
+    pub attr_len: usize,
+    pub real_size: u64,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ParsedAttributes {
     pub file_names: Vec<ParsedFileName>,
@@ -43,6 +51,8 @@ pub struct ParsedAttributes {
     pub dos_flags: Option<u32>,
     pub has_reparse_point: bool,
     pub data_runlist_offset: Option<usize>,
+    pub bitmap_resident: Option<Vec<u8>>,
+    pub bitmap_non_resident: Option<NonResidentAttrSpan>,
 }
 
 /// Parses all attributes inside an MFT record starting from `first_attr_offset`.
@@ -175,6 +185,40 @@ pub fn parse_attributes(
                             ]);
                             result.default_data_size = Some(real_size);
                             result.data_runlist_offset = Some(cursor);
+                        }
+                    }
+                }
+            }
+            ATTR_BITMAP => {
+                if name_len == 0 {
+                    if !non_resident && cursor + 24 <= buf.len() {
+                        let val_len =
+                            u32::from_le_bytes(buf[cursor + 16..cursor + 20].try_into().unwrap())
+                                as usize;
+                        let val_offset =
+                            u16::from_le_bytes([buf[cursor + 20], buf[cursor + 21]]) as usize;
+                        let val_start = cursor + val_offset;
+                        if let Some(val_end) = val_start.checked_add(val_len) {
+                            if val_end <= cursor + attr_len && val_end <= buf.len() {
+                                result.bitmap_resident = Some(buf[val_start..val_end].to_vec());
+                            }
+                        }
+                    } else if non_resident
+                        && cursor + 56 <= cursor + attr_len
+                        && cursor + 56 <= buf.len()
+                    {
+                        let runlist_offset =
+                            u16::from_le_bytes([buf[cursor + 32], buf[cursor + 33]]) as usize;
+                        if runlist_offset < attr_len {
+                            let real_size = u64::from_le_bytes(
+                                buf[cursor + 48..cursor + 56].try_into().unwrap(),
+                            );
+                            result.bitmap_non_resident = Some(NonResidentAttrSpan {
+                                attr_offset: cursor,
+                                runlist_offset,
+                                attr_len,
+                                real_size,
+                            });
                         }
                     }
                 }
