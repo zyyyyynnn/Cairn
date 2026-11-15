@@ -49,6 +49,13 @@
 | `date-created:` | `dc:>2026`、`dc:yesterday` | 创建时间；取值格式与 `dm:` 一致 |
 | `parent:` | `parent:C:\Windows` | 仅匹配指定绝对路径的直接子项，忽略末尾反斜杠 |
 | `content:` | `content:架构`、`content:"error code"` | 触发 Tantivy 全文内容索引；支持复合分组 `content:<abc 123>`；单条查询至多 16 个内容检索项（按解析后带内容检索的项数计，含重复与否定项），超限在管道请求边界以错误码 416 整体拒绝 |
+| `len:` | `len:>20`、`len:4..16` | 按文件名字符长度过滤 |
+| `attrib:` | `attrib:HS`、`attrib:!D` | 按 DOS 文件属性位过滤（支持 `R/H/S/D/A/P/C/L` 及前导 `!` 取反） |
+| `depth:` | `depth:<=3`、`depth:2..4` | 按绝对路径层级深度过滤 |
+| `child:` / `childcount:` / `childfilecount:` / `childfoldercount:` / `empty:` | `child:Cargo.toml`、`empty:` | 按目录子项名、直接子项数或空目录过滤 |
+| `dupe:` / `namedupe:` / `sizedupe:` / `namepartdupe:` / `unique:` | `dupe:name;size`、`unique:` | 按名称、大小、主干或组合检测重复或唯一项 |
+| `length:` / `author:` / `tags:` / `dimensions:` / `width:` / `height:` / `framerate:` | `author:张三`、`dim:1920x1080` | 扩展属性侧表检索（需先启用属性索引；未启用时明确降级） |
+| `sort:` | `sort:size-descending;name-ascending` | 在查询内声明单键或多键排序顺序（别名 `date-modified` / `date-created` / `ext` / `dimensions` / `framerate` 等） |
 
 ### 1.5 快速过滤器宏
 - 内置宏：`audio:`、`doc:`、`exe:`、`image:`、`video:`、`zip:`。
@@ -60,5 +67,5 @@
 
 ### 1.7 与 PCRE / Everything 语法差异
 - 正则表达式：采用 Rust `regex` 引擎保证线性时间复杂度，不支持环视断言与反向引用。
-- 函数范围：语法聚焦于基础元数据过滤（`ext:`、`size:`、`dm:`、`dc:`、`parent:` 与类别宏），未包含字符实体转义（如 `&sp:`）及 `attrib:`、`dupe:` 函数。
-- 已列入 P1 的差异：拼音、忽略标点/空白、变音符号、长度/属性/层级/去重/唯一函数与多键排序（见 [SPEC](../SPEC.md) QRY-10）；当前版本尚未实现。
+- 搜索语言扩展（`QRY-10`）已实现：`pinyin:`/`py:`（含全拼/首字母）、`diacritics:`/`no-diacritics:`、`ignore-punctuation:`/`nopunc:`、`ignore-whitespace:`/`nows:`、`len:`、`attrib:`、`depth:`、`child:`/`childcount:`/`childfilecount:`/`childfoldercount:`/`empty:`、`dupe:`/`namedupe:`/`sizedupe:`/`namepartdupe:`/`unique:`、`sort:` 多键排序，以及 `IDX-12` 扩展属性函数（`length:`/`author:`/`tags:`/`dimensions:`/`width:`/`height:`/`framerate:`）。
+- 未实现边界：字符实体转义（如 `&sp:`）、正则捕获列与自定义宏，以及 `pinyin:`/`nopunc:`/`nows:`/`diacritics:` 的图形菜单开关（当前通过查询语法与协议默认值 `QueryDefaults` 控制）。
