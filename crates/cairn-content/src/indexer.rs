@@ -5,6 +5,7 @@
 //! Tantivy full-text index management and content querying.
 
 use crate::tokenizer::{CjkBigramLatinTokenizer, CJK_BIGRAM_LATIN_TOKENIZER};
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -37,12 +38,17 @@ pub enum ContentIndexError {
     WriterPoisoned,
 }
 
+/// Maximum number of deduplicated context snippets attached to one content hit.
+pub const MAX_CONTENT_SNIPPETS: usize = 3;
+const SNIPPET_WINDOW_CHARS: usize = 120;
+const KEY_LOOKUP_BATCH_SIZE: usize = 256;
+
 #[derive(Clone, Debug)]
 pub struct ContentHit {
     pub volume_id: u64,
     pub frn: u64,
     pub path: String,
-    pub snippet: String,
+    pub snippets: Vec<String>,
 }
 
 /// Read-only handle onto an existing Tantivy index. It never opens a writer, so a process that
@@ -145,18 +151,20 @@ impl ContentSearcher {
     /// and disjunction need the complete hit set; the scored top-k search is only for result rows.
     /// The FAST fields carry both identifiers, so a full set costs no scoring and no body read.
     pub fn search_all_frns(&self, query_str: &str) -> Result<Vec<(u64, u64)>, ContentIndexError> {
-        self.reader.reload()?;
-        let searcher = self.reader.searcher();
-        if searcher.num_docs() == 0 {
+        let query = self.parsed_query(query_str)?;
+        self.collect_frns(query.as_ref())
+    }
+
+    /// Every `(volume_id, frn)` matching all terms in conjunction, without top-k truncation.
+    pub fn search_terms_all_frns(
+        &self,
+        terms: &[String],
+    ) -> Result<Vec<(u64, u64)>, ContentIndexError> {
+        if terms.is_empty() {
             return Ok(Vec::new());
         }
-        let query = self.parsed_query(query_str)?;
-        let schema = self.index.schema();
-        let collector = FrnSetCollector {
-            volume_field: schema.get_field_name(self.f_volume_id).to_string(),
-            frn_field: schema.get_field_name(self.f_frn).to_string(),
-        };
-        Ok(searcher.search(query.as_ref(), &collector)?)
+        let query = self.conjunction_query(terms)?;
+        self.collect_frns(&query)
     }
 
     /// Every `(volume_id, frn)` any of the terms matches, as one disjunction. A pure content
@@ -165,18 +173,98 @@ impl ContentSearcher {
         &self,
         terms: &[String],
     ) -> Result<Vec<(u64, u64)>, ContentIndexError> {
+        let query = self.union_query(terms)?;
+        self.collect_frns(&query)
+    }
+
+    /// Builds up to `MAX_CONTENT_SNIPPETS` deduplicated snippets for the requested
+    /// `(volume_id, frn)` documents against `terms`.
+    pub fn snippets_for_keys(
+        &self,
+        keys: &[(u64, u64)],
+        terms: &[String],
+    ) -> Result<HashMap<(u64, u64), Vec<String>>, ContentIndexError> {
+        if keys.is_empty() || terms.is_empty() {
+            return Ok(HashMap::new());
+        }
+        self.reader.reload()?;
+        let searcher = self.reader.searcher();
+        if searcher.num_docs() == 0 {
+            return Ok(HashMap::new());
+        }
+        let joined_query = terms.join(" ");
+        let mut snippets_by_key = HashMap::with_capacity(keys.len());
+        let mut seen_keys = HashSet::with_capacity(keys.len());
+        let unique_keys: Vec<(u64, u64)> = keys
+            .iter()
+            .copied()
+            .filter(|key| seen_keys.insert(*key))
+            .collect();
+
+        for chunk in unique_keys.chunks(KEY_LOOKUP_BATCH_SIZE) {
+            let clauses: Vec<(Occur, Box<dyn tantivy::query::Query>)> = chunk
+                .iter()
+                .map(|&(volume_id, frn)| {
+                    (
+                        Occur::Should,
+                        Box::new(self.key_query(volume_id, frn)) as Box<dyn tantivy::query::Query>,
+                    )
+                })
+                .collect();
+            let batch_query = BooleanQuery::new(clauses);
+            let docs = searcher.search(
+                &batch_query,
+                &TopDocs::with_limit(chunk.len()).order_by_score(),
+            )?;
+            for (_score, doc_address) in docs {
+                let retrieved_doc: TantivyDocument = searcher.doc(doc_address)?;
+                let (volume_id, frn, _path, body) = self.extract_stored_fields(&retrieved_doc);
+                let snippets = create_snippets(
+                    body,
+                    &joined_query,
+                    SNIPPET_WINDOW_CHARS,
+                    MAX_CONTENT_SNIPPETS,
+                );
+                snippets_by_key.insert((volume_id, frn), snippets);
+            }
+        }
+        Ok(snippets_by_key)
+    }
+
+    fn collect_frns(
+        &self,
+        query: &dyn tantivy::query::Query,
+    ) -> Result<Vec<(u64, u64)>, ContentIndexError> {
         self.reader.reload()?;
         let searcher = self.reader.searcher();
         if searcher.num_docs() == 0 {
             return Ok(Vec::new());
         }
-        let query = self.union_query(terms)?;
         let schema = self.index.schema();
         let collector = FrnSetCollector {
             volume_field: schema.get_field_name(self.f_volume_id).to_string(),
             frn_field: schema.get_field_name(self.f_frn).to_string(),
         };
-        Ok(searcher.search(&query, &collector)?)
+        Ok(searcher.search(query, &collector)?)
+    }
+
+    fn key_query(&self, volume_id: u64, frn: u64) -> BooleanQuery {
+        BooleanQuery::new(vec![
+            (
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_u64(self.f_volume_id, volume_id),
+                    IndexRecordOption::Basic,
+                )),
+            ),
+            (
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_u64(self.f_frn, frn),
+                    IndexRecordOption::Basic,
+                )),
+            ),
+        ])
     }
 
     /// Queries the full-text content index.
@@ -200,11 +288,7 @@ impl ContentSearcher {
     ) -> Result<Vec<ContentHit>, ContentIndexError> {
         self.reader.reload()?;
         let searcher = self.reader.searcher();
-        let mut clauses = Vec::with_capacity(terms.len());
-        for term in terms {
-            clauses.push((Occur::Must, self.parsed_query(term)?));
-        }
-        let query = BooleanQuery::new(clauses);
+        let query = self.conjunction_query(terms)?;
         self.collect_hits(&searcher, &query, &terms.join(" "), limit)
     }
 
@@ -226,6 +310,14 @@ impl ContentSearcher {
         let searcher = self.reader.searcher();
         let query = self.parsed_query(query_str)?;
         Ok(searcher.search(query.as_ref(), &Count)?)
+    }
+
+    fn conjunction_query(&self, terms: &[String]) -> Result<BooleanQuery, ContentIndexError> {
+        let mut clauses = Vec::with_capacity(terms.len());
+        for term in terms {
+            clauses.push((Occur::Must, self.parsed_query(term)?));
+        }
+        Ok(BooleanQuery::new(clauses))
     }
 
     /// One Should clause per parsed term. Parsing each term on its own keeps a term's boolean
@@ -272,6 +364,26 @@ impl ContentSearcher {
         Ok(BooleanQuery::new(clauses))
     }
 
+    fn extract_stored_fields<'a>(&self, doc: &'a TantivyDocument) -> (u64, u64, &'a str, &'a str) {
+        let volume_id = doc
+            .get_first(self.f_volume_id)
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let frn = doc
+            .get_first(self.f_frn)
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let path = doc
+            .get_first(self.f_path)
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let body = doc
+            .get_first(self.f_body)
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        (volume_id, frn, path, body)
+    }
+
     fn collect_hits(
         &self,
         searcher: &tantivy::Searcher,
@@ -284,33 +396,15 @@ impl ContentSearcher {
 
         for (_score, doc_address) in top_docs {
             let retrieved_doc: TantivyDocument = searcher.doc(doc_address)?;
-
-            let volume_id = retrieved_doc
-                .get_first(self.f_volume_id)
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            let frn = retrieved_doc
-                .get_first(self.f_frn)
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            let path = retrieved_doc
-                .get_first(self.f_path)
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let body = retrieved_doc
-                .get_first(self.f_body)
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-
-            // Compute preview snippet
-            let snippet = create_snippet(body, query_str, 120);
+            let (volume_id, frn, path, body) = self.extract_stored_fields(&retrieved_doc);
+            let snippets =
+                create_snippets(body, query_str, SNIPPET_WINDOW_CHARS, MAX_CONTENT_SNIPPETS);
 
             hits.push(ContentHit {
                 volume_id,
                 frn,
-                path,
-                snippet,
+                path: path.to_string(),
+                snippets,
             });
         }
 
@@ -664,30 +758,104 @@ impl ContentIndex {
 /// each hit needs only one to anchor its snippet, so the scan is bounded like the term count.
 const MAX_SNIPPET_NEEDLES: usize = 16;
 
-pub fn create_snippet(body: &str, query: &str, max_len: usize) -> String {
-    if body.is_empty() {
-        return String::new();
+/// Builds up to `max_count` deduplicated, non-overlapping context snippets from `body`
+/// anchored around terms in `query`.
+pub fn create_snippets(body: &str, query: &str, max_len: usize, max_count: usize) -> Vec<String> {
+    if body.is_empty() || max_len == 0 || max_count == 0 {
+        return Vec::new();
     }
+
     let lower_body = body.to_ascii_lowercase();
-    let lower_query = query.to_ascii_lowercase();
+    let needles = extract_snippet_needles(query);
+    let mut positions = Vec::new();
+    for needle in &needles {
+        for (pos, _) in lower_body.match_indices(needle.as_str()).take(32) {
+            positions.push(pos);
+        }
+    }
+    positions.sort_unstable();
+    positions.dedup();
 
-    // A multi-term query reaches this function as space-joined text that may occur nowhere as
-    // a phrase. The earliest position of the whole query or any of its words still anchors the
-    // snippet at a hit; only a query absent from the body falls back to the head.
-    let pos = std::iter::once(lower_query.as_str())
-        .chain(lower_query.split_whitespace())
-        .take(MAX_SNIPPET_NEEDLES)
-        .filter(|needle| !needle.is_empty())
-        .filter_map(|needle| lower_body.find(needle))
-        .min()
-        .unwrap_or(0);
-    let target_start = pos.saturating_sub(max_len / 4);
-    let start = floor_char_boundary(body, target_start);
+    if positions.is_empty() {
+        let end = floor_char_boundary(body, max_len.min(body.len()));
+        return vec![format_snippet_window(body, 0, end)];
+    }
 
-    let target_end = (start + max_len).min(body.len());
-    let end = floor_char_boundary(body, target_end);
+    let mut accepted_ranges: Vec<(usize, usize)> = Vec::with_capacity(max_count);
+    let mut seen_text: HashSet<String> = HashSet::with_capacity(max_count);
+    let mut snippets: Vec<String> = Vec::with_capacity(max_count);
 
-    let mut snippet = String::new();
+    for pos in positions {
+        if snippets.len() >= max_count {
+            break;
+        }
+        if accepted_ranges.iter().any(|&(s, e)| pos >= s && pos < e) {
+            continue;
+        }
+
+        let pos_boundary = floor_char_boundary(body, pos);
+        let min_allowed_start = accepted_ranges
+            .iter()
+            .filter(|&&(_, e)| e <= pos_boundary)
+            .map(|&(_, e)| e)
+            .max()
+            .unwrap_or(0);
+        let raw_start = pos_boundary
+            .saturating_sub(max_len / 4)
+            .max(min_allowed_start);
+        let start = ceil_char_boundary(body, raw_start).min(pos_boundary);
+
+        let max_allowed_end = accepted_ranges
+            .iter()
+            .filter(|&&(s, _)| s > pos_boundary)
+            .map(|&(s, _)| s)
+            .min()
+            .unwrap_or(body.len());
+        let raw_end = (start + max_len).min(max_allowed_end).min(body.len());
+        let end = floor_char_boundary(body, raw_end);
+        if end <= start {
+            continue;
+        }
+
+        let formatted = format_snippet_window(body, start, end);
+        accepted_ranges.push((start, end));
+        if seen_text.insert(formatted.clone()) {
+            snippets.push(formatted);
+        }
+    }
+
+    snippets
+}
+
+fn extract_snippet_needles(query: &str) -> Vec<String> {
+    let mut needles = Vec::new();
+    let trimmed = query.trim();
+    if !trimmed.is_empty()
+        && !trimmed
+            .split_whitespace()
+            .any(|tok| matches!(tok, "AND" | "OR" | "NOT"))
+    {
+        needles.push(trimmed.to_ascii_lowercase());
+    }
+    for token in trimmed.split_whitespace() {
+        if matches!(token, "AND" | "OR" | "NOT") {
+            continue;
+        }
+        let cleaned = token
+            .trim_matches(|ch: char| matches!(ch, '"' | '(' | ')'))
+            .to_ascii_lowercase();
+        if !cleaned.is_empty() && !needles.contains(&cleaned) {
+            needles.push(cleaned);
+            if needles.len() >= MAX_SNIPPET_NEEDLES {
+                break;
+            }
+        }
+    }
+    needles
+}
+
+fn format_snippet_window(body: &str, start: usize, end: usize) -> String {
+    let mut snippet = String::with_capacity((end - start) + 6);
     if start > 0 {
         snippet.push_str("...");
     }
@@ -704,6 +872,16 @@ fn floor_char_boundary(s: &str, mut idx: usize) -> usize {
     }
     while idx > 0 && !s.is_char_boundary(idx) {
         idx -= 1;
+    }
+    idx
+}
+
+fn ceil_char_boundary(s: &str, mut idx: usize) -> usize {
+    if idx >= s.len() {
+        return s.len();
+    }
+    while idx < s.len() && !s.is_char_boundary(idx) {
+        idx += 1;
     }
     idx
 }
@@ -813,9 +991,12 @@ mod tests {
             .expect("scored union");
         assert_eq!(hits.len(), 1);
         assert!(
-            hits[0].snippet.contains("alpha"),
-            "the snippet must show a hit word, got: {}",
-            hits[0].snippet
+            hits[0]
+                .snippets
+                .iter()
+                .any(|snippet| snippet.contains("alpha")),
+            "the snippet must show a hit word, got: {:?}",
+            hits[0].snippets
         );
     }
 
@@ -842,8 +1023,8 @@ mod tests {
         frns.sort_unstable();
         assert_eq!(frns, vec![1, 2, 3]);
         assert!(
-            hits.iter().all(|hit| !hit.snippet.is_empty()),
-            "every scored union hit carries a snippet"
+            hits.iter().all(|hit| !hit.snippets.is_empty()),
+            "every scored union hit carries at least one snippet"
         );
 
         // The top-k bound applies to the merged search as it does to a single term.
@@ -921,7 +1102,10 @@ mod tests {
         let hits = index.search("架构设计", 10).expect("search failed");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].frn, 1001);
-        assert!(hits[0].snippet.contains("架构设计"));
+        assert!(hits[0]
+            .snippets
+            .iter()
+            .any(|snippet| snippet.contains("架构设计")));
     }
 
     #[test]
@@ -1189,12 +1373,85 @@ mod tests {
     }
 
     #[test]
-    fn test_create_snippet_utf8_boundary() {
+    fn test_create_snippets_utf8_boundary_non_overlapping_and_deduped() {
         let long_cjk =
             "这是一段很长很长很长很长很长的文本，包含关键字搜索，后面还有更多的内容。".repeat(10);
-        let snippet = create_snippet(&long_cjk, "关键字搜索", 40);
-        assert!(!snippet.is_empty());
-        assert!(snippet.contains("关键字搜索"));
+        let snippets = create_snippets(&long_cjk, "关键字搜索", 40, MAX_CONTENT_SNIPPETS);
+        assert!(
+            !snippets.is_empty() && snippets.len() <= MAX_CONTENT_SNIPPETS,
+            "snippets count must be in 1..=3, got {}",
+            snippets.len()
+        );
+        assert!(snippets.iter().all(|s| s.contains("关键字搜索")));
+        let unique: std::collections::HashSet<&str> = snippets.iter().map(String::as_str).collect();
+        assert_eq!(
+            unique.len(),
+            snippets.len(),
+            "snippets must be deduplicated"
+        );
+
+        let filler = "padding words without target text here. ".repeat(6);
+        let varied = format!(
+            "section one needle first {filler} section two needle second {filler} section three needle third {filler} section four needle fourth"
+        );
+        let multi = create_snippets(&varied, "needle", 60, MAX_CONTENT_SNIPPETS);
+        assert_eq!(multi.len(), 3, "must cap at 3 distinct snippets: {multi:?}");
+        assert!(multi[0].contains("section one"));
+        assert!(multi[1].contains("section two"));
+        assert!(multi[2].contains("section three"));
+
+        let repeated =
+            format!("{filler} identical needle line {filler} identical needle line {filler}");
+        let deduped = create_snippets(&repeated, "needle", 40, MAX_CONTENT_SNIPPETS);
+        assert_eq!(
+            deduped.len(),
+            1,
+            "identical snippets at distinct offsets must collapse to one: {deduped:?}"
+        );
+    }
+
+    #[test]
+    fn search_terms_all_frns_and_snippets_for_keys_never_truncate_conjunctions() {
+        let temp = tempdir().unwrap();
+        let index = ContentIndex::open_or_create(temp.path()).expect("open failed");
+        for frn in 1..=5u64 {
+            let body = if frn <= 4 {
+                format!("prefix text alpha middle filler beta item-{frn} suffix")
+            } else {
+                "only alpha here".to_string()
+            };
+            index_committed(
+                &index,
+                0,
+                frn,
+                32,
+                1,
+                &format!("C:\\docs\\{frn}.txt"),
+                &body,
+            )
+            .expect("index doc failed");
+        }
+
+        let terms = vec!["alpha".to_string(), "beta".to_string()];
+        let top = index.searcher.search_terms(&terms, 1).expect("bounded");
+        assert_eq!(top.len(), 1);
+
+        let mut all = index
+            .searcher
+            .search_terms_all_frns(&terms)
+            .expect("full conjunction");
+        all.sort_unstable();
+        assert_eq!(all, vec![(0, 1), (0, 2), (0, 3), (0, 4)]);
+
+        let fetched = index
+            .searcher
+            .snippets_for_keys(&[(0, 4), (0, 99)], &terms)
+            .expect("snippets_for_keys");
+        assert_eq!(fetched.len(), 1);
+        let row4 = fetched.get(&(0, 4)).expect("frn 4 snippets");
+        assert!(row4
+            .iter()
+            .any(|s| s.contains("alpha") || s.contains("beta")));
     }
 
     #[test]

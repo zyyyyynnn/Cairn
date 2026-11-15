@@ -21,7 +21,7 @@ pub use extractor::{
     TextExtractor,
 };
 pub use indexer::{
-    ContentHit, ContentIndex, ContentIndexError, ContentSearcher, ContentWriter,
-    CONTENT_RESULT_TOP_K,
+    create_snippets, ContentHit, ContentIndex, ContentIndexError, ContentSearcher, ContentWriter,
+    CONTENT_RESULT_TOP_K, MAX_CONTENT_SNIPPETS,
 };
 pub use tokenizer::{CjkBigramLatinTokenizer, CJK_BIGRAM_LATIN_TOKENIZER};
