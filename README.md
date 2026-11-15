@@ -124,6 +124,7 @@ docs/              产品规格、工程架构与外部调研文档
 | [品牌资产](docs/product/brand.md) | 图标母版、光栅尺寸阶梯与使用位置 |
 | [系统架构](docs/engineering/architecture.md) | Crate 边界、进程拓扑与模块职责 |
 | [索引与同步](docs/engineering/indexing.md) | `$MFT` 扫描、USN 对齐、缓存持久化与内容索引流水线 |
+| [索引平台设计](docs/engineering/index-platform.md) | 文件夹索引源、属性索引与只读索引日志的范围、接口与风险 |
 | [前端与 GPUI](docs/engineering/frontend.md) | 布局、焦点、IME 与窗口行为 |
 | [IPC 与安全](docs/engineering/ipc-security.md) | 协议帧限制、管道 ACL、调用方令牌鉴权与配置保护 |
 | [性能](docs/engineering/performance.md) | 性能目标、内存与 Treemap 预算 |
