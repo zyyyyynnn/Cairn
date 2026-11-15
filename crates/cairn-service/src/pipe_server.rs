@@ -16,10 +16,9 @@ use crate::sync_engine::MultiVolumeEngine;
 use cairn_core::syntax::{parse_query_with, MAX_CONTENT_TERMS};
 use cairn_protocol::codec::{encode_frame_into, peek_frame_header, try_decode_frame};
 use cairn_protocol::message::{
-    ClientRequest, Envelope, FileRowData, ResponsePayload, ERROR_CODE_FIND_PATTERN,
-    ERROR_CODE_HANDSHAKE_REQUIRED, ERROR_CODE_PROTOCOL_VERSION_MISMATCH,
-    ERROR_CODE_QUERY_TOO_COMPLEX, ERROR_CODE_SESSION_EXPIRED, MAX_TREE_DEPTH, PIPE_NAME,
-    PRODUCT_VERSION, WIRE_GUARD,
+    ClientRequest, Envelope, FileRowData, ResponsePayload, ERROR_CODE_HANDSHAKE_REQUIRED,
+    ERROR_CODE_PROTOCOL_VERSION_MISMATCH, ERROR_CODE_QUERY_TOO_COMPLEX, ERROR_CODE_SESSION_EXPIRED,
+    MAX_TREE_DEPTH, PIPE_NAME, PRODUCT_VERSION, WIRE_GUARD,
 };
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -523,43 +522,6 @@ fn process_request(
                 }
             }
         }
-        ClientRequest::FindRows {
-            session_id,
-            pattern,
-            mode,
-            case_sensitive,
-            from,
-            forward,
-            wrap,
-        } => {
-            let compiled = cairn_core::find::FindPattern::compile(&pattern, mode, case_sensitive);
-            let compiled = match compiled {
-                Ok(c) => c,
-                Err(err) => {
-                    return ResponsePayload::Error {
-                        code: ERROR_CODE_FIND_PATTERN,
-                        message: format!("invalid find pattern: {err:?}"),
-                    };
-                }
-            };
-            let found = engine.with_volumes(|vols| {
-                sessions.find_rows_multi(session_id, &compiled, from, forward, wrap, vols)
-            });
-            match found {
-                Ok(offset) => ResponsePayload::FindRowsResult { session_id, offset },
-                Err(RowsError::UnknownSession) => ResponsePayload::Error {
-                    code: ERROR_CODE_SESSION_EXPIRED,
-                    message: format!("query session {session_id} expired or unknown"),
-                },
-                Err(err @ RowsError::Stale { .. }) => {
-                    sessions.invalidate(session_id);
-                    ResponsePayload::Error {
-                        code: ERROR_CODE_SESSION_EXPIRED,
-                        message: format!("query session {session_id} is stale: {err:?}"),
-                    }
-                }
-            }
-        }
         ClientRequest::Cancel { query_id } => {
             sessions.cancel_query(owner, query_id);
             ResponsePayload::CancelAck
@@ -1036,55 +998,6 @@ mod tests {
                 first_page,
                 ..
             } => (session_id, first_page),
-            other => panic!("unexpected response: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn find_rows_navigates_the_session_and_refuses_bad_patterns() {
-        use cairn_core::find::FindMode;
-        let harness = Harness::new(ServiceConfig::default());
-        harness.engine.add_volume(volume_with("notes.txt", 10));
-        let (session_id, _) = query_session(&harness);
-        let req = |pattern: &str, mode, from, forward, wrap| ClientRequest::FindRows {
-            session_id,
-            pattern: pattern.to_string(),
-            mode,
-            case_sensitive: false,
-            from,
-            forward,
-            wrap,
-        };
-        let offset_of = |resp| match resp {
-            ResponsePayload::FindRowsResult { offset, .. } => offset,
-            other => panic!("unexpected response: {other:?}"),
-        };
-        assert_eq!(
-            offset_of(harness.handle(
-                req("notes", FindMode::Substring, 0, true, true),
-                CallerAuthorization::Administrator
-            )),
-            Some(0)
-        );
-        assert_eq!(
-            offset_of(harness.handle(
-                req("notes", FindMode::Substring, 1, true, false),
-                CallerAuthorization::Administrator
-            )),
-            None
-        );
-        assert_eq!(
-            offset_of(harness.handle(
-                req("notes", FindMode::Substring, 1, true, true),
-                CallerAuthorization::Administrator
-            )),
-            Some(0)
-        );
-        match harness.handle(
-            req("([", FindMode::Regex, 0, true, true),
-            CallerAuthorization::Administrator,
-        ) {
-            ResponsePayload::Error { code, .. } => assert_eq!(code, ERROR_CODE_FIND_PATTERN),
             other => panic!("unexpected response: {other:?}"),
         }
     }

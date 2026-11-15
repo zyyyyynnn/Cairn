@@ -9,7 +9,7 @@
 | `IDX-*` / `NFR-01..03` | 索引、扫描、规模与启动 | [engineering/indexing.md](engineering/indexing.md)、[engineering/performance.md](engineering/performance.md) |
 | `QRY-*` / `NFR-03..04` | 查询语义、语法、响应 | [product/search-syntax.md](product/search-syntax.md) |
 | `UI-*` / `NFR-11` | 壳层、交互、可访问性 | [product/ui.md](product/ui.md)、[engineering/quality.md](engineering/quality.md) |
-| `IDX-11..13` / `QRY-10` / `UI-11` | 索引平台对齐（文件夹源、属性索引、只读日志、搜索与 Findbar） | [engineering/index-platform.md](engineering/index-platform.md) |
+| `IDX-11..13` / `QRY-10` / `UI-11` | 索引平台对齐（文件夹源、属性索引、只读日志、搜索语言与列显隐） | [engineering/index-platform.md](engineering/index-platform.md) |
 | `DSV-*` | 磁盘空间可视化 | [product/treemap.md](product/treemap.md) |
 | `SVC-*` / `SET-*` / `NFR-08..10` | 服务、IPC、配置、安全 | [engineering/ipc-security.md](engineering/ipc-security.md) |
 | `CLI-*` / `REL-*` | 命令行与发布 | [engineering/release.md](engineering/release.md) |
@@ -66,7 +66,7 @@
 | 优先级 | 范围与包含特性 |
 |:---|:---|
 | **P0 (核心基础)** | 本地固定 NTFS 卷 `$MFT` 流式索引、USN 增量同步与故障重建、Everything 核心语法（与或非/引号/通配符/大小写/全字/匹配路径/正则）、四段式现代高密度灰阶 GUI、后台 Windows 服务（`CairnService`）、中英双语（`fluent-bundle`）、中文输入法（IME）四大缺陷根治、纯文本内容检索 |
-| **P1 (完善增强)** | 富文档（`docx`/`xlsx`/`pptx`/`pdf`）抽取与 Worker 进程隔离、命中片段切片高亮渲染、快速过滤器内置宏、系统托盘与全局热键唤起、免提权 CLI 查询工具（`cairn-cli`）、GPUI Setup + WiX MSI 单文件安装包（`CairnSetup.exe`）工程与构建溯源、任意文件夹索引源与 `IndexSource` 抽象、3–5 个高频属性索引（开启后目标 ≤160 B/条）、只读索引日志、拼音/忽略标点空白/变音符号与层级/去重/属性函数、多键排序、Findbar 与列显隐 |
+| **P1 (完善增强)** | 富文档（`docx`/`xlsx`/`pptx`/`pdf`）抽取与 Worker 进程隔离、命中片段切片高亮渲染、快速过滤器内置宏、系统托盘与全局热键唤起、免提权 CLI 查询工具（`cairn-cli`）、GPUI Setup + WiX MSI 单文件安装包（`CairnSetup.exe`）工程与构建溯源、任意文件夹索引源与 `IndexSource` 抽象、3–5 个高频属性索引（开启后目标 ≤160 B/条）、只读索引日志、拼音/忽略标点空白/变音符号与层级/去重/属性函数、多键排序、列显隐 |
 | **P2 (后续演进)** | FAT32 / exFAT 卷、ReFS 卷、EFU 文件列表源、Tabs/Sessions、预览/缩略图、多文件重命名、文件操作撤销、Everything IPC / `es.exe` 兼容适配层（独立只读进程、默认关闭）、ARM64 架构构建支持；映射网络盘、远程索引与 HTTP/ETP/FTP 保持非目标 |
 
 **Everything 1.5 索引平台对齐（已确认范围）**
@@ -74,7 +74,7 @@
 - 索引源：先实现任意文件夹索引源并抽象 `IndexSource`；FAT/exFAT、ReFS、EFU 依次跟进；映射网络盘、远程索引、HTTP/ETP/FTP、Everything Server 仍为非目标。
 - 属性索引：3–5 个高频属性；开启后常驻内存目标 ≤160 字节/条，基础配置保持 ≤125 字节/条；Worker 抽取、超时隔离、默认关闭。
 - 索引日志：只读、由 USN 或索引源变更派生、容量有界，可查询与导出；服务不提供写接口。
-- 搜索与结果工作流：拼音、忽略标点/空白、变音符号、长度/属性/层级/去重/唯一等高频函数与多键排序；Findbar 与列显隐先行；Tabs/Sessions、预览/缩略图、多文件重命名、文件操作撤销列为后续。
+- 搜索与结果工作流：拼音、忽略标点/空白、变音符号、长度/属性/层级/去重/唯一等高频函数与多键排序；列显隐先行；Tabs/Sessions、预览/缩略图、多文件重命名、文件操作撤销列为后续。
 - 1.5 没有通用 Groups 视图；Cairn 不以分组为对标项。
 
 ### 2.3 边界与非目标（Non-Goals）
@@ -82,7 +82,7 @@
 2. **免提权客户端安全操作**：仅允许在免提权 GUI 进程中，通过 Windows 原生 Win32 `IFileOperation` / `SHEmptyRecycleBin` API 规范触发删除到系统回收站、从回收站还原、永久删除与清空回收站，由 Windows Shell 原生承载进度与错误；日常删除与永久删除使用项目统一确认框，清空回收站保留 Windows 原生警告。严禁向后台服务暴露写管道。
 3. **平台与介质边界**：首版聚焦本机固定 NTFS 卷，不包含 macOS、Linux、云盘同步盘、网络共享（SMB/ETP）、远程查询管道。
 4. **功能边界**：不引入语义 / AI 向量搜索、OCR 图片文字识别、远程遥测上报、用户账号体系或动态外部插件系统。
-5. **Everything 1.5 非目标面**：不提供 HTTP/ETP/FTP 供数、Everything Server 多用户共享、动态插件生态、便携 ZIP、通用结果分组或 Everything IPC 字节兼容；1.5 没有通用 Groups 视图，Cairn 不以分组为对标项。
+5. **Everything 1.5 非目标面**：不提供 HTTP/ETP/FTP 供数、Everything Server 多用户共享、动态插件生态、便携 ZIP、通用结果分组或 Everything IPC 字节兼容；1.5 没有通用 Groups 视图，Cairn 不以分组为对标项；结果内查找（Findbar）。
 6. **索引平台边界**：所有索引源仍由已安装服务独占管理，不引入用户态回退或范围切换；映射网络盘、远程索引与 SMB 共享仍为非目标，文件夹源只覆盖服务身份可读取的路径。
 
 ### 2.4 能力判据体系（Criteria）
@@ -170,11 +170,11 @@
 2. **内容检索命中片段（Snippet）**（部分达标）：服务端已产出上下文片段；GUI 以内容命中 badge + hover tooltip + ARIA 描述呈现，尚无独立片段面板与匹配词高亮区间。片段只由正极性内容词提供；逐记录布尔慢路径中，单个正向内容词命中达到检索上限（5 万条）时该词只保留命中集，其独占命中的行不显示内容标识；纯内容析取的并集命中达到检索上限时整条查询只保留命中集，所有行不显示内容标识；正向合取的截断回复仍携带返回行的片段。单条查询至多 16 个内容词（`MAX_CONTENT_TERMS`，按解析后带内容检索的项数计，含重复与否定项）；超限查询在管道请求边界以错误码 416 整体拒绝，GUI 在结果空态说明拒绝原因。
 3. **隐藏/系统属性**（待接线）：引擎过滤已实现，但 MFT 扫描未写入 `FLAG_HIDDEN`/`FLAG_SYSTEM`，GUI 也无开关（见 §3.4）。
 4. **GUI 写操作面**（部分达标）：删除到回收站、回收站浏览/还原/永久删除/清空已实现；结果表恰好选中一行时，`F2`、文件菜单、结果右键菜单可就地重命名（GUI 内 `IFileOperation`，索引由 USN 自然更新）；后台服务保持只读。
-5. **表头显隐**（已实现）：创建时间列可经表头右键菜单或“查看”菜单显隐，选择持久化；隐藏当前排序列时回退名称序。列宽拖拽与持久化已落地；Findbar 见 UI-11，尚未实现。
+5. **表头显隐**（已实现）：创建时间列可经表头右键菜单或“查看”菜单显隐，选择持久化；隐藏当前排序列时回退名称序。列宽拖拽与持久化已落地。
 6. **全局热键**：`Ctrl+Alt+Space` 呼出/隐藏主窗口；组合键被占用时启动提示一次，托盘入口保持可用。
 7. **手动重扫与配置重载**（待接线）：协议、服务端 handler 与鉴权已实现并有测试，GUI 与 CLI 都没有发出 `Rescan` / `ReloadConfig` 的入口。
 8. **离线 MFT 镜像**（未实现）：IDX-10 要求的从 `$MFT` 镜像离线构建与验证索引尚无入口；当前仅支持在线卷读取。
-9. **Everything 1.5 索引平台对齐**（计划，P1）：任意文件夹索引源与 `IndexSource` 抽象、3–5 个高频属性索引（开启后 160 B/条目标）、只读索引日志、拼音/忽略标点空白/层级与去重函数/多键排序、Findbar 与列显隐均未实现；范围与非目标见 §2.2.1，设计见 [engineering/index-platform.md](engineering/index-platform.md)。
+9. **Everything 1.5 索引平台对齐**（计划，P1）：任意文件夹索引源与 `IndexSource` 抽象、3–5 个高频属性索引（开启后 160 B/条目标）、只读索引日志、拼音/忽略标点空白/层级与去重函数/多键排序待实现；列显隐已实现（UI-11）；范围与非目标见 §2.2.1，设计见 [engineering/index-platform.md](engineering/index-platform.md)。
 
 ---
 
@@ -227,7 +227,7 @@
 | **UI-08** | P1 | 系统托盘常驻图标与托盘菜单；命名互斥体 `Local\CairnAppInstanceMutex` 保证单实例运行，重复启动唤起已有窗口；全局热键呼出/隐藏窗口；窗口关闭动作响应偏好 | 托盘与热键稳定唤起，无资源泄漏与僵死进程 |
 | **UI-09** | P1 | 灰阶色彩令牌体系：以三原色构建语义 Tokens，设置提供“系统 / 浅色 / 深色”三态；除 Treemap 数据面外保持纯灰阶。Treemap 数据块统一使用浅色 `#D9D9D9`、深色 `#3A3A3A` 单一无彩填充，文字对表面达到 AAA；选中通过子树高光与外部置灰区分，不绘制外框与选中环。令牌与状态细节见 [ui.md](product/ui.md)。 | 系统态跟随 Windows；显式态除 Treemap 外无非灰阶色块；Treemap 文字对表面达到 AAA，外部置灰层次明确。 |
 | **UI-10** | P1 | 高 DPI 与多显示器动态缩放：窗口在不同缩放比（1.0× ~ 2.0×）显示器间拖拽时，字体排印、列宽与 IME 候选窗坐标自适应重算 | 跨屏拖拽布局不崩塌，文字与图标清晰无模糊 |
-| **UI-11** | P1 | 列显隐/表头右键菜单（已实现：创建时间，选择持久化，隐藏当前排序列时回退名称序）；结果内查找（`Ctrl+F`/`F3`/`Shift+F3`，支持高亮与循环）待实现；Tabs/Sessions、预览、多文件重命名、文件操作撤销不在本期 | 键盘可完成查找与列配置；列显隐持久化；不破坏虚拟滚动性能 |
+| **UI-11** | P1 | 列显隐/表头右键菜单（已实现：创建时间，选择持久化，隐藏当前排序列时回退名称序）；Tabs/Sessions、预览、多文件重命名、文件操作撤销不在本期 | 键盘可完成列配置；列显隐持久化；不破坏虚拟滚动性能 |
 
 ### 4.4 内容全文检索（CNT）
 

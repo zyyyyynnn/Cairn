@@ -37,7 +37,7 @@
 | `ignore-whitespace:` | `nows:` | 检索时忽略所有空白字符 | P1 |
 | `pinyin:` | `py:` | 拼音及首字母缩写拼音匹配 | P2 |
 
-> 表中 P1/P2 条目按目标层级规划；`prefix:`/`suffix:`/`start-with:`/`end-with:` 已实现，`diacritics`、`ignore-punctuation`、`ignore-whitespace` 与 `pinyin` 尚未接入。当前闭环状态以 [SPEC §3.1](../SPEC.md) 为准。
+> 表中 P1/P2 条目按目标层级规划；闭环状态以 [SPEC §3.1](../SPEC.md) 为准。
 
 ### 1.4 过滤函数与日期区间完整语法
 

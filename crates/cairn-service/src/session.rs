@@ -292,100 +292,17 @@ impl SessionManager {
             .last_accessed_nanos
             .store(self.clock.now_nanos(), Ordering::Relaxed);
 
-        page_rows(session, offset, limit, &session.pre_folded_terms, volumes)
-    }
-
-    /// Locates the next or previous row whose name or path matches `pattern`, scanning the
-    /// same visible order paging uses. `from` is the visible ordinal to start at (inclusive);
-    /// `wrap` continues past the end (or before the start) once. Returns the matching ordinal.
-    pub fn find_rows_multi(
-        &self,
-        session_id: u64,
-        pattern: &cairn_core::find::FindPattern,
-        from: usize,
-        forward: bool,
-        wrap: bool,
-        volumes: &HashMap<char, VolumeIndex>,
-    ) -> Result<Option<usize>, RowsError> {
-        const CHUNK: usize = 4096;
-        let lock = self.sessions.read().unwrap();
-        let session = lock.get(&session_id).ok_or(RowsError::UnknownSession)?;
-        session
-            .last_accessed_nanos
-            .store(self.clock.now_nanos(), Ordering::Relaxed);
-
-        let scan = |start: usize, end: usize| -> Result<Option<usize>, RowsError> {
-            let mut offset = start;
-            while offset < end {
-                let limit = CHUNK.min(end - offset);
-                let rows = page_rows(session, offset, limit, &[], volumes)?;
-                if rows.is_empty() {
-                    break;
-                }
-                let found = rows
-                    .iter()
-                    .enumerate()
-                    .find(|(_, r)| pattern.matches_row(&r.name, &r.path))
-                    .map(|(i, _)| offset + i);
-                if found.is_some() {
-                    return Ok(found);
-                }
-                offset += rows.len();
-            }
-            Ok(None)
-        };
-
-        if forward {
-            if let Some(hit) = scan(from, usize::MAX)? {
-                return Ok(Some(hit));
-            }
-            if wrap {
-                return scan(0, from);
-            }
-            Ok(None)
-        } else {
-            let end = from.saturating_add(1);
-            let mut cursor = end;
-            while cursor > 0 {
-                let start = cursor.saturating_sub(CHUNK);
-                let rows = page_rows(session, start, cursor - start, &[], volumes)?;
-                if let Some((i, _)) = rows
-                    .iter()
-                    .enumerate()
-                    .rev()
-                    .find(|(_, r)| pattern.matches_row(&r.name, &r.path))
-                {
-                    return Ok(Some(start + i));
-                }
-                if rows.is_empty() || start == 0 {
-                    break;
-                }
-                cursor = start;
-            }
-            if wrap {
-                return scan(end, usize::MAX);
-            }
-            Ok(None)
+        match &session.rows {
+            MatchSet::Items(items) => rows_for_items(
+                session,
+                items,
+                offset,
+                limit,
+                &session.pre_folded_terms,
+                |item| volumes.get(&item.drive_letter),
+            ),
+            MatchSet::AllFiles(view) => rows_for_all_files(view, offset, limit, volumes),
         }
-    }
-}
-
-/// One page of a session in visible order, shared by paging and find so both agree on
-/// ordering, exclusions and staleness. Empty `folded_terms` skips highlight work.
-fn page_rows(
-    session: &QuerySession,
-    offset: usize,
-    limit: usize,
-    folded_terms: &[Vec<u8>],
-    volumes: &HashMap<char, VolumeIndex>,
-) -> Result<Vec<FileRowData>, RowsError> {
-    match &session.rows {
-        MatchSet::Items(items) => {
-            rows_for_items(session, items, offset, limit, folded_terms, |item| {
-                volumes.get(&item.drive_letter)
-            })
-        }
-        MatchSet::AllFiles(view) => rows_for_all_files(view, offset, limit, volumes),
     }
 }
 
@@ -482,49 +399,6 @@ mod tests {
             record_idx: 0,
             generation,
         }
-    }
-
-    #[test]
-    fn find_scans_forward_backward_and_wraps_in_visible_order() {
-        use cairn_core::find::{FindMode, FindPattern};
-        let sessions = SessionManager::default();
-        let vol = three_file_volume();
-        let (view, volumes) =
-            all_files_view(vol, cairn_core::sort::SortColumn::Name, true, &[]);
-        let id = sessions.create_session(
-            owner(7),
-            MatchSet::AllFiles(view),
-            Vec::new(),
-            HashMap::new(),
-        );
-        let b = FindPattern::compile("b.txt", FindMode::Substring, false).unwrap();
-        assert_eq!(
-            sessions.find_rows_multi(id, &b, 0, true, false, &volumes).unwrap(),
-            Some(1)
-        );
-        assert_eq!(
-            sessions.find_rows_multi(id, &b, 2, true, false, &volumes).unwrap(),
-            None
-        );
-        assert_eq!(
-            sessions.find_rows_multi(id, &b, 2, true, true, &volumes).unwrap(),
-            Some(1)
-        );
-        let a = FindPattern::compile("a.txt", FindMode::Substring, false).unwrap();
-        assert_eq!(
-            sessions.find_rows_multi(id, &a, 2, false, false, &volumes).unwrap(),
-            Some(0)
-        );
-        let c = FindPattern::compile("c.txt", FindMode::Substring, false).unwrap();
-        assert_eq!(
-            sessions.find_rows_multi(id, &c, 0, false, true, &volumes).unwrap(),
-            Some(2)
-        );
-        let none = FindPattern::compile("zzz", FindMode::Substring, false).unwrap();
-        assert_eq!(
-            sessions.find_rows_multi(id, &none, 0, true, true, &volumes).unwrap(),
-            None
-        );
     }
 
     fn owner(pid: u32) -> QueryOwner {
