@@ -747,7 +747,9 @@ impl CairnApp {
             | GroupCommand::EmptyRecycleBin => !self.recycle_bin.is_open(),
             // A bin payload is identified by the shell's own listing, not by a live filesystem
             // name, so there is nothing to rename there.
-            GroupCommand::RenameSelected => self.recycle_bin.is_open(),
+            GroupCommand::RenameSelected | GroupCommand::ToggleCreatedColumn => {
+                self.recycle_bin.is_open()
+            }
             GroupCommand::RevealLocation | GroupCommand::ShowProperties => {
                 self.recycle_bin.is_open()
             }
@@ -775,6 +777,7 @@ impl CairnApp {
             GroupCommand::ToggleRegex => self.query.use_regex,
             GroupCommand::SortBy(column) => self.results.table.sort_column == column,
             GroupCommand::ReverseOrder => !self.results.table.sort_asc,
+            GroupCommand::ToggleCreatedColumn => self.settings.columns.show_created,
             GroupCommand::SetTheme(mode) => self.settings.theme == mode,
             GroupCommand::SetLanguage(code) => self.settings.language == code,
             GroupCommand::SetZoom(preset) => ZoomPreset::nearest(self.zoom_level) == preset,
@@ -859,6 +862,7 @@ impl CairnApp {
             GroupCommand::EmptyRecycleBin => self.empty_bin(window, cx),
             GroupCommand::SortBy(column) => self.toggle_table_sort(column, cx),
             GroupCommand::ReverseOrder => self.toggle_sort_direction(cx),
+            GroupCommand::ToggleCreatedColumn => self.toggle_created_column(cx),
             GroupCommand::SetTheme(mode) => self.set_theme_mode(mode, cx),
             GroupCommand::SetZoom(preset) => self.set_zoom(preset.value(), cx),
             GroupCommand::Heading(_) | GroupCommand::Submenu(_, _) => {}

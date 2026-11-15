@@ -104,6 +104,18 @@ pub mod layout {
     pub const PATH_MIN_COLUMN: f32 = 28.0 * STEP; // 112px
     pub const SIZE_COLUMN: f32 = 21.0 * STEP; // 84px
     pub const DATE_COLUMN: f32 = 33.0 * STEP; // 132px
+    /// Fixed width of the optional created-time lane.
+    pub const CREATED_COLUMN: f32 = DATE_COLUMN;
+
+    /// Extra table extent the created-time column requires, so the band scrolls instead of
+    /// squeezing the four core lanes below their floors.
+    pub fn optional_columns_width(show_created: bool) -> f32 {
+        if show_created {
+            CREATED_COLUMN
+        } else {
+            0.0
+        }
+    }
     /// The narrowest table that can show all four lanes at their own floors. The heading row and the
     /// rows share this extent, and the band scrolls to it horizontally, so a wide zoom in a short
     /// window moves the columns out of view instead of cutting the last one off at the frame edge.

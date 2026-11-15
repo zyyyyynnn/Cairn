@@ -49,6 +49,7 @@ col_size = Size
 col_modified = Date modified
 col_deleted = Date deleted
 col_created = Date created
+menu_show_created = Date created column
 col_ext = Extension
 
 query_undo = Undo

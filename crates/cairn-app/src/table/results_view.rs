@@ -25,7 +25,7 @@ use fluent_bundle::FluentArgs;
 use gpui_kit::assets::IconName as AssetIconName;
 use gpui_kit::base::Disableable as _;
 use gpui_kit::component::input::Input;
-use gpui_kit::component::menu::ContextMenuExt;
+use gpui_kit::component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_kit::component::{
     h_flex, v_flex, Icon, IconName, InteractiveElementExt as _, Sizable as _,
@@ -241,6 +241,7 @@ enum HeaderLane {
     Path,
     Size,
     Date,
+    Created,
 }
 
 impl CairnApp {
@@ -336,7 +337,10 @@ impl CairnApp {
             .child(
                 v_flex()
                     .w_full()
-                    .min_w(rems(layout::TABLE_MIN_WIDTH))
+                    .min_w(rems(
+                        layout::TABLE_MIN_WIDTH
+                            + layout::optional_columns_width(self.show_created()),
+                    ))
                     .flex_1()
                     .min_h_0()
                     // The heading row owns the separator under it; the scrolling band must not draw
@@ -905,6 +909,9 @@ impl CairnApp {
         let is_focused = self.results.table.focused_idx == Some(ix);
         let full_path = join_row_path(&row.path, &row.name);
         let i18n = Rc::clone(&self.i18n);
+        let created_cell = self
+            .show_created()
+            .then(|| self.render_created_cell(row, tokens, is_selected));
 
         let mut row_el = accessibility::element_at(accessibility::control("result-row"), ix)
             .aria_label(full_path.clone())
@@ -933,7 +940,8 @@ impl CairnApp {
             .child(self.render_name_cell(row, &full_path, tokens, is_selected))
             .child(self.render_path_cell(row, &full_path, tokens, is_selected))
             .child(self.render_size_cell(row, tokens, is_selected))
-            .child(self.render_date_cell(row, tokens, is_selected));
+            .child(self.render_date_cell(row, tokens, is_selected))
+            .when_some(created_cell, |this, cell| this.child(cell));
 
         // A pinned row is a preview of the loaded window edge, not the row at this scroll
         // position. Pointer and context-menu handlers would act on an identity the viewport is
@@ -1204,6 +1212,27 @@ impl CairnApp {
             .child(format_timestamp_cached(row.modified_ts))
     }
 
+    fn render_created_cell(
+        &self,
+        row: &FileRowData,
+        tokens: &ShellTokens,
+        is_selected: bool,
+    ) -> Div {
+        div()
+            .w(rems(layout::CREATED_COLUMN))
+            .flex_shrink_0()
+            .px(rems(layout::INNER_SPACING))
+            .flex()
+            .items_center()
+            .font_features(theme::tabular_figures())
+            .text_color(if is_selected {
+                tokens.foreground
+            } else {
+                tokens.muted_foreground
+            })
+            .child(format_timestamp_cached(row.created_ts))
+    }
+
     /// A row the service has not delivered yet: an explicit loading state, so a scrollbar ahead of
     /// the fetched window never reads as an empty result. The words say which of the two states this
     /// is; the bar beside them is the shape of the row that will land there.
@@ -1309,6 +1338,23 @@ impl CairnApp {
                             .bg(bar_bg),
                     ),
             )
+            .when(self.show_created(), |this| {
+                this.child(
+                    div()
+                        .w(rems(layout::CREATED_COLUMN))
+                        .flex_shrink_0()
+                        .px(rems(layout::INNER_SPACING))
+                        .flex()
+                        .items_center()
+                        .child(
+                            div()
+                                .h(rems(PLACEHOLDER_BAR_HEIGHT))
+                                .w(rems(PLACEHOLDER_DATE_WIDTH))
+                                .rounded(tokens.radius)
+                                .bg(bar_bg),
+                        ),
+                )
+            })
             .into_any_element()
     }
 
@@ -1316,9 +1362,13 @@ impl CairnApp {
     /// centerline, resolved from the same [`layout`] constants. It is drawn here rather than by
     /// `Table` for the reason recorded on [`CairnApp::render_rows_band`], and it stays clickable
     /// because sorting is a command, not a caption.
-    fn render_table_header(&self, tokens: &ShellTokens, cx: &mut Context<Self>) -> ControlElement {
+    fn show_created(&self) -> bool {
+        !self.recycle_bin.is_open() && self.settings.columns.show_created
+    }
+
+    fn render_table_header(&self, tokens: &ShellTokens, cx: &mut Context<Self>) -> AnyElement {
         let control = accessibility::control("table-header");
-        accessibility::element(control)
+        let mut header = accessibility::element(control)
             .aria_label(accessibility::name(control, &self.i18n))
             .h(rems(layout::HEADER_HEIGHT))
             .flex()
@@ -1342,7 +1392,16 @@ impl CairnApp {
                 HeaderLane::Date,
                 tokens,
                 cx,
-            ))
+            ));
+        if self.show_created() {
+            header = header.child(self.render_column_header(
+                SortColumn::DateCreated,
+                HeaderLane::Created,
+                tokens,
+                cx,
+            ));
+        }
+        header.into_any_element()
     }
 
     /// The band on the trailing edge of a heading cell that resizes that lane and its right
@@ -1398,7 +1457,7 @@ impl CairnApp {
         lane: HeaderLane,
         tokens: &ShellTokens,
         cx: &mut Context<Self>,
-    ) -> ControlElement {
+    ) -> AnyElement {
         let label_key = column.label_key_in(self.recycle_bin.is_open());
         let control = accessibility::control_at(&element_id("column-header", label_key));
         let label = accessibility::name(control, &self.i18n);
@@ -1408,7 +1467,7 @@ impl CairnApp {
             HeaderLane::Name => Some(ColumnBoundary::NamePath),
             HeaderLane::Path => Some(ColumnBoundary::PathSize),
             HeaderLane::Size => Some(ColumnBoundary::SizeDate),
-            HeaderLane::Date => None,
+            HeaderLane::Date | HeaderLane::Created => None,
         };
 
         let cell = accessibility::element(control)
@@ -1465,12 +1524,36 @@ impl CairnApp {
                 .lane_grow(self.results.column_widths.date)
                 .min_w(rems(layout::DATE_COLUMN))
                 .px(rems(layout::INNER_SPACING)),
+            HeaderLane::Created => cell
+                .w(rems(layout::CREATED_COLUMN))
+                .min_w(rems(layout::CREATED_COLUMN))
+                .flex_shrink_0()
+                .px(rems(layout::INNER_SPACING)),
         };
 
-        match boundary {
+        let cell = match boundary {
             Some(boundary) => cell.child(self.render_column_resize_handle(boundary, tokens, cx)),
             None => cell,
+        };
+        // The optional lanes do not exist in the Recycle Bin, so the column menu would offer
+        // toggles that cannot change what this table shows.
+        if self.recycle_bin.is_open() {
+            return cell.into_any_element();
         }
+        let app = cx.entity();
+        let created_label = self.i18n.get_text("menu_show_created");
+        let menu_created = self.settings.columns.show_created;
+        cell.context_menu(move |menu, _, _| {
+            let created_app = app.clone();
+            menu.item(
+                PopupMenuItem::new(created_label.clone())
+                    .checked(menu_created)
+                    .on_click(move |_, _, cx| {
+                        created_app.update(cx, |this, cx| this.toggle_created_column(cx));
+                    }),
+            )
+        })
+        .into_any_element()
     }
 }
 

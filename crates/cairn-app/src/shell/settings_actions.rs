@@ -48,6 +48,19 @@ impl CairnApp {
         cx.notify();
     }
 
+    /// Shows or hides the created-time lane. Hiding it while it orders the table would leave the
+    /// sort active without a visible indicator, so that case falls back to the name order.
+    pub(crate) fn toggle_created_column(&mut self, cx: &mut Context<Self>) {
+        self.settings.columns.show_created = !self.settings.columns.show_created;
+        if !self.settings.columns.show_created
+            && self.results.table.sort_column == SortColumn::DateCreated
+        {
+            self.toggle_table_sort(SortColumn::Name, cx);
+        }
+        self.save_settings();
+        cx.notify();
+    }
+
     /// Applies a drag on one header boundary, measured from the widths the drag started with so a
     /// long drag cannot accumulate rounding or fight the minimum clamps.
     pub(crate) fn resize_columns_to(

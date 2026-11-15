@@ -49,6 +49,7 @@ col_size = 大小
 col_modified = 修改日期
 col_deleted = 删除日期
 col_created = 创建时间
+menu_show_created = 创建时间列
 col_ext = 扩展名
 
 # 溢出菜单里的条目：结果、查询、索引三段各自成组。

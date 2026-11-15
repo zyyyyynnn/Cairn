@@ -87,6 +87,8 @@ pub struct ColumnSettings {
     pub sort_column: String,
     #[serde(default = "default_true")]
     pub sort_asc: bool,
+    #[serde(default)]
+    pub show_created: bool,
 }
 
 impl Default for ColumnSettings {
@@ -98,6 +100,7 @@ impl Default for ColumnSettings {
             modified_width: default_modified_width(),
             sort_column: default_sort_column(),
             sort_asc: true,
+            show_created: false,
         }
     }
 }
@@ -266,6 +269,24 @@ mod tests {
         let serialized = toml::to_string_pretty(&default_settings).unwrap();
         let parsed: AppSettings = toml::from_str(&serialized).unwrap();
         assert_eq!(parsed, default_settings);
+    }
+
+    #[test]
+    fn optional_columns_are_hidden_by_default_and_roundtrip() {
+        let default_settings = AppSettings::default();
+        assert!(!default_settings.columns.show_created);
+
+        let mut settings = AppSettings::default();
+        settings.columns.show_created = true;
+        let serialized = toml::to_string_pretty(&settings).unwrap();
+        let parsed: AppSettings = toml::from_str(&serialized).unwrap();
+        assert!(parsed.columns.show_created);
+    }
+
+    #[test]
+    fn a_settings_file_without_optional_columns_keeps_them_hidden() {
+        let legacy: AppSettings = toml::from_str("").unwrap();
+        assert!(!legacy.columns.show_created);
     }
 
     #[test]

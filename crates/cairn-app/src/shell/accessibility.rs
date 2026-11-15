@@ -441,6 +441,15 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         named_by: "",
         requirement: "UI-02",
     },
+    KeyControl {
+        key: "column-created",
+        element: "column-header:col_created",
+        indexed: false,
+        role: Role::ColumnHeader,
+        messages: &["col_created"],
+        named_by: "",
+        requirement: "UI-02, UI-11",
+    },
     // The Recycle Bin reuses the path and date lanes for a different value. The
     // header still has to name what the lane holds, so each value has its own
     // registered column header rather than borrowing the index table's caption.

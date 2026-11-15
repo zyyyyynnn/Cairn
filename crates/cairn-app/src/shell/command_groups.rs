@@ -170,6 +170,8 @@ pub enum GroupCommand {
     // ---- ordering (查看) ------------------------------------------------------------
     SortBy(SortColumn),
     ReverseOrder,
+    // ---- optional columns (查看) ----------------------------------------------------
+    ToggleCreatedColumn,
     // ---- appearance (查看) ----------------------------------------------------------
     SetTheme(&'static str),
     SetZoom(ZoomPreset),
@@ -244,6 +246,7 @@ impl GroupCommand {
             GroupCommand::ToggleRegex => "toggle_regex_label",
             GroupCommand::SortBy(column) => column.label_key(),
             GroupCommand::ReverseOrder => "sort_reverse",
+            GroupCommand::ToggleCreatedColumn => "menu_show_created",
             GroupCommand::SetTheme(mode) => theme_label_key(mode),
             GroupCommand::SetZoom(preset) => preset.label_key(),
             GroupCommand::Heading(key) => key,
@@ -422,6 +425,7 @@ pub static DEFAULT_GROUPS: &[MenuGroupSpec] = &[
                     GroupCommand::ReverseOrder,
                 ],
             )],
+            &[GroupCommand::ToggleCreatedColumn],
             &[GroupCommand::Submenu(
                 "settings_theme",
                 &[
@@ -678,6 +682,7 @@ mod tests {
             match command {
                 GroupCommand::SortBy(_)
                 | GroupCommand::ReverseOrder
+                | GroupCommand::ToggleCreatedColumn
                 | GroupCommand::SetTheme(_)
                 | GroupCommand::SetZoom(_)
                 | GroupCommand::Heading(_)
@@ -728,6 +733,7 @@ mod tests {
             GroupCommand::EmptyRecycleBin,
             GroupCommand::SortBy(SortColumn::Name),
             GroupCommand::ReverseOrder,
+            GroupCommand::ToggleCreatedColumn,
             GroupCommand::SetTheme(crate::shell::settings::THEME_SYSTEM),
             GroupCommand::SetZoom(ZoomPreset::Standard),
             GroupCommand::Heading("menu_startup"),
