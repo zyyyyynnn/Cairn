@@ -12,6 +12,7 @@
 pub mod arena;
 pub mod engine;
 pub mod filter;
+pub mod find;
 pub mod format;
 pub mod frn_index;
 pub mod index_file;

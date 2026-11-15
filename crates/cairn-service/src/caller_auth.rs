@@ -90,7 +90,8 @@ fn access_class(req: &ClientRequest) -> AccessClass {
         | ClientRequest::GetContentIndexStatus
         | ClientRequest::CancelContentIndex
         | ClientRequest::ClearContentIndex
-        | ClientRequest::GetTree { .. } => AccessClass::Read,
+        | ClientRequest::GetTree { .. }
+        | ClientRequest::FindRows { .. } => AccessClass::Read,
     }
 }
 

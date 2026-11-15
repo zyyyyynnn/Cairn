@@ -66,6 +66,9 @@ pub const ERROR_CODE_TREE_TOO_LARGE: u32 = 415;
 /// The query carries more content terms than one evaluation may resolve
 /// (`cairn_core::syntax::MAX_CONTENT_TERMS`); the request is refused before evaluation.
 pub const ERROR_CODE_QUERY_TOO_COMPLEX: u32 = 416;
+/// The find pattern is empty or, in regex mode, does not compile; the request is refused
+/// before scanning the session.
+pub const ERROR_CODE_FIND_PATTERN: u32 = 417;
 
 /// The deepest tree one response may carry: three levels stay inside the entry and frame budgets
 /// on a full drive (about 42k entries on a 1.8M-record index). A subtree that still overflows is
@@ -125,6 +128,17 @@ pub enum ClientRequest {
     GetTree {
         path: String,
         max_depth: usize,
+    },
+    /// Find the next/previous row matching `pattern` within an open session's visible order.
+    /// `from` is the visible ordinal to start at (inclusive); `wrap` continues past the end.
+    FindRows {
+        session_id: u64,
+        pattern: String,
+        mode: cairn_core::find::FindMode,
+        case_sensitive: bool,
+        from: usize,
+        forward: bool,
+        wrap: bool,
     },
 }
 
@@ -209,6 +223,12 @@ pub enum ResponsePayload {
     /// payload inserted in the middle would move every slot behind it — including the rejection a
     /// peer of another protocol version has to read (SVC-03).
     CancelAck,
+    /// The visible ordinal of the next/previous find match, or `None` when the session has
+    /// no further match. Appended at the end so earlier wire slots keep their positions.
+    FindRowsResult {
+        session_id: u64,
+        offset: Option<usize>,
+    },
 }
 
 /// One node of a [`ResponsePayload::TreeResult`]. A depth-capped leaf (a
@@ -253,7 +273,7 @@ mod tests {
     /// another protocol version with the rejection, and that peer has to be able to read it, or a
     /// service that needs updating looks like a broken one (SVC-03). A payload inserted in the
     /// middle of the enum would move every slot behind it, so a new payload is appended instead.
-    const PUBLISHED_RESPONSE_SLOTS: [(&str, u8); 14] = [
+    const PUBLISHED_RESPONSE_SLOTS: [(&str, u8); 15] = [
         ("hello_ack", 0),
         ("query_result", 1),
         ("rows_result", 2),
@@ -268,12 +288,13 @@ mod tests {
         ("tree_result", 11),
         ("error", 12),
         ("cancel_ack", 13),
+        ("find_rows_result", 14),
     ];
 
     /// The slot each published request occupies on the wire. A request is only decoded by a peer
     /// of the same protocol version, so the rule is the same: a renamed request keeps its slot and
     /// a new one is appended.
-    const PUBLISHED_REQUEST_SLOTS: [(&str, u8); 13] = [
+    const PUBLISHED_REQUEST_SLOTS: [(&str, u8); 14] = [
         ("hello", 0),
         ("query", 1),
         ("cancel", 2),
@@ -287,6 +308,7 @@ mod tests {
         ("cancel_content_index", 10),
         ("clear_content_index", 11),
         ("get_tree", 12),
+        ("find_rows", 13),
     ];
 
     /// One payload per published slot, in the published order.
@@ -374,6 +396,13 @@ mod tests {
                 },
             ),
             ("cancel_ack", ResponsePayload::CancelAck),
+            (
+                "find_rows_result",
+                ResponsePayload::FindRowsResult {
+                    session_id: 1,
+                    offset: Some(0),
+                },
+            ),
         ]
     }
 
@@ -428,6 +457,18 @@ mod tests {
                 ClientRequest::GetTree {
                     path: String::new(),
                     max_depth: 0,
+                },
+            ),
+            (
+                "find_rows",
+                ClientRequest::FindRows {
+                    session_id: 1,
+                    pattern: String::new(),
+                    mode: cairn_core::find::FindMode::Substring,
+                    case_sensitive: false,
+                    from: 0,
+                    forward: true,
+                    wrap: true,
                 },
             ),
         ]
