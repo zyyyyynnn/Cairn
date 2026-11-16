@@ -55,6 +55,7 @@
 | 测试 | 忽略理由 | 运行方式与前条件 |
 | --- | --- | --- |
 | `cairn-service` `a_full_backfill_reaches_ready_and_indexes_existing_files` | 测试 spawn 真实 `CairnWorker`，需要先构建 Worker；测试通过引擎的 worker 路径 seam 注入工作区构建的二进制，生产仍只在服务可执行文件旁查找。 | CI 的 `Test / Backfill` 作业在构建 `cairn-worker` 后执行 `cargo test -p cairn-service a_full_backfill_reaches_ready_and_indexes_existing_files -- --ignored`；本地先 `cargo build -p cairn-worker` 再运行同一命令。 |
+| `cairn-service` `property_index_extracts_through_real_worker_and_recovers_from_corrupt_files` | 测试 spawn 真实 `CairnWorker` 进行扩展属性抽取与损坏文件隔离，需要先构建 Worker。 | CI 的 `Test / Backfill` 作业在构建 `cairn-worker` 后执行；本地先 `cargo build -p cairn-worker` 再运行 `cargo test -p cairn-service --test platform_seam property_index_extracts_through_real_worker_and_recovers_from_corrupt_files -- --ignored`。 |
 | `cairn-service` `test_live_scan_reconciles_with_the_real_change_journal` | 需要启用 USN 日志的真实 NTFS 卷，并以管理员身份读取裸卷。 | 提权后执行 `cargo test -p cairn-service test_live_scan_reconciles_with_the_real_change_journal -- --ignored`；`C:` 必须已启用 USN 日志。 |
 | `cairn-app` `a_deleted_file_lists_and_restores_through_the_shell` | 手工验证：经 Shell 在真实回收站创建并恢复一个探针文件。 | 仅在改动 Shell 管道时执行 `cargo test -p cairn-app a_deleted_file_lists_and_restores_through_the_shell -- --ignored`；探针限定为临时目录中的 `cairn-bin-round-trip.txt`，不得操作其他回收站项。 |
 | `cairn-app` `the_update_check_reaches_the_release_api` | 需要访问 GitHub releases API 的真实网络；CI 不保证出网。 | 在网络可用时执行 `cargo test -p cairn-app the_update_check_reaches_the_release_api -- --ignored`；HTTP/TLS 依赖升级后用它确认请求能穿过 TLS 后端与系统代理。 |
@@ -68,7 +69,7 @@
 - `Test / Content & Filesystem`：`cairn-ntfs` `cairn-content`
 - `Test / Service`：`cairn-service`
 - `Test / Desktop`：`cairn-app`
-- `Test / Backfill`：构建 `cairn-worker` 并运行 `cairn-service` 内容回填 `#[ignore]` 端到端测试
+- `Test / Backfill`：构建 `cairn-worker` 并运行 `cairn-service` 内容回填与扩展属性抽取 `#[ignore]` 端到端测试
 - `Test / Tooling`：`cairn-cli` `cairn-worker` `cairn-setup` `cairn-setup-bin` `xtask`，并执行 `cargo run --release -p xtask -- bench-query --check`
 
 `Domain & System Test Suite` 汇总 `Test` 各层、Tooling 与 Backfill 的结果，作为必需状态检查；`Installer Package` 在 release 二进制与 Tooling 产物就绪后运行 `xtask` 的 `real_package_builds_msi_and_setup`。新增测试默认必须被上述命令覆盖；无法进入 CI 的测试在“需要权限的验证”或“被忽略的测试”中登记。

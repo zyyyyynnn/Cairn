@@ -33,18 +33,41 @@ use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
 fn cairn_worker_exe() -> PathBuf {
-    let exe = std::env::current_exe().expect("test executable path");
-    let target_dir = exe
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("target profile dir");
-    let candidate = target_dir.join("CairnWorker.exe");
-    assert!(
-        candidate.exists(),
-        "CairnWorker.exe must exist at {} (build cairn-worker first)",
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
+    let name = if cfg!(windows) {
+        "CairnWorker.exe"
+    } else {
+        "CairnWorker"
+    };
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .and_then(std::path::Path::parent)
+                .expect("workspace root")
+                .join("target")
+        });
+    let candidate = target.join(profile).join(name);
+    if candidate.is_file() {
+        return candidate;
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        for ancestor in exe.ancestors().skip(1) {
+            let fallback = ancestor.join(name);
+            if fallback.is_file() {
+                return fallback;
+            }
+        }
+    }
+    panic!(
+        "CairnWorker executable must exist at {} (build cairn-worker first)",
         candidate.display()
     );
-    candidate
 }
 
 fn minimal_png_bytes(width: u32, height: u32) -> Vec<u8> {
@@ -166,6 +189,10 @@ fn engine_folder_source_watch_and_persistence_work_end_to_end() {
         .expect("add folder source");
     assert_eq!(added.kind, SourceKind::Folder);
     assert_eq!(added.status, VolumeState::Synced);
+    assert!(
+        added.live_watch_enabled,
+        "folder watcher must be armed before creating live files"
+    );
 
     // Live watcher should pick up a file created right inside the watched folder.
     let created = watch_root.join("live_watch_target.txt");
@@ -352,14 +379,12 @@ fn apply_refreshed_metadata_synchronizes_all_indexed_attribute_bits() {
 }
 
 #[test]
-fn property_index_degrades_explicitly_when_off_and_recovers_on_worker_errors() {
+fn property_index_degrades_explicitly_when_off_and_handles_missing_worker_cleanly() {
     let temp = tempdir().expect("tempdir");
     let media_dir = temp.path().join("media");
     fs::create_dir_all(&media_dir).unwrap();
     let good_png = media_dir.join("banner.png");
-    let corrupt_png = media_dir.join("broken.png");
     fs::write(&good_png, minimal_png_bytes(1920, 1080)).unwrap();
-    fs::write(&corrupt_png, b"not a valid png image payload").unwrap();
 
     let config = ServiceConfig {
         excluded_paths: Vec::new(),
@@ -391,6 +416,48 @@ fn property_index_degrades_explicitly_when_off_and_recovers_on_worker_errors() {
     );
     assert_eq!(engine.memory_footprint().property_store_bytes, 0);
 
+    // Enabling without an available worker binary must isolate failure without crashing or bloating store.
+    engine.set_property_index_enabled(true);
+    let missing_worker = temp.path().join("missing-worker.exe");
+    let status = engine
+        .run_property_extraction_with_worker(&missing_worker, Duration::from_secs(5))
+        .expect("worker invocation failure stays contained");
+    assert!(status.enabled);
+    assert_eq!(status.indexed_records, 0);
+    assert_eq!(engine.memory_footprint().property_store_bytes, 0);
+
+    engine.set_property_index_enabled(false);
+    assert!(!engine.property_index_status().enabled);
+    assert_eq!(engine.memory_footprint().property_store_bytes, 0);
+}
+
+#[test]
+#[ignore = "requires target/debug/CairnWorker.exe"]
+fn property_index_extracts_through_real_worker_and_recovers_from_corrupt_files() {
+    let temp = tempdir().expect("tempdir");
+    let media_dir = temp.path().join("media");
+    fs::create_dir_all(&media_dir).unwrap();
+    let good_png = media_dir.join("banner.png");
+    let corrupt_png = media_dir.join("broken.png");
+    fs::write(&good_png, minimal_png_bytes(1920, 1080)).unwrap();
+    fs::write(&corrupt_png, b"not a valid png image payload").unwrap();
+
+    let config = ServiceConfig {
+        excluded_paths: Vec::new(),
+        content_excluded_paths: Vec::new(),
+        property_index_enabled: false,
+        ..Default::default()
+    };
+    let engine = MultiVolumeEngine::with_paths(
+        &temp.path().join("index"),
+        &temp.path().join("content"),
+        &temp.path().join("service.toml"),
+        vec![],
+        config,
+    );
+    engine.add_folder_source(&media_dir, false).unwrap();
+
+    let cancel = CancellationToken::new();
     // Enable properties and invoke real CairnWorker extraction across good + corrupt files.
     engine.set_property_index_enabled(true);
     engine

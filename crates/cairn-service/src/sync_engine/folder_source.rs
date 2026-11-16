@@ -718,7 +718,9 @@ pub(crate) fn spawn_folder_watcher(
 ) -> Option<FolderWatcherHandle> {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
-    use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0};
+    use windows::Win32::Foundation::{
+        CloseHandle, HANDLE, INVALID_HANDLE_VALUE, WAIT_EVENT, WAIT_OBJECT_0,
+    };
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, ReadDirectoryChangesW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OVERLAPPED,
         FILE_LIST_DIRECTORY, FILE_NOTIFY_CHANGE_ATTRIBUTES, FILE_NOTIFY_CHANGE_CREATION,
@@ -726,7 +728,9 @@ pub(crate) fn spawn_folder_watcher(
         FILE_NOTIFY_CHANGE_SIZE, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
         OPEN_EXISTING,
     };
-    use windows::Win32::System::Threading::{CreateEventW, WaitForMultipleObjects, INFINITE};
+    use windows::Win32::System::Threading::{
+        CreateEventW, SetEvent, WaitForMultipleObjects, INFINITE,
+    };
     use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 
     let wide_dir: Vec<u16> = root_path
@@ -759,6 +763,9 @@ pub(crate) fn spawn_folder_watcher(
     let dir_raw = dir_handle.0 as usize;
     let stop_raw = stop_event.0 as usize;
     let io_raw = io_event.0 as usize;
+    // Wait until the first ReadDirectoryChangesW call attaches a notify buffer to dir_handle;
+    // changes written before that call are never buffered by Windows.
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<bool>(1);
 
     let join = std::thread::Builder::new()
         .name("cairn-folder-watch".to_string())
@@ -766,6 +773,7 @@ pub(crate) fn spawn_folder_watcher(
             let dir_h = HANDLE(dir_raw as *mut core::ffi::c_void);
             let stop_h = HANDLE(stop_raw as *mut core::ffi::c_void);
             let io_h = HANDLE(io_raw as *mut core::ffi::c_void);
+            let mut ready_tx = Some(ready_tx);
             let mut buffer = vec![0u8; 64 * 1024];
             let filter = FILE_NOTIFY_CHANGE_FILE_NAME
                 | FILE_NOTIFY_CHANGE_DIR_NAME
@@ -779,7 +787,6 @@ pub(crate) fn spawn_folder_watcher(
                     hEvent: io_h,
                     ..Default::default()
                 };
-                let mut bytes_returned = 0u32;
                 // SAFETY: dir_h and buffer remain valid until CancelIoEx/GetOverlappedResult completes.
                 let issued = unsafe {
                     ReadDirectoryChangesW(
@@ -788,13 +795,19 @@ pub(crate) fn spawn_folder_watcher(
                         buffer.len() as u32,
                         true,
                         filter,
-                        Some(&mut bytes_returned),
+                        None,
                         Some(&mut overlapped),
                         None,
                     )
                 };
                 if issued.is_err() {
+                    if let Some(tx) = ready_tx.take() {
+                        let _ = tx.send(false);
+                    }
                     break;
+                }
+                if let Some(tx) = ready_tx.take() {
+                    let _ = tx.send(true);
                 }
 
                 let waits = [stop_h, io_h];
@@ -803,14 +816,19 @@ pub(crate) fn spawn_folder_watcher(
                 if wait == WAIT_OBJECT_0 {
                     unsafe {
                         let _ = CancelIoEx(dir_h, Some(&overlapped));
-                        let _ = GetOverlappedResult(dir_h, &overlapped, &mut bytes_returned, true);
+                        let mut cancelled_bytes = 0u32;
+                        let _ = GetOverlappedResult(dir_h, &overlapped, &mut cancelled_bytes, true);
                     }
                     break;
                 }
+                if wait != WAIT_EVENT(WAIT_OBJECT_0.0 + 1) {
+                    break;
+                }
 
+                let mut bytes_returned = 0u32;
                 // SAFETY: overlapped signaled completion on io_h.
                 let completed =
-                    unsafe { GetOverlappedResult(dir_h, &overlapped, &mut bytes_returned, false) };
+                    unsafe { GetOverlappedResult(dir_h, &overlapped, &mut bytes_returned, true) };
                 if completed.is_err() || bytes_returned == 0 {
                     on_events(vec![FolderWatchEvent::Overflow]);
                     continue;
@@ -830,7 +848,7 @@ pub(crate) fn spawn_folder_watcher(
         })
         .ok();
 
-    if join.is_none() {
+    let Some(join_handle) = join else {
         // SAFETY: Clean up created handles when thread spawn fails.
         unsafe {
             let _ = CloseHandle(io_event);
@@ -838,32 +856,55 @@ pub(crate) fn spawn_folder_watcher(
             let _ = CloseHandle(dir_handle);
         }
         return None;
+    };
+
+    if !ready_rx.recv().unwrap_or(false) {
+        // SAFETY: First ReadDirectoryChangesW failed before entering WaitForMultipleObjects.
+        unsafe {
+            let _ = SetEvent(stop_event);
+        }
+        let _ = join_handle.join();
+        unsafe {
+            let _ = CloseHandle(stop_event);
+        }
+        return None;
     }
 
     Some(FolderWatcherHandle {
         stop_event: stop_raw,
-        join,
+        join: Some(join_handle),
     })
 }
 
 #[cfg(windows)]
 fn parse_notify_buffer(root: &Path, buf: &[u8]) -> Vec<FolderWatchEvent> {
     use windows::Win32::Storage::FileSystem::{
-        FILE_ACTION_ADDED, FILE_ACTION_MODIFIED, FILE_ACTION_REMOVED, FILE_ACTION_RENAMED_NEW_NAME,
-        FILE_ACTION_RENAMED_OLD_NAME, FILE_NOTIFY_INFORMATION,
+        FILE_ACTION, FILE_ACTION_ADDED, FILE_ACTION_MODIFIED, FILE_ACTION_REMOVED,
+        FILE_ACTION_RENAMED_NEW_NAME, FILE_ACTION_RENAMED_OLD_NAME,
     };
+
+    // NextEntryOffset (u32) + Action (u32) + FileNameLength (u32); struct size_of includes
+    // trailing alignment padding that exceeds a 1-character (14-byte) notification record.
+    const FILE_NOTIFY_HEADER_BYTES: usize = 12;
 
     let mut events = Vec::new();
     let mut offset = 0usize;
     let mut pending_old: Option<PathBuf> = None;
 
-    while offset + size_of::<FILE_NOTIFY_INFORMATION>() <= buf.len() {
-        // SAFETY: Read fixed header fields cleanly via unaligned pointer read.
-        let info = unsafe {
-            std::ptr::read_unaligned(buf[offset..].as_ptr().cast::<FILE_NOTIFY_INFORMATION>())
-        };
-        let name_bytes = info.FileNameLength as usize;
-        let name_offset = offset + 12;
+    while offset + FILE_NOTIFY_HEADER_BYTES <= buf.len() {
+        let next_entry_offset =
+            u32::from_le_bytes(buf[offset..offset + 4].try_into().expect("4-byte header")) as usize;
+        let action = FILE_ACTION(u32::from_le_bytes(
+            buf[offset + 4..offset + 8]
+                .try_into()
+                .expect("4-byte header"),
+        ));
+        let name_bytes = u32::from_le_bytes(
+            buf[offset + 8..offset + 12]
+                .try_into()
+                .expect("4-byte header"),
+        ) as usize;
+        let name_offset = offset + FILE_NOTIFY_HEADER_BYTES;
         if name_offset + name_bytes > buf.len() || !name_bytes.is_multiple_of(2) {
             events.push(FolderWatchEvent::Overflow);
             break;
@@ -877,7 +918,7 @@ fn parse_notify_buffer(root: &Path, buf: &[u8]) -> Vec<FolderWatchEvent> {
         let rel = String::from_utf16_lossy(&u16s);
         let full_path = root.join(rel);
 
-        match info.Action {
+        match action {
             FILE_ACTION_ADDED => events.push(FolderWatchEvent::Added(full_path)),
             FILE_ACTION_REMOVED => events.push(FolderWatchEvent::Removed(full_path)),
             FILE_ACTION_MODIFIED => events.push(FolderWatchEvent::Modified(full_path)),
@@ -898,10 +939,10 @@ fn parse_notify_buffer(root: &Path, buf: &[u8]) -> Vec<FolderWatchEvent> {
         if events.len() > FOLDER_CHANGE_BUFFER_CAP {
             return vec![FolderWatchEvent::Overflow];
         }
-        if info.NextEntryOffset == 0 {
+        if next_entry_offset == 0 {
             break;
         }
-        let next = offset + info.NextEntryOffset as usize;
+        let next = offset + next_entry_offset;
         if next <= offset {
             break;
         }
@@ -909,4 +950,25 @@ fn parse_notify_buffer(root: &Path, buf: &[u8]) -> Vec<FolderWatchEvent> {
     }
 
     events
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use windows::Win32::Storage::FileSystem::FILE_ACTION_ADDED;
+
+    #[test]
+    fn parse_notify_buffer_accepts_single_character_14_byte_record() {
+        let mut buf = Vec::with_capacity(14);
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(&FILE_ACTION_ADDED.0.to_le_bytes());
+        buf.extend_from_slice(&2u32.to_le_bytes());
+        buf.extend_from_slice(&u16::from(b'a').to_le_bytes());
+
+        let events = parse_notify_buffer(Path::new(r"C:\Watched"), &buf);
+        assert_eq!(
+            events,
+            vec![FolderWatchEvent::Added(PathBuf::from(r"C:\Watched\a"))]
+        );
+    }
 }
