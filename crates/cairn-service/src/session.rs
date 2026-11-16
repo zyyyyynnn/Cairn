@@ -7,7 +7,7 @@
 use crate::sync_engine::folder_source::FolderSource;
 use crate::sync_engine::{AllFilesView, MatchSet, SearchResultItem, VolumeIndex};
 use cairn_core::engine::CancellationToken;
-use cairn_core::property_store::{PropertySideTables, RecordPropertyData, SourceId};
+use cairn_core::property_store::{PropertySideTables, SourceId};
 use cairn_protocol::message::FileRowData;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -286,9 +286,7 @@ impl SessionManager {
         session_id: u64,
         offset: usize,
         limit: usize,
-        volumes: &HashMap<char, VolumeIndex>,
-        folders: &HashMap<SourceId, FolderSource>,
-        properties: &PropertySideTables,
+        sources: &SourceTables<'_>,
     ) -> Result<Vec<FileRowData>, RowsError> {
         let lock = self.sessions.read().unwrap();
         let session = lock.get(&session_id).ok_or(RowsError::UnknownSession)?;
@@ -297,49 +295,17 @@ impl SessionManager {
             .store(self.clock.now_nanos(), Ordering::Relaxed);
 
         match &session.rows {
-            MatchSet::Items(items) => {
-                rows_for_items(session, items, offset, limit, volumes, folders, properties)
-            }
-            MatchSet::AllFiles(view) => {
-                rows_for_all_files(view, offset, limit, volumes, properties)
-            }
+            MatchSet::Items(items) => rows_for_items(session, items, offset, limit, sources),
+            MatchSet::AllFiles(view) => rows_for_all_files(view, offset, limit, sources),
         }
     }
 }
 
-enum RowSource<'a> {
-    Volume(&'a VolumeIndex),
-    Folder(&'a FolderSource),
-}
-
-impl<'a> RowSource<'a> {
-    fn generation(&self) -> u64 {
-        match self {
-            Self::Volume(vol) => vol.generation(),
-            Self::Folder(folder) => folder.generation(),
-        }
-    }
-
-    fn build_file_row<F, P>(
-        &self,
-        record_idx: u32,
-        folded_terms: &[Vec<u8>],
-        snippet_lookup: F,
-        property_lookup: P,
-    ) -> Option<FileRowData>
-    where
-        F: FnOnce(u64) -> Vec<String>,
-        P: FnOnce(u64) -> Option<RecordPropertyData>,
-    {
-        match self {
-            Self::Volume(vol) => {
-                vol.build_file_row(record_idx, folded_terms, snippet_lookup, property_lookup)
-            }
-            Self::Folder(folder) => {
-                folder.build_file_row(record_idx, folded_terms, snippet_lookup, property_lookup)
-            }
-        }
-    }
+#[derive(Clone, Copy)]
+pub struct SourceTables<'a> {
+    pub volumes: &'a HashMap<char, VolumeIndex>,
+    pub folders: &'a HashMap<SourceId, FolderSource>,
+    pub properties: &'a PropertySideTables,
 }
 
 /// Pages one live all-files view: the volume's order is the answer, filtered by the
@@ -348,10 +314,9 @@ fn rows_for_all_files(
     view: &AllFilesView,
     offset: usize,
     limit: usize,
-    volumes: &HashMap<char, VolumeIndex>,
-    properties: &PropertySideTables,
+    sources: &SourceTables<'_>,
 ) -> Result<Vec<FileRowData>, RowsError> {
-    let Some(volume) = volumes.get(&view.drive_letter) else {
+    let Some(volume) = sources.volumes.get(&view.drive_letter) else {
         return Err(RowsError::Stale {
             source_id: view.source_id,
         });
@@ -362,7 +327,12 @@ fn rows_for_all_files(
             idx,
             &[],
             |_| Vec::new(),
-            |frn| properties.get(view.source_id, frn).map(|v| v.to_owned()),
+            |frn| {
+                sources
+                    .properties
+                    .get(view.source_id, frn)
+                    .map(|v| v.to_owned())
+            },
         ) {
             rows.push(row);
         }
@@ -382,9 +352,7 @@ fn rows_for_items(
     items: &[SearchResultItem],
     offset: usize,
     limit: usize,
-    volumes: &HashMap<char, VolumeIndex>,
-    folders: &HashMap<SourceId, FolderSource>,
-    properties: &PropertySideTables,
+    sources: &SourceTables<'_>,
 ) -> Result<Vec<FileRowData>, RowsError> {
     let end = offset.saturating_add(limit).min(items.len());
     if offset >= items.len() {
@@ -398,12 +366,17 @@ fn rows_for_items(
         let Some(source) = item
             .source_id
             .drive_letter()
-            .and_then(|drive| volumes.get(&drive).map(RowSource::Volume))
-            .or_else(|| folders.get(&item.source_id).map(RowSource::Folder))
+            .and_then(|drive| sources.volumes.get(&drive).map(VolumeIndex::table_view))
+            .or_else(|| {
+                sources
+                    .folders
+                    .get(&item.source_id)
+                    .map(FolderSource::table_view)
+            })
         else {
             continue;
         };
-        if source.generation() != item.generation {
+        if source.generation != item.generation {
             return Err(RowsError::Stale {
                 source_id: item.source_id,
             });
@@ -418,7 +391,12 @@ fn rows_for_items(
                     .cloned()
                     .unwrap_or_default()
             },
-            |frn| properties.get(item.source_id, frn).map(|v| v.to_owned()),
+            |frn| {
+                sources
+                    .properties
+                    .get(item.source_id, frn)
+                    .map(|v| v.to_owned())
+            },
         ) {
             rows.push(row);
         }
@@ -430,6 +408,7 @@ fn rows_for_items(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cairn_core::property_store::RecordPropertyData;
     use cairn_ntfs::mft::ExtractedItem;
     use cairn_ntfs::usn::UsnChange;
     use std::collections::HashMap;
@@ -471,7 +450,16 @@ mod tests {
     ) -> Result<Vec<FileRowData>, RowsError> {
         let folders = HashMap::new();
         let props = PropertySideTables::disabled();
-        sessions.get_rows_multi(session_id, offset, limit, volumes, &folders, &props)
+        sessions.get_rows_multi(
+            session_id,
+            offset,
+            limit,
+            &SourceTables {
+                volumes,
+                folders: &folders,
+                properties: &props,
+            },
+        )
     }
 
     fn owner(pid: u32) -> QueryOwner {
@@ -995,7 +983,16 @@ mod tests {
         let volumes = HashMap::new();
         let mut folders = HashMap::from([(source_id, source)]);
         let rows = sessions
-            .get_rows_multi(session_id, 0, 10, &volumes, &folders, &props)
+            .get_rows_multi(
+                session_id,
+                0,
+                10,
+                &SourceTables {
+                    volumes: &volumes,
+                    folders: &folders,
+                    properties: &props,
+                },
+            )
             .expect("folder source row");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].name, "report.mp4");
@@ -1005,7 +1002,16 @@ mod tests {
         // Rescanning advances folder generation -> stale error names the folder source id.
         folders.get_mut(&source_id).unwrap().rescan(&[]).unwrap();
         assert_eq!(
-            sessions.get_rows_multi(session_id, 0, 10, &volumes, &folders, &props),
+            sessions.get_rows_multi(
+                session_id,
+                0,
+                10,
+                &SourceTables {
+                    volumes: &volumes,
+                    folders: &folders,
+                    properties: &props,
+                },
+            ),
             Err(RowsError::Stale { source_id })
         );
     }

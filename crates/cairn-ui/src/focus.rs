@@ -11,14 +11,17 @@
 //! so a pointer click focuses a control without adding a second outline. gpui-kit's own 1 px focus
 //! line remains the framework components' cue.
 
+use gpui_kit::component::{Icon, IconName};
 use gpui_kit::gpui::{
-    div, px, AnyElement, App, FocusHandle, Global, Hsla, IntoElement as _, Pixels, Styled as _,
-    Subscription, Window,
+    div, px, rems, AnyElement, App, FocusHandle, Global, Hsla, IntoElement as _,
+    ParentElement as _, Pixels, Styled as _, Subscription, Window,
 };
 
 /// The focus frame's width. One pixel, flush on the control's visible surface, matching the
 /// product's other focus frames.
 pub const RING_WIDTH: Pixels = px(1.0);
+pub const CAPTION_WIDTH: Pixels = px(34.0);
+pub const CAPTION_FOCUS_SIZE: Pixels = px(22.0);
 
 /// Whether the product's last input was a keystroke.
 struct KeyboardNavigation(bool);
@@ -82,4 +85,28 @@ pub fn edge(
             .rounded(radius)
             .into_any_element()
     })
+}
+
+/// Centered caption glyph box shared by desktop and installer titlebar window buttons.
+pub fn caption_glyph(
+    icon: impl Into<IconName>,
+    icon_size_rem: f32,
+    focus: &FocusHandle,
+    ink: Hsla,
+    keyboard_navigation: bool,
+    window: &Window,
+    cx: &App,
+) -> AnyElement {
+    let mut cell = div()
+        .relative()
+        .size(CAPTION_FOCUS_SIZE)
+        .flex()
+        .flex_shrink_0()
+        .items_center()
+        .justify_center()
+        .child(Icon::new(icon.into()).size(rems(icon_size_rem)));
+    if let Some(ring) = edge(focus, ink, px(0.0), keyboard_navigation, window, cx) {
+        cell = cell.child(ring);
+    }
+    cell.into_any_element()
 }

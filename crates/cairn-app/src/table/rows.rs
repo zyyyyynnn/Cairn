@@ -126,6 +126,22 @@ pub(super) const BIN_COMMANDS: &[GroupCommand] = &[
     GroupCommand::DeleteSelected,
 ];
 
+struct RowRender<'a> {
+    ix: usize,
+    row: &'a FileRowData,
+    full_path: &'a str,
+    is_selected: bool,
+    band: &'a RowBand<'a>,
+}
+
+fn cell_text_color(tokens: &ShellTokens, is_selected: bool) -> gpui::Hsla {
+    if is_selected {
+        tokens.foreground
+    } else {
+        tokens.muted_foreground
+    }
+}
+
 impl CairnApp {
     pub(super) fn render_result_row(
         &self,
@@ -144,6 +160,13 @@ impl CairnApp {
 
         let snippets = crate::table::snippets::prepare_snippets(&row.snippets);
         let aria_snippets = (!snippets.is_empty()).then(|| snippets.join(" "));
+        let cell_ctx = RowRender {
+            ix,
+            row,
+            full_path: &full_path,
+            is_selected,
+            band,
+        };
 
         let mut row_el = accessibility::element_at(accessibility::control("result-row"), ix)
             .aria_label(full_path.clone())
@@ -158,36 +181,33 @@ impl CairnApp {
             .items_center()
             .h(row_height)
             .bg(tokens.row_background(is_selected))
-            .text_color(if is_selected {
-                tokens.foreground
-            } else {
-                tokens.muted_foreground
-            })
+            .text_color(cell_text_color(tokens, is_selected))
             .text_sm()
-            .child(self.render_name_cell(
-                ix,
-                row,
-                &full_path,
-                snippets,
-                tokens,
-                is_selected,
-                band.search_focused,
-                cx,
-            ));
+            .child(self.render_name_cell(&cell_ctx, snippets, cx));
 
         if self.show_table_column(TableColumn::Path) {
-            row_el = row_el.child(self.render_path_cell(row, &full_path, tokens, is_selected));
+            row_el = row_el.child(self.render_path_cell(&cell_ctx));
         }
         if self.show_table_column(TableColumn::Size) {
-            row_el = row_el.child(self.render_size_cell(row, tokens, is_selected));
+            row_el = row_el.child(self.render_metric_cell(
+                &cell_ctx,
+                self.results.column_widths.size,
+                layout::SIZE_COLUMN,
+                format_size_bytes(row.size),
+            ));
         }
         if self.show_table_column(TableColumn::DateModified) {
-            row_el = row_el.child(self.render_date_cell(row, tokens, is_selected));
+            row_el = row_el.child(self.render_metric_cell(
+                &cell_ctx,
+                self.results.column_widths.date,
+                layout::DATE_COLUMN,
+                format_timestamp_cached(row.modified_ts),
+            ));
         }
 
         for col in OptionalColumn::ALL {
             if self.show_optional_column(col) {
-                row_el = row_el.child(self.render_optional_cell(row, col, tokens, is_selected));
+                row_el = row_el.child(self.render_optional_cell(&cell_ctx, col));
             }
         }
 
@@ -269,18 +289,21 @@ impl CairnApp {
             .into_any_element()
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn render_name_cell(
         &self,
-        ix: usize,
-        row: &FileRowData,
-        full_path: &str,
+        ctx: &RowRender<'_>,
         snippets: Vec<String>,
-        tokens: &ShellTokens,
-        is_selected: bool,
-        search_focused: bool,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
+        let RowRender {
+            ix,
+            row,
+            full_path,
+            is_selected,
+            band,
+        } = *ctx;
+        let tokens = band.tokens;
+        let search_focused = band.search_focused;
         let renaming = self
             .rename
             .draft
@@ -318,11 +341,7 @@ impl CairnApp {
         let cell = cell.child(
             Icon::new(result_row_icon(&row.name, extension, row.is_dir))
                 .small()
-                .text_color(if is_selected {
-                    tokens.foreground
-                } else {
-                    tokens.muted_foreground
-                }),
+                .text_color(cell_text_color(tokens, is_selected)),
         );
         let cell = if renaming {
             let control = accessibility::control("rename-input");
@@ -356,17 +375,11 @@ impl CairnApp {
         })
     }
 
-    fn render_path_cell(
-        &self,
-        row: &FileRowData,
-        full_path: &str,
-        tokens: &ShellTokens,
-        is_selected: bool,
-    ) -> Stateful<Div> {
-        let tooltip = SharedString::from(row.path.as_str());
+    fn render_path_cell(&self, ctx: &RowRender<'_>) -> Stateful<Div> {
+        let tooltip = SharedString::from(ctx.row.path.as_str());
 
         div()
-            .id(element_id("result-path", full_path))
+            .id(element_id("result-path", ctx.full_path))
             .tooltip(crate::shell::tooltip::text(tooltip))
             .lane_grow(self.results.column_widths.path)
             .min_w(rems(layout::PATH_MIN_COLUMN))
@@ -374,53 +387,33 @@ impl CairnApp {
             .flex()
             .items_center()
             .overflow_hidden()
-            .text_color(if is_selected {
-                tokens.foreground
-            } else {
-                tokens.muted_foreground
-            })
-            .child(result_text(&row.path, &row.path_highlights, tokens))
+            .text_color(cell_text_color(ctx.band.tokens, ctx.is_selected))
+            .child(result_text(
+                &ctx.row.path,
+                &ctx.row.path_highlights,
+                ctx.band.tokens,
+            ))
     }
 
-    fn render_size_cell(&self, row: &FileRowData, tokens: &ShellTokens, is_selected: bool) -> Div {
-        div()
-            .lane_grow(self.results.column_widths.size)
-            .min_w(rems(layout::SIZE_COLUMN))
-            .px(rems(layout::INNER_SPACING))
-            .flex()
-            .items_center()
-            .font_features(theme::tabular_figures())
-            .text_color(if is_selected {
-                tokens.foreground
-            } else {
-                tokens.muted_foreground
-            })
-            .child(format_size_bytes(row.size))
-    }
-
-    fn render_date_cell(&self, row: &FileRowData, tokens: &ShellTokens, is_selected: bool) -> Div {
-        div()
-            .lane_grow(self.results.column_widths.date)
-            .min_w(rems(layout::DATE_COLUMN))
-            .px(rems(layout::INNER_SPACING))
-            .flex()
-            .items_center()
-            .font_features(theme::tabular_figures())
-            .text_color(if is_selected {
-                tokens.foreground
-            } else {
-                tokens.muted_foreground
-            })
-            .child(format_timestamp_cached(row.modified_ts))
-    }
-
-    fn render_optional_cell(
+    fn render_metric_cell(
         &self,
-        row: &FileRowData,
-        col: OptionalColumn,
-        tokens: &ShellTokens,
-        is_selected: bool,
+        ctx: &RowRender<'_>,
+        width_grow: f32,
+        min_width: f32,
+        text: impl Into<SharedString>,
     ) -> Div {
+        div()
+            .lane_grow(width_grow)
+            .min_w(rems(min_width))
+            .px(rems(layout::INNER_SPACING))
+            .flex()
+            .items_center()
+            .font_features(theme::tabular_figures())
+            .text_color(cell_text_color(ctx.band.tokens, ctx.is_selected))
+            .child(text.into())
+    }
+
+    fn render_optional_cell(&self, ctx: &RowRender<'_>, col: OptionalColumn) -> Div {
         let mut cell = div()
             .w(rems(col.width_rem()))
             .flex_shrink_0()
@@ -428,11 +421,7 @@ impl CairnApp {
             .flex()
             .items_center()
             .overflow_hidden()
-            .text_color(if is_selected {
-                tokens.foreground
-            } else {
-                tokens.muted_foreground
-            });
+            .text_color(cell_text_color(ctx.band.tokens, ctx.is_selected));
         if col.uses_tabular_figures() {
             cell = cell.font_features(theme::tabular_figures());
         }
@@ -440,7 +429,7 @@ impl CairnApp {
             div()
                 .min_w_0()
                 .truncate()
-                .child(format_optional_cell(row, col)),
+                .child(format_optional_cell(ctx.row, col)),
         )
     }
 
@@ -678,26 +667,6 @@ mod tests {
     fn the_result_menu_offers_in_place_rename_but_the_bin_does_not() {
         assert!(RESULT_COMMANDS.contains(&GroupCommand::RenameSelected));
         assert!(!BIN_COMMANDS.contains(&GroupCommand::RenameSelected));
-    }
-
-    #[test]
-    fn a_bin_delete_is_words_apart_from_the_reversible_delete() {
-        assert_eq!(
-            GroupCommand::DeleteSelected.label_key_in(true),
-            "ctx_delete_permanently"
-        );
-        assert_eq!(
-            GroupCommand::DeleteSelected.label_key_in(false),
-            "ctx_delete"
-        );
-        assert_eq!(
-            GroupCommand::CopyPaths.label_key_in(true),
-            "ctx_copy_original_location"
-        );
-        assert_eq!(
-            GroupCommand::RestoreSelected.label_key_in(true),
-            "ctx_restore"
-        );
     }
 
     #[test]

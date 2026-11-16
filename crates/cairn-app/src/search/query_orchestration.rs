@@ -7,7 +7,6 @@
 use crate::app::{layout, CairnApp, HighlightSpan};
 use crate::search::coordinator::{MonotonicClock, SearchCommand, SearchPlan, ServiceTransport};
 use crate::service::ipc_tasks::get_tokio_runtime;
-use crate::service::service_issue::ServiceIssue;
 use gpui_kit::gpui::{AsyncApp, Context, Pixels, Point};
 use std::ops::Range;
 
@@ -285,9 +284,9 @@ impl CairnApp {
             return;
         }
         if !rows_page_ready(
-            self.service.is_service_connected,
-            self.query.is_searching,
-            self.service.is_probing_service,
+            self.service.connection.is_connected(),
+            self.query.is_searching(),
+            self.service.connection.is_probing(),
             self.query.is_fetching_more,
             self.query.active_session_id.is_some(),
         ) {
@@ -328,9 +327,9 @@ impl CairnApp {
             return self.needs_recycle_bin_page(visible);
         }
         rows_page_ready(
-            self.service.is_service_connected,
-            self.query.is_searching,
-            self.service.is_probing_service,
+            self.service.connection.is_connected(),
+            self.query.is_searching(),
+            self.service.connection.is_probing(),
             self.query.is_fetching_more,
             self.query.active_session_id.is_some(),
         ) && self
@@ -346,12 +345,10 @@ impl CairnApp {
     pub fn schedule_text_search(&mut self, cx: &mut Context<Self>) {
         self.discard_rename(cx);
         if self.recycle_bin.is_open() {
-            self.query.is_searching = false;
             self.filter_recycle_bin(cx);
             return;
         }
         if self.block_listing.is_some() {
-            self.query.is_searching = false;
             self.filter_block_listing(cx);
             return;
         }
@@ -439,8 +436,6 @@ impl CairnApp {
         }
         let mut transport = QueuedTransport::default();
         self.query.coordinator.cancel_in_flight(&mut transport);
-        self.query.query_id = self.query.coordinator.current_query_id();
-        self.query.is_searching = false;
         self.query.is_fetching_more = false;
         self.spawn_queued_cancels(transport.cancels);
         true
@@ -451,6 +446,7 @@ impl CairnApp {
     /// active session released, so it cannot splice into the new rows.
     pub(crate) fn take_table_for_local_rows(&mut self) {
         self.supersede_index_query();
+        self.query.coordinator.set_cancelled(false);
         self.query.active_session_id = None;
         self.query.degraded = None;
         self.results.snippet_preview = None;
@@ -464,8 +460,6 @@ impl CairnApp {
         // An empty query is never refused, so a refusal of the cleared text must not
         // outlive it and block the all-files view once the index settles.
         self.query.rejection = None;
-        // An explicit trigger is a new state: a stop belongs to the query it stopped.
-        self.query.cancelled = false;
         self.query.degraded = None;
         self.query.coordinator.set_cancelled(false);
         self.start_status_refresh(cx);
@@ -475,9 +469,7 @@ impl CairnApp {
     /// Records a failed exchange. A timeout keeps the connection (and the rows
     /// already in hand) usable; every other failure marks the service down.
     fn note_service_error(&mut self, error: &cairn_client::client::ClientError) {
-        self.service.is_service_connected =
-            !matches!(error, cairn_client::client::ClientError::Timeout);
-        self.service.service_issue = Some(ServiceIssue::from_client_error(error));
+        self.service.connection.note_client_error(error);
     }
 
     /// Cancels the in-flight query without changing the text or the rows already shown. The local
@@ -487,7 +479,6 @@ impl CairnApp {
         if !self.supersede_index_query() {
             return;
         }
-        self.query.cancelled = true;
         // A stopped first page reveals the band through the same entrance an empty answer uses.
         self.note_table_empty(cx);
         cx.notify();
@@ -507,9 +498,7 @@ impl CairnApp {
         }
         // A cancelled query is a stop, not a pause: only explicit input asks
         // for a new one.
-        if self.query.is_searching
-            || self.query.cancelled
-            || !self.query.coordinator.can_background_refresh()
+        if !self.query.coordinator.can_background_refresh()
             || self.recycle_bin.is_open()
             || self.drive_view.is_some()
             || self.query.rejection.is_some()
@@ -556,12 +545,10 @@ impl CairnApp {
         // and IME commit all arrive here, so this one branch keeps the location
         // stable for every text path.
         if self.recycle_bin.is_open() {
-            self.query.is_searching = false;
             self.filter_recycle_bin(cx);
             return;
         }
         if self.block_listing.is_some() {
-            self.query.is_searching = false;
             self.filter_block_listing(cx);
             return;
         }
@@ -588,11 +575,8 @@ impl CairnApp {
     }
 
     fn apply_coordinator_dispatch(&mut self, transport: QueuedTransport, cx: &mut Context<Self>) {
-        self.query.query_id = self.query.coordinator.current_query_id();
         self.query.rejection = None;
-        self.query.cancelled = self.query.coordinator.is_cancelled();
         self.query.degraded = None;
-        self.query.is_searching = self.query.coordinator.is_searching();
         self.recycle_bin.leave();
         self.spawn_queued_cancels(transport.cancels);
 
@@ -620,14 +604,13 @@ impl CairnApp {
 
             let res = rx.await;
             this.update(cx, |this: &mut CairnApp, cx| {
-                if qid != this.query.query_id {
+                if qid != this.query.query_id() {
                     return;
                 }
                 let res = match res {
                     Ok(res) => res,
                     Err(e) => {
                         this.query.coordinator.abort_waiting_on_error(qid);
-                        this.query.is_searching = this.query.coordinator.is_searching();
                         tracing::warn!("Cairn query response task lost: {e}");
                         cx.notify();
                         return;
@@ -638,16 +621,13 @@ impl CairnApp {
                         let Some(reset_scroll) = this.query.coordinator.accept_response(qid) else {
                             return;
                         };
-                        this.query.is_searching = this.query.coordinator.is_searching();
-                        this.service.is_service_connected = true;
-                        this.service.service_issue = None;
+                        this.service.connection.mark_connected();
                         this.service.status.update_volumes(envelope.volumes);
                         this.start_status_refresh(cx);
                         this.apply_query_payload(reset_scroll, envelope.payload, cx);
                     }
                     Err(e) => {
                         this.query.coordinator.abort_waiting_on_error(qid);
-                        this.query.is_searching = this.query.coordinator.is_searching();
                         tracing::warn!("Cairn IPC query error: {}", e);
                         this.note_service_error(&e);
                     }
@@ -676,7 +656,6 @@ impl CairnApp {
                 degraded,
             } => {
                 self.query.rejection = None;
-                self.query.cancelled = false;
                 self.query.degraded = degraded;
                 self.results.snippet_preview = None;
                 self.query.active_session_id = Some(session_id);
@@ -702,7 +681,6 @@ impl CairnApp {
             }
             cairn_protocol::message::ResponsePayload::Error { code, .. } => {
                 self.query.rejection = QueryRejection::from_error_code(code);
-                self.query.cancelled = false;
                 self.query.degraded = None;
                 self.results.snippet_preview = None;
                 if self.query.rejection.is_some() {
@@ -722,7 +700,7 @@ impl CairnApp {
             return;
         };
         self.query.is_fetching_more = true;
-        let current_qid = self.query.query_id;
+        let current_qid = self.query.query_id();
         // A page fetched after a background refresh replaces the stale window; remember which
         // offset that is so a response already in flight cannot be mistaken for it.
         self.results.table.note_page_request(offset);
@@ -742,7 +720,7 @@ impl CairnApp {
                 // set this table no longer shows, even when the query id still matches.
                 if !page_response_is_current(
                     current_qid,
-                    this.query.query_id,
+                    this.query.query_id(),
                     session_id,
                     this.query.active_session_id,
                 ) {
@@ -768,8 +746,7 @@ impl CairnApp {
                     }
                     Err(e) => {
                         tracing::warn!("Cairn page fetch task lost: {e}");
-                        this.service.is_service_connected = false;
-                        this.service.service_issue = Some(ServiceIssue::NotRunning);
+                        this.service.connection.mark_lost_running();
                     }
                 }
                 cx.notify();
@@ -985,19 +962,20 @@ mod tests {
                     let app = cx.new(|cx| CairnApp::new(window, cx));
 
                     app.update(cx, |this, cx| {
-                        this.query.cancelled = true;
-                        let id = this.query.query_id;
+                        this.query.coordinator.set_cancelled(true);
+                        let id = this.query.query_id();
                         this.refresh_results(cx);
-                        assert!(!this.query.is_searching);
+                        assert!(!this.query.is_searching());
                         assert_eq!(
-                            this.query.query_id, id,
+                            this.query.query_id(),
+                            id,
                             "a status refresh must not issue a query behind a stop"
                         );
 
-                        this.query.cancelled = false;
+                        this.query.coordinator.set_cancelled(false);
                         this.refresh_results(cx);
                         assert!(
-                            this.query.is_searching,
+                            this.query.is_searching(),
                             "an explicit state resumes the query"
                         );
                     });
@@ -1027,13 +1005,13 @@ mod tests {
                     app.update(cx, |this, cx| {
                         this.query.search_input.set_text("report");
                         this.request_result_set(ResultSetChange::InPlace, cx);
-                        assert!(this.query.is_searching);
-                        let before = this.query.query_id;
+                        assert!(this.query.is_searching());
+                        let before = this.query.query_id();
                         this.cancel_in_flight_query(cx);
-                        assert!(!this.query.is_searching);
-                        assert!(this.query.cancelled);
+                        assert!(!this.query.is_searching());
+                        assert!(this.query.is_cancelled());
                         assert_eq!(
-                            this.query.query_id,
+                            this.query.query_id(),
                             before + 1,
                             "the late answer belongs to a superseded id"
                         );

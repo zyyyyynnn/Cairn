@@ -68,7 +68,7 @@ impl CairnApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.service.is_service_connected {
+        if self.service.connection.is_connected() {
             self.refresh_index_journal_dialog(cx);
         }
         let view = cx.entity();
@@ -92,12 +92,12 @@ fn render_index_journal_dialog(
     let dialog_width = (rem * 44.0).min(max_width);
     let list_max_height = (window.viewport_size().height * 0.5).clamp(rem * 12.0, rem * 24.0);
 
-    let connected = app.service.is_service_connected;
-    let status = app.service.journal_status.clone();
-    let entries = app.service.journal_entries.clone();
-    let loading = app.service.journal_entries_loading || app.service.journal_status_loading;
-    let entries_error = app.service.journal_entries_error.clone();
-    let status_error = app.service.journal_status_error.clone();
+    let connected = app.service.connection.is_connected();
+    let status = app.service.journal.value.clone();
+    let entries = app.service.journal_entries.value.clone();
+    let loading = app.service.journal_entries.is_loading() || app.service.journal.is_loading();
+    let entries_error = app.service.journal_entries.load_error().map(str::to_owned);
+    let status_error = app.service.journal.load_error().map(str::to_owned);
     let error_text = entries_error.as_deref().or(status_error.as_deref());
     let menu_state = app.index_menu_state();
     let switch_disabled = menu_state.journal_switch_is_disabled();

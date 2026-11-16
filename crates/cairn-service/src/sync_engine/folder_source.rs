@@ -57,24 +57,16 @@ pub fn normalize_folder_root(path: &Path) -> Result<(PathBuf, String), String> {
     } else {
         stripped.to_string()
     };
-    let canonical = if normalized_display.len() == 3 {
-        let mut chars = normalized_display.chars();
-        if let (Some(drive), Some(':'), Some('\\')) = (chars.next(), chars.next(), chars.next()) {
-            format!("{}:\\", drive.to_ascii_uppercase())
-        } else {
-            normalized_display
+    let canonical = match cairn_core::path_cache::drive_letter_prefix(&normalized_display) {
+        Some(drive) if normalized_display.len() == 3 && normalized_display.ends_with('\\') => {
+            format!("{drive}:\\")
         }
-    } else if normalized_display.as_bytes().get(1) == Some(&b':') {
-        let mut out = normalized_display;
-        if let Some(first) = out.as_bytes().first().copied() {
-            if first.is_ascii_alphabetic() {
-                let upper = (first as char).to_ascii_uppercase();
-                out.replace_range(0..1, &upper.to_string());
-            }
+        Some(drive) => {
+            let mut out = normalized_display;
+            out.replace_range(0..1, &drive.to_string());
+            out
         }
-        out
-    } else {
-        normalized_display
+        None => normalized_display,
     };
     Ok((PathBuf::from(&canonical), canonical))
 }
@@ -153,10 +145,7 @@ impl FolderSource {
     pub fn new(source_id: SourceId, root: &Path) -> Result<Self, String> {
         let (normalized_path, display) = normalize_folder_root(root)?;
         let root_prefix = normalize_root(&display);
-        let volume_id_tag = normalized_path
-            .to_string_lossy()
-            .chars()
-            .next()
+        let volume_id_tag = cairn_core::path_cache::drive_letter_prefix(&display)
             .and_then(FileRecord::volume_id_from_drive)
             .unwrap_or(0);
         Ok(Self {
@@ -232,16 +221,16 @@ impl FolderSource {
     }
 
     pub fn as_source_index<'a>(&'a self, properties: &'a PropertySideTables) -> SourceIndex<'a> {
-        SourceIndex::new(
-            self.source_id,
-            &self.root_prefix,
-            &self.records,
-            &self.arena,
-            &self.path_cache,
-            None,
+        SourceIndex {
+            source_id: self.source_id,
+            root_prefix: &self.root_prefix,
+            records: &self.records,
+            arena: &self.arena,
+            path_cache: &self.path_cache,
+            presorted: None,
             properties,
-        )
-        .with_tombstones(self.has_tombstones)
+            has_tombstones: self.has_tombstones,
+        }
     }
 
     pub fn to_summary(&self) -> SourceStatusSummary {
@@ -642,6 +631,16 @@ impl FolderSource {
         needs_rescan
     }
 
+    pub(crate) fn table_view(&self) -> super::SourceTableView<'_> {
+        super::SourceTableView {
+            root_prefix: self.root_prefix.clone(),
+            records: &self.records,
+            arena: &self.arena,
+            path_cache: &self.path_cache,
+            generation: self.generation,
+        }
+    }
+
     pub fn build_file_row<F, P>(
         &self,
         record_idx: u32,
@@ -653,16 +652,8 @@ impl FolderSource {
         F: FnOnce(u64) -> Vec<String>,
         P: FnOnce(u64) -> Option<cairn_core::property_store::RecordPropertyData>,
     {
-        super::volume_index::build_file_row_from_parts(
-            &self.records,
-            &self.arena,
-            &self.path_cache,
-            &self.root_prefix,
-            record_idx,
-            folded_terms,
-            snippet_lookup,
-            property_lookup,
-        )
+        self.table_view()
+            .build_file_row(record_idx, folded_terms, snippet_lookup, property_lookup)
     }
 }
 
@@ -814,6 +805,7 @@ pub(crate) fn spawn_folder_watcher(
                 // SAFETY: Both event handles stay valid until the loop exits before FolderWatcherHandle closes stop_h.
                 let wait = unsafe { WaitForMultipleObjects(&waits, false, INFINITE) };
                 if wait == WAIT_OBJECT_0 {
+                    // SAFETY: `stop_h` signaled stop; cancel pending overlapped I/O on `dir_h` before closing.
                     unsafe {
                         let _ = CancelIoEx(dir_h, Some(&overlapped));
                         let mut cancelled_bytes = 0u32;
@@ -864,6 +856,7 @@ pub(crate) fn spawn_folder_watcher(
             let _ = SetEvent(stop_event);
         }
         let _ = join_handle.join();
+        // SAFETY: watcher thread has exited; close `stop_event` owned by startup cleanup.
         unsafe {
             let _ = CloseHandle(stop_event);
         }

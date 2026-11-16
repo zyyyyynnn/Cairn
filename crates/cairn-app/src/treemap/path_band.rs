@@ -106,7 +106,7 @@ impl CairnApp {
         }
         self.clear_treemap_path_menu();
         let input = self.treemap_path.input.clone();
-        if self.treemap_path.editing {
+        if self.treemap_path.mode.is_editing() {
             // A second request lands on the text already in the field; replacing
             // it with the current directory would discard what the person typed.
             input.update(cx, |input, cx| input.select_all(window, cx));
@@ -120,8 +120,7 @@ impl CairnApp {
         else {
             return;
         };
-        self.treemap_path.editing = true;
-        self.treemap_path.error = false;
+        self.treemap_path.mode = crate::app::PathFieldMode::Editing { error: false };
         input.update(cx, |input, cx| {
             input.set_value(current, window, cx);
             input.select_all(window, cx);
@@ -133,11 +132,10 @@ impl CairnApp {
     /// Leaves path editing without navigating. The breadcrumb returns and the
     /// canvas takes the focus, so the next key still reaches the Treemap.
     pub(crate) fn cancel_treemap_path_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.treemap_path.editing {
+        if !self.treemap_path.mode.is_editing() {
             return;
         }
-        self.treemap_path.editing = false;
-        self.treemap_path.error = false;
+        self.treemap_path.mode = crate::app::PathFieldMode::Closed;
         let title = self.i18n.get_text("treemap_path_invalid_title");
         self.dismiss_toast_titled(&title, cx);
         self.focus_treemap_canvas(window, cx);
@@ -145,7 +143,9 @@ impl CairnApp {
     }
 
     pub(crate) fn treemap_path_changed(&mut self, cx: &mut Context<Self>) {
-        self.treemap_path.error = false;
+        if self.treemap_path.mode.is_editing() {
+            self.treemap_path.mode = crate::app::PathFieldMode::Editing { error: false };
+        }
         let title = self.i18n.get_text("treemap_path_invalid_title");
         self.dismiss_toast_titled(&title, cx);
         // The clear control appears and disappears with the text, so the
@@ -159,16 +159,15 @@ impl CairnApp {
         let input = self.treemap_path.input.clone();
         input.update(cx, |input, cx| input.set_value("", window, cx));
         input.read(cx).focus_handle(cx).focus(window, cx);
-        self.treemap_path.error = false;
+        if self.treemap_path.mode.is_editing() {
+            self.treemap_path.mode = crate::app::PathFieldMode::Editing { error: false };
+        }
         cx.notify();
     }
 
     pub(crate) fn clear_treemap_path_menu(&mut self) {
         self.treemap_dir_loader.cancel();
-        self.treemap_path_menu_dismiss = None;
         self.treemap_path_menu = None;
-        self.treemap_path_menu_for = None;
-        self.treemap_path_menu_focus = None;
     }
 
     /// Opens the child-folder menu under one breadcrumb segment. The filesystem scan runs off the
@@ -180,7 +179,10 @@ impl CairnApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let same_segment = self.treemap_path_menu_for.as_deref() == Some(segment)
+        let same_segment = self
+            .treemap_path_menu
+            .as_ref()
+            .is_some_and(|menu| menu.target == segment)
             || self.treemap_dir_loader.is_pending_for(segment);
         if same_segment {
             self.clear_treemap_path_menu();
@@ -286,12 +288,11 @@ impl CairnApp {
             &menu,
             window,
             |this, _menu, _: &DismissEvent, window, cx| {
-                this.treemap_path_menu_dismiss = None;
-                this.treemap_path_menu = None;
-                this.treemap_path_menu_for = None;
-                // Dismissal returns focus to the arrow that opened the menu; the canvas only
-                // catches the case where the segment is no longer on screen.
-                match this.treemap_path_menu_focus.take() {
+                let focus = this
+                    .treemap_path_menu
+                    .take()
+                    .and_then(|mut menu| menu.trigger_focus.take());
+                match focus {
                     Some(trigger) => trigger.focus(window, cx),
                     None => {
                         if let Some(state) = this.treemap_state.as_ref() {
@@ -303,10 +304,12 @@ impl CairnApp {
             },
         );
         menu.focus_handle(cx).focus(window, cx);
-        self.treemap_path_menu = Some(menu);
-        self.treemap_path_menu_focus = Some(trigger_focus);
-        self.treemap_path_menu_for = Some(segment.to_string());
-        self.treemap_path_menu_dismiss = Some(subscription);
+        self.treemap_path_menu = Some(crate::app::TreemapPathMenu {
+            popup: menu,
+            target: segment.to_string(),
+            trigger_focus: Some(trigger_focus),
+            _dismiss: subscription,
+        });
         cx.notify();
     }
 
@@ -315,7 +318,7 @@ impl CairnApp {
     /// well-formed path the index does not cover opens and shows the canvas's
     /// unavailable state.
     pub(crate) fn commit_treemap_path(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.treemap_path.editing {
+        if !self.treemap_path.mode.is_editing() {
             return;
         }
         let typed = self.treemap_path.input.read(cx).value().to_string();
@@ -328,10 +331,8 @@ impl CairnApp {
             return;
         };
         let Some(target) = normalize_treemap_path(&typed, &current) else {
-            // The field action and the input's own Enter can both report the
-            // same rejection; one toast is enough.
-            let first_rejection = !self.treemap_path.error;
-            self.treemap_path.error = true;
+            let first_rejection = !self.treemap_path.mode.has_error();
+            self.treemap_path.mode = crate::app::PathFieldMode::Editing { error: true };
             if first_rejection {
                 let title = self.i18n.get_text("treemap_path_invalid_title");
                 let hint = self.i18n.get_text("treemap_path_invalid_hint");
@@ -340,8 +341,7 @@ impl CairnApp {
             cx.notify();
             return;
         };
-        self.treemap_path.editing = false;
-        self.treemap_path.error = false;
+        self.treemap_path.mode = crate::app::PathFieldMode::Closed;
         let rejection = self.i18n.get_text("treemap_path_invalid_title");
         self.dismiss_toast_titled(&rejection, cx);
         let drive = target
@@ -374,8 +374,8 @@ impl CairnApp {
             .as_ref()
             .map(|state| state.current_dir().to_string())
             .unwrap_or_default();
-        let editing = self.treemap_path.editing;
-        let error = self.treemap_path.error;
+        let editing = self.treemap_path.mode.is_editing();
+        let error = self.treemap_path.mode.has_error();
         let show_clear = editing && !self.treemap_path.input.read(cx).value().is_empty();
         let snap_margin = window.rem_size() * layout::SPACE_8;
         // A canvas root whose folded tail cannot carry a tile label hosts it
@@ -490,26 +490,22 @@ impl CairnApp {
         } else {
             let segments = path_segments(&current_dir);
             let last = segments.len().saturating_sub(1);
-            let menu_for = self.treemap_path_menu_for.clone();
-            let menu = self.treemap_path_menu.clone();
-            // The product's focus frame belongs to the keyboard. A pointer click
-            // lands on these controls without painting a second outline.
+            let menu_for = self
+                .treemap_path_menu
+                .as_ref()
+                .map(|menu| menu.target.clone());
+            let menu = self
+                .treemap_path_menu
+                .as_ref()
+                .map(|menu| menu.popup.clone());
             let keyboard_navigation = cairn_ui::focus::keyboard_navigation(cx);
-            // A tooltip that appears over the open menu reads as a stray label,
-            // so the band stays quiet while one of its menus is up.
             let menu_open = self.treemap_path_menu.is_some();
             let mut breadcrumb = h_flex()
                 .min_w_0()
                 .overflow_hidden()
                 .justify_start()
                 .items_center()
-                // No gap of its own: the arrow's 24px plate centres a 14px
-                // glyph, and that padding alone is the distance to the label on
-                // either side, so the separator's ink sits equidistant from both
-                // by construction.
                 .text_color(tokens.muted_foreground)
-                // The path reads at the search box's body step, so punctuation
-                // and Latin text use the same face and size in both fields.
                 .text_size(rems(1.0));
             for (ix, (label, path)) in segments.into_iter().enumerate() {
                 let text = div()
@@ -523,18 +519,12 @@ impl CairnApp {
                         .id(element_id("treemap-path-current", &path))
                         .flex_shrink_0()
                         .text_color(tokens.foreground)
-                        // The address the truncated label stands for, anchored to
-                        // the label the pointer is on rather than to the whole
-                        // field, which is a thousand pixels wide.
                         .when(!menu_open, move |this| {
                             this.tooltip(crate::shell::tooltip::text(tip.clone()))
                         })
                         .child(text)
                         .into_any_element()
                 } else {
-                    // Ancestors are real controls: each is a tab stop, activated
-                    // by Enter, Space or a click, and framed only while the
-                    // keyboard drives focus.
                     let focus = window
                         .use_keyed_state(element_id("treemap-crumb-focus", &path), cx, |_, cx| {
                             cx.focus_handle().tab_stop(true)
@@ -669,7 +659,6 @@ impl CairnApp {
                             })
                             .on_click(move |event: &ClickEvent, window, cx| {
                                 cx.stop_propagation();
-                                // Mouse activation already ran on mouse-down.
                                 if matches!(event, ClickEvent::Mouse(_)) {
                                     return;
                                 }
@@ -697,14 +686,9 @@ impl CairnApp {
                                     });
                                 },
                             )
-                            // The tooltip would sit on top of the menu the same
-                            // press just opened, so it belongs to the quiet state.
                             .when(!menu_open, |this| {
                                 this.tooltip(crate::shell::tooltip::text(toggle_label.clone()))
                             })
-                            // The separator and the menu trigger are one control:
-                            // it points at the next path step while closed and
-                            // turns down while its menu is open.
                             .child(
                                 Icon::new(if open {
                                     IconName::ChevronDown
@@ -771,7 +755,7 @@ impl CairnApp {
                         this.key_context(crate::shell::commands::TREEMAP_PATH_CONTEXT)
                     })
                     .on_click(cx.listener(|this, _, window, cx| {
-                        if !this.treemap_path.editing {
+                        if !this.treemap_path.mode.is_editing() {
                             this.begin_treemap_path_edit(window, cx);
                         }
                     }))

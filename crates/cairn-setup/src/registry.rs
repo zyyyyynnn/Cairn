@@ -21,6 +21,7 @@ pub(crate) fn wide(value: &std::ffi::OsStr) -> Vec<u16> {
 pub(crate) fn subkeys(base: &str, view: REG_SAM_FLAGS) -> Vec<String> {
     let base_wide = wide(std::ffi::OsStr::new(base));
     let mut key = HKEY::default();
+    // SAFETY: `base_wide` is null-terminated and lives for the call; `key` is a stack out-parameter.
     let status = unsafe {
         RegOpenKeyExW(
             HKEY_LOCAL_MACHINE,

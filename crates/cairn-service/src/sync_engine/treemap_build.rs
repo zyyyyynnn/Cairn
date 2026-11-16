@@ -91,12 +91,7 @@ impl MultiVolumeEngine {
         max_depth: usize,
     ) -> Result<Vec<TreeEntryData>, TreeUnavailable> {
         let trimmed = path.trim_end_matches('\\');
-        if let Some(drive) = trimmed
-            .chars()
-            .next()
-            .filter(|c| c.is_ascii_alphabetic() && trimmed.as_bytes().get(1) == Some(&b':'))
-            .map(|c| c.to_ascii_uppercase())
-        {
+        if let Some(drive) = cairn_core::path_cache::drive_letter_prefix(trimmed) {
             let volumes = self.volumes.read().unwrap();
             if let Some(volume) = volumes.get(&drive) {
                 let is_root = trimmed.eq_ignore_ascii_case(&format!("{drive}:"));

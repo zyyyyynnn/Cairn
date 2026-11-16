@@ -13,6 +13,8 @@ pub struct VolumeIdentity {
     pub volume_serial: u64,
 }
 
+use cairn_core::path_cache::drive_letter_of_mount;
+
 /// Splits a Win32 `MULTI_SZ` UTF-16 buffer into mount path strings, stopping at the double-null terminator.
 pub fn parse_volume_path_names(multi_sz: &[u16]) -> Vec<String> {
     multi_sz
@@ -22,22 +24,9 @@ pub fn parse_volume_path_names(multi_sz: &[u16]) -> Vec<String> {
         .collect()
 }
 
-fn extract_drive_letter(mount_point: &str) -> Option<char> {
-    let bytes = mount_point.as_bytes();
-    if bytes.len() == 3
-        && bytes[0].is_ascii_alphabetic()
-        && bytes[1] == b':'
-        && (bytes[2] == b'\\' || bytes[2] == b'/')
-    {
-        Some((bytes[0] as char).to_ascii_uppercase())
-    } else {
-        None
-    }
-}
-
 #[cfg(windows)]
 mod win {
-    use super::{extract_drive_letter, parse_volume_path_names, VolumeIdentity};
+    use super::{drive_letter_of_mount, parse_volume_path_names, VolumeIdentity};
     use std::collections::HashSet;
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{ERROR_MORE_DATA, HANDLE, INVALID_HANDLE_VALUE};
@@ -147,7 +136,7 @@ mod win {
                         if !mount_paths.is_empty() {
                             let drive_mount = mount_paths
                                 .iter()
-                                .find_map(|p| extract_drive_letter(p).map(|ch| (ch, p.clone())));
+                                .find_map(|p| drive_letter_of_mount(p).map(|ch| (ch, p.clone())));
                             let (drive_letter, mount_point) = match drive_mount {
                                 Some((ch, p)) => (Some(ch), p),
                                 None => (None, mount_paths[0].clone()),

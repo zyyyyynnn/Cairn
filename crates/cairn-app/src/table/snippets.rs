@@ -218,7 +218,7 @@ impl CairnApp {
         if self.results.table.focused_idx != Some(ix) {
             self.results.table.select_row(ix, false);
         }
-        self.results.keyboard_navigation = false;
+        cairn_ui::focus::set_keyboard_navigation(false, cx);
         let already_pinned = self
             .results
             .snippet_preview

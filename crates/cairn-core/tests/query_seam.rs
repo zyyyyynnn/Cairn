@@ -180,15 +180,16 @@ fn query_supports_pinyin_diacritics_punctuation_and_whitespace_modifiers() {
 
     let cache = DirectoryPathCache::new();
     let props = PropertySideTables::disabled();
-    let idx = SourceIndex::new(
-        SourceId(0),
-        "C:\\",
-        &fx.records,
-        &fx.arena,
-        &cache,
-        None,
-        &props,
-    );
+    let idx = SourceIndex {
+        source_id: SourceId(0),
+        root_prefix: "C:\\",
+        records: &fx.records,
+        arena: &fx.arena,
+        path_cache: &cache,
+        presorted: None,
+        properties: &props,
+        has_tombstones: false,
+    };
     let cancel = CancellationToken::new();
     let policy = QueryPolicy::default();
 
@@ -266,15 +267,16 @@ fn query_evaluates_len_attrib_depth_children_and_duplicates() {
     let cache = DirectoryPathCache::new();
     let props = PropertySideTables::disabled();
     // Root as a non-drive FolderSource (`D:\Projects\Cairn`)
-    let idx = SourceIndex::new(
-        SourceId(1),
-        r"D:\Projects\Cairn",
-        &fx.records,
-        &fx.arena,
-        &cache,
-        None,
-        &props,
-    );
+    let idx = SourceIndex {
+        source_id: SourceId(1),
+        root_prefix: r"D:\Projects\Cairn",
+        records: &fx.records,
+        arena: &fx.arena,
+        path_cache: &cache,
+        presorted: None,
+        properties: &props,
+        has_tombstones: false,
+    };
     let cancel = CancellationToken::new();
     let policy = QueryPolicy::default();
 
@@ -358,15 +360,16 @@ fn property_queries_work_when_enabled_and_report_explicit_degradation_when_disab
 
     let cache = DirectoryPathCache::new();
     let cancel = CancellationToken::new();
-    let enabled_idx = SourceIndex::new(
-        SourceId(3),
-        "D:\\",
-        &fx.records,
-        &fx.arena,
-        &cache,
-        None,
-        &props,
-    );
+    let enabled_idx = SourceIndex {
+        source_id: SourceId(3),
+        root_prefix: "D:\\",
+        records: &fx.records,
+        arena: &fx.arena,
+        path_cache: &cache,
+        presorted: None,
+        properties: &props,
+        has_tombstones: false,
+    };
 
     let run_enabled = |q: &str, sort: SortSpec| {
         let expr = parse_query(q);
@@ -416,15 +419,16 @@ fn property_queries_work_when_enabled_and_report_explicit_degradation_when_disab
 
     // Disabled store must return empty results AND explicit degraded reason.
     let disabled_props = PropertySideTables::disabled();
-    let disabled_idx = SourceIndex::new(
-        SourceId(3),
-        "D:\\",
-        &fx.records,
-        &fx.arena,
-        &cache,
-        None,
-        &disabled_props,
-    );
+    let disabled_idx = SourceIndex {
+        source_id: SourceId(3),
+        root_prefix: "D:\\",
+        records: &fx.records,
+        arena: &fx.arena,
+        path_cache: &cache,
+        presorted: None,
+        properties: &disabled_props,
+        has_tombstones: false,
+    };
     let expr = parse_query("length:>1m tags:hdr");
     let degraded = execute_query(&disabled_idx, &expr, &QueryPolicy::default(), &cancel);
     assert!(materialize(degraded.rows, None).is_empty());
@@ -457,15 +461,16 @@ fn multi_key_sort_presorted_all_and_hidden_system_opt_in_contract() {
     let cancel = CancellationToken::new();
 
     // Multi-key inline sort: equal sizes break by Name ascending without reversing Name.
-    let idx_with_tombstone = SourceIndex::new(
-        SourceId(0),
-        "C:\\",
-        &fx.records,
-        &fx.arena,
-        &cache,
-        None,
-        &props,
-    );
+    let idx_with_tombstone = SourceIndex {
+        source_id: SourceId(0),
+        root_prefix: "C:\\",
+        records: &fx.records,
+        arena: &fx.arena,
+        path_cache: &cache,
+        presorted: None,
+        properties: &props,
+        has_tombstones: false,
+    };
     let expr = parse_query("sort:size-desc,name-asc");
     let res = execute_query(&idx_with_tombstone, &expr, &QueryPolicy::default(), &cancel);
     assert_eq!(
@@ -500,15 +505,16 @@ fn multi_key_sort_presorted_all_and_hidden_system_opt_in_contract() {
     // Clean fixture without tombstones tests zero-materialization `PresortedAll` path.
     fx.records.pop();
     let presorted = PresortedIndices::build(&fx.records, &fx.arena, &cache, 'C');
-    let clean_idx = SourceIndex::new(
-        SourceId(0),
-        "C:\\",
-        &fx.records,
-        &fx.arena,
-        &cache,
-        Some(&presorted),
-        &props,
-    );
+    let clean_idx = SourceIndex {
+        source_id: SourceId(0),
+        root_prefix: "C:\\",
+        records: &fx.records,
+        arena: &fx.arena,
+        path_cache: &cache,
+        presorted: Some(&presorted),
+        properties: &props,
+        has_tombstones: false,
+    };
     let unfiltered = execute_query(
         &clean_idx,
         &parse_query_with("", &QueryDefaults::default()),

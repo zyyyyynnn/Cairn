@@ -15,9 +15,8 @@ use cairn_client::ServiceSession;
 
 /// The index-configuration change this build can submit.
 ///
-/// There is no scope editor yet (next milestone), so the one real setting the window can drive from
-/// its own state is the content-index master switch, which is what the search box's "content
-/// search" capsule depends on (CNT-01, CNT-06).
+/// The window currently drives the content-index master switch referenced by content-search UI
+/// state (CNT-01, CNT-06) while keeping all remaining service configuration fields intact.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IndexScopeChange {
     /// Write an explicit `content_index_enabled` value. A switch submits the state it is meant to

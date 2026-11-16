@@ -248,9 +248,20 @@ fn pending_version_path() -> PathBuf {
 fn write_pending_version(version: &str) {
     let path = pending_version_path();
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        if let Err(err) = std::fs::create_dir_all(parent) {
+            tracing::warn!(
+                "Failed to create pending-update directory {}: {err}",
+                parent.display()
+            );
+            return;
+        }
     }
-    let _ = std::fs::write(path, version);
+    if let Err(err) = std::fs::write(&path, version) {
+        tracing::warn!(
+            "Failed to write pending update marker {}: {err}",
+            path.display()
+        );
+    }
 }
 
 fn remove_pending_version() {

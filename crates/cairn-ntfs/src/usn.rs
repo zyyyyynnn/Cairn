@@ -159,8 +159,10 @@ pub fn parse_usn_records(buf: &[u8]) -> (i64, Vec<UsnChange>) {
                     scratch.clear();
                     scratch.extend(
                         name_bytes
-                            .chunks_exact(2)
-                            .map(|c| u16::from_le_bytes([c[0], c[1]])),
+                            .as_chunks::<2>()
+                            .0
+                            .iter()
+                            .map(|&pair| u16::from_le_bytes(pair)),
                     );
                     String::from_utf16_lossy(scratch)
                 } else {
@@ -343,7 +345,7 @@ mod tests {
         let mut buf = Vec::new();
         buf.extend_from_slice(&5000i64.to_le_bytes());
 
-        // 1. Unclosed non-rename record must be skipped even with non-UTF-16 odd payload.
+        // Unclosed non-rename record must be skipped even with non-UTF-16 odd payload.
         push_record(
             &mut buf,
             10,
@@ -352,7 +354,7 @@ mod tests {
             0,
             &[0xFF, 0x00, 0xAA],
         );
-        // 2. Deleted closed record carries no name; odd filename bytes must be ignored.
+        // Deleted closed record carries no name; odd filename bytes must be ignored.
         push_record(
             &mut buf,
             11,
@@ -361,7 +363,6 @@ mod tests {
             0,
             &[0xAA, 0xBB, 0xCC],
         );
-        // 3. Created record with Unicode UTF-16 filename.
         let unicode_bytes: Vec<u8> = "设计文档.md"
             .encode_utf16()
             .flat_map(u16::to_le_bytes)
@@ -374,7 +375,7 @@ mod tests {
             0,
             &unicode_bytes,
         );
-        // 4. Rename old & new (without USN_REASON_CLOSE, because rename records arrive unclosed).
+        // Rename old & new (without USN_REASON_CLOSE, because rename records arrive unclosed).
         let old_bytes: Vec<u8> = "old.txt"
             .encode_utf16()
             .flat_map(u16::to_le_bytes)
@@ -385,7 +386,7 @@ mod tests {
             .collect();
         push_record(&mut buf, 13, 1, USN_REASON_RENAME_OLD_NAME, 0, &old_bytes);
         push_record(&mut buf, 13, 2, USN_REASON_RENAME_NEW_NAME, 0, &new_bytes);
-        // 5. DataChanged & BasicInfoChanged carry no filename.
+        // DataChanged & BasicInfoChanged carry no filename.
         push_record(
             &mut buf,
             14,

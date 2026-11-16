@@ -8,6 +8,7 @@ use cairn_ntfs::mft::ExtractedItem;
 
 mod content_query;
 mod engine;
+mod presorted;
 mod search;
 mod volume_index;
 

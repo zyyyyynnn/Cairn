@@ -165,7 +165,9 @@ mod platform {
         /// the calling OS thread only, so the caller must not yield the thread (no `.await`) while
         /// the guard is alive.
         unsafe fn begin(pipe: HANDLE) -> Result<Self, CallerAuthError> {
-            match ImpersonateNamedPipeClient(pipe) {
+            // SAFETY: caller guarantees `pipe` is a connected named pipe handle that remains valid
+            // on the current OS thread for the lifetime of the returned `Impersonation` guard.
+            match unsafe { ImpersonateNamedPipeClient(pipe) } {
                 Ok(()) => Ok(Self),
                 Err(_) => Err(CallerAuthError::ImpersonationFailed(last_os_error())),
             }
@@ -304,7 +306,7 @@ mod platform {
             .map_err(|err| CallerAuthError::TokenUnavailable(err.to_string()))?;
         // SAFETY: GetTokenInformation(TokenUser) filled the buffer with a TOKEN_USER header whose
         // `User.Sid` points into the very same buffer, which lives until the SID has been rendered.
-        let user = &*(user_buffer.as_ptr() as *const TOKEN_USER);
+        let user = unsafe { &*(user_buffer.as_ptr() as *const TOKEN_USER) };
         let user_sid =
             sid_to_string(user.User.Sid).unwrap_or_else(|| "<unrenderable-sid>".to_string());
 
@@ -324,12 +326,14 @@ mod platform {
                 continue;
             };
             let mut member = BOOL::default();
-            // SAFETY: `sid_buffer` holds a valid well-known SID for the duration of the call.
-            let probe = CheckTokenMembership(
-                Some(token),
-                PSID(sid_buffer.as_ptr() as *mut core::ffi::c_void),
-                &mut member,
-            );
+            // SAFETY: `token` is an impersonated access token handle and `sid_buffer` holds a valid well-known SID.
+            let probe = unsafe {
+                CheckTokenMembership(
+                    Some(token),
+                    PSID(sid_buffer.as_ptr() as *mut core::ffi::c_void),
+                    &mut member,
+                )
+            };
             match probe {
                 Ok(()) => {
                     groups_readable = true;

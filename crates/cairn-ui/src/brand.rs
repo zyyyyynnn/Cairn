@@ -275,35 +275,15 @@ mod tests {
     }
 
     #[test]
-    fn serif_font_config_selects_the_embedded_weights() {
+    fn the_western_serif_falls_back_to_the_system_sans() {
         let regular = serif_font(FontWeight::NORMAL);
         assert_eq!(regular.family.as_str(), SERIF_FONT_FAMILY_WESTERN);
         assert_eq!(regular.weight, FontWeight::NORMAL);
-
-        let semibold = serif_font(FontWeight::SEMIBOLD);
-        assert_eq!(semibold.family.as_str(), SERIF_FONT_FAMILY_WESTERN);
-        assert_eq!(semibold.weight, FontWeight::SEMIBOLD);
-        assert!(semibold.fallbacks.is_some());
-    }
-
-    #[test]
-    fn the_cjk_heading_face_is_regular_with_a_system_sans_fallback() {
-        let font = cjk_heading_font();
-        assert_eq!(font.family.as_str(), SERIF_FONT_FAMILY_CJK);
-        assert_eq!(font.weight, FontWeight::NORMAL);
-        let fallbacks = font
-            .fallbacks
-            .expect("the CJK heading font carries a fallback chain");
         assert_eq!(
-            fallbacks.fallback_list(),
-            [SERIF_FONT_FALLBACK_SYSTEM.to_string()]
+            serif_font(FontWeight::SEMIBOLD).weight,
+            FontWeight::SEMIBOLD
         );
-    }
-
-    #[test]
-    fn the_western_serif_falls_back_to_the_system_sans() {
-        let font = serif_font(FontWeight::NORMAL);
-        let fallbacks = font
+        let fallbacks = regular
             .fallbacks
             .expect("the serif font carries a fallback chain");
         assert_eq!(

@@ -138,8 +138,10 @@ pub fn parse_attributes(
 
                             if name_bytes_end <= cursor + attr_len && name_bytes_end <= buf.len() {
                                 let u16_chars: Vec<u16> = buf[name_bytes_start..name_bytes_end]
-                                    .chunks_exact(2)
-                                    .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+                                    .as_chunks::<2>()
+                                    .0
+                                    .iter()
+                                    .map(|&pair| u16::from_le_bytes(pair))
                                     .collect();
 
                                 let name_str = String::from_utf16_lossy(&u16_chars);

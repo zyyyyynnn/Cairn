@@ -31,13 +31,13 @@ pub(super) fn content_query_notice(state: &IndexMenuState<'_>) -> Option<Content
     if !state.service_connected {
         return None;
     }
-    if state.content_loading {
+    if state.content.loading {
         return Some(ContentQueryNotice::Loading);
     }
     if state.content_action_failed {
         return Some(ContentQueryNotice::Error);
     }
-    if state.content_failed {
+    if state.content.failed {
         return Some(ContentQueryNotice::Unreadable);
     }
     match state.content_state {
@@ -142,7 +142,7 @@ impl CairnApp {
             );
         }
 
-        if self.query.cancelled {
+        if self.query.is_cancelled() {
             let message = self.i18n.get_text("search_cancelled_title");
             return render_state_band(
                 tokens,
@@ -231,7 +231,7 @@ impl CairnApp {
                     _ => "index_status_retry",
                 };
                 let pending = !matches!(notice, Some(ContentQueryNotice::Unreadable))
-                    && self.service.content_action_pending;
+                    && self.service.content.action_pending;
                 let control = accessibility::control("content-search-action");
                 let label = self.i18n.get_text(label_key);
                 let icon = match notice {
@@ -267,7 +267,8 @@ impl CairnApp {
     ) -> ControlElement {
         let issue = self
             .service
-            .service_issue
+            .connection
+            .issue()
             .unwrap_or(ServiceIssue::NotRunning);
         let control = accessibility::control(issue.accessibility_key());
         let message = self.i18n.get_text(issue.message_key());
@@ -276,20 +277,18 @@ impl CairnApp {
         let start = accessibility::control("service-start-button");
         let start_label = accessibility::name(start, &self.i18n);
         let probe_label = self.i18n.get_text("service_probe_label");
-        let start_face = if self.service.is_probing_service {
+        let probing = self.service.connection.is_probing();
+        let start_face = if probing {
             probe_label.clone()
         } else {
             start_label
         };
-        let retry_face = if self.service.is_probing_service {
-            probe_label
-        } else {
-            retry_label
-        };
-        let action = match service_issue::band_action(issue, self.service.service_installed) {
+        let retry_face = if probing { probe_label } else { retry_label };
+        let action = match service_issue::band_action(issue, self.service.connection.is_installed())
+        {
             ServiceBandAction::Start => Some(
                 icon_action(start, AssetIconName::Play, start_face)
-                    .loading(self.service.is_probing_service)
+                    .loading(probing)
                     .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
                         this.start_service(cx);
                     }))
@@ -297,7 +296,7 @@ impl CairnApp {
             ),
             ServiceBandAction::Retry => Some(
                 icon_action(retry, AssetIconName::RotateCcw, retry_face)
-                    .loading(self.service.is_probing_service)
+                    .loading(probing)
                     .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
                         this.retry_service_connection(cx);
                     }))
@@ -323,6 +322,7 @@ mod tests {
     use core::prelude::rust_2021::test;
 
     use super::{content_query_notice, ContentQueryNotice};
+    use crate::shell::menu_rules::SubsystemMenuAccess;
     use cairn_protocol::status::{ContentIndexState, IndexJournalStatus, PropertyIndexStatus};
 
     #[test]
@@ -331,40 +331,34 @@ mod tests {
         let journal = IndexJournalStatus::default();
         let mut state = crate::shell::menu_rules::IndexMenuState {
             service_connected: true,
-            content_loading: false,
-            content_failed: false,
-            content_action_failed: false,
-            content_action_pending: false,
-            content_state: &ContentIndexState::Ready,
-            property_loading: false,
-            property_failed: false,
-            property_action_pending: false,
-            property_state: &property,
-            journal_loading: false,
-            journal_failed: false,
-            journal_action_pending: false,
-            journal_status: &journal,
             service_control_pending: false,
+            content: SubsystemMenuAccess::default(),
+            content_action_failed: false,
+            content_state: &ContentIndexState::Ready,
+            property: SubsystemMenuAccess::default(),
+            property_state: &property,
+            journal: SubsystemMenuAccess::default(),
+            journal_status: &journal,
         };
 
         state.service_connected = false;
         assert_eq!(content_query_notice(&state), None);
 
         state.service_connected = true;
-        state.content_loading = true;
+        state.content.loading = true;
         assert_eq!(
             content_query_notice(&state),
             Some(ContentQueryNotice::Loading)
         );
 
-        state.content_loading = false;
-        state.content_failed = true;
+        state.content.loading = false;
+        state.content.failed = true;
         assert_eq!(
             content_query_notice(&state),
             Some(ContentQueryNotice::Unreadable)
         );
 
-        state.content_failed = false;
+        state.content.failed = false;
         state.content_action_failed = true;
         assert_eq!(
             content_query_notice(&state),

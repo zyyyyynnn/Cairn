@@ -28,33 +28,31 @@ pub(crate) enum BinRetry {
     EmptyBin,
 }
 
+enum BinStage {
+    Loading,
+    Ready {
+        all: Vec<Arc<RecycleBinItem>>,
+        rows: Vec<Arc<RecycleBinItem>>,
+        icon_extensions: HashMap<u64, String>,
+        mutating: bool,
+    },
+    Failed(String),
+}
+
+enum RecycleBinState {
+    Closed,
+    Open {
+        stage: BinStage,
+        selected_keys: HashSet<String>,
+    },
+}
+
 /// The Recycle Bin view's own state.
 ///
-/// The bin is a location, not a search scope, so every path that leaves it has to release the
-/// whole view at once: the rendered rows, the unfiltered listing behind them, the icon side
-/// table, the identity-keyed selection and the error band belong to one another. One owner
-/// makes "leaving the bin" a single decision instead of a six-field sequence that each caller
-/// could half-clear.
+/// The bin is a location, not a search scope, so every path that leaves it releases the whole
+/// view at once.
 pub(crate) struct RecycleBinView {
-    /// The rows the table renders, in table order. `None` means the bin is not the current
-    /// location; `Some` with an empty vector means the bin is open but holds no rows yet.
-    rows: Option<Vec<Arc<RecycleBinItem>>>,
-    /// The full shell listing behind [`Self::rows`]. The search box filters this location in
-    /// place, so the unfiltered rows stay available until the bin is left. Items are shared by
-    /// `Arc`, so the filtered view never duplicates the name/path strings.
-    all: Vec<Arc<RecycleBinItem>>,
-    /// Lowercase extension for each bin row, keyed by the row's display identity. The Shell
-    /// hides `.lnk` from a shortcut's display name, so the table icon reads the payload
-    /// extension kept by [`Self::all`].
-    icon_extensions: HashMap<u64, String>,
-    /// Selection is kept by item identity, not row index, so a filter or sort can hide a row
-    /// without silently dropping it from the selection.
-    selected_keys: HashSet<String>,
-    /// Some when the bin listing itself could not be read. The view then shows an inline
-    /// recovery band instead of rows that may be stale.
-    error: Option<String>,
-    /// True while a background shell read is in flight for the bin.
-    loading: bool,
+    state: RecycleBinState,
     /// Invalidates a background bin read when the location is left or reloaded again.
     generation: u64,
 }
@@ -63,54 +61,91 @@ impl RecycleBinView {
     /// A bin view that is not the window's current location.
     pub(crate) fn closed() -> Self {
         Self {
-            rows: None,
-            all: Vec::new(),
-            icon_extensions: HashMap::new(),
-            selected_keys: HashSet::new(),
-            error: None,
-            loading: false,
+            state: RecycleBinState::Closed,
             generation: 0,
         }
     }
 
     /// Whether the bin is the window's current location.
     pub(crate) fn is_open(&self) -> bool {
-        self.rows.is_some()
+        matches!(self.state, RecycleBinState::Open { .. })
     }
 
-    /// The rows the table renders, or `None` when the bin is not the current location.
+    /// The rows the table renders when ready, or `None` when closed, loading, or failed.
     pub(crate) fn rows(&self) -> Option<&[Arc<RecycleBinItem>]> {
-        self.rows.as_deref()
+        match &self.state {
+            RecycleBinState::Open {
+                stage: BinStage::Ready { rows, .. },
+                ..
+            } => Some(rows.as_slice()),
+            _ => None,
+        }
     }
 
     /// The unfiltered shell listing behind the rendered rows.
     pub(crate) fn all(&self) -> &[Arc<RecycleBinItem>] {
-        &self.all
+        match &self.state {
+            RecycleBinState::Open {
+                stage: BinStage::Ready { all, .. },
+                ..
+            } => all.as_slice(),
+            _ => &[],
+        }
     }
 
     /// The payload extension of a row, keyed by its display identity.
     pub(crate) fn icon_extension(&self, key: u64) -> Option<&str> {
-        self.icon_extensions.get(&key).map(String::as_str)
+        match &self.state {
+            RecycleBinState::Open {
+                stage: BinStage::Ready {
+                    icon_extensions, ..
+                },
+                ..
+            } => icon_extensions.get(&key).map(String::as_str),
+            _ => None,
+        }
     }
 
     /// The identity keys of the rows the person selected.
     pub(crate) fn selected_keys(&self) -> &HashSet<String> {
-        &self.selected_keys
+        static EMPTY: std::sync::LazyLock<HashSet<String>> = std::sync::LazyLock::new(HashSet::new);
+        match &self.state {
+            RecycleBinState::Open { selected_keys, .. } => selected_keys,
+            RecycleBinState::Closed => &EMPTY,
+        }
     }
 
     /// The reason the listing could not be read.
     pub(crate) fn error(&self) -> Option<&str> {
-        self.error.as_deref()
+        match &self.state {
+            RecycleBinState::Open {
+                stage: BinStage::Failed(reason),
+                ..
+            } => Some(reason.as_str()),
+            _ => None,
+        }
     }
 
-    /// True while a background shell read is in flight.
+    /// True while a listing read or bin mutation is in flight.
     pub(crate) fn is_loading(&self) -> bool {
-        self.loading
+        matches!(
+            self.state,
+            RecycleBinState::Open {
+                stage: BinStage::Loading | BinStage::Ready { mutating: true, .. },
+                ..
+            }
+        )
     }
 
-    /// Marks whether a background shell read is in flight.
-    pub(crate) fn set_loading(&mut self, loading: bool) {
-        self.loading = loading;
+    /// Marks whether a write operation on an already-loaded bin is in flight.
+    pub(crate) fn set_mutating(&mut self, next: bool) {
+        if let RecycleBinState::Open {
+            stage: BinStage::Ready { mutating, .. },
+            ..
+        } = &mut self.state
+        {
+            *mutating = next;
+        }
     }
 
     /// The token a background read must still match to be accepted.
@@ -120,74 +155,87 @@ impl RecycleBinView {
 
     /// Releases the view. Returns whether the bin was open.
     pub(crate) fn leave(&mut self) -> bool {
-        let was_open = self.rows.take().is_some();
-        self.loading = false;
-        self.all.clear();
-        self.icon_extensions.clear();
-        self.selected_keys.clear();
-        self.error = None;
+        let was_open = self.is_open();
+        self.state = RecycleBinState::Closed;
         was_open
     }
 
     /// Starts a background shell read. Returns the token the read must match to be accepted.
     pub(crate) fn begin_load(&mut self) -> u64 {
         self.generation = self.generation.wrapping_add(1);
-        self.loading = true;
-        self.error = None;
-        self.all.clear();
-        self.icon_extensions.clear();
-        self.selected_keys.clear();
-        self.rows = Some(Vec::new());
+        self.state = RecycleBinState::Open {
+            stage: BinStage::Loading,
+            selected_keys: HashSet::new(),
+        };
         self.generation
     }
 
     /// Installs the listing a shell read returned, dropping the selection it no longer covers.
     pub(crate) fn install_listing(&mut self, items: Vec<Arc<RecycleBinItem>>) {
-        self.icon_extensions = bin_icon_extensions(&items);
-        self.all = items;
-        self.error = None;
-        let live: HashSet<String> = self.all.iter().map(|item| item.identity_key()).collect();
-        self.selected_keys.retain(|key| live.contains(key));
+        let icon_extensions = bin_icon_extensions(&items);
+        let live: HashSet<String> = items.iter().map(|item| item.identity_key()).collect();
+        let selected_keys = match &mut self.state {
+            RecycleBinState::Open { selected_keys, .. } => {
+                selected_keys.retain(|key| live.contains(key));
+                std::mem::take(selected_keys)
+            }
+            RecycleBinState::Closed => HashSet::new(),
+        };
+        self.state = RecycleBinState::Open {
+            stage: BinStage::Ready {
+                all: items,
+                rows: Vec::new(),
+                icon_extensions,
+                mutating: false,
+            },
+            selected_keys,
+        };
     }
 
     /// Records that the listing could not be read.
     pub(crate) fn fail(&mut self, reason: String) {
-        self.error = Some(reason);
-        self.all.clear();
-        self.icon_extensions.clear();
-        self.selected_keys.clear();
-        self.rows = Some(Vec::new());
+        self.state = RecycleBinState::Open {
+            stage: BinStage::Failed(reason),
+            selected_keys: HashSet::new(),
+        };
     }
 
     /// Shows the filtered rows of the current listing.
-    pub(crate) fn set_rows(&mut self, rows: Vec<Arc<RecycleBinItem>>) {
-        self.rows = Some(rows);
+    pub(crate) fn set_rows(&mut self, next_rows: Vec<Arc<RecycleBinItem>>) {
+        if let RecycleBinState::Open {
+            stage: BinStage::Ready { rows, .. },
+            ..
+        } = &mut self.state
+        {
+            *rows = next_rows;
+        }
     }
 
     /// Merges the visible table selection into the identity-keyed selection before the visible
-    /// set changes. A key that is temporarily hidden by a filter stays in the set; a visible row
-    /// the person deselected is removed. A wholly absent table selection is not a decision to
-    /// deselect anything: a chrome press clears the indices, focus and anchor together, and the
-    /// keys are then the only record of what the person selected.
+    /// set changes.
     pub(crate) fn merge_visible_selection(
         &mut self,
         selected_indices: &HashSet<usize>,
         selection_cleared: bool,
     ) {
-        let Some(items) = self.rows.as_deref() else {
-            return;
-        };
-        merge_bin_selection_keys(
-            items,
-            selected_indices,
-            selection_cleared,
-            &mut self.selected_keys,
-        );
+        if let RecycleBinState::Open {
+            stage: BinStage::Ready { rows, .. },
+            selected_keys,
+        } = &mut self.state
+        {
+            merge_bin_selection_keys(rows, selected_indices, selection_cleared, selected_keys);
+        }
     }
 
     /// Reorders the full listing to the table's current sort.
     pub(crate) fn sort(&mut self, column: SortColumn, ascending: bool) {
-        sort_items(&mut self.all, column, ascending);
+        if let RecycleBinState::Open {
+            stage: BinStage::Ready { all, .. },
+            ..
+        } = &mut self.state
+        {
+            sort_items(all, column, ascending);
+        }
     }
 }
 
@@ -602,7 +650,6 @@ impl CairnApp {
         if !self.recycle_bin.is_open() || self.recycle_bin.generation() != generation {
             return;
         }
-        self.recycle_bin.set_loading(false);
         match result {
             Ok(items) => {
                 let mut items: Vec<std::sync::Arc<RecycleBinItem>> =

@@ -18,14 +18,12 @@
 
 ### 1.2 静态检查与回归门禁
 代码变更合入与构建交付必须无条件通过：
-1. `cargo fmt --all --check`
-2. `cargo clippy --workspace --all-targets -- -D warnings`（零警告）
+1. `cargo fmt --all --check`（遵循根目录 `rustfmt.toml`）
+2. `cargo clippy --workspace --all-targets -- -D warnings`（继承根目录 `[workspace.lints]`，含 `unsafe_op_in_unsafe_fn = "deny"`、`clippy::undocumented_unsafe_blocks = "deny"`、`clippy::missing_safety_doc = "deny"`、`clippy::await_holding_lock = "deny"` 与 `rustdoc` 断链检查，零警告）
 3. `cargo doc --workspace --no-deps`（`RUSTDOCFLAGS=-D warnings` 零警告）
-4. `cargo run -p xtask -- check-i18n`（`zh-CN.ftl` 与 `en-US.ftl` 翻译键 100% 对齐）
-5. `cargo run -p xtask -- check-size`（任何 Rust 源文件不超过 2000 行）
-6. `cargo run -p xtask -- check-docs`（必需工程文档与相对链接全部有效）
-7. `cargo deny check`（许可证、安全漏洞与 yanked 检查；仓库已提供 `deny.toml`）
-8. `cargo run --release -p xtask -- bench-query --check`（CI `Test / Tooling` 执行全账本内存与查询延迟回归门禁）
+4. `cargo run -p xtask -- check`（统一执行 `check-i18n`、`check-docs`、`check-size` 与 `check-hygiene`，覆盖本地化对齐、文档相对链接、2000 行上限、`[workspace.lints]` 继承、纯安全 crate 的 `#![forbid(unsafe_code)]`、`#[ignore]` 登记一致性及全仓非调研文档/注释/文案规范）
+5. `cargo deny check`（许可证、安全漏洞与 yanked 检查；仓库已提供 `deny.toml`）
+6. `cargo run --release -p xtask -- bench-query --check`（CI `Test / Tooling` 执行全账本内存与查询延迟回归门禁）
 
 文档-only PR 只运行 `check-docs`；逐层测试、Tooling 与 Release job 跳过，Dependency Policy 与 Installer Package 以 no-op 成功结束。代码变更必须通过完整门禁，安装器打包等待质量检查通过。
 

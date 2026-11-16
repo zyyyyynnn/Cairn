@@ -31,13 +31,37 @@ pub fn root_path_for_drive(drive_letter: char) -> Arc<str> {
     }
 }
 
+/// Extracts the uppercase ASCII drive letter from a path beginning with `X:` (e.g. `C:\...` or `C:`).
+#[inline]
+pub fn drive_letter_prefix(path: &str) -> Option<char> {
+    let bytes = path.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        Some((bytes[0] as char).to_ascii_uppercase())
+    } else {
+        None
+    }
+}
+
+/// Extracts the uppercase ASCII drive letter from an exact mount root (`X:\` or `X:/`).
+#[inline]
+pub fn drive_letter_of_mount(path: &str) -> Option<char> {
+    if path.len() == 3 && matches!(path.as_bytes()[2], b'\\' | b'/') {
+        drive_letter_prefix(path)
+    } else {
+        None
+    }
+}
+
 /// Normalizes an index source root (drive letter `C:\`, mount point `C:\Mounts\Data`, or folder
 /// `D:\Projects`) into an `Arc<str>` ending with `\` while reusing static drive roots when matched.
 pub fn normalize_root(root_prefix: &str) -> Arc<str> {
     let trimmed = root_prefix.trim();
-    if let [b, b':', rest @ ..] = trimmed.as_bytes() {
-        if b.is_ascii_alphabetic() && rest.iter().all(|ch| *ch == b'\\' || *ch == b'/') {
-            return root_path_for_drive(*b as char);
+    if let Some(drive) = drive_letter_prefix(trimmed) {
+        if trimmed.as_bytes()[2..]
+            .iter()
+            .all(|ch| *ch == b'\\' || *ch == b'/')
+        {
+            return root_path_for_drive(drive);
         }
     }
     if trimmed.is_empty() {

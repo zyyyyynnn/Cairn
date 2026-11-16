@@ -78,10 +78,8 @@ impl ServiceRuntime {
             layout: _layout,
         } = self;
 
-        // 1. Background USN polling task. A volume that is still replaying a backlog is polled at
-        //    50ms so a cold start drains in seconds; once every volume is Synced the normal 500ms
-        //    cadence resumes. The sync state stays CatchingUp until this reaches Synced, so the
-        //    fast path is what keeps "loading" from meaning "stuck".
+        // Poll backlog volumes at 50ms so cold-start CatchingUp drains in seconds before returning
+        // to the 500ms steady cadence once every volume is Synced.
         let engine_usn = engine.clone();
         let usn_task = tokio::spawn(async move {
             loop {
@@ -91,7 +89,6 @@ impl ServiceRuntime {
             }
         });
 
-        // 2. Periodic atomic index persistence task (every 5 minutes)
         let engine_persist = engine.clone();
         let persist_task = tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(300));
@@ -106,7 +103,6 @@ impl ServiceRuntime {
         engine.ensure_folder_sources_loaded();
         engine.spawn_property_extraction();
 
-        // 3. Periodic snapshot volumes rescan task (every 5 minutes) (IDX-08)
         let engine_snapshot = engine.clone();
         let snapshot_task = tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(300));
@@ -116,7 +112,6 @@ impl ServiceRuntime {
             }
         });
 
-        // 4. Periodic folder-source rescan task honoring folder_rescan_interval_secs (IDX-11)
         let engine_folders = engine.clone();
         let folder_rescan_task = tokio::spawn(async move {
             loop {

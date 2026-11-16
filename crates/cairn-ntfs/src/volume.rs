@@ -143,6 +143,7 @@ impl RawVolumeHandle {
             )
         };
         if res.is_err() {
+            // SAFETY: GetLastError reads thread-local error state set by the failing DeviceIoControl call.
             let err = unsafe { windows::Win32::Foundation::GetLastError() };
             return Err(crate::usn::UsnError::QueryFailed(err.0));
         }
@@ -179,6 +180,7 @@ impl RawVolumeHandle {
             )
         };
         if res.is_err() {
+            // SAFETY: GetLastError reads thread-local error state set by the failing DeviceIoControl call.
             let err = unsafe { windows::Win32::Foundation::GetLastError() };
             return Err(crate::usn::UsnError::ReadFailed(err.0));
         }
@@ -277,22 +279,22 @@ mod tests {
 
     #[test]
     fn test_locate_mft_clusters_synthetic() {
-        // 1. Build a synthetic NTFS Sector 0 (Boot Sector)
+        // Synthetic NTFS Boot Sector (512 bytes/sector, 8 sectors/cluster, 1024-byte MFT records, LCN 4).
         let mut boot_sector = vec![0u8; 512];
         boot_sector[3..11].copy_from_slice(b"NTFS    ");
-        boot_sector[0x0B..0x0D].copy_from_slice(&512u16.to_le_bytes()); // 512 bytes / sector
-        boot_sector[0x0D] = 8; // 8 sectors / cluster -> 4096 bytes / cluster
-        boot_sector[0x40] = 0xF6; // -10 -> 1024 bytes per MFT record
-        boot_sector[0x30..0x38].copy_from_slice(&4i64.to_le_bytes()); // MFT start LCN = 4 (offset 16384)
+        boot_sector[0x0B..0x0D].copy_from_slice(&512u16.to_le_bytes());
+        boot_sector[0x0D] = 8;
+        boot_sector[0x40] = 0xF6;
+        boot_sector[0x30..0x38].copy_from_slice(&4i64.to_le_bytes());
         boot_sector[0x48..0x50].copy_from_slice(&0x1122334455667788u64.to_le_bytes());
 
-        // 2. Build a synthetic Record 0 (1024 bytes) with non-resident $DATA runlist
+        // Synthetic Record 0 (1024 bytes) with USA fixup at 0x30 and non-resident $DATA runlist.
         let mut rec0 = vec![0u8; 1024];
         rec0[0..4].copy_from_slice(b"FILE");
-        rec0[4..6].copy_from_slice(&48u16.to_le_bytes()); // Update sequence offset = 48 (0x30)
-        rec0[6..8].copy_from_slice(&3u16.to_le_bytes()); // Update sequence size = 3 words
-        rec0[0x14..0x16].copy_from_slice(&56u16.to_le_bytes()); // First attribute offset = 56 (0x38)
-        rec0[0x16..0x18].copy_from_slice(&1u16.to_le_bytes()); // Flags: in use (1)
+        rec0[4..6].copy_from_slice(&48u16.to_le_bytes());
+        rec0[6..8].copy_from_slice(&3u16.to_le_bytes());
+        rec0[0x14..0x16].copy_from_slice(&56u16.to_le_bytes());
+        rec0[0x16..0x18].copy_from_slice(&1u16.to_le_bytes());
 
         // USA check word at offset 48
         rec0[48..50].copy_from_slice(&[0xAA, 0x55]);

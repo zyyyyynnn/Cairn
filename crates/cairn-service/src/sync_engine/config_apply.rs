@@ -103,14 +103,19 @@ impl MultiVolumeEngine {
         }
     }
 
-    /// Drops volumes whose drive is no longer indexed (IDX-01).
+    /// Drops unindexed drives and updates each surviving volume's full-path exclusion mode.
     fn retain_indexed_volumes(&self, cfg: &ServiceConfig) {
+        let full_path_rules =
+            crate::exclusion::ExclusionRules::parse(&cfg.excluded_paths).uses_full_path_rules();
         let mut lock = self.volumes.write().unwrap();
         lock.retain(|&d, _| {
             !cfg.excluded_drives
                 .iter()
                 .any(|&ex| ex.eq_ignore_ascii_case(&d))
         });
+        for vol in lock.values_mut() {
+            vol.set_full_path_exclusion_rules(full_path_rules);
+        }
     }
 
     /// Reloads configuration from the service configuration file and applies it (SVC-05, IDX-09).

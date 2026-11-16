@@ -28,6 +28,8 @@ fn acquire_single_instance_mutex() -> Option<windows::Win32::Foundation::HANDLE>
     use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
     use windows::Win32::System::Threading::CreateMutexW;
 
+    // SAFETY: `w!(...)` is a static null-terminated wide string and the returned mutex handle
+    // is closed on duplicate-instance exit or kept alive until process termination.
     unsafe {
         let handle = CreateMutexW(None, true, w!(r"Local\CairnAppInstanceMutex"));
         match handle {

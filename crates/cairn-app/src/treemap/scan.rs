@@ -102,8 +102,7 @@ impl CairnApp {
             return;
         };
         state.reset_scan_state();
-        state.scan_fade_epoch = 0;
-        state.is_scanning = true;
+        state.begin_scan();
         let epoch = state.request_epoch;
         cx.notify();
 
@@ -317,7 +316,7 @@ mod tests {
     #[test]
     fn revealing_a_finished_scan_keys_the_dissolve_to_that_generation() {
         let mut state = crate::treemap::state::TreemapViewState::new_headless('C');
-        state.is_scanning = true;
+        state.begin_scan();
         state.reveal_content();
         assert!(
             state.scan_fade_epoch > 0,

@@ -47,8 +47,8 @@ pub use property_store::{
     FOLDER_SOURCE_ID_BASE,
 };
 pub use sort::{
-    compare_cross_source_records, sort_indices, sort_indices_for_root, sort_indices_with_spec,
-    PresortedIndices, SortColumn, SortDirection, SortKey, SortSpec,
+    compare_cross_source_records, sort_indices_with_spec, PresortedIndices, SortColumn,
+    SortContext, SortDirection, SortKey, SortSpec,
 };
 pub use syntax::{
     parse_query, parse_query_with, parse_search_term, QueryDefaults, QueryExpr, SearchTerm,

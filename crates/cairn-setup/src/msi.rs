@@ -8,6 +8,7 @@
 //! process. That keeps the MSI's own external UI silent while giving this window the real action
 //! and percentage records: the bar reflects work Windows Installer actually reports, never a timer.
 
+use crate::registry::wide;
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -282,6 +283,7 @@ fn run_uninstall_all(
     sender: Option<&Sender<MsiEvent>>,
 ) -> Result<MsiSuccess, MsiFailure> {
     let log_wide = wide(log.as_os_str());
+    // SAFETY: `log_wide` is null-terminated and stays valid for the synchronous MsiEnableLogW call.
     unsafe {
         let _ = MsiEnableLogW(log_filter(), PCWSTR(log_wide.as_ptr()), 0);
     }
@@ -307,6 +309,8 @@ fn run_uninstall(
         .as_ref()
         .map(|context| context as *const CallbackContext as *const c_void);
 
+    // SAFETY: `product_wide` is null-terminated, `callback_context` outlives `MsiConfigureProductW`,
+    // and the external UI handler is cleared before `callback_context` drops.
     unsafe {
         let _ = MsiSetInternalUI(INSTALLUILEVEL_NONE, None);
         let _ = MsiSetExternalUIRecord(Some(external_ui_handler), MSI_FILTER, context_ptr, None);
@@ -337,6 +341,8 @@ fn run_msi(
         .as_ref()
         .map(|context| context as *const CallbackContext as *const c_void);
 
+    // SAFETY: all wide strings are null-terminated and `callback_context` outlives `MsiInstallProductW`;
+    // `MsiSetExternalUIRecord(None, ...)` unregisters the callback before `callback_context` drops.
     unsafe {
         let _ = MsiSetInternalUI(INSTALLUILEVEL_NONE, None);
         let _ = MsiEnableLogW(log_filter(), PCWSTR(log_wide.as_ptr()), 0);
@@ -422,12 +428,16 @@ unsafe extern "system" fn external_ui_handler(
     message: u32,
     record: MSIHANDLE,
 ) -> i32 {
-    let Some(context) = context.cast::<CallbackContext>().as_ref() else {
+    // SAFETY: `context` was passed to `MsiSetExternalUIRecord` as `&CallbackContext` on the calling thread,
+    // which outlives every callback invocation before being unregistered.
+    let Some(context) = (unsafe { context.cast::<CallbackContext>().as_ref() }) else {
         return 0;
     };
 
     if message == INSTALLMESSAGE_PROGRESS.0 as u32 {
+        // SAFETY: `record` is a valid progress MSIHANDLE provided by Windows Installer for this callback.
         let kind = unsafe { MsiRecordGetInteger(record, 1) };
+        // SAFETY: `record` is a valid progress MSIHANDLE provided by Windows Installer for this callback.
         let value = unsafe { MsiRecordGetInteger(record, 2) };
         let event = context
             .progress
@@ -438,11 +448,13 @@ unsafe extern "system" fn external_ui_handler(
             let _ = context.sender.send(MsiEvent::Progress { current, total });
         }
     } else if message == INSTALLMESSAGE_ACTIONSTART.0 as u32 {
-        if let Some(action) = record_string(record, 1) {
+        // SAFETY: `record` is a valid action-start MSIHANDLE provided by Windows Installer.
+        if let Some(action) = unsafe { record_string(record, 1) } {
             let _ = context.sender.send(MsiEvent::Action(action));
         }
     } else if message == INSTALLMESSAGE_ERROR.0 as u32 {
-        if let Some(action) = record_string(record, 2) {
+        // SAFETY: `record` is a valid error MSIHANDLE provided by Windows Installer.
+        if let Some(action) = unsafe { record_string(record, 2) } {
             let _ = context.sender.send(MsiEvent::Action(action));
         }
     }
@@ -495,6 +507,7 @@ pub fn package_product_code(package: &std::path::Path) -> Option<String> {
 unsafe fn record_string(record: MSIHANDLE, field: u32) -> Option<String> {
     let mut buffer = vec![0u16; 512];
     let mut length = buffer.len() as u32;
+    // SAFETY: caller guarantees `record` is a live `MSIHANDLE`; `buffer` holds `length` writable UTF-16 code units.
     let result = unsafe {
         MsiRecordGetStringW(
             record,
@@ -508,11 +521,6 @@ unsafe fn record_string(record: MSIHANDLE, field: u32) -> Option<String> {
     }
     let length = (length as usize).min(buffer.len());
     Some(String::from_utf16_lossy(&buffer[..length]))
-}
-
-fn wide(value: &std::ffi::OsStr) -> Vec<u16> {
-    use std::os::windows::ffi::OsStrExt;
-    value.encode_wide().chain(std::iter::once(0)).collect()
 }
 
 #[cfg(test)]

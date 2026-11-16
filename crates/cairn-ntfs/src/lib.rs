@@ -3,7 +3,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! `cairn-ntfs`: Direct NTFS $MFT parsing, USN Journal monitoring, and volume operations.
-#![allow(clippy::chunks_exact_to_as_chunks)]
 
 pub mod attribute;
 pub mod boot_sector;

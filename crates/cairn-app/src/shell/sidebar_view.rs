@@ -267,7 +267,7 @@ fn keyboard_row(
         }))
         .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
             if matches!(event, ClickEvent::Mouse(_)) {
-                this.results.keyboard_navigation = false;
+                cairn_ui::focus::set_keyboard_navigation(false, cx);
                 click_focus.focus(window, cx);
                 cx.notify();
             }
@@ -329,7 +329,7 @@ impl CairnApp {
                     .read(cx)
                     .clone();
                 let is_focused =
-                    focus.contains_focused(window, cx) && self.results.keyboard_navigation;
+                    focus.contains_focused(window, cx) && cairn_ui::focus::keyboard_navigation(cx);
                 let item = sidebar_row(
                     category_icon(category),
                     self.cached_text(category.label_key()),
@@ -364,7 +364,7 @@ impl CairnApp {
             .read(cx)
             .clone();
         let bin_is_focused =
-            bin_focus.contains_focused(window, cx) && self.results.keyboard_navigation;
+            bin_focus.contains_focused(window, cx) && cairn_ui::focus::keyboard_navigation(cx);
         let bin_row = sidebar_row(
             IconName::Recycle,
             self.cached_text("sidebar_recycle_bin"),
@@ -408,7 +408,7 @@ impl CairnApp {
                     .read(cx)
                     .clone();
                 let is_focused =
-                    focus.contains_focused(window, cx) && self.results.keyboard_navigation;
+                    focus.contains_focused(window, cx) && cairn_ui::focus::keyboard_navigation(cx);
                 let item = sidebar_row(IconName::HardDrive, label, is_active, tokens, icon_metrics);
 
                 let row = keyboard_row(
@@ -424,8 +424,8 @@ impl CairnApp {
                 );
                 let app = cx.entity();
                 let rescan_label = self.cached_text("ctx_rescan_source");
-                let disabled =
-                    !self.service.is_service_connected || self.service.service_control_pending;
+                let disabled = !self.service.connection.is_connected()
+                    || self.service.connection.is_control_pending();
                 attach_rescan_menu(
                     div()
                         .id(element_id("sidebar-drive-menu", &drive.to_string()))
@@ -459,7 +459,8 @@ impl CairnApp {
                 )
                 .read(cx)
                 .clone();
-            let is_focused = focus.contains_focused(window, cx) && self.results.keyboard_navigation;
+            let is_focused =
+                focus.contains_focused(window, cx) && cairn_ui::focus::keyboard_navigation(cx);
             let item = sidebar_row(
                 IconName::Folder,
                 root_path.clone(),
@@ -477,8 +478,8 @@ impl CairnApp {
             let rescan_path = root_path;
             let app = cx.entity();
             let rescan_label = self.cached_text("ctx_rescan_source");
-            let disabled =
-                !self.service.is_service_connected || self.service.service_control_pending;
+            let disabled = !self.service.connection.is_connected()
+                || self.service.connection.is_control_pending();
             let click_focus = focus.clone();
             let row = div()
                 .id(element_id("sidebar-source", &source_id.0.to_string()))
@@ -494,7 +495,7 @@ impl CairnApp {
                 .track_focus(&focus)
                 .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                     if matches!(event, ClickEvent::Mouse(_)) {
-                        this.results.keyboard_navigation = false;
+                        cairn_ui::focus::set_keyboard_navigation(false, cx);
                         click_focus.focus(window, cx);
                     }
                     this.sync_visualization_dir();
@@ -527,8 +528,8 @@ impl CairnApp {
         // While the connection probe or the first query is still running, an empty drive list is
         // not a fact about the machine. Saying "no drives found" there reports a failure that has
         // not happened; status reports whether the index is being read.
-        let awaiting_index =
-            drive_rows.is_empty() && (self.service.is_probing_service || self.query.is_searching);
+        let awaiting_index = drive_rows.is_empty()
+            && (self.service.connection.is_probing() || self.query.is_searching());
         let drive_elements = if awaiting_index {
             Vec::new()
         } else if drive_rows.is_empty() {
@@ -650,14 +651,8 @@ fn category_icon(category: FilterCategory) -> IconName {
 
 #[cfg(test)]
 mod tests {
-    use super::{sidebar_icon_svg, text_ink_offset};
+    use super::sidebar_icon_svg;
     use gpui_kit::assets::IconName;
-    use gpui_kit::gpui::px;
-
-    #[test]
-    fn text_ink_offset_is_measured_from_the_line_centre() {
-        assert_eq!(text_ink_offset(px(12.0), px(3.0), px(4.0)), px(0.5));
-    }
 
     #[test]
     fn sidebar_variant_keeps_the_light_stroke() {

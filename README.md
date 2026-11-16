@@ -80,17 +80,15 @@ cargo run -p xtask -- package
 ## 验证
 
 ```powershell
-cargo fmt --all -- --check
+cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 $env:RUSTDOCFLAGS="-D warnings"; cargo doc --workspace --no-deps
 cargo test --workspace
 cargo deny check
-cargo run -p xtask -- check-i18n
-cargo run -p xtask -- check-docs
-cargo run -p xtask -- check-size
+cargo run -p xtask -- check
 ```
 
-工作区测试含 5 个 `#[ignore]` 用例，前置条件与运行命令见[测试与验证](docs/engineering/testing.md)；内容回填端到端用例由 CI 的 `Test / Backfill` 作业执行。
+需要外部二进制、独立网络或提权前置条件的 `#[ignore]` 用例由 [`docs/engineering/testing.md`](docs/engineering/testing.md) 统一登记并由 `xtask check-hygiene` 校验同步；内容回填端到端用例由 CI 的 `Test / Backfill` 作业执行。
 
 ## 仓库结构
 

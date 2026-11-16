@@ -78,8 +78,6 @@ const EMPTY: &[&str] = &[];
 /// Every key control of the main window. Adding a control means adding a row here, and the tests
 /// below reject a row the render path does not build.
 pub const KEY_CONTROLS: &[KeyControl] = &[
-    // ---- locations sidebar: the file-type rows, and the column that holds them (UI-01, QRY-06) ----
-    // ---- title bar: sidebar toggle, back/forward/up navigation (UI-01) -----------
     KeyControl {
         key: "sidebar-toggle",
         element: "sidebar-toggle",
@@ -249,7 +247,6 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         named_by: "",
         requirement: "UI-01, QRY-06",
     },
-    // 回收站 is a location beside the file-type rows, not a filter category.
     KeyControl {
         key: "sidebar-recycle-bin",
         element: "sidebar-recycle-bin",
@@ -259,10 +256,6 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         named_by: "",
         requirement: "UI-01, DSV-08",
     },
-    // ---- search band: the query box (UI-03) ----------------------------------------
-    // The match flags live in the 匹配 dropdown, not in the search band: their keys are promised by the command model
-    // ([`crate::shell::command_groups::GroupCommand::shortcut`]) and their hints are drawn by the popup from
-    // the binding, which is what keeps a menu label and a keystroke on one definition.
     KeyControl {
         key: "search-input",
         element: "search-input",
@@ -290,8 +283,6 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         named_by: "",
         requirement: "DSV-04",
     },
-    // Each breadcrumb segment owns a menu of its own child folders, so the
-    // trigger is a repeated family named by the segment it opens.
     KeyControl {
         key: "treemap-path-menu",
         element: "treemap-path-menu",
@@ -301,9 +292,6 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         named_by: "treemap_path_menu_for",
         requirement: "DSV-04",
     },
-    // A path menu row commands on the folder it names, so it reports as a menu item
-    // whose accessible name carries the verb; the framework's own wrapper keeps the
-    // selection semantics.
     KeyControl {
         key: "treemap-path-menu-row",
         element: "treemap-path-menu-row",
@@ -313,8 +301,6 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         named_by: "path_menu_option",
         requirement: "DSV-04",
     },
-    // The menu's foot note states what the list leaves out. It is a message,
-    // not an option, and it carries no icon lane of its own.
     KeyControl {
         key: "treemap-path-menu-note",
         element: "treemap-path-menu-note",
@@ -324,11 +310,6 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         named_by: "path_menu_note",
         requirement: "DSV-04",
     },
-    // ---- title-bar menu bar: the six top-level menus (UI-01, UI-03) ----------------
-    // Each trigger is a `Button` carrying the element id the view builds, so `element` is exactly what
-    // GPUI sees, and `Role::Button` is exactly what a `Button` reports. The popup they open and the
-    // items inside it belong to the component, which sets their roles and reads their key hints from
-    // the keymap.
     KeyControl {
         key: "toolbar-menu-file",
         element: "toolbar-menu:file",
@@ -392,10 +373,6 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         named_by: "",
         requirement: "UI-01",
     },
-    // ---- result table: heading row, column headings, band, rows (UI-02) -----------
-    // The table region: the heading row and the rows under it, together wide enough that a tight
-    // window scrolls them sideways. It is the region that answers Left, Right, Home and End, so it
-    // carries the keys as its own announcement and takes focus as a Tab stop (UI-03).
     KeyControl {
         key: "result-table",
         element: "result-table",
@@ -748,9 +725,6 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         named_by: "",
         requirement: "SVC-03, SVC-04, UI-03",
     },
-    // ---- status band: the result count (UI-01) -------------------------------------
-    // The Treemap zoom badge appears only above 100%; it resets the view
-    // without touching the selected node.
     KeyControl {
         key: "treemap-zoom-reset",
         element: "treemap-zoom-reset",
@@ -769,7 +743,6 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         named_by: "",
         requirement: "UI-01",
     },
-    // ---- app-owned transient status -------------------------------------------------
     KeyControl {
         key: "toast",
         element: "toast",

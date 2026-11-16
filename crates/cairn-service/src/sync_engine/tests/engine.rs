@@ -310,7 +310,6 @@ fn a_contended_volume_lock_serves_the_cached_summary() {
 fn test_volume_cache_invalidation_does_not_silently_return_stale_data() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
 
-    // 1. Save a cached index for volume 'Z' with old records
     let mut vol_z = VolumeIndex::new('Z');
     vol_z.volume_serial = 0xEEEE;
     vol_z.journal_id = 999;
@@ -327,17 +326,8 @@ fn test_volume_cache_invalidation_does_not_silently_return_stale_data() {
         is_reparse_point: false,
     }]);
 
-    persistence::save_volume_index_atomic(
-        temp_dir.path(),
-        'Z',
-        vol_z.volume_serial,
-        vol_z.journal_id,
-        vol_z.last_usn,
-        vol_z.records(),
-        vol_z.arena(),
-        vol_z.directory_sizes_valid(),
-    )
-    .expect("save_volume_index_atomic");
+    persistence::save_volume_index_atomic(temp_dir.path(), &vol_z.snapshot())
+        .expect("save_volume_index_atomic");
 
     // Corrupt cache file (simulating invalidation / corrupt index)
     let cache_file = temp_dir.path().join("vol_Z.idx");
@@ -467,7 +457,6 @@ fn test_excluded_drives_filtering() {
         ..Default::default()
     };
 
-    // 1. Initialize engine with drives C and D, but D is in excluded_drives
     let engine = MultiVolumeEngine::with_index_dir_drives_and_config(
         temp_dir.path(),
         vec!['C', 'D'],
@@ -482,7 +471,6 @@ fn test_excluded_drives_filtering() {
         "Excluded drive D must not be initialized (IDX-01)"
     );
 
-    // 2. Add an excluded volume manually - add_volume must reject it
     let mut vol_d = VolumeIndex::new('D');
     vol_d.ingest_items(vec![ExtractedItem {
         frn: 10,
@@ -504,7 +492,6 @@ fn test_excluded_drives_filtering() {
         "add_volume must reject excluded drive D"
     );
 
-    // 3. Hot update: add 'C' to excluded_drives
     let mut new_cfg = engine.get_config();
     new_cfg.excluded_drives.push('C');
     engine.update_config(new_cfg);
@@ -646,7 +633,6 @@ fn test_excluded_paths_filtering_and_hot_apply() {
 
     let cancel = CancellationToken::new();
 
-    // 1. Search without query text (returns all allowed)
     let outcome = engine.execute_search_multi(
         "",
         &QueryDefaults::default(),
@@ -655,16 +641,9 @@ fn test_excluded_paths_filtering_and_hot_apply() {
     );
     let results = engine.test_items(outcome.rows);
     let total = outcome.total;
-    // Only public_doc.txt (frn 40) should be returned:
-    // - deleted_file.txt in $Recycle.Bin is excluded
-    // - confidential.pdf in C:\Secret is excluded (via C:/Secret/ rule)
-    // - scratch.tmp (*.tmp) is excluded (via **/*.tmp rule)
-    // - package.json in node_modules is excluded (via node_modules/ rule)
-    // - $Recycle.Bin, Secret, node_modules directories match excluded rules
     assert_eq!(total, 1);
     assert_eq!(results.len(), 1);
 
-    // 2. Direct search for deleted_file must be excluded
     let outcome = engine.execute_search_multi(
         "deleted_file",
         &QueryDefaults::default(),
@@ -676,7 +655,6 @@ fn test_excluded_paths_filtering_and_hot_apply() {
     assert_eq!(total, 0);
     assert!(results.is_empty());
 
-    // 3. Direct search for confidential must be excluded
     let outcome = engine.execute_search_multi(
         "confidential",
         &QueryDefaults::default(),
@@ -688,7 +666,6 @@ fn test_excluded_paths_filtering_and_hot_apply() {
     assert_eq!(total, 0);
     assert!(results.is_empty());
 
-    // 4. Direct search for package.json in node_modules must be excluded
     let outcome = engine.execute_search_multi(
         "package.json",
         &QueryDefaults::default(),
@@ -700,7 +677,7 @@ fn test_excluded_paths_filtering_and_hot_apply() {
     assert_eq!(total, 0);
     assert!(results.is_empty());
 
-    // 5. Hot config update: remove **/*.tmp rule (IDX-09)
+    // Removing **/*.tmp via hot config update must surface scratch.tmp without restart (IDX-09).
     let mut new_cfg = engine.get_config();
     new_cfg.excluded_paths.retain(|p| !p.contains("*.tmp"));
     engine.update_config(new_cfg);

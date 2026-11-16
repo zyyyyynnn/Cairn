@@ -25,7 +25,7 @@ use crate::model::{
     default_install_dir, initial_screen, validate_install_path, InstalledProduct, Launch,
     PathProblem, Screen, Stage,
 };
-use crate::msi::{self, MsiEvent, MsiFailure};
+use crate::msi::{self, MsiEvent};
 use crate::payload::PayloadError;
 use crate::platform;
 use crate::preview::Preview;
@@ -45,35 +45,16 @@ gpui_kit::gpui::actions!(
     ]
 );
 
-/// The page-level outcome of a failed transaction. It names the sentence to show. The raw
-/// installer code is not part of it: that code belongs to the MSI log, which the failure page
-/// links to, and nowhere on the page itself.
-#[derive(Clone, Debug)]
-pub struct SetupError {
-    pub key: &'static str,
-}
-
-impl SetupError {
-    pub fn simple(key: &'static str) -> Self {
-        Self { key }
-    }
-
-    pub fn from_failure(failure: &MsiFailure) -> Self {
-        Self::simple(failure.kind.message_key())
-    }
-
-    pub fn from_payload(error: &PayloadError) -> Self {
-        let key = match error {
-            PayloadError::Missing
-            | PayloadError::TooLarge
-            | PayloadError::AlreadyEmbedded
-            | PayloadError::EmptyInput => "error_no_payload",
-            PayloadError::CorruptFooter | PayloadError::Checksum | PayloadError::SetupHash => {
-                "error_msi_invalid"
-            }
-            PayloadError::Io(_) => "error_msi_fatal",
-        };
-        Self::simple(key)
+fn error_key_from_payload(error: &PayloadError) -> &'static str {
+    match error {
+        PayloadError::Missing
+        | PayloadError::TooLarge
+        | PayloadError::AlreadyEmbedded
+        | PayloadError::EmptyInput => "error_no_payload",
+        PayloadError::CorruptFooter | PayloadError::Checksum | PayloadError::SetupHash => {
+            "error_msi_invalid"
+        }
+        PayloadError::Io(_) => "error_msi_fatal",
     }
 }
 
@@ -126,7 +107,7 @@ pub struct SetupApp {
     pub(crate) progress: Option<f32>,
     pub(crate) stage: Stage,
     pub(crate) log: Option<PathBuf>,
-    pub(crate) error: Option<SetupError>,
+    pub(crate) error: Option<&'static str>,
     pub(crate) notice: Option<&'static str>,
     pub(crate) cleanup_incomplete: bool,
     pub(crate) restart_required: bool,
@@ -269,10 +250,10 @@ impl SetupApp {
 
         let error = preview
             .as_ref()
-            .and_then(|preview| preview.error.clone())
+            .and_then(|preview| preview.error)
             .or_else(|| {
                 (launch == Launch::Uninstall && installed.is_none())
-                    .then_some(SetupError::simple("error_not_installed"))
+                    .then_some("error_not_installed")
             });
         let install_dir = installed
             .as_ref()
@@ -401,7 +382,7 @@ impl SetupApp {
     fn fail_staging(&mut self, error: std::io::Error, cx: &mut Context<Self>) {
         tracing::warn!("installer staging root is unavailable: {error}");
         self.log = None;
-        self.error = Some(SetupError::simple("error_staging"));
+        self.error = Some("error_staging");
         self.screen = Screen::Failed;
         self.installing.set(false);
         cx.notify();
@@ -430,7 +411,7 @@ impl SetupApp {
         let (msi, payload_dir) = match quiet::msi_for_this_build(None) {
             Ok(value) => value,
             Err(error) => {
-                self.error = Some(SetupError::from_payload(&error));
+                self.error = Some(error_key_from_payload(&error));
                 self.screen = Screen::Failed;
                 cx.notify();
                 return;
@@ -487,7 +468,7 @@ impl SetupApp {
         // Cairn; the removal decision uses the current registration, not the cached banner state.
         let product = installed::installed_product();
         let Some(product) = product else {
-            self.error = Some(SetupError::simple("error_not_installed"));
+            self.error = Some("error_not_installed");
             self.screen = Screen::Failed;
             cx.notify();
             return;
@@ -497,18 +478,25 @@ impl SetupApp {
             Err(error) => {
                 match platform::uninstall_log_path() {
                     Ok(log) => {
-                        let _ = std::fs::write(
+                        if let Err(write_err) = std::fs::write(
                             &log,
                             format!("MSI product enumeration failed: {error}\n"),
-                        );
-                        self.log = Some(log);
+                        ) {
+                            tracing::warn!(
+                                "could not write uninstall log {}: {write_err}",
+                                log.display()
+                            );
+                            self.log = None;
+                        } else {
+                            self.log = Some(log);
+                        }
                     }
                     Err(log_error) => {
                         self.log = None;
                         tracing::warn!("uninstall log is unavailable: {log_error}");
                     }
                 }
-                self.error = Some(SetupError::simple("error_msi_unknown"));
+                self.error = Some("error_msi_unknown");
                 self.screen = Screen::Failed;
                 cx.notify();
                 return;
@@ -615,7 +603,7 @@ impl SetupApp {
         }
         self.record_remaining = false;
         let Some(install_dir) = self.install_dir.clone() else {
-            self.error = Some(SetupError::simple("error_msi_unknown"));
+            self.error = Some("error_msi_unknown");
             self.screen = Screen::Failed;
             cx.notify();
             return;
@@ -708,7 +696,7 @@ impl SetupApp {
         if let Some(dir) = self.payload_dir.take() {
             let _ = std::fs::remove_dir_all(dir);
         }
-        self.error = Some(SetupError::simple("error_msi_unknown"));
+        self.error = Some("error_msi_unknown");
         self.screen = Screen::Failed;
         cx.notify();
     }
@@ -765,9 +753,9 @@ impl SetupApp {
                         // A forced cleanup has its own failure wording: the page offers no retry,
                         // because a second attempt could target a newer install.
                         self.error = Some(if was_uninstalling && self.forced_cleanup {
-                            SetupError::simple("error_msi_cleanup_failed")
+                            "error_msi_cleanup_failed"
                         } else {
-                            SetupError::from_failure(&failure)
+                            failure.kind.message_key()
                         });
                         self.screen = Screen::Failed;
                     }

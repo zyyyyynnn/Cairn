@@ -32,36 +32,6 @@ pub struct SourceIndex<'a> {
     pub has_tombstones: bool,
 }
 
-impl<'a> SourceIndex<'a> {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        source_id: SourceId,
-        root_prefix: &'a str,
-        records: &'a [FileRecord],
-        arena: &'a NamePool,
-        path_cache: &'a DirectoryPathCache,
-        presorted: Option<&'a PresortedIndices>,
-        properties: &'a PropertySideTables,
-    ) -> Self {
-        Self {
-            source_id,
-            root_prefix,
-            records,
-            arena,
-            path_cache,
-            presorted,
-            properties,
-            has_tombstones: false,
-        }
-    }
-
-    /// Marks whether `records` may contain live tombstones excluded from presorted snapshots.
-    pub fn with_tombstones(mut self, has_tombstones: bool) -> Self {
-        self.has_tombstones = has_tombstones;
-        self
-    }
-}
-
 /// Execution policy passed to [`execute_query`].
 #[derive(Clone, Default)]
 pub struct QueryPolicy<'a> {

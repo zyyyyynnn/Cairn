@@ -94,7 +94,6 @@ impl PipeServer {
             server.connect().await?;
             let connected_server = server;
 
-            // Immediately create next pipe instance to listen for concurrent clients
             server = self.create_pipe_instance(false)?;
 
             let engine = self.engine.clone();
@@ -461,8 +460,8 @@ fn process_request(
                     outcome.highlight_terms,
                     outcome.snippets,
                 );
-                let first_page = engine.with_sources_for_rows(|vols, folders, props| {
-                    sessions.get_rows_multi(session_id, 0, first_page_limit, vols, folders, props)
+                let first_page = engine.with_sources_for_rows(|sources| {
+                    sessions.get_rows_multi(session_id, 0, first_page_limit, &sources)
                 });
                 match first_page {
                     Ok(rows) => {
@@ -521,8 +520,8 @@ fn process_request(
             offset,
             limit,
         } => {
-            let rows = engine.with_sources_for_rows(|vols, folders, props| {
-                sessions.get_rows_multi(session_id, offset, limit, vols, folders, props)
+            let rows = engine.with_sources_for_rows(|sources| {
+                sessions.get_rows_multi(session_id, offset, limit, &sources)
             });
             match rows {
                 Ok(rows) => ResponsePayload::RowsResult {
@@ -1019,8 +1018,7 @@ mod tests {
     #[test]
     fn rescan_reports_failure_instead_of_claiming_success() {
         let harness = Harness::new(ServiceConfig::default());
-        // No volume is indexed in this harness, so a rescan cannot succeed; the old code answered
-        // `success: true` unconditionally.
+        // No volume is indexed in this harness, so rescan requests must return failure.
         match harness.handle(
             ClientRequest::Rescan { volume_id: None },
             CallerAuthorization::Administrator,

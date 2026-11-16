@@ -815,7 +815,6 @@ fn test_content_query_intersection_with_mft() {
     ]);
     engine.add_volume(vol);
 
-    // 2. Index documents with a writer (the worker's role), then publish a read-only searcher.
     let writer = ContentIndex::open_or_create(&engine.content_dir).expect("content index");
     writer
         .index_document_deferred(

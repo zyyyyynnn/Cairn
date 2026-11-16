@@ -18,6 +18,7 @@
 
 use crate::search::filters::FilterCategory;
 use crate::search::input::{QueryTextMetrics, SearchInputState};
+use crate::service::{ServiceConnection, SubsystemState};
 use crate::shell::command_groups::MenuGroup;
 use crate::shell::i18n::I18nManager;
 use crate::shell::settings::AppSettings;
@@ -61,10 +62,7 @@ pub mod layout {
 
     use crate::shell::theme;
 
-    // ---- the 4px ladder ------------------------------------------------------------
-    /// One 4px step in the window's rem. Every layout distance is an integer multiple of this, so
-    /// a 100% window renders whole 4px values while the interface zoom still scales the shell.
-    /// The type scale stays at the compact 14px base; spacing and type are separate token families.
+    /// One 4px step in the window's rem so a 100% window renders whole 4px values while zoom scales.
     pub const STEP: f32 = 4.0 / theme::BASE_FONT_PX;
     pub const SPACE_4: f32 = 1.0 * STEP;
     pub const SPACE_8: f32 = 2.0 * STEP;
@@ -73,88 +71,40 @@ pub mod layout {
     pub const SPACE_32: f32 = 8.0 * STEP;
     pub const SPACE_48: f32 = 12.0 * STEP;
 
-    // ---- the two base steps --------------------------------------------------------
-    /// One taller interactive control: a toolbar trigger or a table action. The query box and path
-    /// field take the compact row step, so a control never invents a step of its own.
     pub const CONTROL_HEIGHT: f32 = SPACE_32;
-    /// One result row: 7 four-pixel steps. Virtualization math requires it to be constant for a
-    /// frame. Navigation rows share this step: the sidebar is a list before it is a toolbar.
+    /// Virtualization math requires a fixed row height per frame; sidebar rows share this step.
     pub const ROW_HEIGHT: f32 = 7.0 * STEP;
 
-    // ---- bands, each one an expression over the base steps --------------------------
-    /// The 8px inner step: padding inside a row, lane, section or band, and the gap between related
-    /// parts such as an icon and its label or two peer controls. One token covers both roles so the
-    /// same distance cannot drift between an inset and a gap.
     pub const INNER_SPACING: f32 = SPACE_8;
-    /// The search band: the query box plus the tight inset that keeps it off the band's edges.
     pub const SEARCH_BAND_HEIGHT: f32 = ROW_HEIGHT + 2.0 * TIGHT_LEAD;
-    /// The column-heading row shares the result row's height so it reads as the first row of the
-    /// table, not a taller control band above it.
     pub const HEADER_HEIGHT: f32 = ROW_HEIGHT;
-    /// The status line: the compact data row, so it takes the result-row step. The shell pins it
-    /// so its arithmetic and the rendered band cannot drift apart.
     pub const STATUS_HEIGHT: f32 = ROW_HEIGHT;
-    /// The option row step every dropdown in the app shares: the title-bar menus, the row context
-    /// menu and the Treemap path menu. `gpui-kit`'s `PopupMenu` paints its own rows at this fixed
-    /// physical step, so a menu row the application draws itself has to match it rather than take
-    /// the 28px data-row step, which would leave two menu row heights in one product.
+    /// Matches `gpui-kit`'s `PopupMenu` physical row height across custom and component menus.
     pub const MENU_ROW_HEIGHT: Pixels = gpui_kit::gpui::px(26.0);
-    // ---- column lanes, in 4px steps ------------------------------------------------
-    // The heading row and every result row read the same three widths, so a column is one definition.
-    /// Narrowest name lane: below this a filename stops being the thing the row is for.
-    pub const NAME_MIN_COLUMN: f32 = 42.0 * STEP; // 168px
-    /// Narrowest path lane, kept wide enough that the trailing folder still reads.
-    pub const PATH_MIN_COLUMN: f32 = 28.0 * STEP; // 112px
-    pub const SIZE_COLUMN: f32 = 21.0 * STEP; // 84px
-    pub const DATE_COLUMN: f32 = 33.0 * STEP; // 132px
-    /// Fixed width of the optional created-time lane.
+    // Heading and result rows read the same widths so column dividers never drift.
+    pub const NAME_MIN_COLUMN: f32 = 42.0 * STEP;
+    pub const PATH_MIN_COLUMN: f32 = 28.0 * STEP;
+    pub const SIZE_COLUMN: f32 = 21.0 * STEP;
+    pub const DATE_COLUMN: f32 = 33.0 * STEP;
     pub const CREATED_COLUMN: f32 = DATE_COLUMN;
-    pub const LENGTH_COLUMN: f32 = 22.0 * STEP; // 88px
-    pub const AUTHOR_COLUMN: f32 = 32.0 * STEP; // 128px
-    pub const TAGS_COLUMN: f32 = 34.0 * STEP; // 136px
-    pub const DIMENSIONS_COLUMN: f32 = 26.0 * STEP; // 104px
-    pub const FRAMERATE_COLUMN: f32 = 21.0 * STEP; // 84px
-    /// How far one keyboard step moves the columns, as a fraction of the width the window actually
-    /// shows of the table.
-    ///
-    /// A fixed pixel step would be a different distance at every zoom and in every window: two steps
-    /// would clear the table on a laptop and never reach the last column on a wide monitor. A quarter
-    /// of the visible table keeps the whole horizontal extent four steps away however the frame is
-    /// sized, and leaves the columns the eye just read partly on screen so the move does not lose the
-    /// row being compared.
+    pub const LENGTH_COLUMN: f32 = 22.0 * STEP;
+    pub const AUTHOR_COLUMN: f32 = 32.0 * STEP;
+    pub const TAGS_COLUMN: f32 = 34.0 * STEP;
+    pub const DIMENSIONS_COLUMN: f32 = 26.0 * STEP;
+    pub const FRAMERATE_COLUMN: f32 = 21.0 * STEP;
     pub const TABLE_SCROLL_STEP_FACTOR: f32 = 0.25;
-    /// Widest an explanatory line runs before it wraps: long enough to read as one sentence, short
-    /// enough that the message never decides the width of the region holding it.
-    pub const MESSAGE_MAX_WIDTH: f32 = 154.0 * STEP; // 616px
-    /// The serif sentence's ink centre sits 1.5px below its flex line box at this heading step.
-    /// The state action uses it to keep its 24px icon on the sentence's optical centre; it is a
-    /// correction, not a ladder distance.
+    pub const MESSAGE_MAX_WIDTH: f32 = 154.0 * STEP;
+    /// Baseline optical correction centering the 24px state icon beside the serif heading line box.
     pub const STATE_ACTION_OPTICAL_OFFSET: f32 = 1.5 / theme::BASE_FONT_PX;
-    /// One dialog surface for every alert: 384px wide at 100%, keeping a filename and its
-    /// explanation readable without the half-empty framework default.
-    pub const DIALOG_WIDTH: f32 = 96.0 * STEP; // 384px
-    /// Where a compact alert is seated in the window before layout. The surface itself grows with
-    /// its copy instead of reserving a fixed height; the viewport cap scrolls a very long body.
-    pub const DIALOG_SEAT_HEIGHT: f32 = 32.0 * STEP; // 128px
+    pub const DIALOG_WIDTH: f32 = 96.0 * STEP;
+    pub const DIALOG_SEAT_HEIGHT: f32 = 32.0 * STEP;
 
-    // ---- panes ---------------------------------------------------------------------
-    /// The sidebar renders at this width or not at all; collapsing clips its
-    /// full surface instead of compressing the rows.
     pub const SIDEBAR_WIDTH: f32 = 52.0 * STEP;
-    /// Sidebar leading glyph. It reads the shared control-glyph token (1rem = 14 px at 100%);
-    /// the 0.875rem row label sits inside the 1–1.25em icon band. A graphic size, not a layout
-    /// distance, so it is not part of the 4px ladder test.
     pub const SIDEBAR_ICON: f32 = theme::UI_ICON_SIZE;
 
-    // ---- physical title-bar geometry -----------------------------------------------
-    /// The platform-owned title-bar step, shared with GPUI Kit's components. It is not a `rem`
-    /// multiple: the bar and its caption buttons must agree with the window chrome at every zoom.
+    /// Platform title-bar height shared with `gpui-kit` components rather than scaled by `rem`.
     pub const TITLE_BAR_HEIGHT: Pixels = KIT_TITLE_BAR_HEIGHT;
-    /// The app mark's own 20 px token (5 × 4 px), separate from the 16 px wordmark.
     pub const TITLE_BAR_ICON: Pixels = cairn_ui::brand::APP_ICON_SIZE;
-    /// Caption buttons are square and use the bar's full step on both axes.
-    pub const WINDOW_CONTROL_WIDTH: Pixels = TITLE_BAR_HEIGHT;
-
     /// The shared leading edge of the content column: query band, table heading, row icon and
     /// status summary all inset by this. This is the text/icon baseline the title-bar menu, search
     /// glyph and table heading align to.
@@ -276,21 +226,30 @@ pub struct QueryDomain {
     /// Drive letter the sidebar scopes the search to, when one is active. The service reads it as a
     /// `X:` term, so the scope is part of the query the user can still edit by hand.
     pub scope_drive: Option<char>,
-    pub query_id: u64,
     pub active_session_id: Option<u64>,
     /// The service's refusal of the current query, if it answered with one. Cleared when a new
     /// query starts and when a result set arrives, so the band never outlives its query.
     pub rejection: Option<crate::search::query_orchestration::QueryRejection>,
     /// Non-fatal degradation notice reported by the service for the current query.
     pub degraded: Option<cairn_protocol::message::QueryDegradedReason>,
-    /// The current query stopped before the service answered. The rows already shown stay; the
-    /// empty band states the stop instead of claiming a no-match.
-    pub cancelled: bool,
     pub is_fetching_more: bool,
-    pub is_searching: bool,
     pub(crate) coordinator: crate::search::coordinator::SearchCoordinator,
     /// Byte offset where mouse text drag selection started, if a drag is in progress.
     pub text_selection_anchor: Option<usize>,
+}
+
+impl QueryDomain {
+    pub(crate) fn query_id(&self) -> u64 {
+        self.coordinator.current_query_id()
+    }
+
+    pub(crate) fn is_searching(&self) -> bool {
+        self.coordinator.is_searching()
+    }
+
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.coordinator.is_cancelled()
+    }
 }
 
 /// The result table: focus, scroll owners, viewport state and lane geometry.
@@ -313,65 +272,63 @@ pub struct ResultsDomain {
     pub(crate) column_drag: Option<ColumnDrag>,
     /// Active content-snippet preview popover state, when open on a row.
     pub(crate) snippet_preview: Option<crate::table::snippets::SnippetPreviewState>,
-    /// `true` while the last input was a keystroke. The result region paints its focus ring from
-    /// this, so a pointer click selects a row without drawing a second, redundant border around
-    /// the entire table.
-    pub keyboard_navigation: bool,
 }
 
 /// The indexer this window talks to, and everything it reports back.
 pub struct ServiceDomain {
-    pub is_service_connected: bool,
-    /// Whether SCM knows `CairnService`. It decides whether the recovery band can offer an elevated
-    /// start; opening the window never asks for elevation.
-    pub service_installed: bool,
-    /// One silent SCM start attempt per connection-loss episode. If it succeeds the probe is
-    /// repeated; if access is denied the explicit UAC button is the remaining route.
-    pub(crate) has_attempted_silent_start: bool,
+    pub(crate) connection: ServiceConnection,
     /// One status-refresh loop while a volume is building or catching up; it stops at the first
     /// all-Synced answer so the index capsule can disappear.
     pub(crate) is_refreshing_status: bool,
-    /// `true` while a connection probe is in flight. It is what makes the retry button answer at once
-    /// and refuse a second click while the first is still unanswered, so the state has to belong to
-    /// the probe and not to the button.
-    pub is_probing_service: bool,
-    pub service_issue: Option<crate::service::service_issue::ServiceIssue>,
     pub status: StatusBarModel,
     /// Persistent named-pipe session reused across status, query, page, tree and config RPCs.
     pub session: cairn_client::ServiceSession,
-    /// The service's content-index lifecycle, including backfill progress and the last error.
-    pub content_status: ContentIndexStatus,
-    pub content_status_loading: bool,
-    /// Why the last status read failed. Kept apart from [`ServiceDomain::content_action_error`]
-    /// because a status that could not be read is not the same condition as a service-side
-    /// content-index failure, and neither may be shown as "off".
-    pub content_status_error: Option<String>,
-    pub content_action_pending: bool,
-    /// A local submission failure (config write/pipe), kept separate from the service's own
-    /// content-index error so the page can show both without overwriting one with the other.
-    pub content_action_error: Option<String>,
-    pub property_status: PropertyIndexStatus,
-    pub property_status_loading: bool,
-    pub property_status_error: Option<String>,
-    pub property_action_pending: bool,
-    pub journal_status: IndexJournalStatus,
-    pub journal_status_loading: bool,
-    pub journal_status_error: Option<String>,
-    pub journal_action_pending: bool,
-    pub journal_entries: Vec<IndexJournalEntry>,
-    pub journal_entries_loading: bool,
-    pub journal_entries_error: Option<String>,
+    pub content: SubsystemState<ContentIndexStatus>,
+    pub property: SubsystemState<PropertyIndexStatus>,
+    pub journal: SubsystemState<IndexJournalStatus>,
+    pub journal_entries: SubsystemState<Vec<IndexJournalEntry>>,
     pub sources: Vec<SourceStatusSummary>,
-    pub service_control_pending: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum PathFieldMode {
+    #[default]
+    Closed,
+    Editing {
+        error: bool,
+    },
+}
+
+impl PathFieldMode {
+    pub(crate) fn is_editing(self) -> bool {
+        matches!(self, Self::Editing { .. })
+    }
+
+    pub(crate) fn has_error(self) -> bool {
+        matches!(self, Self::Editing { error: true })
+    }
 }
 
 /// The Treemap address field's retained state. The field is an ecosystem
 /// input; this wrapper owns the entity, the edit mode and the last rejection.
 pub(crate) struct TreemapPathField {
     pub input: Entity<InputState>,
-    pub editing: bool,
-    pub error: bool,
+    pub mode: PathFieldMode,
     pub _subscription: Subscription,
+}
+
+pub(crate) struct OpenGroupMenu {
+    pub group: MenuGroup,
+    pub popup: Entity<PopupMenu>,
+    pub _dismiss: Subscription,
+    pub entered: bool,
+}
+
+pub(crate) struct TreemapPathMenu {
+    pub popup: Entity<PopupMenu>,
+    pub target: String,
+    pub trigger_focus: Option<FocusHandle>,
+    pub _dismiss: Subscription,
 }
 
 /// The in-place rename editor: the selected row swaps its name cell for this input while a draft
@@ -381,6 +338,22 @@ pub(crate) struct RenameEditor {
     pub draft: Option<crate::shell::rename::RenameDraft>,
     pub in_flight: bool,
     pub _subscription: Subscription,
+}
+
+pub struct TableRevealState {
+    pub generation: u64,
+    pub fade_epoch: u64,
+    pub pending: bool,
+}
+
+impl TableRevealState {
+    pub fn new() -> Self {
+        Self {
+            generation: 0,
+            fade_epoch: 0,
+            pending: true,
+        }
+    }
 }
 
 pub struct CairnApp {
@@ -397,11 +370,7 @@ pub struct CairnApp {
     /// Whether Windows is using its dark app appearance, read once per run and refreshed when the
     /// settings dialog opens. `theme = system` resolves through this value.
     pub system_dark: bool,
-    pub open_group: Option<MenuGroup>,
-    /// The menu entity of the open group, built from the live command state the moment it opens.
-    pub group_menu: Option<Entity<PopupMenu>>,
-    pub group_menu_dismiss: Option<Subscription>,
-    pub(crate) group_menu_entered: bool,
+    pub(crate) open_group_menu: Option<OpenGroupMenu>,
     /// Window-level focus-lost subscriptions, held so they stay registered for
     /// the lifetime of the view. Never read: dropping this field would cancel
     /// the focus restoration above.
@@ -422,12 +391,7 @@ pub struct CairnApp {
     #[cfg(windows)]
     pub(crate) _hotkey: Option<crate::shell::hotkey::GlobalHotkey>,
     /// The path switch menu anchored to one breadcrumb segment.
-    pub(crate) treemap_path_menu: Option<Entity<PopupMenu>>,
-    pub(crate) treemap_path_menu_for: Option<String>,
-    /// The breadcrumb segment whose arrow opened the menu, so dismissing the menu
-    /// can hand focus back to its trigger.
-    pub(crate) treemap_path_menu_focus: Option<FocusHandle>,
-    pub(crate) treemap_path_menu_dismiss: Option<Subscription>,
+    pub(crate) treemap_path_menu: Option<TreemapPathMenu>,
     pub(crate) treemap_dir_loader: crate::treemap::dir_menu::DirectoryMenuLoader,
     /// The Recycle Bin view. The bin is a location, not a search scope: the view owns its rows,
     /// its selection and its error band together, so any query or drive switch releases the whole
@@ -440,14 +404,7 @@ pub struct CairnApp {
     /// The app-owned transient status surface. One at a time; errors persist.
     pub toast: Option<crate::shell::toast::ToastState>,
     pub(crate) toast_serial: u64,
-    /// Generation identifier for the results table panel's entrance animation.
-    pub table_reveal_generation: u64,
-    /// Generation counter for the table reveal overlay fade-out animation.
-    pub table_reveal_fade_epoch: u64,
-    /// A table panel session is waiting for its first visible result set, so
-    /// the entrance starts with content instead of running while the query is
-    /// still in flight.
-    pub table_reveal_pending: bool,
+    pub table_reveal: TableRevealState,
     /// True while the GitHub release check is in flight. The Help menu trigger carries the
     /// loading icon; no separate waiting dialog is opened.
     pub(crate) is_checking_update: bool,
@@ -573,13 +530,10 @@ impl CairnApp {
                 use_regex: false,
                 active_filter: FilterCategory::All,
                 scope_drive: None,
-                query_id: 0,
                 active_session_id: None,
                 rejection: None,
                 degraded: None,
-                cancelled: false,
                 is_fetching_more: false,
-                is_searching: false,
                 coordinator: crate::search::coordinator::SearchCoordinator::default(),
                 text_selection_anchor: None,
             },
@@ -591,47 +545,23 @@ impl CairnApp {
                 column_widths,
                 column_drag: None,
                 snippet_preview: None,
-                keyboard_navigation: false,
             },
             service: ServiceDomain {
-                is_service_connected: true,
-                // The probe below is already in flight by the time the first frame is drawn.
-                is_probing_service: true,
-                service_issue: None,
+                connection: ServiceConnection::initial(),
+                is_refreshing_status: false,
                 status: StatusBarModel::default(),
                 session,
-                content_status: ContentIndexStatus::default(),
-                content_status_loading: false,
-                content_status_error: None,
-                content_action_pending: false,
-                content_action_error: None,
-                property_status: PropertyIndexStatus::default(),
-                property_status_loading: false,
-                property_status_error: None,
-                property_action_pending: false,
-                journal_status: IndexJournalStatus::default(),
-                journal_status_loading: false,
-                journal_status_error: None,
-                journal_action_pending: false,
-                journal_entries: Vec::new(),
-                journal_entries_loading: false,
-                journal_entries_error: None,
+                content: SubsystemState::default(),
+                property: SubsystemState::default(),
+                journal: SubsystemState::default(),
+                journal_entries: SubsystemState::default(),
                 sources: Vec::new(),
-                service_control_pending: false,
-                // Deferred off the critical path: connection success confirms installation, and
-                // failure checks SCM off-thread.
-                service_installed: false,
-                has_attempted_silent_start: false,
-                is_refreshing_status: false,
             },
             root_focus,
             zoom_level: settings.zoom_level,
             settings,
             system_dark,
-            open_group: None,
-            group_menu: None,
-            group_menu_dismiss: None,
-            group_menu_entered: false,
+            open_group_menu: None,
             _focus_lost: vec![focus_lost],
             _keyboard_modality: keyboard_modality,
             sidebar_collapsed: false,
@@ -647,8 +577,7 @@ impl CairnApp {
             treemap_state: None,
             treemap_path: TreemapPathField {
                 input: treemap_path_input,
-                editing: false,
-                error: false,
+                mode: PathFieldMode::Closed,
                 _subscription: treemap_path_subscription,
             },
             rename: RenameEditor {
@@ -660,18 +589,13 @@ impl CairnApp {
             #[cfg(windows)]
             _hotkey: hotkey,
             treemap_path_menu: None,
-            treemap_path_menu_for: None,
-            treemap_path_menu_focus: None,
-            treemap_path_menu_dismiss: None,
             treemap_dir_loader: Default::default(),
             recycle_bin: crate::shell::recycle_bin::RecycleBinView::closed(),
             block_listing: None,
             delete_in_flight: false,
             toast: None,
             toast_serial: 0,
-            table_reveal_generation: 0,
-            table_reveal_fade_epoch: 0,
-            table_reveal_pending: true,
+            table_reveal: TableRevealState::new(),
             is_checking_update: false,
             window_resize: Default::default(),
             window_resize_subscription: None,
@@ -725,7 +649,7 @@ impl CairnApp {
     /// Opens a fresh table session. Every entry point that replaces the result set starts
     /// one, so the entrance waits for real content instead of firing over an empty frame.
     pub(crate) fn begin_table_session(&mut self) {
-        self.table_reveal_pending = true;
+        self.table_reveal.pending = true;
     }
 
     /// Replaces the visible result set as a new location. The old rows leave at
@@ -743,17 +667,17 @@ impl CairnApp {
 
     /// Starts the results panel's entrance and closes the pending session.
     pub(crate) fn bump_table_reveal(&mut self, cx: &mut Context<Self>) {
-        self.table_reveal_generation = self.table_reveal_generation.wrapping_add(1);
-        self.table_reveal_pending = false;
-        self.table_reveal_fade_epoch = self.table_reveal_generation;
-        let fade_epoch = self.table_reveal_fade_epoch;
+        self.table_reveal.generation = self.table_reveal.generation.wrapping_add(1);
+        self.table_reveal.pending = false;
+        self.table_reveal.fade_epoch = self.table_reveal.generation;
+        let fade_epoch = self.table_reveal.fade_epoch;
         cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(crate::shell::motion::MASK_DISSOLVE_CLEANUP)
                 .await;
             let _ = this.update(cx, |this, cx| {
-                if this.table_reveal_fade_epoch == fade_epoch {
-                    this.table_reveal_fade_epoch = 0;
+                if this.table_reveal.fade_epoch == fade_epoch {
+                    this.table_reveal.fade_epoch = 0;
                     cx.notify();
                 }
             });
@@ -775,7 +699,7 @@ impl CairnApp {
     /// Starts the table entrance once a panel session actually has rows, so the
     /// fade begins with content rather than while the query is still in flight.
     pub(crate) fn note_table_content(&mut self, cx: &mut Context<Self>) {
-        if self.table_reveal_pending
+        if self.table_reveal.pending
             && self.results.table.total_rows() > 0
             && self.drive_view.is_none()
         {
@@ -786,7 +710,7 @@ impl CairnApp {
     /// Starts the same entrance for a new session whose answer is empty; the
     /// state band is content too, not a reason to leave the old frame static.
     pub(crate) fn note_table_empty(&mut self, cx: &mut Context<Self>) {
-        if self.table_reveal_pending && self.drive_view.is_none() {
+        if self.table_reveal.pending && self.drive_view.is_none() {
             self.bump_table_reveal(cx);
         }
     }
@@ -848,6 +772,7 @@ impl CairnApp {
 #[cfg(windows)]
 pub fn trim_working_set() {
     use windows::Win32::System::Threading::{GetCurrentProcess, SetProcessWorkingSetSize};
+    // SAFETY: `GetCurrentProcess` returns a pseudo-handle to this process; `usize::MAX` asks Windows to empty the working set.
     unsafe {
         let _ = SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
     }
@@ -862,6 +787,7 @@ pub fn hide_main_window() {
     use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
 
     if let Some(hwnd) = crate::shell::tray::find_main_window() {
+        // SAFETY: `hwnd` was found by `find_main_window` for the current process window.
         unsafe {
             let _ = ShowWindow(hwnd, SW_HIDE);
         }
@@ -1061,12 +987,12 @@ mod tests {
 
         with_app(|this, cx| {
             this.results.table.set_rows(vec![test_row("old.txt")], 1);
-            this.table_reveal_pending = false;
-            let generation = this.table_reveal_generation;
+            this.table_reveal.pending = false;
+            let generation = this.table_reveal.generation;
 
             this.set_filter(FilterCategory::Document, cx);
             assert!(
-                this.table_reveal_pending,
+                this.table_reveal.pending,
                 "a new location opens a table session"
             );
             assert_eq!(
@@ -1075,14 +1001,14 @@ mod tests {
                 "the previous location's rows leave at once"
             );
             assert_eq!(
-                this.table_reveal_generation, generation,
+                this.table_reveal.generation, generation,
                 "no fade runs before the new content exists"
             );
 
             this.results.table.set_rows(vec![test_row("new.docx")], 1);
             this.note_table_content(cx);
             assert_eq!(
-                this.table_reveal_fade_epoch,
+                this.table_reveal.fade_epoch,
                 generation + 1,
                 "the new page fades in"
             );
@@ -1095,22 +1021,22 @@ mod tests {
     fn a_table_refresh_replaces_the_result_set_at_once() {
         with_app(|this, cx| {
             this.results.table.set_rows(vec![test_row("old.txt")], 1);
-            this.table_reveal_pending = false;
-            let generation = this.table_reveal_generation;
+            this.table_reveal.pending = false;
+            let generation = this.table_reveal.generation;
 
             this.refresh_current_view(cx);
-            assert!(this.table_reveal_pending, "refresh opens a table session");
+            assert!(this.table_reveal.pending, "refresh opens a table session");
             assert_eq!(
                 this.results.table.total_rows(),
                 0,
                 "the stale rows leave before the new page exists"
             );
-            assert_eq!(this.table_reveal_generation, generation);
+            assert_eq!(this.table_reveal.generation, generation);
 
             this.results.table.set_rows(vec![test_row("old.txt")], 1);
             this.note_table_content(cx);
             assert_eq!(
-                this.table_reveal_fade_epoch,
+                this.table_reveal.fade_epoch,
                 generation + 1,
                 "the refreshed page fades in"
             );
@@ -1122,13 +1048,13 @@ mod tests {
     fn a_sort_keeps_the_rows_without_a_table_entrance() {
         with_app(|this, cx| {
             this.results.table.set_rows(vec![test_row("old.txt")], 1);
-            this.table_reveal_pending = false;
-            let epoch = this.table_reveal_fade_epoch;
+            this.table_reveal.pending = false;
+            let epoch = this.table_reveal.fade_epoch;
 
             this.request_result_set(ResultSetChange::InPlace, cx);
-            assert!(!this.table_reveal_pending, "sorting opens no session");
+            assert!(!this.table_reveal.pending, "sorting opens no session");
             assert_eq!(this.results.table.total_rows(), 1, "the rows stay");
-            assert_eq!(this.table_reveal_fade_epoch, epoch, "nothing fades");
+            assert_eq!(this.table_reveal.fade_epoch, epoch, "nothing fades");
         });
     }
 
@@ -1138,21 +1064,21 @@ mod tests {
     fn a_probe_refreshes_silently_once_rows_exist() {
         with_app(|this, cx| {
             this.results.table.set_rows(vec![test_row("a.txt")], 1);
-            this.table_reveal_pending = false;
-            let epoch = this.table_reveal_fade_epoch;
+            this.table_reveal.pending = false;
+            let epoch = this.table_reveal.fade_epoch;
 
             this.request_result_set(ResultSetChange::Probe, cx);
             assert!(
-                !this.table_reveal_pending,
+                !this.table_reveal.pending,
                 "a probe over rows opens no session"
             );
             assert_eq!(this.results.table.total_rows(), 1, "the rows stay");
-            assert_eq!(this.table_reveal_fade_epoch, epoch, "nothing fades");
+            assert_eq!(this.table_reveal.fade_epoch, epoch, "nothing fades");
 
             this.results.table.set_rows(Vec::new(), 0);
             this.request_result_set(ResultSetChange::Probe, cx);
             assert!(
-                this.table_reveal_pending,
+                this.table_reveal.pending,
                 "an empty table gets the replacement entrance"
             );
         });
@@ -1196,7 +1122,7 @@ mod tests {
 
         with_app(|this, cx| {
             this.results.table.set_rows(vec![test_row("old.txt")], 1);
-            this.table_reveal_pending = false;
+            this.table_reveal.pending = false;
             catching_up(this);
 
             this.request_result_set(ResultSetChange::Refresh, cx);
@@ -1206,7 +1132,7 @@ mod tests {
                 "a refresh keeps rows that already describe this place"
             );
             assert!(
-                !this.table_reveal_pending,
+                !this.table_reveal.pending,
                 "the poll answers the refresh without an entrance"
             );
 
@@ -1224,32 +1150,28 @@ mod tests {
                 "another place's rows never wait for the index"
             );
             assert!(
-                this.table_reveal_pending,
+                this.table_reveal.pending,
                 "the place change owes its own first page"
             );
         });
     }
 
-    /// A local surface can clear the window's search mirror before it takes
-    /// the table; the cancellation authority is the coordinator, so the answer
-    /// still on the wire is released anyway.
     #[test]
-    fn a_local_takeover_supersedes_an_answer_the_mirror_no_longer_tracks() {
+    fn a_local_takeover_supersedes_an_in_flight_query_and_clears_the_session() {
         with_app(|this, cx| {
             this.request_result_set(ResultSetChange::InPlace, cx);
-            let stale_id = this.query.query_id;
-            this.query.is_searching = false;
+            let stale_id = this.query.query_id();
             this.query.active_session_id = Some(7);
 
             this.take_table_for_local_rows();
 
-            assert_ne!(this.query.query_id, stale_id, "the answer is superseded");
+            assert_ne!(this.query.query_id(), stale_id, "the answer is superseded");
             assert!(
                 this.query.active_session_id.is_none(),
                 "the old session can no longer page the new rows"
             );
             assert!(
-                !this.query.coordinator.is_searching(),
+                !this.query.is_searching(),
                 "the coordinator holds no stale in-flight query"
             );
         });
@@ -1262,8 +1184,8 @@ mod tests {
         with_app(|this, cx| {
             this.results.table.set_rows(Vec::new(), 0);
             this.request_result_set(ResultSetChange::InPlace, cx);
-            let stale_id = this.query.query_id;
-            assert!(this.query.is_searching, "the first request is in flight");
+            let stale_id = this.query.query_id();
+            assert!(this.query.is_searching(), "the first request is in flight");
 
             this.service
                 .status
@@ -1277,12 +1199,13 @@ mod tests {
             this.request_result_set(ResultSetChange::Replace, cx);
 
             assert_ne!(
-                this.query.query_id, stale_id,
+                this.query.query_id(),
+                stale_id,
                 "the replacement supersedes the in-flight answer"
             );
-            assert!(!this.query.is_searching, "the stale request is stopped");
+            assert!(!this.query.is_searching(), "the stale request is stopped");
             assert!(
-                this.table_reveal_pending,
+                this.table_reveal.pending,
                 "the replacement waits for its own first page"
             );
         });
@@ -1302,11 +1225,11 @@ mod tests {
                 |window, cx| {
                     let app = cx.new(|cx| CairnApp::new(window, cx));
                     app.update(cx, |this, cx| {
-                        assert_eq!(this.table_reveal_fade_epoch, 0);
-                        this.table_reveal_pending = true;
+                        assert_eq!(this.table_reveal.fade_epoch, 0);
+                        this.table_reveal.pending = true;
                         this.bump_table_reveal(cx);
-                        assert_eq!(this.table_reveal_fade_epoch, 1);
-                        assert!(!this.table_reveal_pending);
+                        assert_eq!(this.table_reveal.fade_epoch, 1);
+                        assert!(!this.table_reveal.pending);
                     });
                     cx.quit();
                     app

@@ -154,7 +154,7 @@ impl MultiVolumeEngine {
     /// Adds or replaces a volume in the multi-volume engine. A replacement starts one generation
     /// past the table it hides, so a query session created against the old table cannot page into
     /// records that now belong to the new one.
-    pub fn add_volume(&self, vol: VolumeIndex) {
+    pub fn add_volume(&self, mut vol: VolumeIndex) {
         let cfg = self.config.read().unwrap();
         if cfg
             .excluded_drives
@@ -163,21 +163,18 @@ impl MultiVolumeEngine {
         {
             return;
         }
+        let full_path_rules =
+            crate::exclusion::ExclusionRules::parse(&cfg.excluded_paths).uses_full_path_rules();
         drop(cfg);
+        vol.set_full_path_exclusion_rules(full_path_rules);
         let mut lock = self.volumes.write().unwrap();
         let generation = lock
             .get(&vol.drive_letter)
             .map(|previous| previous.generation().wrapping_add(1));
-        match generation {
-            Some(generation) => {
-                let mut vol = vol;
-                vol.set_generation(generation);
-                lock.insert(vol.drive_letter, vol);
-            }
-            None => {
-                lock.insert(vol.drive_letter, vol);
-            }
+        if let Some(generation) = generation {
+            vol.set_generation(generation);
         }
+        lock.insert(vol.drive_letter, vol);
     }
 
     /// Atomically saves all non-empty volume indexes to disk.

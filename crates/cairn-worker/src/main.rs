@@ -324,7 +324,6 @@ mod tests {
         let writer = ContentWriter::open_or_create(&idx_dir).expect("create writer");
         let extractor = CompositeExtractor::new();
 
-        // 1. Empty runs
         let (processed, failed) = apply_batches(
             &extractor,
             &writer,
@@ -337,7 +336,6 @@ mod tests {
         assert_eq!(processed, 0);
         assert_eq!(failed, 0);
 
-        // 2. Malformed deletions and tasks
         let del_file = temp.path().join("dels.jsonl");
         std::fs::write(&del_file, "not a json\n[1, 2]\n").expect("write dels");
 

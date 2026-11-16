@@ -43,6 +43,17 @@ pub struct LoadedIndexData {
     pub directory_sizes_valid: bool,
 }
 
+#[derive(Clone, Copy)]
+pub struct VolumeSnapshot<'a> {
+    pub drive_letter: char,
+    pub volume_serial: u64,
+    pub journal_id: u64,
+    pub last_usn: i64,
+    pub records: &'a [FileRecord],
+    pub arena: &'a NamePool,
+    pub directory_sizes_valid: bool,
+}
+
 /// Streaming chunk size for decoding records without holding a full parallel byte buffer (384 KiB).
 const DECODE_CHUNK_RECORDS: usize = 8_192;
 const STREAM_CHUNK_BYTES: usize = DECODE_CHUNK_RECORDS * RECORD_SIZE;
@@ -67,26 +78,19 @@ pub(crate) fn headroom_for_arena(len: usize) -> usize {
 }
 
 /// Atomically saves volume index records and arena to `vol_<drive>.idx`.
-#[allow(clippy::too_many_arguments)]
 pub fn save_volume_index_atomic(
     dir: &Path,
-    drive_letter: char,
-    volume_serial: u64,
-    journal_id: u64,
-    last_usn: i64,
-    records: &[FileRecord],
-    arena: &NamePool,
-    directory_sizes_valid: bool,
+    snapshot: &VolumeSnapshot<'_>,
 ) -> Result<PathBuf, PersistenceError> {
     fs::create_dir_all(dir)?;
 
-    let file_name = format!("vol_{}.idx", drive_letter.to_ascii_uppercase());
+    let file_name = format!("vol_{}.idx", snapshot.drive_letter.to_ascii_uppercase());
     let target_path = dir.join(&file_name);
     let tmp_path = dir.join(format!("{}.tmp", file_name));
 
-    let (arena_bytes, folded_bytes) = arena.raw_parts();
-    let record_count =
-        u32::try_from(records.len()).map_err(|_| PersistenceError::InvalidPayloadLength)?;
+    let (arena_bytes, folded_bytes) = snapshot.arena.raw_parts();
+    let record_count = u32::try_from(snapshot.records.len())
+        .map_err(|_| PersistenceError::InvalidPayloadLength)?;
     let arena_len =
         u32::try_from(arena_bytes.len()).map_err(|_| PersistenceError::InvalidPayloadLength)?;
     let folded_len =
@@ -95,7 +99,7 @@ pub fn save_volume_index_atomic(
     // The checksum covers the encoded payload exactly as it will be written.
     let mut hasher = Hasher::new();
     let mut record_buf = [0u8; RECORD_SIZE];
-    for record in records {
+    for record in snapshot.records {
         encode_record(record, &mut record_buf);
         hasher.update(&record_buf);
     }
@@ -104,11 +108,11 @@ pub fn save_volume_index_atomic(
     let checksum = hasher.finalize();
 
     let header = IndexHeader {
-        drive_letter,
-        directory_sizes_valid,
-        volume_serial,
-        journal_id,
-        last_usn,
+        drive_letter: snapshot.drive_letter,
+        directory_sizes_valid: snapshot.directory_sizes_valid,
+        volume_serial: snapshot.volume_serial,
+        journal_id: snapshot.journal_id,
+        last_usn: snapshot.last_usn,
         record_count,
         arena_len,
         folded_len,
@@ -121,7 +125,7 @@ pub fn save_volume_index_atomic(
         // keeps the write pattern batched instead of one syscall per record.
         let mut file = BufWriter::with_capacity(1 << 20, File::create(&tmp_path)?);
         file.write_all(&header)?;
-        for record in records {
+        for record in snapshot.records {
             encode_record(record, &mut record_buf);
             file.write_all(&record_buf)?;
         }
@@ -423,13 +427,15 @@ mod tests {
 
         let saved_path = save_volume_index_atomic(
             temp.path(),
-            'C',
-            0x12345678,
-            999,
-            50000,
-            &records,
-            &pool,
-            true,
+            &VolumeSnapshot {
+                drive_letter: 'C',
+                volume_serial: 0x12345678,
+                journal_id: 999,
+                last_usn: 50000,
+                records: &records,
+                arena: &pool,
+                directory_sizes_valid: true,
+            },
         )
         .expect("save should succeed");
 
@@ -456,8 +462,19 @@ mod tests {
         let temp = tempdir().unwrap();
         let pool = NamePool::default();
 
-        let saved_path = save_volume_index_atomic(temp.path(), 'D', 7, 8, 9, &[], &pool, false)
-            .expect("save should succeed");
+        let saved_path = save_volume_index_atomic(
+            temp.path(),
+            &VolumeSnapshot {
+                drive_letter: 'D',
+                volume_serial: 7,
+                journal_id: 8,
+                last_usn: 9,
+                records: &[],
+                arena: &pool,
+                directory_sizes_valid: false,
+            },
+        )
+        .expect("save should succeed");
         let loaded = load_volume_index(&saved_path).expect("load should succeed");
 
         assert!(
@@ -484,8 +501,19 @@ mod tests {
             created_ts: 1,
         }];
 
-        let saved_path = save_volume_index_atomic(temp.path(), 'E', 1, 2, 3, &records, &pool, true)
-            .expect("save should succeed");
+        let saved_path = save_volume_index_atomic(
+            temp.path(),
+            &VolumeSnapshot {
+                drive_letter: 'E',
+                volume_serial: 1,
+                journal_id: 2,
+                last_usn: 3,
+                records: &records,
+                arena: &pool,
+                directory_sizes_valid: true,
+            },
+        )
+        .expect("save should succeed");
         // A zero validity byte is the on-disk form of a cache whose folder sizes were never
         // proven; the rest of the file is unchanged, so only that byte needs rewriting.
         let mut bytes = fs::read(&saved_path).expect("read cache");
@@ -502,8 +530,19 @@ mod tests {
     fn corrupted_header_lengths_fail_before_allocating_unbounded_buffers() {
         let temp = tempdir().unwrap();
         let pool = NamePool::default();
-        let saved_path = save_volume_index_atomic(temp.path(), 'C', 1, 2, 3, &[], &pool, true)
-            .expect("save should succeed");
+        let saved_path = save_volume_index_atomic(
+            temp.path(),
+            &VolumeSnapshot {
+                drive_letter: 'C',
+                volume_serial: 1,
+                journal_id: 2,
+                last_usn: 3,
+                records: &[],
+                arena: &pool,
+                directory_sizes_valid: true,
+            },
+        )
+        .expect("save should succeed");
 
         let mut bytes = fs::read(&saved_path).expect("read cache");
         // Set record_count = u32::MAX (~192 GiB if allocated unchecked) on a 64-byte file. The
@@ -540,9 +579,19 @@ mod tests {
             });
         }
 
-        let saved_path =
-            save_volume_index_atomic(temp.path(), 'C', 42, 88, 1234, &records, &pool, true)
-                .expect("save should succeed");
+        let saved_path = save_volume_index_atomic(
+            temp.path(),
+            &VolumeSnapshot {
+                drive_letter: 'C',
+                volume_serial: 42,
+                journal_id: 88,
+                last_usn: 1234,
+                records: &records,
+                arena: &pool,
+                directory_sizes_valid: true,
+            },
+        )
+        .expect("save should succeed");
         let raw = fs::read(&saved_path).expect("read saved index");
 
         let loaded = load_volume_index_from(std::io::Cursor::new(&raw)).expect("stream load");

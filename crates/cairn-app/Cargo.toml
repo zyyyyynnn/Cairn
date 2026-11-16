@@ -56,3 +56,6 @@ features = [
 [target.'cfg(windows)'.dependencies]
 tray-icon = { workspace = true }
 global-hotkey = { workspace = true }
+
+[lints]
+workspace = true

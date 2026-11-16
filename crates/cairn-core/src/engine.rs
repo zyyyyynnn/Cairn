@@ -571,42 +571,6 @@ impl CompiledExpr {
     }
 }
 
-/// Precompiled query execution state ready to evaluate individual records without reallocations.
-pub struct CompiledQuery {
-    plan: CompiledExpr,
-}
-
-impl CompiledQuery {
-    pub fn compile(query: &QueryExpr) -> Self {
-        Self {
-            plan: CompiledExpr::compile(query),
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn evaluate_record(
-        &self,
-        rec: &FileRecord,
-        idx: u32,
-        records: &[FileRecord],
-        arena: &NamePool,
-        path_cache: &DirectoryPathCache,
-        drive_letter: char,
-    ) -> bool {
-        let root = root_path_for_drive(drive_letter);
-        let ctx = EvalContext {
-            records,
-            arena,
-            path_cache,
-            root: &root,
-            drive_letter: Some(drive_letter),
-            content_hit: None,
-            extra_term_eval: None,
-        };
-        evaluate_compiled_expr(rec, idx, &ctx, &self.plan)
-    }
-}
-
 fn evaluate_compiled_expr(
     rec: &FileRecord,
     idx: u32,
@@ -1309,7 +1273,6 @@ mod tests {
         let path_cache = DirectoryPathCache::new();
         let cancel = CancellationToken::new();
 
-        // 1. Pure content query (content:架构) - MUST NOT match all files (CNT-06)
         let q_content = parse_query("content:架构");
         let matches = execute_query(&records, &pool, &path_cache, 'C', &q_content, &cancel);
         assert_eq!(
@@ -1318,7 +1281,6 @@ mod tests {
             "content: query must not match files when content search is not evaluated"
         );
 
-        // 2. Combined extension and content query (ext:md content:架构)
         let q_combined = parse_query("ext:md content:架构");
         let matches_combined =
             execute_query(&records, &pool, &path_cache, 'C', &q_combined, &cancel);
@@ -1328,7 +1290,6 @@ mod tests {
             "ext:md content:架构 must not falsely match readme.md without content hit"
         );
 
-        // 3. Normal metadata queries should still match correctly
         let q_ext = parse_query("ext:md");
         let matches_ext = execute_query(&records, &pool, &path_cache, 'C', &q_ext, &cancel);
         assert_eq!(matches_ext.len(), 1);
@@ -1434,7 +1395,6 @@ mod tests {
         let path_cache = DirectoryPathCache::new();
         let cancel = CancellationToken::new();
 
-        // 1. prefix: matches start of any word bounded by non-alphanumeric chars
         let q_pref1 = parse_query("prefix:cair");
         let m1 = execute_query(&records, &pool, &path_cache, 'C', &q_pref1, &cancel);
         assert_eq!(m1, vec![0]);
@@ -1448,7 +1408,6 @@ mod tests {
         let m_mid = execute_query(&records, &pool, &path_cache, 'C', &q_pref_mid, &cancel);
         assert_eq!(m_mid.len(), 0);
 
-        // 2. suffix: matches end of any word
         let q_suff1 = parse_query("suffix:rn");
         let s1 = execute_query(&records, &pool, &path_cache, 'C', &q_suff1, &cancel);
         assert_eq!(s1, vec![0]);
@@ -1462,7 +1421,6 @@ mod tests {
         let s_mid = execute_query(&records, &pool, &path_cache, 'C', &q_suff_mid, &cancel);
         assert_eq!(s_mid.len(), 0);
 
-        // 3. Unicode Chinese word boundaries
         let q_zh_pref = parse_query("prefix:测");
         let m_zh = execute_query(&records, &pool, &path_cache, 'C', &q_zh_pref, &cancel);
         assert_eq!(m_zh, vec![1]);
@@ -1492,38 +1450,6 @@ mod tests {
             });
         }
         (pool, records)
-    }
-
-    #[test]
-    fn compiled_query_matches_execute_query_for_regex_and_repeated_terms() {
-        use crate::syntax::parse_query;
-
-        let mut names = vec!["report.log"; 2_000];
-        names.push("vision_report.txt");
-        names.push("notes.md");
-        let (pool, records) = records_of(&names);
-        let path_cache = DirectoryPathCache::new();
-        let cancel = CancellationToken::new();
-
-        for q in [
-            "regex:^report",
-            "regex:log|regex:log regex:log",
-            "regex:rep.* regex:vi.*",
-        ] {
-            let expr = parse_query(q);
-            let compiled = CompiledQuery::compile(&expr);
-            let full = execute_query(&records, &pool, &path_cache, 'C', &expr, &cancel);
-            let via_compiled: Vec<u32> = records
-                .iter()
-                .enumerate()
-                .filter_map(|(i, rec)| {
-                    compiled
-                        .evaluate_record(rec, i as u32, &records, &pool, &path_cache, 'C')
-                        .then_some(i as u32)
-                })
-                .collect();
-            assert_eq!(via_compiled, full, "mismatch for compiled query {q}");
-        }
     }
 
     /// An unparsable pattern matches nothing, exactly as the per-record compilation did.
@@ -1606,32 +1532,6 @@ mod tests {
 
         // A record whose attributes were never recorded (flags 0) is never treated as hidden.
         assert!(!records[0].is_hidden() && !records[0].is_system());
-    }
-
-    #[test]
-    fn compiled_query_handles_path_and_prefix_terms_without_divergence() {
-        use crate::syntax::parse_query;
-
-        let names = ["sub_report_file.txt", "report.log", "other.txt"];
-        let (pool, records) = records_of(&names);
-        let path_cache = DirectoryPathCache::new();
-        let cancel = CancellationToken::new();
-
-        for q in ["path:report prefix:sub", "report report report"] {
-            let expr = parse_query(q);
-            let compiled = CompiledQuery::compile(&expr);
-            let full = execute_query(&records, &pool, &path_cache, 'C', &expr, &cancel);
-            let via_compiled: Vec<u32> = records
-                .iter()
-                .enumerate()
-                .filter_map(|(i, rec)| {
-                    compiled
-                        .evaluate_record(rec, i as u32, &records, &pool, &path_cache, 'C')
-                        .then_some(i as u32)
-                })
-                .collect();
-            assert_eq!(via_compiled, full, "mismatch for compiled query {q}");
-        }
     }
 
     #[test]

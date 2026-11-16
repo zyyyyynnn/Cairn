@@ -101,9 +101,7 @@ impl Index {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Naive reference: raw string in, boolean out. No production parser involved.
-// ---------------------------------------------------------------------------
 
 /// SPEC QRY-02: whitespace separates AND operands, so the query matches when *every* item
 /// matches. An empty query has no items, which the product resolves to "every record".
@@ -253,10 +251,6 @@ fn strip_quotes(s: &str) -> &str {
         s
     }
 }
-
-// ---------------------------------------------------------------------------
-// Query generator
-// ---------------------------------------------------------------------------
 
 /// xorshift64: deterministic, dependency-free, and independent of any production RNG use.
 struct Rng(u64);

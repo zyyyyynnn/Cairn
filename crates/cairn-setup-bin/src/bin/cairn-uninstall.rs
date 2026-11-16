@@ -4,6 +4,7 @@
 
 //! `CairnUninstall.exe`: the product-owned Apps & features entry.
 
+#![forbid(unsafe_code)]
 #![windows_subsystem = "windows"]
 
 fn main() {

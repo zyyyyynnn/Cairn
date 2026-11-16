@@ -157,6 +157,10 @@ impl ExclusionRules {
             .map(|rule| rule.single_segment().map(str::to_string))
             .collect()
     }
+
+    pub fn uses_full_path_rules(&self) -> bool {
+        !self.is_empty() && self.single_segments().is_none()
+    }
 }
 
 #[cfg(test)]

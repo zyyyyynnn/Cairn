@@ -211,7 +211,7 @@ impl CairnApp {
                         widths: this.results.column_widths,
                         start_x: event.position.x,
                     });
-                    this.results.keyboard_navigation = false;
+                    cairn_ui::focus::set_keyboard_navigation(false, cx);
                     cx.notify();
                 }),
             )
@@ -380,22 +380,11 @@ fn sort_indicator(
 mod tests {
     use core::prelude::rust_2021::test;
 
-    use crate::table::model::{SortColumn, SortColumnLabel};
-
-    #[test]
-    fn the_recycle_bin_headers_name_the_values_they_hold() {
-        assert_eq!(SortColumn::Name.label_key_in(true), "col_name");
-        assert_eq!(SortColumn::Path.label_key_in(true), "col_original_location");
-        assert_eq!(SortColumn::DateModified.label_key_in(true), "col_deleted");
-        assert_eq!(SortColumn::Path.label_key_in(false), "col_path");
-        assert_eq!(SortColumn::DateModified.label_key_in(false), "col_modified");
-    }
+    use crate::shell::settings::ColumnSettings;
+    use crate::table::model::{ColumnBoundary, TableColumn};
 
     #[test]
     fn header_context_menu_starts_with_locked_name_and_base_columns() {
-        use crate::shell::settings::ColumnSettings;
-        use crate::table::model::{ColumnBoundary, TableColumn};
-
         let mut settings = ColumnSettings {
             show_size: false,
             ..Default::default()

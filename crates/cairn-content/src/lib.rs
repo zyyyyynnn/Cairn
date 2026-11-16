@@ -3,7 +3,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #![forbid(unsafe_code)]
-#![allow(clippy::chunks_exact_to_as_chunks)]
 
 //! `cairn-content`: Full-text content search engine with Tantivy,
 //! CJK Bigram + Latin tokenizer, auto encoding detection, and document text extractors.

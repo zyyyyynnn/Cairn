@@ -10,7 +10,7 @@ use std::ops::Range;
 use std::time::{Duration, Instant};
 
 /// Bidirectional index converter between UTF-16 code unit offsets and UTF-8 byte offsets.
-/// Fixes Zed Issue #64389 (panic on invalid char boundary with non-ASCII or Chinese text).
+/// Win32 IME APIs report selection and composition offsets in UTF-16 code units, so mapping directly prevents non-ASCII char boundary panics.
 pub struct Utf16Utf8Mapper<'a> {
     text: &'a str,
 }
@@ -319,15 +319,14 @@ impl SearchInputState {
         }
     }
 
-    /// Handles text replacement in range with duplicate WM_CHAR suppression (Zed Issue #56327).
+    /// Handles text replacement in range while suppressing redundant Win32 `WM_CHAR` echo immediately after an IME commit.
     pub fn handle_replace_text_in_range(
         &mut self,
         replacement_range: Option<Range<usize>>,
         new_text: &str,
     ) {
         let now = Instant::now();
-        // Check for duplicate rapid insertion of the exact same string from an IME commit (Zed Issue #56327).
-        // Only suppress if this comes immediately after an active IME composition commit.
+        // Suppress duplicate insertion when Win32 posts a trailing WM_CHAR for an active IME commit.
         if let Some(ref last_committed) = self.last_committed_text {
             if let Some(last_time) = self.last_commit_time {
                 if now.duration_since(last_time) < Duration::from_millis(80)
@@ -670,7 +669,7 @@ impl SearchInputState {
         self.marked_range = None;
     }
 
-    /// Handles IME composition text replacement and marking (Zed Issue #64389).
+    /// Handles IME composition text replacement and marking using UTF-16 to UTF-8 offset conversion.
     pub fn handle_replace_and_mark_text_in_range(
         &mut self,
         range_utf16: Option<Range<usize>>,
@@ -762,19 +761,17 @@ mod tests {
     fn test_ime_composition_and_marking() {
         let mut state = SearchInputState::default();
 
-        // 1. Simulating IME typing "cairn"
         state.handle_replace_and_mark_text_in_range(None, "cairn", None);
         assert_eq!(state.text, "cairn");
         assert_eq!(state.marked_range, Some(0..5));
         assert_eq!(state.selection, 5..5);
 
-        // 2. Candidate selected, commit "石堆"
         state.handle_replace_text_in_range(None, "石堆");
         assert_eq!(state.text, "石堆");
         assert_eq!(state.marked_range, None);
-        assert_eq!(state.selection, 6..6); // "石堆" is 6 UTF-8 bytes
+        assert_eq!(state.selection, 6..6);
 
-        // 3. Candidate bounds follow the caret's measured x, not a fixed character estimate.
+        // Candidate bounds track measured caret_x instead of fixed-width character estimates.
         let bounds = candidate_window_bounds(
             Bounds {
                 origin: point(px(100.0), px(20.0)),
@@ -866,31 +863,24 @@ mod tests {
     fn test_undo_and_redo() {
         let mut state = SearchInputState::default();
 
-        // 1. Initial typing
         state.handle_replace_text_in_range(None, "hello");
         assert_eq!(state.text, "hello");
 
-        // 2. Clear query
         state.clear();
         assert_eq!(state.text, "");
 
-        // 3. Undo clear -> restored "hello"
         assert!(state.undo());
         assert_eq!(state.text, "hello");
 
-        // 4. Redo clear -> back to empty
         assert!(state.redo());
         assert_eq!(state.text, "");
 
-        // 5. Undo again
         assert!(state.undo());
         assert_eq!(state.text, "hello");
 
-        // 6. Append " world"
         state.handle_replace_text_in_range(None, " world");
         assert_eq!(state.text, "hello world");
 
-        // 7. Undo append -> "hello"
         assert!(state.undo());
         assert_eq!(state.text, "hello");
     }
@@ -994,13 +984,12 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::reversed_empty_ranges)]
     fn test_backward_selection_delete_and_replace() {
         let mut state = SearchInputState::default();
         state.handle_replace_text_in_range(None, "abcdef");
 
         // Backward selection from index 4 to 1 ("bcd")
-        state.selection = 4..1;
+        state.selection = std::ops::Range { start: 4, end: 1 };
         let (start, end) = state.normalized_selection();
         assert_eq!(start, 1);
         assert_eq!(end, 4);
@@ -1013,21 +1002,21 @@ mod tests {
         assert_eq!(state.selection, 4..4);
 
         // Backward selection delete_backward
-        state.selection = 4..1; // selects "XYZ"
+        state.selection = std::ops::Range { start: 4, end: 1 }; // selects "XYZ"
         state.delete_backward();
         assert_eq!(state.text, "aef");
         assert_eq!(state.selection, 1..1);
 
         // Backward selection delete_forward
         state.text = "abcdef".to_string();
-        state.selection = 4..1; // selects "bcd"
+        state.selection = std::ops::Range { start: 4, end: 1 }; // selects "bcd"
         state.delete_forward();
         assert_eq!(state.text, "aef");
         assert_eq!(state.selection, 1..1);
 
         // Word backward deletion on backward selection
         state.text = "hello world test".to_string();
-        state.selection = 11..6; // selects "world"
+        state.selection = std::ops::Range { start: 11, end: 6 }; // selects "world"
         state.delete_word_backward();
         assert_eq!(state.text, "hello  test");
         assert_eq!(state.selection, 6..6);
@@ -1051,7 +1040,7 @@ mod tests {
         );
 
         // Arrow navigation collapsing backward selection
-        state.selection = 4..1; // selects "bcd" backward
+        state.selection = std::ops::Range { start: 4, end: 1 }; // selects "bcd" backward
         state.move_cursor_left(false);
         assert_eq!(
             state.selection,
@@ -1059,7 +1048,7 @@ mod tests {
             "Left arrow must collapse backward selection to left boundary"
         );
 
-        state.selection = 4..1;
+        state.selection = std::ops::Range { start: 4, end: 1 };
         state.move_cursor_right(false);
         assert_eq!(
             state.selection,
@@ -1069,7 +1058,7 @@ mod tests {
 
         // Word arrow navigation collapsing backward selection
         state.text = "hello world test".to_string();
-        state.selection = 11..6;
+        state.selection = std::ops::Range { start: 11, end: 6 };
         state.move_cursor_word_left(false);
         assert_eq!(
             state.selection,
@@ -1077,7 +1066,7 @@ mod tests {
             "Word left must collapse backward selection to left boundary"
         );
 
-        state.selection = 11..6;
+        state.selection = std::ops::Range { start: 11, end: 6 };
         state.move_cursor_word_right(false);
         assert_eq!(
             state.selection,
@@ -1090,7 +1079,7 @@ mod tests {
         state.move_cursor_home(true);
         assert_eq!(
             state.selection,
-            5..0,
+            std::ops::Range { start: 5, end: 0 },
             "Shift+Home must extend selection to 0 while keeping anchor"
         );
     }

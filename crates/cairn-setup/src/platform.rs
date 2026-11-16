@@ -55,6 +55,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 impl Drop for InstanceLock {
     fn drop(&mut self) {
         if let InstanceLock::Acquired(handle) = self {
+            // SAFETY: `handle` is an owned mutex HANDLE from `CreateMutexW` held until `InstanceLock` drops.
             unsafe {
                 let _ = CloseHandle(*handle);
             }
@@ -70,6 +71,7 @@ pub struct MsiExecutionLock(HANDLE);
 
 impl Drop for MsiExecutionLock {
     fn drop(&mut self) {
+        // SAFETY: `self.0` was successfully waited on and acquired in `acquire_msi_execution`.
         unsafe {
             let _ = ReleaseMutex(self.0);
             let _ = CloseHandle(self.0);
@@ -79,11 +81,14 @@ impl Drop for MsiExecutionLock {
 
 pub fn acquire_msi_execution(timeout_ms: u32) -> Option<MsiExecutionLock> {
     let name = wide(OsStr::new(r"Global\_MSIExecute"));
+    // SAFETY: `name` is null-terminated and lives for the `CreateMutexW` call.
     let handle = unsafe { CreateMutexW(None, false, PCWSTR(name.as_ptr())) }.ok()?;
+    // SAFETY: `handle` is an open mutex handle returned by `CreateMutexW`.
     let wait = unsafe { WaitForSingleObject(handle, timeout_ms) };
     if matches!(wait, WAIT_OBJECT_0 | WAIT_ABANDONED) {
         Some(MsiExecutionLock(handle))
     } else {
+        // SAFETY: Wait failed or timed out; close the owned handle before returning `None`.
         unsafe {
             let _ = CloseHandle(handle);
         }
@@ -105,14 +110,17 @@ pub enum InstanceLock {
 /// window forward instead of racing the first one's MSI transaction.
 pub fn acquire_instance(mutex_name: &str, window_titles: &[&str]) -> InstanceLock {
     let name = wide(OsStr::new(mutex_name));
+    // SAFETY: `name` is null-terminated and lives for the `CreateMutexW` call.
     let handle = match unsafe { CreateMutexW(None, true, PCWSTR(name.as_ptr())) } {
         Ok(handle) => handle,
         Err(_) => return InstanceLock::Unavailable,
     };
+    // SAFETY: `GetLastError` checks whether `CreateMutexW` opened an existing named mutex.
     if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
         for title in window_titles {
             activate_window(title);
         }
+        // SAFETY: `handle` is a valid mutex handle from `CreateMutexW` that this instance does not own.
         unsafe {
             let _ = CloseHandle(handle);
         }
@@ -134,20 +142,25 @@ pub fn activate_window(window_title: &str) -> bool {
         hwnd: windows::Win32::Foundation::HWND,
         lparam: LPARAM,
     ) -> BOOL {
-        let context = &mut *(lparam.0 as *mut Context);
-        let mut buffer = [0u16; 96];
-        let length = GetWindowTextW(hwnd, &mut buffer);
-        if length > 0 && String::from_utf16_lossy(&buffer[..length as usize]) == context.title {
-            context.found = Some(hwnd);
-            return BOOL(0);
+        // SAFETY: `lparam` is `&mut Context` passed synchronously by `EnumWindows`, which does not return
+        // until enumeration finishes, and `hwnd` is the top-level window enumerated by Win32.
+        unsafe {
+            let context = &mut *(lparam.0 as *mut Context);
+            let mut buffer = [0u16; 96];
+            let length = GetWindowTextW(hwnd, &mut buffer);
+            if length > 0 && String::from_utf16_lossy(&buffer[..length as usize]) == context.title {
+                context.found = Some(hwnd);
+                return BOOL(0);
+            }
+            BOOL(1)
         }
-        BOOL(1)
     }
 
     let mut context = Context {
         title: window_title.to_string(),
         found: None,
     };
+    // SAFETY: `enum_proc` runs synchronously inside `EnumWindows` while `context` lives on this stack frame.
     unsafe {
         let _ = EnumWindows(
             Some(enum_proc),
@@ -155,6 +168,7 @@ pub fn activate_window(window_title: &str) -> bool {
         );
     }
     if let Some(hwnd) = context.found {
+        // SAFETY: `hwnd` was found by `EnumWindows`; restoring and focusing an existing HWND is checked by Win32.
         unsafe {
             let _ = ShowWindow(hwnd, SW_RESTORE);
             let _ = SetForegroundWindow(hwnd);
@@ -168,6 +182,8 @@ pub fn activate_window(window_title: &str) -> bool {
 /// Opens the Windows folder picker. Returns `None` when the user cancels or the dialog cannot open;
 /// a cancelled picker is not an error the window should report.
 pub fn browse_for_folder(title: &str) -> Option<PathBuf> {
+    // SAFETY: calls standard shell COM dialog APIs on the UI thread; `title` stays alive across
+    // `SetTitle` and `display` is freed via `CoTaskMemFree`.
     unsafe {
         // GPUI may already have initialized COM. A different apartment model is not fatal here;
         // the shell dialog still opens on the UI thread.
@@ -205,6 +221,7 @@ pub fn launch_installed_app(exe: &Path) -> Result<(), String> {
 /// of the elevated setup first, which is user-writable when the installer is run from Downloads.
 pub fn explorer_executable() -> PathBuf {
     let mut buffer = [0u16; 260];
+    // SAFETY: `buffer` is a writable stack array of MAX_PATH UTF-16 code units.
     let length = unsafe {
         windows::Win32::System::SystemInformation::GetWindowsDirectoryW(Some(&mut buffer))
     } as usize;
@@ -734,6 +751,7 @@ fn remove_autostart_values_for(profiles: &[(String, PathBuf)]) -> Vec<String> {
 fn remove_run_value(root: HKEY, subkey: &str) -> Result<(), String> {
     let subkey_wide = wide(OsStr::new(subkey));
     let mut key = HKEY::default();
+    // SAFETY: `subkey_wide` is null-terminated and outlives `RegOpenKeyExW`; `key` is a stack out-parameter.
     let status = unsafe {
         RegOpenKeyExW(
             root,
@@ -749,7 +767,9 @@ fn remove_run_value(root: HKEY, subkey: &str) -> Result<(), String> {
     if status != ERROR_SUCCESS {
         return Err(format!("RegOpenKeyExW failed: {status:?}"));
     }
+    // SAFETY: `key` is an open registry key with `KEY_SET_VALUE` permission and static wide literal `"Cairn"`.
     let deleted = unsafe { RegDeleteValueW(key, windows::core::w!("Cairn")) };
+    // SAFETY: `key` was opened above and is closed exactly once here.
     unsafe {
         let _ = RegCloseKey(key);
     }
@@ -815,6 +835,7 @@ pub fn remove_orphan_registration(install_dir: &Path) -> Result<Vec<String>, Str
 
 fn remove_hklm_key_tree(subkey: &str) -> Result<(), String> {
     let subkey = wide(OsStr::new(subkey));
+    // SAFETY: `subkey` is a null-terminated registry path under `HKEY_LOCAL_MACHINE`.
     let status = unsafe { RegDeleteTreeW(HKEY_LOCAL_MACHINE, PCWSTR(subkey.as_ptr())) };
     if status == ERROR_SUCCESS || status == ERROR_FILE_NOT_FOUND {
         return Ok(());
@@ -825,6 +846,7 @@ fn remove_hklm_key_tree(subkey: &str) -> Result<(), String> {
 fn remove_machine_path_entry(install_dir: &Path) -> Result<(), String> {
     let key_name = wide(OsStr::new(ENVIRONMENT_KEY));
     let mut key = HKEY::default();
+    // SAFETY: `key_name` is null-terminated and lives for the call; `key` receives the opened handle.
     let status = unsafe {
         RegOpenKeyExW(
             HKEY_LOCAL_MACHINE,
@@ -844,6 +866,7 @@ fn remove_machine_path_entry(install_dir: &Path) -> Result<(), String> {
     let result = (|| -> Result<(), String> {
         let mut value_type = REG_SZ;
         let mut size = 0u32;
+        // SAFETY: querying value length with `None` buffer on the open `key`.
         let status = unsafe {
             RegQueryValueExW(
                 key,
@@ -862,6 +885,7 @@ fn remove_machine_path_entry(install_dir: &Path) -> Result<(), String> {
         }
         let mut buffer = vec![0u16; (size as usize / 2).max(1)];
         let mut read = size;
+        // SAFETY: `buffer` has at least `read` bytes of writable allocation matching `&mut read`.
         let status = unsafe {
             RegQueryValueExW(
                 key,
@@ -888,12 +912,14 @@ fn remove_machine_path_entry(install_dir: &Path) -> Result<(), String> {
             REG_SZ
         };
         let replacement = wide(OsStr::new(&replacement));
+        // SAFETY: `replacement` is a contiguous initialized `[u16]` slice, valid to view as `len * 2` bytes.
         let bytes = unsafe {
             std::slice::from_raw_parts(
                 replacement.as_ptr() as *const u8,
                 replacement.len() * std::mem::size_of::<u16>(),
             )
         };
+        // SAFETY: `key` is open with `KEY_SET_VALUE` and `bytes` is a NUL-terminated UTF-16 buffer.
         let status = unsafe {
             RegSetValueExW(
                 key,
@@ -910,6 +936,7 @@ fn remove_machine_path_entry(install_dir: &Path) -> Result<(), String> {
         Ok(())
     })();
 
+    // SAFETY: `key` was opened at the top of `remove_machine_path_entry` and is closed once here.
     unsafe {
         let _ = RegCloseKey(key);
     }
@@ -943,6 +970,7 @@ fn path_without_entry(current: &str, install_dir: &Path) -> Option<String> {
 
 fn broadcast_environment_change() {
     let environment = wide(OsStr::new("Environment"));
+    // SAFETY: `environment` is null-terminated and outlives the synchronous `SendMessageTimeoutW` broadcast.
     unsafe {
         let _ = SendMessageTimeoutW(
             HWND_BROADCAST,
@@ -979,6 +1007,7 @@ fn remove_service(name: &str) -> Result<(), String> {
 fn system32(program: &str) -> PathBuf {
     use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
     let mut buffer = [0u16; 260];
+    // SAFETY: `buffer` is a writable stack array of MAX_PATH UTF-16 code units.
     let length = unsafe { GetSystemDirectoryW(Some(&mut buffer)) } as usize;
     let directory = if length > 0 && length < buffer.len() {
         PathBuf::from(String::from_utf16_lossy(&buffer[..length]))

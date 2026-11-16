@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Integration seam tests for isolated extended property extraction (`IDX-12`, Seam 6).
+//! Integration seam tests for isolated extended property extraction (`IDX-12`).
 
 use cairn_core::property_store::{RecordPropertyData, SourceId};
 use cairn_protocol::PropertyExtractTask;
@@ -312,7 +312,6 @@ fn hung_extraction_is_killed_on_timeout_and_crash_recovers_cleanly() {
         path: temp.path().join("dummy.txt").to_string_lossy().into_owned(),
     }];
 
-    // 1. Timeout on a hung child subprocess (uses powershell sleep when invoked on Windows).
     let cancel = AtomicBool::new(false);
     let started = Instant::now();
     let timeout_outcome = cairn_worker::isolation::run_command_with_isolation(
@@ -336,7 +335,6 @@ fn hung_extraction_is_killed_on_timeout_and_crash_recovers_cleanly() {
         "timeout must kill hung child promptly"
     );
 
-    // 2. Cancellation stops an active child process before timeout.
     let cancel_flag = Arc::new(AtomicBool::new(false));
     let cancel_trigger = Arc::clone(&cancel_flag);
     std::thread::spawn(move || {
@@ -360,7 +358,6 @@ fn hung_extraction_is_killed_on_timeout_and_crash_recovers_cleanly() {
         "cancellation must terminate hung worker: {cancelled:?}"
     );
 
-    // 3. Aborting / crashing child process returns WorkerFailed without crashing caller.
     let crashed = cairn_worker::isolation::run_command_with_isolation(
         Path::new("cmd"),
         &["/C".to_string(), "exit 42".to_string()],

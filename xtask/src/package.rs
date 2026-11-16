@@ -173,7 +173,6 @@ fn build_package(
     wix: &Path,
     mt: &Path,
 ) -> Result<(), Box<dyn Error>> {
-    // 1. Generate the WiX source and stage every input next to it.
     let wxs_path = staging_dir.join(WIX_TEMPLATE_NAME);
     generate_wix_template(&wxs_path)?;
 
@@ -211,14 +210,12 @@ fn build_package(
     let manifest_path = staging_dir.join(INSTALLER_MANIFEST_NAME);
     fs::copy(&manifest_source, &manifest_path)?;
 
-    // 2. The GPUI binaries already carry GPUI's own asInvoker manifest. Replace that resource with
-    //    the setup's requireAdministrator manifest before WiX consumes the uninstaller.
+    // GPUI binaries embed an asInvoker manifest; replace it with requireAdministrator before WiX packages the uninstaller.
     println!("Injecting installer manifest...");
     for name in [UNINSTALLER_NAME, SETUP_EXE_NAME] {
         inject_manifest(&staging_dir.join(name), mt, &manifest_path)?;
     }
 
-    // 3. Compile the MSI. Every source is in the staging directory and resolved by relative name.
     println!("Building MSI...");
     let msi_path = staging_dir.join(MSI_NAME);
     let mut msi_cmd = Command::new(wix);
@@ -242,7 +239,6 @@ fn build_package(
         fs::metadata(&msi_path)?.len()
     );
 
-    // 4. Append the MSI to the GPUI setup front end.
     let setup_path = staging_dir.join(SETUP_EXE_NAME);
     cairn_setup::payload::append_payload(&setup_path, &msi_path)
         .map_err(|error| format!("embed the MSI into {}: {error}", setup_path.display()))?;
@@ -252,7 +248,6 @@ fn build_package(
         fs::metadata(&setup_path)?.len()
     );
 
-    // 5. Generate SHA256SUMS.txt (REL-04) over the final file names.
     let sums_path = staging_dir.join(SHA256SUMS_NAME);
     generate_sha256sums(staging_dir, &sums_path)?;
     println!("Generated SHA256 checksums: {}", sums_path.display());

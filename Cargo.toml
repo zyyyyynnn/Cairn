@@ -100,3 +100,21 @@ panic = "abort"
 [profile.bench]
 opt-level = 3
 lto = "thin"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"
+private_intra_doc_links = "deny"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"
+missing_safety_doc = "deny"
+await_holding_lock = "deny"
+too_many_arguments = "deny"
+large_enum_variant = "deny"
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+

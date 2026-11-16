@@ -35,11 +35,11 @@ impl CairnApp {
             recycle_bin_loading: self.recycle_bin.is_loading(),
             recycle_bin_error: self.recycle_bin.error().is_some(),
             block_listing_open: self.block_listing.is_some(),
-            query_in_flight: self.query.is_searching,
+            query_in_flight: self.query.is_searching(),
             index_catching_up: self.service.status.is_any_loading(),
-            service_connected: self.service.is_service_connected,
-            service_issue: self.service.service_issue.is_some(),
-            probing_service: self.service.is_probing_service,
+            service_connected: self.service.connection.is_connected(),
+            service_issue: self.service.connection.issue().is_some(),
+            probing_service: self.service.connection.is_probing(),
             has_query: self.has_query(),
         });
         let rows = (surface == ResultSurface::Rows)
@@ -81,12 +81,6 @@ impl CairnApp {
             .aria_label(accessibility::name(control, &self.i18n))
             .key_context(RESULTS_CONTEXT)
             .track_focus(&self.results.results_focus)
-            .on_key_down(cx.listener(|this, _: &KeyDownEvent, _, cx| {
-                if !this.results.keyboard_navigation {
-                    this.results.keyboard_navigation = true;
-                    cx.notify();
-                }
-            }))
             .on_action(cx.listener(Self::scroll_table_left))
             .on_action(cx.listener(Self::scroll_table_right))
             .on_action(cx.listener(Self::scroll_table_start))
@@ -156,9 +150,9 @@ impl CairnApp {
                 )
             })
             .when(
-                self.table_reveal_fade_epoch > 0 && (has_content || has_state),
+                self.table_reveal.fade_epoch > 0 && (has_content || has_state),
                 |this| {
-                    let fade_key = format!("table-reveal-fade-{}", self.table_reveal_fade_epoch);
+                    let fade_key = format!("table-reveal-fade-{}", self.table_reveal.fade_epoch);
                     let reduce_motion = cx.reduce_motion();
                     this.child(
                         div()

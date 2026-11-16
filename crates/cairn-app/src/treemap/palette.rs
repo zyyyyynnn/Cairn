@@ -63,12 +63,7 @@ fn mix(base: Hsla, tint: Hsla, amount: f32) -> Hsla {
     base.blend(tint)
 }
 
-// ---- light: low-saturation graphite tone on #F7F7F7 ---------------------------
-
 const LIGHT_TILE_FILL: Hsla = hsla(0.0000, 0.0000, 0.8510); // #D9D9D9
-
-// ---- dark: neutral graphite tone on #141414 -----------------------------------
-
 const DARK_TILE_FILL: Hsla = hsla(0.0000, 0.0000, 0.2275); // #3A3A3A
 
 /// Secondary ink for sizes: `#3A3A3A` in light, `#CECECE` in dark, both steps of the neutral ramp.

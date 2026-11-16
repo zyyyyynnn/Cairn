@@ -208,11 +208,8 @@ impl CairnApp {
         // The listing owns the table now: an index answer in flight is
         // cancelled and its session released before these rows are installed.
         self.take_table_for_local_rows();
-        // A refusal or stop of the query that preceded the block does not
-        // describe these rows.
         self.query.rejection = None;
         self.query.degraded = None;
-        self.query.cancelled = false;
         self.leave_drive_view();
         self.query.scope_drive = None;
         self.query.active_filter = FilterCategory::All;

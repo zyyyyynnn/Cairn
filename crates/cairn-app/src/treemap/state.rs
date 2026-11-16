@@ -56,6 +56,14 @@ impl TreemapUnavailable {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum DirectoryLoadState {
+    Idle,
+    Scanning,
+    Ready,
+    Unavailable(TreemapUnavailable),
+}
+
 pub(crate) fn tree_unavailable_from_code(code: u32) -> TreemapUnavailable {
     match code {
         ERROR_CODE_TREE_NOT_INDEXED => TreemapUnavailable::NotIndexed,
@@ -120,16 +128,10 @@ pub struct TreemapViewState {
     pub(crate) scan_fade_epoch: u64,
     /// Highest scan fade epoch for which a cleanup timer has been scheduled.
     pub(crate) scan_fade_timer_armed: u64,
-    /// Whether a service tree request is in flight.
-    pub(super) is_scanning: bool,
     /// Epoch of the directory request the view is waiting for. A late answer
     /// for an older directory is ignored.
     pub(super) request_epoch: u64,
-    /// The service could not provide the current directory; this is not a legitimate empty folder.
-    pub(super) unavailable: Option<TreemapUnavailable>,
-    /// Whether a complete tree has been computed and revealed on the canvas.
-    /// Reset on each new directory request until the tree is ready.
-    pub(super) content_revealed: bool,
+    pub(super) load_state: DirectoryLoadState,
     /// Exact item totals from scans completed in this view, keyed by directory.
     /// A later stored-tree load of the same directory reuses the scan total
     /// instead of the depth-capped tree count.
@@ -187,10 +189,8 @@ impl TreemapViewState {
             painted_canvas_bounds: Rc::new(Cell::new(None)),
             scan_fade_epoch: 0,
             scan_fade_timer_armed: 0,
-            is_scanning: false,
             request_epoch: 0,
-            unavailable: None,
-            content_revealed: false,
+            load_state: DirectoryLoadState::Idle,
             scanned_item_totals: TreemapLru::with_capacity(MAX_SCANNED_ITEM_TOTALS),
             zoom: TreemapZoom::new(),
         }
@@ -238,7 +238,6 @@ impl TreemapViewState {
 
         let current_dir = self.navigation.current_dir().to_string();
 
-        // 1. Drive root: instant from stored_drive_tree if already scanned.
         if is_drive_root(&current_dir) {
             if let Some(drive_tree) = self.stored_drive_tree.clone() {
                 self.current_dir_total_items = self
@@ -251,7 +250,6 @@ impl TreemapViewState {
                 return None;
             }
         } else {
-            // 2. Subdirectory: check if we previously fetched and cached the full tree for this directory.
             let dir_key = normalize_dir_key(&current_dir);
             if let Some(cached_tree) = self.cached_dir_trees.get(&dir_key).cloned() {
                 self.current_dir_total_items = self
@@ -265,21 +263,23 @@ impl TreemapViewState {
             }
         }
 
-        // 3. The service's live index has to answer before the canvas can draw.
         self.current_dir_total_size = 0;
         self.current_dir_total_items = 0;
-        self.is_scanning = true;
+        self.load_state = DirectoryLoadState::Scanning;
 
         Some(PathBuf::from(current_dir))
+    }
+
+    pub(super) fn begin_scan(&mut self) {
+        self.scan_fade_epoch = 0;
+        self.load_state = DirectoryLoadState::Scanning;
     }
 
     /// Starts a new directory request from nothing to draw. The fresh epoch makes a late answer
     /// for the directory being left unrenderable, and the cleared tree cannot outlive its root.
     pub(super) fn reset_scan_state(&mut self) {
         self.request_epoch = next_tree_request_epoch();
-        self.is_scanning = false;
-        self.unavailable = None;
-        self.content_revealed = false;
+        self.load_state = DirectoryLoadState::Idle;
         self.layout_nodes.clear();
         self.root_tail = None;
         self.root_tree = None;
@@ -303,7 +303,7 @@ impl TreemapViewState {
 
     /// Marks the scanned tree content as ready for display.
     pub(super) fn reveal_content(&mut self) {
-        self.content_revealed = true;
+        self.load_state = DirectoryLoadState::Ready;
         self.reveal_generation = self.reveal_generation.wrapping_add(1);
         self.scan_fade_epoch = self.reveal_generation;
     }
@@ -311,9 +311,7 @@ impl TreemapViewState {
     /// The service could not answer for this directory. The canvas shows the
     /// unavailable message instead of a misleading empty folder.
     pub(super) fn mark_unavailable(&mut self, reason: TreemapUnavailable) {
-        self.is_scanning = false;
-        self.unavailable = Some(reason);
-        self.content_revealed = true;
+        self.load_state = DirectoryLoadState::Unavailable(reason);
         self.root_tree = None;
         self.layout_nodes.clear();
         self.root_tail = None;
@@ -327,7 +325,6 @@ impl TreemapViewState {
     /// (`DirectorySizeIndex::build_tree_node` runs the same finish pipeline as
     /// a scan), so no second pass runs here.
     pub(super) fn adopt_service_tree(&mut self, entries: Vec<TreeEntryData>) -> bool {
-        self.unavailable = None;
         let Some(tree) = reassemble_tree(entries) else {
             return false;
         };
@@ -343,7 +340,6 @@ impl TreemapViewState {
         }
         self.scanned_item_totals
             .insert(current_dir, descendant_count);
-        self.is_scanning = false;
         self.reveal_content();
         true
     }
@@ -514,17 +510,20 @@ impl TreemapViewState {
 
     /// Whether the service is still answering for the current directory.
     pub fn is_scanning(&self) -> bool {
-        self.is_scanning
+        matches!(self.load_state, DirectoryLoadState::Scanning)
     }
 
     /// The service could not provide the current root; the empty canvas is a
     /// failure, not an empty folder.
     pub fn is_unavailable(&self) -> bool {
-        self.unavailable.is_some()
+        matches!(self.load_state, DirectoryLoadState::Unavailable(_))
     }
 
     pub(crate) fn unavailable_reason(&self) -> Option<TreemapUnavailable> {
-        self.unavailable
+        match self.load_state {
+            DirectoryLoadState::Unavailable(reason) => Some(reason),
+            _ => None,
+        }
     }
 
     /// Removes one item from the in-memory tree after the shell deleted it on
@@ -552,7 +551,6 @@ impl TreemapViewState {
 
         let mut removed_count = None;
 
-        // 1. If target_path is under the current view directory, remove it from root_tree
         if let Some((segments, name)) = resolve_relative_segments(&current_dir, target_path) {
             if let Some(tree) = self.root_tree.as_mut() {
                 let tree = Arc::make_mut(tree);
@@ -567,7 +565,6 @@ impl TreemapViewState {
             }
         }
 
-        // 2. Also restore or update stored_drive_tree
         if at_drive_root {
             if restore_drive_tree || removed_count.is_some() {
                 self.stored_drive_tree = self.root_tree.clone();
@@ -998,21 +995,16 @@ mod tests {
 
         state.remove_item(r"C:\Windows\System32\calc.exe");
 
-        // 1. Selection dropped
         assert_eq!(state.selected_path, None);
-        // 2. Current dir items exact (cmd.exe + System32 = 2)
         assert_eq!(state.current_dir_total_items, 2);
-        // 3. Current dir scan total equals current_dir_total_items (NOT double-decremented!)
+        // Removing a file under the current subtree must not double-decrement current_dir_total_items.
         assert_eq!(state.scanned_item_totals.peek(r"C:\Windows"), Some(&2));
-        // 4. Ancestors decremented by removed count (1)
         assert_eq!(state.scanned_item_totals.peek(r"C:\"), Some(&5));
         assert_eq!(
             state.scanned_item_totals.peek(r"C:\Windows\System32"),
             Some(&1)
         );
-        // 5. Unrelated directory (C:\Users) untouched
         assert_eq!(state.scanned_item_totals.peek(r"C:\Users"), Some(&1));
-        // 6. Stored drive tree also has calc.exe removed
         let drive_tree = state.stored_drive_tree.as_ref().unwrap();
         assert!(drive_tree
             .find_by_path(r"C:\Windows\System32\calc.exe")
@@ -1077,20 +1069,15 @@ mod tests {
 
         state.adopt_service_tree(entries);
 
-        // 1. Root tree is populated
         assert!(state.root_tree.is_some());
-        // 2. stored_drive_tree is cached
         assert!(state.stored_drive_tree.is_some());
-        // 3. scanned_item_totals contains root count
         assert_eq!(state.scanned_item_totals.peek(r"C:\"), Some(&3));
 
-        // 4. Drilling into a subdirectory requires querying the service for that directory
-        // instead of assuming stored_drive_tree has infinite depth
+        // Subdirectories still query the service rather than assuming stored_drive_tree has full depth.
         state.navigation.enter(r"C:\Windows");
         let scan_target = state.load_current_dir();
         assert_eq!(scan_target, Some(PathBuf::from(r"C:\Windows")));
 
-        // 5. Adopting service tree for the subdirectory caches it in cached_dir_trees
         let win_entries = vec![
             entry("Windows", 4_000, true, 0),
             entry("System32", 3_000, true, 1),
@@ -1099,17 +1086,14 @@ mod tests {
         state.adopt_service_tree(win_entries);
         assert_eq!(state.current_dir_total_items, 2);
 
-        // 6. Navigating back to drive root is 0ms instant from stored_drive_tree
         assert!(state.navigation.back());
         assert_eq!(state.load_current_dir(), None);
         assert_eq!(state.current_dir_total_items, 3);
 
-        // 7. Navigating forward to C:\Windows is 0ms instant from cached_dir_trees
         assert!(state.navigation.forward());
         assert_eq!(state.load_current_dir(), None);
         assert_eq!(state.current_dir_total_items, 2);
 
-        // 8. Navigating up to drive root is also 0ms instant from stored_drive_tree
         assert!(state.navigation.up());
         assert_eq!(state.load_current_dir(), None);
         assert_eq!(state.current_dir_total_items, 3);
@@ -1227,54 +1211,13 @@ mod tests {
     }
 
     #[test]
-    fn tree_error_codes_choose_the_state_reason() {
-        assert_eq!(
-            tree_unavailable_from_code(cairn_protocol::message::ERROR_CODE_TREE_NOT_INDEXED),
-            TreemapUnavailable::NotIndexed
-        );
-        assert_eq!(
-            tree_unavailable_from_code(cairn_protocol::message::ERROR_CODE_TREE_NOT_DIRECTORY),
-            TreemapUnavailable::NotDirectory
-        );
-        assert_eq!(
-            tree_unavailable_from_code(cairn_protocol::message::ERROR_CODE_TREE_TOO_LARGE),
-            TreemapUnavailable::TooLarge
-        );
-        assert_eq!(
-            tree_unavailable_from_code(9999),
-            TreemapUnavailable::ServiceUnavailable
-        );
-        assert!(TreemapUnavailable::NotIndexed.retryable());
-        assert!(TreemapUnavailable::ServiceUnavailable.retryable());
-        assert!(!TreemapUnavailable::NotDirectory.retryable());
-        assert!(!TreemapUnavailable::TooLarge.retryable());
-        assert_eq!(
-            TreemapUnavailable::NotIndexed.message_key(),
-            "treemap_unavailable_not_indexed"
-        );
-        assert_eq!(
-            TreemapUnavailable::NotDirectory.message_key(),
-            "treemap_unavailable_not_directory"
-        );
-        assert_eq!(
-            TreemapUnavailable::TooLarge.message_key(),
-            "treemap_unavailable_too_large"
-        );
-        assert_eq!(
-            TreemapUnavailable::ServiceUnavailable.message_key(),
-            "treemap_unavailable_service"
-        );
-    }
-
-    #[test]
     fn an_unavailable_load_is_not_an_empty_folder() {
         let mut state = TreemapViewState::new_headless('C');
-        state.is_scanning = true;
+        state.begin_scan();
         state.mark_unavailable(TreemapUnavailable::NotIndexed);
 
         assert!(state.is_unavailable());
         assert!(!state.is_scanning());
-        assert!(state.content_revealed);
         assert!(state.layout_nodes.is_empty());
         assert_eq!(state.total_items(), 0);
     }

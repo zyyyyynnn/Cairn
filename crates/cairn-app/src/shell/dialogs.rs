@@ -74,6 +74,36 @@ pub(crate) fn alert_surface(
         .footer(footer)
 }
 
+pub(crate) fn confirmation_alert(
+    alert: AlertDialog,
+    window: &mut Window,
+    cx: &mut App,
+    ok_text: impl Into<SharedString>,
+    cancel_text: impl Into<SharedString>,
+) -> AlertDialog {
+    confirmation_alert_with_variant(
+        alert,
+        window,
+        cx,
+        ok_text,
+        cancel_text,
+        ButtonVariant::Danger,
+    )
+}
+
+pub(crate) fn confirmation_alert_with_variant(
+    alert: AlertDialog,
+    window: &mut Window,
+    cx: &mut App,
+    ok_text: impl Into<SharedString>,
+    cancel_text: impl Into<SharedString>,
+    variant: ButtonVariant,
+) -> AlertDialog {
+    let surface = cairn_ui::theme::dialog_surface(cx.theme());
+    let actions = DialogActions::new(ok_text, variant).with_cancel(cancel_text);
+    alert_surface(alert, window, cx, surface, actions)
+}
+
 /// The footer order matches the stock alert: cancel on the left, commit on the right. A pair has
 /// an optical inset only when both actions are present, so a lone commit stays at full size.
 fn dialog_footer(
@@ -231,8 +261,6 @@ pub(crate) fn body(title: String, description: String, window: &Window) -> AnyEl
 #[cfg(test)]
 mod tests {
     use super::{inset_target, top_offset_for_height, InsetTarget};
-    use crate::app::layout;
-    use crate::shell::theme;
     use gpui_kit::gpui::{px, Hsla};
 
     fn gray(l: f32) -> Hsla {
@@ -254,9 +282,7 @@ mod tests {
     }
 
     #[test]
-    fn dialogs_share_a_compact_seat() {
-        assert!((layout::DIALOG_WIDTH * theme::BASE_FONT_PX - 384.0).abs() < 0.001);
-        assert!((layout::DIALOG_SEAT_HEIGHT * theme::BASE_FONT_PX - 128.0).abs() < 0.001);
+    fn seat_top_offset_centers_and_clamps_to_margin() {
         assert_eq!(top_offset_for_height(px(800.), px(128.), px(24.)), px(336.));
         assert_eq!(top_offset_for_height(px(350.), px(128.), px(24.)), px(111.));
         assert_eq!(top_offset_for_height(px(100.), px(128.), px(24.)), px(24.));

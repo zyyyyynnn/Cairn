@@ -9,7 +9,6 @@
 
 use std::path::PathBuf;
 
-use crate::app::SetupError;
 use crate::model::{default_install_dir, InstalledProduct, Launch, Screen, Stage};
 use crate::PRODUCT_VERSION;
 
@@ -24,7 +23,7 @@ pub struct Preview {
     pub progress: Option<f32>,
     pub stage: Stage,
     pub log: Option<PathBuf>,
-    pub error: Option<SetupError>,
+    pub error: Option<&'static str>,
     pub uninstall_attempted: bool,
     pub record_remaining: bool,
 }
@@ -76,19 +75,17 @@ impl Preview {
                 path
             });
             let error = match (screen, launch) {
-                (Screen::Failed, Launch::Setup) => Some(SetupError::simple("error_msi_unknown")),
+                (Screen::Failed, Launch::Setup) => Some("error_msi_unknown"),
                 (Screen::Failed, Launch::Uninstall) if key == "uninstall-missing" => {
-                    Some(SetupError::simple("error_not_installed"))
+                    Some("error_not_installed")
                 }
                 (Screen::Failed, Launch::Uninstall) if key == "uninstall-invalid" => {
-                    Some(SetupError::simple("error_msi_invalid"))
+                    Some("error_msi_invalid")
                 }
                 (Screen::Failed, Launch::Uninstall) if key == "uninstall-staging" => {
-                    Some(SetupError::simple("error_staging"))
+                    Some("error_staging")
                 }
-                (Screen::Failed, Launch::Uninstall) => {
-                    Some(SetupError::simple("error_msi_unknown"))
-                }
+                (Screen::Failed, Launch::Uninstall) => Some("error_msi_unknown"),
                 _ => None,
             };
 

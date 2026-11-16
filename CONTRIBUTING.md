@@ -11,9 +11,13 @@ Cairn 采用 Rust 与 GPUI 构建 Windows NTFS 文件检索与磁盘分析工具
 - **打包依赖（可选）**：WiX 5 (`dotnet tool install --global wix`)
 - **环境检查**：
   ```powershell
-  cargo check --workspace --all-targets
+  cargo fmt --all --check
+  cargo clippy --workspace --all-targets -- -D warnings
+  cargo run -p xtask -- check
   cargo test --workspace
   ```
+
+所有 crate 通过 `[lints] workspace = true` 继承根目录 `[workspace.lints]`（禁止未加 `// SAFETY:` 的 `unsafe` 块与未显式隔离的 `unsafe` 调用）及 `rustfmt.toml` 格式规则。
 
 ---
 

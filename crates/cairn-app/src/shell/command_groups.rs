@@ -160,7 +160,6 @@ impl ZoomPreset {
 /// implementation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GroupCommand {
-    // ---- the selected result (文件) -------------------------------------------------
     OpenSelected,
     RenameSelected,
     RestoreSelected,
@@ -169,7 +168,6 @@ pub enum GroupCommand {
     ShowProperties,
     DeleteSelected,
     EmptyRecycleBin,
-    // ---- the query text and clipboard (编辑) ----------------------------------------
     UndoQueryText,
     RedoQueryText,
     CutQueryText,
@@ -178,27 +176,21 @@ pub enum GroupCommand {
     PasteQueryText,
     SelectAll,
     ClearQuery,
-    // ---- match flags (搜索) ---------------------------------------------------------
     ToggleCase,
     ToggleWholeWord,
     ToggleMatchPath,
     ToggleRegex,
     ToggleExcludeHidden,
     ToggleExcludeSystem,
-    // ---- ordering -------------------------------------------------------------------
     SortBy(SortColumn),
     ReverseOrder,
-    // ---- table columns --------------------------------------------------------------
     ToggleColumn(TableColumn),
-    // ---- appearance (查看) ----------------------------------------------------------
     SetTheme(&'static str),
     SetZoom(ZoomPreset),
-    // ---- preferences (工具) and shared submenus -------------------------------------
     /// A labelled submenu and its sectioned rows. Sections are separated inside the nested popup.
     Submenu(&'static str, &'static [&'static [GroupCommand]]),
     SetLanguage(&'static str),
     ToggleAutostart,
-    // ---- index (索引) ---------------------------------------------------------------
     /// Opens the read-only Index Journal viewer dialog.
     OpenIndexJournal,
     /// Dynamic rescan submenu listing all locations plus individual indexed sources.
@@ -225,7 +217,6 @@ pub enum GroupCommand {
     TogglePropertyIndex,
     PropertyIndexStatus,
     PropertyIndexUsage,
-    // ---- help -----------------------------------------------------------------------
     /// Checks the latest stable release, downloads and verifies the installer, then hands the
     /// verified installer to the elevated setup flow.
     CheckForUpdates,

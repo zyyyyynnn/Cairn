@@ -319,13 +319,15 @@ fn a_cache_without_the_directory_size_flag_is_recomputed_and_migrated() {
     }
     persistence::save_volume_index_atomic(
         temp_dir.path(),
-        'Z',
-        vol.volume_serial,
-        vol.journal_id,
-        vol.last_usn,
-        &legacy_records,
-        vol.arena(),
-        false,
+        &crate::persistence::VolumeSnapshot {
+            drive_letter: 'Z',
+            volume_serial: vol.volume_serial,
+            journal_id: vol.journal_id,
+            last_usn: vol.last_usn,
+            records: &legacy_records,
+            arena: vol.arena(),
+            directory_sizes_valid: false,
+        },
     )
     .expect("legacy cache");
 
@@ -367,13 +369,15 @@ fn a_cache_with_a_valid_flag_keeps_its_stored_folder_sizes() {
     assert!(vol.directory_sizes_valid());
     persistence::save_volume_index_atomic(
         temp_dir.path(),
-        'Y',
-        vol.volume_serial,
-        vol.journal_id,
-        vol.last_usn,
-        &seeded_records,
-        vol.arena(),
-        true,
+        &crate::persistence::VolumeSnapshot {
+            drive_letter: 'Y',
+            volume_serial: vol.volume_serial,
+            journal_id: vol.journal_id,
+            last_usn: vol.last_usn,
+            records: &seeded_records,
+            arena: vol.arena(),
+            directory_sizes_valid: true,
+        },
     )
     .expect("valid cache");
 
@@ -598,7 +602,6 @@ fn test_volume_index_ingest_and_usn_changes() {
 
     let cancel = CancellationToken::new();
 
-    // 1. Initial search finds report
     let q_report = parse_query("annual");
     let matches = cairn_core::engine::execute_query(
         vol.records(),
@@ -610,7 +613,6 @@ fn test_volume_index_ingest_and_usn_changes() {
     );
     assert_eq!(matches.len(), 1);
 
-    // 2. USN Create: add "presentation.pptx"
     vol.apply_usn_changes([UsnChange::Created {
         frn: 13,
         parent_frn: 10,
@@ -631,7 +633,6 @@ fn test_volume_index_ingest_and_usn_changes() {
     );
     assert_eq!(matches_pres.len(), 1);
 
-    // 3. USN Rename: rename "annual_report.pdf" to "q4_report.pdf"
     vol.apply_usn_changes([
         UsnChange::Renamed {
             frn: 11,
@@ -671,7 +672,6 @@ fn test_volume_index_ingest_and_usn_changes() {
     );
     assert_eq!(matches_q4.len(), 1);
 
-    // 4. USN Delete: delete "budget.xlsx"
     vol.apply_usn_changes([UsnChange::Deleted { frn: 12 }]);
     let q_budget = parse_query("budget");
     let matches_budget = cairn_core::engine::execute_query(
@@ -777,35 +777,27 @@ fn matched_bytes_are_counted_once_at_the_highest_matched_point() {
     let note_idx = vol.first_record_index_for_frn(30).expect("note");
     let out_idx = vol.first_record_index_for_frn(50).expect("out");
 
-    // 1. Every folder matched: the root is the highest hit point and owns the whole tree.
+    // Matching a parent folder covers its nested subfolders once rather than double-counting.
     let all_folders = vec![root_idx, win_idx, sys_idx, users_idx];
     assert_eq!(vol.calculate_matched_bytes(&all_folders), 150);
 
-    // 2. A folder-only hit reports the folder's recursive size; the nested System32 is
-    //    covered by Windows and adds nothing.
     let subfolders = vec![win_idx, sys_idx, users_idx];
     assert_eq!(vol.calculate_matched_bytes(&subfolders), 50);
 
-    // 3. A single folder hit reports its recursive size on its own.
     assert_eq!(vol.calculate_matched_bytes(&[sys_idx]), 50);
 
-    // 4. Sibling directories keep their own shares.
     let siblings = vec![win_idx, users_idx];
     assert_eq!(vol.calculate_matched_bytes(&siblings), 50);
 
-    // 5. Pure file query: files contribute their size.
     let files = vec![note_idx, out_idx];
     assert_eq!(vol.calculate_matched_bytes(&files), 150);
 
-    // 6. Mixed query: Windows covers its matched descendant; the outside file counts once.
     let mixed = vec![win_idx, note_idx, out_idx];
     assert_eq!(vol.calculate_matched_bytes(&mixed), 150);
 
-    // 7. Duplicate indices are counted once.
     let duplicates = vec![note_idx, note_idx, out_idx, out_idx];
     assert_eq!(vol.calculate_matched_bytes(&duplicates), 150);
 
-    // 8. A many-times repeated index is still one record.
     let mut large_query = Vec::new();
     for _ in 0..50 {
         large_query.push(note_idx);
@@ -814,7 +806,6 @@ fn matched_bytes_are_counted_once_at_the_highest_matched_point() {
     assert!(large_query.len() > 64);
     assert_eq!(vol.calculate_matched_bytes(&large_query), 150);
 
-    // 9. Tombstoned records contribute zero bytes.
     vol.apply_usn_changes([UsnChange::Deleted { frn: 30 }]);
     assert_eq!(
         vol.calculate_matched_bytes(&[note_idx, out_idx]),
@@ -1270,12 +1261,13 @@ fn a_full_path_rule_rename_invalidates_exclusion_verdicts() {
         flags: 0,
         is_reparse_point: false,
     }]);
-    let volumes = HashMap::from([('C', vol)]);
+    vol.set_full_path_exclusion_rules(
+        crate::exclusion::ExclusionRules::parse(&["*.tmp".to_string()]).uses_full_path_rules(),
+    );
+    let mut volumes = HashMap::from([('C', vol)]);
     let _exclusions =
         crate::sync_engine::path_exclusions::PathExclusions::new(&volumes, &["*.tmp".to_string()]);
     let epoch = volumes[&'C'].exclusion_epoch();
-
-    let mut volumes = volumes;
     volumes
         .get_mut(&'C')
         .expect("volume")

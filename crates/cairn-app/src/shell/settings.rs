@@ -230,6 +230,8 @@ pub fn set_autostart_registry(enable: bool) -> Result<(), Box<dyn std::error::Er
     let subkey = w!(r"Software\Microsoft\Windows\CurrentVersion\Run");
     let value_name = w!("Cairn");
 
+    // SAFETY: `subkey` and `value_name` are static null-terminated strings, `wide` stays valid
+    // for `RegSetValueExW`, and `hkey` is closed before returning.
     unsafe {
         let mut hkey = windows::Win32::System::Registry::HKEY::default();
         let status = RegOpenKeyExW(HKEY_CURRENT_USER, subkey, None, KEY_SET_VALUE, &mut hkey);
@@ -287,7 +289,14 @@ impl AppSettings {
 
     pub fn load() -> Self {
         let path = default_settings_path();
-        Self::load_from_path(&path).unwrap_or_default()
+        Self::load_from_path(&path).unwrap_or_else(|err| {
+            tracing::warn!(
+                path = %path.display(),
+                error = %err,
+                "failed to load settings; falling back to defaults"
+            );
+            Self::default()
+        })
     }
 
     pub fn load_from_path(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {

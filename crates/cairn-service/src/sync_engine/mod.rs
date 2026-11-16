@@ -29,8 +29,6 @@ pub mod index_journal;
 pub mod journal_reconciliation;
 pub(crate) mod path_exclusions;
 pub mod post_scan;
-#[cfg(test)]
-mod presorted;
 pub mod property_pipeline;
 mod search;
 mod startup_scan;
@@ -42,6 +40,7 @@ pub use journal_reconciliation::*;
 pub use post_scan::*;
 pub use search::{AllFilesView, MatchSet, SearchOutcome, SearchResultItem};
 pub use treemap_build::TreeUnavailable;
+pub(crate) use volume_index::SourceTableView;
 pub use volume_index::{CompactPolicy, CompactionReport, RefreshedRecordMetadata, VolumeIndex};
 
 #[cfg(test)]
@@ -206,8 +205,11 @@ impl MultiVolumeEngine {
                 .collect()
         };
 
+        let full_path_exclusions =
+            crate::exclusion::ExclusionRules::parse(&config.excluded_paths).uses_full_path_rules();
         for d in active_drives {
             let mut vol = VolumeIndex::new(d);
+            vol.set_full_path_exclusion_rules(full_path_exclusions);
             let live_identity = identities_by_drive.get(&d.to_ascii_uppercase());
             if let Some(roots) = excluded_roots.get(&d) {
                 vol.set_excluded_roots(roots.iter().copied());
@@ -247,11 +249,17 @@ impl MultiVolumeEngine {
                             if let Some(identity) = live_identity {
                                 vol.set_identity(identity.clone());
                                 if saved_guid.is_none() {
-                                    let _ = persistence::save_volume_guid_sidecar(
+                                    if let Err(err) = persistence::save_volume_guid_sidecar(
                                         index_dir,
                                         d,
                                         &vol.volume_guid,
-                                    );
+                                    ) {
+                                        tracing::warn!(
+                                            "Failed to persist GUID sidecar for volume {}: {}",
+                                            d,
+                                            err
+                                        );
+                                    }
                                 }
                             }
 
@@ -675,16 +683,16 @@ impl MultiVolumeEngine {
 
     pub(crate) fn with_sources_for_rows<F, R>(&self, f: F) -> R
     where
-        F: FnOnce(
-            &HashMap<char, VolumeIndex>,
-            &HashMap<SourceId, folder_source::FolderSource>,
-            &PropertySideTables,
-        ) -> R,
+        F: FnOnce(crate::session::SourceTables<'_>) -> R,
     {
         let volumes = self.volumes.read().unwrap();
         let folders = self.folder_sources.read().unwrap();
         let properties = self.property_tables.read().unwrap();
-        f(&volumes, &folders, &properties)
+        f(crate::session::SourceTables {
+            volumes: &volumes,
+            folders: &folders,
+            properties: &properties,
+        })
     }
 
     /// Ensures configured directory sources are loaded and watched in memory.

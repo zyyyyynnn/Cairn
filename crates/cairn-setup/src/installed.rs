@@ -91,7 +91,12 @@ pub fn find_product_code() -> Option<String> {
 /// Every product registered under Cairn's upgrade code. A failed side-by-side install can leave
 /// more than one; uninstalling only the first would leave a second entry and its service behind.
 pub fn find_product_codes() -> Vec<String> {
-    find_product_codes_checked().unwrap_or_default()
+    find_product_codes_checked().unwrap_or_else(|err| {
+        tracing::warn!(
+            "MSI product enumeration failed (code {err}); falling back to registry keys"
+        );
+        Vec::new()
+    })
 }
 
 /// Whether every product registered now was part of the removal that started with `expected`.
@@ -109,6 +114,7 @@ pub fn find_product_codes_checked() -> Result<Vec<String>, u32> {
     let mut index = 0u32;
     loop {
         let mut product = [0u16; 39];
+        // SAFETY: `upgrade` is null-terminated and lives for the call; `product` fits a 38-char GUID plus NUL.
         let result = unsafe {
             MsiEnumRelatedProductsW(
                 PCWSTR(upgrade.as_ptr()),
@@ -188,6 +194,7 @@ pub fn legacy_burn_uninstallers() -> Vec<LegacyUninstall> {
 fn product_info(product_code: &str, attribute: PCWSTR) -> Option<String> {
     let product = wide(std::ffi::OsStr::new(product_code));
     let mut length = 0u32;
+    // SAFETY: `product` and `attribute` are null-terminated; passing `None` buffer queries required length into `length`.
     let status =
         unsafe { MsiGetProductInfoW(PCWSTR(product.as_ptr()), attribute, None, Some(&mut length)) };
     if status != ERROR_SUCCESS.0 && status != 234 {
@@ -196,6 +203,7 @@ fn product_info(product_code: &str, attribute: PCWSTR) -> Option<String> {
     }
     let mut buffer = vec![0u16; length as usize + 1];
     let mut length = buffer.len() as u32;
+    // SAFETY: `buffer` has capacity `length` UTF-16 code units matching the `length` pointer passed to MsiGetProductInfoW.
     let status = unsafe {
         MsiGetProductInfoW(
             PCWSTR(product.as_ptr()),

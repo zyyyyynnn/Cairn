@@ -16,6 +16,7 @@ const REQUIRED: &[&str] = &[
     "docs/engineering/architecture.md",
     "docs/engineering/quality.md",
     "docs/engineering/release.md",
+    "docs/engineering/testing.md",
 ];
 
 pub fn check_docs(workspace: &Path) -> Result<(), String> {

@@ -1206,10 +1206,12 @@ mod tests {
     }
 
     #[test]
-    fn test_truncate_str() {
+    fn truncate_str_respects_utf8_boundaries_and_max_chars() {
         assert_eq!(truncate_str("hello", 10), "hello");
         assert_eq!(truncate_str("hello", 5), "hello");
         assert_eq!(truncate_str("hello world", 8), "hello...");
+        assert_eq!(truncate_str("中文文档检索结果", 6), "中文文...");
+        assert_eq!(truncate_str("abc", 2), "...");
     }
 
     #[test]
@@ -1555,7 +1557,6 @@ mod tests {
             ..Default::default()
         };
 
-        // 1. Paginated streaming JSON output
         let json_args =
             CliArgs::try_parse_from(["CairnCli", "--json", "--max", "5", "report"]).unwrap();
         let transport = mk_transport();
@@ -1570,7 +1571,6 @@ mod tests {
         assert_eq!(decoded[4].frn, 5);
         assert_eq!(*transport.recorded_offsets.borrow(), vec![(2, 3), (5, 1)]);
 
-        // 2. Paginated streaming CSV export with CJK, commas, and quotes
         let temp = tempfile::tempdir().unwrap();
         let csv_path = temp.path().join("paginated.csv");
         let csv_args = CliArgs::try_parse_from([

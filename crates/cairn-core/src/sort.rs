@@ -7,7 +7,7 @@
 use crate::arena::NamePool;
 use crate::engine::CancellationToken;
 use crate::model::FileRecord;
-use crate::path_cache::{normalize_root, root_path_for_drive, DirectoryPathCache};
+use crate::path_cache::{root_path_for_drive, DirectoryPathCache};
 use crate::property_store::{PropertyKind, PropertySideTables, SourceId};
 use rayon::prelude::*;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -402,6 +402,24 @@ pub struct SortContext<'a> {
     pub properties: Option<&'a PropertySideTables>,
 }
 
+impl<'a> SortContext<'a> {
+    pub fn for_root(
+        records: &'a [FileRecord],
+        arena: &'a NamePool,
+        path_cache: &'a DirectoryPathCache,
+        root: &'a Arc<str>,
+    ) -> Self {
+        Self {
+            records,
+            arena,
+            path_cache,
+            root,
+            source_id: SourceId::default(),
+            properties: None,
+        }
+    }
+}
+
 #[inline]
 fn cmp_name_only(records: &[FileRecord], arena: &NamePool, a: u32, b: u32) -> Ordering {
     let ra = &records[a as usize];
@@ -725,32 +743,12 @@ impl PresortedIndices {
     }
 
     /// Merges changed/inserted records into the cached column, filtering out `removed` indices.
-    #[allow(clippy::too_many_arguments)]
     pub fn merge_changed(
         &mut self,
         col: SortColumn,
         changed: &mut Vec<u32>,
         removed: impl Fn(u32) -> bool,
-        records: &[FileRecord],
-        arena: &NamePool,
-        path_cache: &DirectoryPathCache,
-        drive_letter: char,
-    ) {
-        let root = root_path_for_drive(drive_letter);
-        self.merge_changed_with_root(col, changed, removed, records, arena, path_cache, &root);
-    }
-
-    /// Variant of [`Self::merge_changed`] accepting an arbitrary pre-normalized `root`.
-    #[allow(clippy::too_many_arguments)]
-    pub fn merge_changed_with_root(
-        &mut self,
-        col: SortColumn,
-        changed: &mut Vec<u32>,
-        removed: impl Fn(u32) -> bool,
-        records: &[FileRecord],
-        arena: &NamePool,
-        path_cache: &DirectoryPathCache,
-        root: &Arc<str>,
+        ctx: &SortContext<'_>,
     ) {
         let base = match col {
             SortColumn::Name => &mut self.by_name,
@@ -759,15 +757,7 @@ impl PresortedIndices {
             SortColumn::Path => &mut self.by_path,
             _ => return,
         };
-        let ctx = SortContext {
-            records,
-            arena,
-            path_cache,
-            root,
-            source_id: SourceId::default(),
-            properties: None,
-        };
-        changed.sort_unstable_by(|&a, &b| cmp_indices(col, a, b, &ctx).then_with(|| a.cmp(&b)));
+        changed.sort_unstable_by(|&a, &b| cmp_indices(col, a, b, ctx).then_with(|| a.cmp(&b)));
         let base_len = base.len();
         let mut merged = Vec::with_capacity(base_len + changed.len());
         let (mut left, mut right) = (0usize, 0usize);
@@ -778,7 +768,7 @@ impl PresortedIndices {
             if left >= base_len || right >= changed.len() {
                 break;
             }
-            let ord = cmp_indices(col, base[left], changed[right], &ctx)
+            let ord = cmp_indices(col, base[left], changed[right], ctx)
                 .then_with(|| base[left].cmp(&changed[right]));
             if ord == Ordering::Greater {
                 merged.push(changed[right]);
@@ -955,58 +945,6 @@ pub fn sort_indices_with_spec(
     });
 }
 
-/// Sorts query result indices by a single column and direction under a drive letter root.
-#[allow(clippy::too_many_arguments)]
-pub fn sort_indices(
-    indices: &mut [u32],
-    records: &[FileRecord],
-    arena: &NamePool,
-    path_cache: &DirectoryPathCache,
-    drive_letter: char,
-    col: SortColumn,
-    dir: SortDirection,
-    cancel: &CancellationToken,
-) {
-    if indices.len() <= 1 || cancel.is_cancelled() {
-        return;
-    }
-    let root = root_path_for_drive(drive_letter);
-    let ctx = SortContext {
-        records,
-        arena,
-        path_cache,
-        root: &root,
-        source_id: SourceId::default(),
-        properties: None,
-    };
-    sort_single_column(indices, &ctx, col, dir);
-}
-
-/// Sorts query result indices under an arbitrary source root prefix.
-#[allow(clippy::too_many_arguments)]
-pub fn sort_indices_for_root(
-    indices: &mut [u32],
-    records: &[FileRecord],
-    arena: &NamePool,
-    path_cache: &DirectoryPathCache,
-    root_prefix: &str,
-    source_id: SourceId,
-    properties: Option<&PropertySideTables>,
-    spec: &SortSpec,
-    cancel: &CancellationToken,
-) {
-    let root = normalize_root(root_prefix);
-    let ctx = SortContext {
-        records,
-        arena,
-        path_cache,
-        root: &root,
-        source_id,
-        properties,
-    };
-    sort_indices_with_spec(indices, &ctx, spec, cancel);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1100,38 +1038,29 @@ mod tests {
         ];
 
         let path_cache = DirectoryPathCache::new();
+        let root = root_path_for_drive('C');
+        let ctx = SortContext::for_root(&records, &arena, &path_cache, &root);
         let cancel = CancellationToken::new();
 
-        // 1. Sort by Size ascending: sizes are equal (100), secondary key (Name) puts "a.txt" before "b.txt".
-        // Between the two "a.txt" records (indices 1 and 2), tertiary key index breaks tie (1 before 2).
+        // Size tiebreaks by Name ascending ("a.txt" before "b.txt") and then record index (1 before 2).
         let mut indices = vec![0, 1, 2];
-        sort_indices(
+        sort_indices_with_spec(
             &mut indices,
-            &records,
-            &arena,
-            &path_cache,
-            'C',
-            SortColumn::Size,
-            SortDirection::Ascending,
+            &ctx,
+            &SortSpec::single(SortColumn::Size, SortDirection::Ascending),
             &cancel,
         );
         assert_eq!(indices, vec![1, 2, 0]);
 
-        // 2. Sort by DateModified ascending: all modified_ts are equal (50).
         indices = vec![0, 2, 1];
-        sort_indices(
+        sort_indices_with_spec(
             &mut indices,
-            &records,
-            &arena,
-            &path_cache,
-            'C',
-            SortColumn::DateModified,
-            SortDirection::Ascending,
+            &ctx,
+            &SortSpec::single(SortColumn::DateModified, SortDirection::Ascending),
             &cancel,
         );
         assert_eq!(indices, vec![1, 2, 0]);
 
-        // 3. Presorted index by size:
         let mut presorted = PresortedIndices::default();
         presorted.ensure_column(SortColumn::Size, &records, &arena, &path_cache, 'C');
         assert_eq!(presorted.by_size, vec![1, 2, 0]);
@@ -1231,6 +1160,8 @@ mod tests {
         let cache = DirectoryPathCache::new();
         let cancel = CancellationToken::new();
 
+        let root = root_path_for_drive('C');
+        let ctx = SortContext::for_root(&records, &arena, &cache, &root);
         for col in [
             SortColumn::Name,
             SortColumn::Size,
@@ -1241,7 +1172,7 @@ mod tests {
         ] {
             for dir in [SortDirection::Ascending, SortDirection::Descending] {
                 let mut got: Vec<u32> = (0..records.len() as u32).collect();
-                sort_indices(&mut got, &records, &arena, &cache, 'C', col, dir, &cancel);
+                sort_indices_with_spec(&mut got, &ctx, &SortSpec::single(col, dir), &cancel);
 
                 let mut expected: Vec<u32> = (0..records.len() as u32).collect();
                 expected.sort_by(|&a, &b| {

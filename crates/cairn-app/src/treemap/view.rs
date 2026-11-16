@@ -108,21 +108,12 @@ impl CairnApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        // Read the shell's resize cover before `state` borrows the app.
         let resize_covered = self.window_resize.is_covered();
         let Some(ref mut state) = self.treemap_state else {
             return div().into_any_element();
         };
 
-        // Measure available content bounds
         let window_bounds = window.bounds();
-        // The shell lays its boxes out border-box, so the 1px hairlines are
-        // already inside these band widths; counting them again would shift
-        // every pointer-to-base projection by a pixel or two.
-        // The canvas is the content column's panel, below the path band. It keeps the
-        // panel's own margin on the sides and bottom, while the band's bottom inset is
-        // its top gap, mirroring the table panel under the search band. Pointer
-        // coordinates and the tile layout both read this rect.
         let panel_margin = f32::from(theme::rem(window) * layout::SPACE_4);
         let band_height = f32::from(theme::rem(window) * layout::SEARCH_BAND_HEIGHT);
         let avail_w =
@@ -143,11 +134,7 @@ impl CairnApp {
         );
         state.last_scale_factor = canvas_scale(window);
 
-        // The squarified layout is tied to the window, not to the sidebar. A
-        // sidebar motion projects the existing cells onto the new canvas width,
-        // so the topology never reshuffles and no frame exposes the background.
-        // While the shell covers a live resize the layout stays put and reflows
-        // once, on the first frame after the cover lifts.
+        // Reflow squarified tiles on window resize (once the resize cover lifts), never during sidebar animation.
         let is_initial = state.last_window_size.0 <= 1.0 || state.last_window_size.1 <= 1.0;
         let window_changed = (state.last_window_size.0 - window_size.0).abs() > 0.5
             || (state.last_window_size.1 - window_size.1).abs() > 0.5;
@@ -157,8 +144,6 @@ impl CairnApp {
             state.recompute_layout();
         }
 
-        // A sidebar shift only changes the width the same cells cover. The
-        // projection absorbs the delta, so the final frame has no layout jump.
         let stretch_x = if state.last_bounds.0 > 1.0 {
             canvas_size.0 / state.last_bounds.0
         } else {
@@ -166,9 +151,7 @@ impl CairnApp {
         };
         state.zoom.set_stretch_x(stretch_x, canvas_size);
 
-        // Labels are sized by the width the canvas keeps once the sidebar stops moving: a collapse
-        // widens every cell without reshaping the squarified layout, so a title has to appear on
-        // the settled width instead of flipping with the animated one.
+        // Judge label visibility by the settled canvas width so titles do not flicker during sidebar slide.
         let settled_canvas_width =
             (f32::from(window_bounds.size.width) - sidebar_settled_width - 2.0 * panel_margin)
                 .max(100.0);
@@ -185,8 +168,7 @@ impl CairnApp {
         let pan_view = view.clone();
         let focus = state.focus_handle().cloned();
 
-        // Scan progress is reported by the status bar, not here.
-        let is_scanning = state.is_scanning;
+        let is_scanning = state.is_scanning();
 
         let mut tail_focus = HashMap::new();
         tail_focus_handles(&state.layout_nodes, window, cx, &mut tail_focus);
@@ -207,10 +189,6 @@ impl CairnApp {
             app: cx,
         };
 
-        // An empty directory is content, not a separate surface: it must keep
-        // the canvas focus, Backspace/Enter and wheel zoom.
-        // A scan waits on the panel's own muted surface: the canvas container is already
-        // painted in it, so a waiting overlay would add no pixels and one more id to keep.
         let content = if is_scanning {
             div().into_any_element()
         } else if state.layout_nodes.is_empty() {
@@ -755,14 +733,9 @@ fn render_nested_node(
         return;
     }
 
-    // Content decisions run on the rect that will actually be painted, not on
-    // the fractional layout value; otherwise a label/size threshold can flip
-    // on a device-pixel boundary.
+    // Snap after viewport projection so size thresholds match painted pixels rather than fractional layout coordinates.
     let display = snap_rect_to_device_pixels(paint, canvas_scale(rcx.window));
-    // Label decisions read the settled cell, never the per-frame projection: `stretch_x` moves
-    // every frame while the panel collapses, and device-pixel rounding flips a size threshold back
-    // and forth, which makes titles appear and disappear mid-animation. The settled stretch is
-    // fixed for the whole motion, so a collapse shows exactly the labels its final width carries.
+    // Measure labels against settled width rather than per-frame animation stretch so titles do not flicker.
     let stable = TreemapRect::new(
         0.0,
         0.0,
@@ -771,14 +744,10 @@ fn render_nested_node(
     );
 
     let category = node.item.category;
-    // Selecting a container focuses its whole subtree: the container's own header and every
-    // descendant stay at full tone, and only what lies outside dims.
     let in_selected = rcx
         .selected_path
         .is_some_and(|selected| path_is_within(&node.path, selected));
     let dimmed = rcx.selection_active && !in_selected;
-    // Every directory uses its resolved category color; a directory whose content carries no
-    // signal keeps the Other tint.
     let base_header = rcx.palette.directory_header(category);
     let header_bg = if dimmed {
         rcx.palette.dimmed_fill(base_header)
@@ -794,13 +763,10 @@ fn render_nested_node(
     let is_label_sized =
         stable.width >= TREEMAP_LABEL_MIN_WIDTH && stable.height >= TREEMAP_LABEL_MIN_HEIGHT;
     if !has_header && !is_label_sized && !node.is_aggregate() {
-        // Sub-label real cells are texture: the core folds anything this small
-        // into the directory's summary block, which keeps its byte share.
         push_flat_fill(elements, display, texture_fill, rcx.palette, dimmed);
         return;
     }
 
-    // Labels allocate; do it only after culling and flat-fill early return.
     let name = node.item.name.clone();
     let size_str = format_size_bytes(node.item.size);
     let full_path = node.path.clone();
@@ -814,9 +780,6 @@ fn render_nested_node(
             "{label}
 {size_str}"
         ));
-        // A summary block keeps its byte share whatever shape that is, so it
-        // can be too small for text. It still paints, stays selectable and
-        // opens its member list on double click; only the label is dropped.
         let content: AnyElement = if is_label_sized {
             compact_block_content(
                 IconName::FileStack,
@@ -915,22 +878,12 @@ fn render_nested_node(
             let budget = header_content(inner_width, size_width, tail_width);
             let show_header_size = budget.size;
             let header_tooltip = SharedString::from(format!("{full_path_drill}\n{size_str}"));
-            // A chip the canvas clips must not stay a tab stop: keyboard focus
-            // would land on a control no one can see. The chip sits at the
-            // header's right end and is one 16px pill centered in the band, so
-            // its own band decides: the header's visible height can exceed the
-            // band while the pill itself is above the canvas. The pointer
-            // keeps the visible part either way.
+            // Keep clipped tail chips out of the keyboard Tab order when scrolled off canvas.
             let pill_top = paint.y + (header_height - 16.0) * 0.5;
             let header_focusable = paint.x + paint.width <= canvas.0 + 1.0
                 && pill_top < canvas.1
                 && pill_top + 16.0 > 0.0;
 
-            // A tail too small for its own tile lives in the header instead of
-            // painting a sliver. It keeps the count, the size and the member
-            // list one click away while the body stays label-sized. A header
-            // too narrow for the full count chip drops it instead of showing an
-            // unlabeled icon; the directory itself stays the way in.
             let tail_control = accessibility::control("treemap-tail");
             let tail_chip = node.tail.as_ref().and_then(|tail| {
                 let label = tail_label.as_ref().filter(|_| budget.tail)?;
@@ -1101,9 +1054,6 @@ fn render_nested_node(
                     )
                 })
                 .when_some(tail_chip, |this, chip| this.child(chip));
-            // The container owns the press: it selects, drills on double click,
-            // and stops propagation so the canvas does not clear the selection.
-            // The header tints itself on hover/press; no ancestor frame reacts.
             let header_bar = with_block_fill_interaction(
                 header_bar,
                 header_bg,
@@ -1118,7 +1068,6 @@ fn render_nested_node(
             ));
             elements.push(place_treemap_node(container.child(header_bar), paint));
 
-            // Recursively render child layout nodes
             for child in &node.children {
                 render_nested_node(child, rcx, viewport, canvas, elements);
             }
@@ -1126,10 +1075,6 @@ fn render_nested_node(
         }
     }
 
-    // Leaf block (file or compact directory). A file carries its category fill; a
-    // compact directory uses the quieter header share of the same category, so a
-    // directory without a header strip still reads as what it holds. A directory
-    // whose content carries no category signal keeps the Other tint.
     let leaf_path = full_path.clone();
     let leaf_view = rcx.view.clone();
     let leaf_tooltip = SharedString::from(format!("{full_path}\n{size_str}"));
@@ -1162,7 +1107,6 @@ fn render_nested_node(
         .bg(leaf_bg)
         .overflow_hidden()
         .cursor_pointer()
-        // A leaf shows a single clipped line; hovering names the whole item.
         .when(!rcx.panning && !rcx.suppress_tooltip, move |this| {
             this.tooltip(crate::shell::tooltip::text(leaf_tooltip.clone()))
         })

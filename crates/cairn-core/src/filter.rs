@@ -534,7 +534,6 @@ pub fn parse_date_span(s: &str, now_sec: i64) -> Option<(i64, i64)> {
         _ => {}
     }
 
-    // 1. Month names (e.g. january, feb)
     let month_idx = match s.as_str() {
         "january" | "jan" => Some(1),
         "february" | "feb" => Some(2),
@@ -561,7 +560,6 @@ pub fn parse_date_span(s: &str, now_sec: i64) -> Option<(i64, i64)> {
         return Some((start, end));
     }
 
-    // 2. Weekday names (e.g. monday, fri)
     let weekday_idx = match s.as_str() {
         "monday" | "mon" => Some(1),
         "tuesday" | "tue" => Some(2),
@@ -580,7 +578,6 @@ pub fn parse_date_span(s: &str, now_sec: i64) -> Option<(i64, i64)> {
         return Some((start, start + 86400));
     }
 
-    // 3. Relative durations: e.g. 2years, 3months, 4weeks, 5days, 6hours, 7minutes, 8seconds
     if let Some(n_str) = s.strip_suffix("years").or_else(|| s.strip_suffix("year")) {
         let n: i64 = n_str.trim().parse().ok()?;
         return Some((now_sec - n * 365 * 86400, now_sec));
@@ -620,7 +617,6 @@ pub fn parse_date_span(s: &str, now_sec: i64) -> Option<(i64, i64)> {
         return Some((now_sec - n, now_sec));
     }
 
-    // 4. MM/YYYY format (e.g. 07/2026 or 7/2026)
     if let Some((m_str, y_str)) = s.split_once('/') {
         if let (Ok(m), Ok(y)) = (m_str.trim().parse::<i64>(), y_str.trim().parse::<i64>()) {
             if (1..=12).contains(&m) && y > 0 {
@@ -635,7 +631,6 @@ pub fn parse_date_span(s: &str, now_sec: i64) -> Option<(i64, i64)> {
         }
     }
 
-    // 5. YYYY-MM-DD
     if s.len() == 10 && s.as_bytes()[4] == b'-' && s.as_bytes()[7] == b'-' {
         let year: i64 = s[0..4].parse().ok()?;
         let month: i64 = s[5..7].parse().ok()?;
@@ -646,7 +641,6 @@ pub fn parse_date_span(s: &str, now_sec: i64) -> Option<(i64, i64)> {
         }
     }
 
-    // 6. YYMMDD (6 digits, e.g. 260702 -> 2026-07-02, 990702 -> 1999-07-02)
     if s.len() == 6 && s.chars().all(|c| c.is_ascii_digit()) {
         let yy: i64 = s[0..2].parse().ok()?;
         let month: i64 = s[2..4].parse().ok()?;
@@ -658,7 +652,6 @@ pub fn parse_date_span(s: &str, now_sec: i64) -> Option<(i64, i64)> {
         }
     }
 
-    // 7. YYYY (4 digits, e.g. 2026)
     if s.len() == 4 && s.chars().all(|c| c.is_ascii_digit()) {
         if let Ok(year) = s.parse::<i64>() {
             let start = ymd_to_timestamp(year, 1, 1);
@@ -667,7 +660,6 @@ pub fn parse_date_span(s: &str, now_sec: i64) -> Option<(i64, i64)> {
         }
     }
 
-    // 8. YY (2 digits, e.g. 26 -> 2026, 99 -> 1999)
     if s.len() == 2 && s.chars().all(|c| c.is_ascii_digit()) {
         if let Ok(yy) = s.parse::<i64>() {
             let year = if yy >= 70 { 1900 + yy } else { 2000 + yy };

@@ -556,11 +556,13 @@ mod windows_acl {
     }
 
     fn is_trusted_sid(sid: PSID, trusted: &[OwnedSid]) -> bool {
-        !sid.is_invalid()
-            // SAFETY: both operands are valid SIDs and EqualSid only compares their contents.
-            && trusted
-                .iter()
-                .any(|candidate| unsafe { EqualSid(sid, candidate.0) }.is_ok())
+        if sid.is_invalid() {
+            return false;
+        }
+        trusted.iter().any(|candidate| {
+            // SAFETY: both `sid` and `candidate.0` are valid SIDs and `EqualSid` only reads them.
+            unsafe { EqualSid(sid, candidate.0) }.is_ok()
+        })
     }
 
     fn read_descriptor(path: &Path) -> Result<Option<OwnedDescriptor>, DataDirectoryError> {
@@ -901,7 +903,7 @@ mod windows_acl {
     /// Naming an owner the caller is not needs `SeRestorePrivilege` *enabled*; `SeTakeOwnershipPrivilege`
     /// on its own only lets a holder claim the object for a SID it may legitimately use, which for an
     /// elevated administrator means itself and never `SY`. Both are attempted by
-    /// [`super::apply_ownership_privilege`] before anything is enforced, and the LocalSystem service
+    /// [`super::apply_ownership_privileges`] before anything is enforced, and the LocalSystem service
     /// holds both from the start. Group is deliberately left alone: bundling it would refuse the owner
     /// for any process that cannot claim `SY` as its primary group. `Ok(None)` means the write was
     /// accepted.

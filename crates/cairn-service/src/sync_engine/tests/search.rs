@@ -319,7 +319,6 @@ fn test_multi_volume_schwartzian_transform_sort() {
 
     let cancel = CancellationToken::new();
 
-    // 1. Sort by Name ascending (natural sort: file_1, file_2, file_10, file_20)
     let outcome = engine.execute_search_multi(
         "",
         &QueryDefaults::default(),
@@ -344,7 +343,6 @@ fn test_multi_volume_schwartzian_transform_sort() {
         ["file_1.txt", "file_2.txt", "file_10.txt", "file_20.txt"]
     );
 
-    // 2. Sort by Name descending
     let outcome = engine.execute_search_multi(
         "",
         &QueryDefaults::default(),
@@ -367,7 +365,6 @@ fn test_multi_volume_schwartzian_transform_sort() {
         ["file_20.txt", "file_10.txt", "file_2.txt", "file_1.txt"]
     );
 
-    // 3. Sort by Size ascending (10, 50, 100, 200)
     let outcome = engine.execute_search_multi(
         "",
         &QueryDefaults::default(),
@@ -386,7 +383,6 @@ fn test_multi_volume_schwartzian_transform_sort() {
     });
     assert_eq!(sizes, [10, 50, 100, 200]);
 
-    // 4. Sort by DateModified ascending (100, 200, 300, 400)
     let outcome = engine.execute_search_multi(
         "",
         &QueryDefaults::default(),
@@ -405,7 +401,6 @@ fn test_multi_volume_schwartzian_transform_sort() {
     });
     assert_eq!(dates, [100, 200, 300, 400]);
 
-    // 5. Sort by Extension ascending with mixed case
     let mut vol_e = VolumeIndex::new('E');
     vol_e.ingest_items(vec![
         ExtractedItem {

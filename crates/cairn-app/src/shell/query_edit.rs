@@ -124,7 +124,9 @@ impl CairnApp {
         let Some(text) = self.selected_query_text() else {
             return false;
         };
-        let _ = crate::shell::os::set_clipboard_text(&text);
+        if let Err(err) = crate::shell::os::set_clipboard_text(&text) {
+            tracing::warn!(error = %err, "failed to copy query selection during cut");
+        }
         self.query.search_input.delete_backward();
         self.schedule_text_search(cx);
         cx.notify();
@@ -226,7 +228,6 @@ mod query_edit_tests {
     use gpui_kit::gpui::AppContext as _;
 
     #[test]
-    #[allow(clippy::reversed_empty_ranges)]
     fn selected_query_text_supports_both_forward_and_backward_selection() {
         gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
             gpui_kit::init(cx);
@@ -243,12 +244,12 @@ mod query_edit_tests {
                     app.update(cx, |this, _| {
                         this.query.search_input.text = "hello world".to_string();
 
-                        // Forward selection "world" (6..11)
+                        // Forward selection "world"
                         this.query.search_input.selection = 6..11;
                         assert_eq!(this.selected_query_text().as_deref(), Some("world"));
 
-                        // Backward selection "world" (11..6)
-                        this.query.search_input.selection = 11..6;
+                        // Backward selection "world" (reversed bounds represent right-to-left drag)
+                        this.query.search_input.selection = std::ops::Range { start: 11, end: 6 };
                         assert_eq!(
                             this.selected_query_text().as_deref(),
                             Some("world"),
@@ -259,23 +260,22 @@ mod query_edit_tests {
                         this.query.search_input.selection = 6..6;
                         assert_eq!(this.selected_query_text(), None);
 
-                        // Mouse click anchor & selection behavior
-                        // 1. Single click at index 6 sets anchor and cursor
                         this.handle_search_bar_mouse_down(6, 1, false);
                         assert_eq!(this.query.text_selection_anchor, Some(6));
                         assert_eq!(this.query.search_input.selection, 6..6);
 
-                        // 2. Shift+Click to index 11 expands selection, keeps anchor
                         this.handle_search_bar_mouse_down(11, 1, true);
                         assert_eq!(this.query.text_selection_anchor, Some(6));
                         assert_eq!(this.query.search_input.selection, 6..11);
 
-                        // 3. Shift+Click backwards to index 0 creates backward selection
                         this.handle_search_bar_mouse_down(0, 1, true);
                         assert_eq!(this.query.text_selection_anchor, Some(6));
-                        assert_eq!(this.query.search_input.selection, 6..0);
+                        assert_eq!(
+                            this.query.search_input.selection,
+                            std::ops::Range { start: 6, end: 0 }
+                        );
 
-                        // 4. Double-click selects word and CLEARS anchor so jitter cannot wipe it
+                        // Multi-click must clear text_selection_anchor so drag jitter cannot erase selection.
                         this.handle_search_bar_mouse_down(7, 2, false);
                         assert_eq!(
                             this.query.text_selection_anchor, None,
@@ -283,7 +283,6 @@ mod query_edit_tests {
                         );
                         assert_eq!(this.query.search_input.selection, 6..11);
 
-                        // 5. Triple-click selects all and CLEARS anchor
                         this.handle_search_bar_mouse_down(2, 3, false);
                         assert_eq!(
                             this.query.text_selection_anchor, None,

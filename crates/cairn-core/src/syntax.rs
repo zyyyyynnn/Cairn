@@ -56,16 +56,19 @@ impl QueryDefaults {
     }
 }
 
-#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum QueryExpr {
-    Term(SearchTerm),
+    Term(Box<SearchTerm>),
     And(Vec<QueryExpr>),
     Or(Vec<QueryExpr>),
     Not(Box<QueryExpr>),
 }
 
 impl QueryExpr {
+    pub fn term(term: SearchTerm) -> Self {
+        Self::Term(Box::new(term))
+    }
+
     pub fn is_empty(&self) -> bool {
         match self {
             QueryExpr::Term(t) => t.is_empty(),
@@ -540,13 +543,13 @@ pub fn parse_query_with(input: &str, defaults: &QueryDefaults) -> QueryExpr {
         None => expr,
         Some(filter) => match expr {
             QueryExpr::And(subs) if subs.is_empty() => {
-                QueryExpr::And(vec![QueryExpr::Term(filter)])
+                QueryExpr::And(vec![QueryExpr::term(filter)])
             }
             QueryExpr::And(mut subs) => {
-                subs.insert(0, QueryExpr::Term(filter));
+                subs.insert(0, QueryExpr::term(filter));
                 QueryExpr::And(subs)
             }
-            other => QueryExpr::And(vec![QueryExpr::Term(filter), other]),
+            other => QueryExpr::And(vec![QueryExpr::term(filter), other]),
         },
     }
 }
@@ -691,9 +694,9 @@ impl<'a> QueryParser<'a> {
             if token.is_empty() {
                 // Dangling operator (`a|`, `a||b`, `!<>`): the item carries no constraint,
                 // so it must not act as "match everything" inside an OR/AND chain.
-                QueryExpr::Term(SearchTerm::match_nothing())
+                QueryExpr::term(SearchTerm::match_nothing())
             } else {
-                QueryExpr::Term(parse_search_term(&token, self.defaults))
+                QueryExpr::term(parse_search_term(&token, self.defaults))
             }
         }
     }
@@ -1657,7 +1660,7 @@ mod tests {
         // Off by default: an unchanged query keeps its old width, and a plain term is not
         // itself an attribute constraint.
         assert!(!parse_query("报告").is_empty());
-        assert!(QueryExpr::Term(SearchTerm::default()).is_empty());
+        assert!(QueryExpr::term(SearchTerm::default()).is_empty());
 
         // A textless query with the filter on is no longer "every record".
         let expr = parse_query_with("", &hidden);
