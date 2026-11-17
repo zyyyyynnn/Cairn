@@ -64,7 +64,7 @@
 
 ## CI 门禁
 
-`.github/workflows/ci.yml` 在 `windows-latest` 上执行 `cargo clippy --workspace --all-targets -- -D warnings`、`cargo doc --workspace --no-deps`、`cargo run -p xtask -- check`（覆盖 `check-i18n`、`check-docs`、`check-size` 与 `check-hygiene`），并在 `ubuntu-latest` 上执行 `cargo fmt --all --check` 与 `cargo deny check`，随后按以下作业运行测试与回归门禁：
+`.github/workflows/ci.yml` 的 `Code Quality & Static Analysis` 作业在 `windows-latest` 上执行 `cargo clippy --workspace --all-targets -- -D warnings` 与 `cargo doc --workspace --no-deps`，并以四条独立命令执行仓库门禁：`cargo run -p xtask -- check-i18n`、`cargo run -p xtask -- check-size`、`cargo run -p xtask -- check-docs`、`cargo run -p xtask -- check-hygiene`（前两条跳过纯文档改动，后两条始终执行）；`Dependency Policy` 作业在 `ubuntu-latest` 上执行 `cargo fmt --all --check` 与 `cargo deny check`，随后按以下作业运行测试与回归门禁：
 
 - `Test / Core & Protocol`：`cairn-protocol` `cairn-client` `cairn-core` `cairn-ui`
 - `Test / Content & Filesystem`：`cairn-ntfs` `cairn-content`

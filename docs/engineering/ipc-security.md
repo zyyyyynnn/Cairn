@@ -28,6 +28,25 @@
 - 查询结果采用会话游标分页，不在一次响应中反序列化完整结果集。
 - 客户端连接使用退避重试；服务端每个连接独立处理，支持并发客户端。
 
+### 3.1 错误码
+
+`ResponsePayload::Error.code` 为机器可读错误码，常量与数值定义在 `cairn_protocol::message`，文本为英文技术描述，本地化由呈现层负责（UI-07）。
+
+| 错误码 | 常量 | 含义 |
+| --- | --- | --- |
+| 400 | `ERROR_CODE_HANDSHAKE_REQUIRED` | 请求在 `Hello` 握手前到达，协议版本尚未协商 |
+| 401 | `ERROR_CODE_ADMIN_ONLY_QUERY` | `admin_only_query` 已开启且调用方不是管理员 |
+| 403 | `ERROR_CODE_UNAUTHORIZED` | 无法从访问令牌推导调用方身份，或策略拒绝该请求（含未认证调用方、非管理员修改 `admin_only_query`） |
+| 409 | `ERROR_CODE_PROTOCOL_VERSION_MISMATCH` | 版本护栏不一致，需同时更新应用与服务 |
+| 410 | `ERROR_CODE_SESSION_EXPIRED` | 查询会话不存在或已过期（失效、重载或压缩后） |
+| 413 | `ERROR_CODE_TREE_NOT_INDEXED` | 请求路径不在活动卷索引内（Treemap 专用） |
+| 414 | `ERROR_CODE_TREE_NOT_DIRECTORY` | 请求路径是文件而非目录（Treemap 专用） |
+| 415 | `ERROR_CODE_TREE_TOO_LARGE` | 目录树超出单次响应的条目或载荷预算（Treemap 专用） |
+| 416 | `ERROR_CODE_QUERY_TOO_COMPLEX` | 内容检索项超过 `MAX_CONTENT_TERMS`（16），求值前整体拒绝 |
+| 417 | `ERROR_CODE_INVALID_REQUEST` | 请求参数无效或引用了未知来源 |
+
+413、414、415 只由 Treemap 的 `GetTree` 返回。
+
 ## 4. 权限使用
 
 - `SeRestorePrivilege`：用于服务数据目录的 owner 修复；只有该特权允许把任意有效 SID 设为 owner。使用后按原状态释放。

@@ -65,7 +65,7 @@ cargo run --profile dev-ui -p cairn-app
 
 # 命令行检索与状态查询
 cargo run -p cairn-cli -- --status
-cargo run -p cairn-cli -- "ext:rs" --max 50 --sort size --asc=false
+cargo run -p cairn-cli -- "ext:rs" --max 50 --sort size-desc
 ```
 
 ### 构建与打包发布

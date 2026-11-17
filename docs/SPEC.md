@@ -73,7 +73,7 @@
 - 对标基线：只使用 Everything 1.5 官方文档与 1.5 发布说明，不引用更早版本。
 - 索引源：先实现任意文件夹索引源并抽象 `IndexSource`；FAT/exFAT、ReFS、EFU 依次跟进；映射网络盘、远程索引、HTTP/ETP/FTP、Everything Server 仍为非目标。
 - 属性索引：3–5 个高频属性；开启后常驻内存目标 ≤160 字节/条，基础配置保持 ≤125 字节/条；Worker 抽取、超时隔离、默认关闭。
-- 索引日志：只读、由 USN 或索引源变更派生、容量有界，可查询与导出；服务不提供写接口。
+- 索引日志：只读、由 USN 或索引源变更派生、容量有界，可查询；导出尚未实现；服务不提供写接口。
 - 搜索与结果工作流：拼音、忽略标点/空白、变音符号、长度/属性/层级/去重/唯一等高频函数与多键排序；列显隐先行；Tabs/Sessions、预览/缩略图、多文件重命名、文件操作撤销列为后续。
 - 1.5 没有通用 Groups 视图；Cairn 不以分组为对标项。
 
@@ -155,7 +155,7 @@
 - **Cairn 闭环现状**：
   - `CairnService.exe` 服务具备 Win32 DACL 严格安全描述符与 `PIPE_REJECT_REMOTE_CLIENTS`，仅允许本地交互用户连接。
   - 管道显式校验版本护栏，防止反序列化漏洞。
-  - 索引配置由本地已认证用户经管道提交，服务校验后以 SYSTEM/Administrators 描述符原子持久化并即时应用：`SetConfig` / `GetConfig` / `ClearContentIndex` / `Rescan` / `RescanSource` / `SetPropertyIndex` / `GetIndexJournal` / `GetSources` 均已打通协议、服务与客户端；GUI“索引”菜单提供只读日志弹窗、重扫描、内容索引与扩展属性管理，CLI `CairnCli` 提供 `sources` / `add-folder` / `remove-folder` / `rescan` / `rescan-source` / `reload-config` / `property-index` / `journal` 子命令；`admin_only_query` 只能由管理员修改。
+  - 索引配置由本地已认证用户经管道提交，服务校验后以 SYSTEM/Administrators 描述符原子持久化并即时应用；配置、重扫、来源、属性索引与索引日志的管理请求 `GetConfig` / `SetConfig` / `ReloadConfig` / `Rescan` / `RescanSource` / `ClearContentIndex` / `GetContentIndexStatus` / `GetSources` / `AddFolderSource` / `RemoveFolderSource` / `GetPropertyIndexStatus` / `SetPropertyIndexEnabled` / `GetIndexJournal` / `SetIndexJournalEnabled` 均已打通协议、服务与客户端；GUI“索引”菜单提供只读日志弹窗、重扫描、内容索引与扩展属性管理，侧边栏文件夹源支持右键重扫描，CLI `CairnCli` 提供 `sources` / `add-folder` / `remove-folder` / `rescan` / `rescan-source` / `reload-config` / `property-index` / `journal` 子命令；`admin_only_query` 只能由管理员修改。
 
 ### 3.9 本地化与偏好设置（Localization & Settings）
 - **同类基线**：完整的多语言国际化架构（非硬编码），偏好设置持久化。
@@ -173,7 +173,7 @@
 5. **全局热键**：`Ctrl+Alt+Space` 呼出/隐藏主窗口；组合键被占用时启动提示一次，托盘入口保持可用。
 6. **手动重扫与配置重载**（已实现）：协议、服务端 handler、鉴权、GUI“索引 > 重扫描”子菜单与侧边栏文件夹源右键重扫描、以及 CLI `rescan` / `rescan-source` / `reload-config` 子命令均已闭环。
 7. **离线 MFT 镜像**（部分达标）：`cairn-ntfs::mft_reader` 已支持从独立 `$MFT` 镜像或内存流离线解析记录并有集成测试（`mft_reader_seam`）；CLI 暂未提供独立离线镜像文件导入子命令。
-8. **Everything 1.5 索引平台对齐**（部分达标，P1）：任意文件夹索引源与 `IndexSource`（`IDX-11`）、5 个高频属性侧表与 `CairnWorker` 抽取（`IDX-12`）、有界只读索引日志与查看弹窗（`IDX-13`）、拼音/忽略标点空白/变音符号/长度与属性/层级与去重函数/多键排序（`QRY-10`）均已打通服务、CLI、语法与 GUI；尚余差距：GUI 暂未提供图形化增删文件夹源弹窗（当前通过 `CairnCli add-folder/remove-folder` 或配置文件管理），属性索引开启后的 400 万条规模 release 常驻内存（≤160 B/条）与全量查询延迟待发布前单独实测；设计见 [engineering/index-platform.md](engineering/index-platform.md)。
+8. **Everything 1.5 索引平台对齐**（部分达标，P1）：任意文件夹索引源与 `IndexSource`（`IDX-11`）、5 个高频属性侧表与 `CairnWorker` 抽取（`IDX-12`）、有界只读索引日志与查看弹窗（`IDX-13`）、拼音/忽略标点空白/变音符号/长度与属性/层级与去重函数/多键排序（`QRY-10`）的语法与执行已打通服务、CLI 与界面；尚余差距：`pinyin:`、`nopunc:`、`nows:`、`diacritics:` 尚无图形开关，界面只提供区分大小写、全字匹配、匹配路径与正则 4 个匹配开关以及隐藏项/系统项排除开关，其余经 `QueryDefaults` 或查询语法生效；GUI 暂未提供图形化增删文件夹源弹窗（当前通过 `CairnCli add-folder/remove-folder` 或配置文件管理）；属性索引开启后的 400 万条规模 release 常驻内存（≤160 B/条）与全量查询延迟待发布前单独实测；索引日志导出尚未实现，CLI 仅提供查询与录制开关；设计见 [engineering/index-platform.md](engineering/index-platform.md)。
 
 ---
 
@@ -258,7 +258,7 @@
 | 编号 | 优先级 | 需求描述 | 存储位置与权限要求 |
 |:---|:---|:---|:---|
 | **SET-01** | P0 | 客户端偏好持久化于 `%APPDATA%\Cairn\settings.toml`：主题（系统/浅色/深色）、界面语言（系统/简中/EN）、排序列、升降序、列宽配置、界面缩放三档（紧凑/标准/宽松，对应 90/100/110%；界面只显示档位名）、开机自启等，采用原子写盘 | 当前登录用户私有目录，标准用户权限可读写；系统主题/语言解析到 Windows 设置，显式选项覆盖系统值；缩放只接受三档 |
-| **SET-02** | P0 | 服务端全局配置持久化于 `%ProgramData%\Cairn\service.toml`：包含纳入/排除卷、排除路径规则、内容索引专用排除路径、内容索引总开关、扩展名白名单与单文件大小上限 | 文件 ACL 仅 SYSTEM 与内置管理员组可写；写入由 LocalSystem 服务完成，本地用户经管道提交并由服务校验 |
+| **SET-02** | P0 | 服务端全局配置持久化于 `%ProgramData%\Cairn\service.toml`：包含纳入/排除卷、排除路径规则、内容索引专用排除路径、内容索引总开关、扩展名白名单与单文件大小上限，以及文件夹源列表 `folder_sources`、属性索引开关 `property_index_enabled`（默认 false）、索引日志开关 `index_journal_enabled`（默认 true）与文件夹周期重扫间隔 `folder_rescan_interval_secs`（默认 86400 秒，0 表示关闭周期重扫）；经管道提交的热改由服务的 `apply_config_change` 校验、安全持久化并即时应用 | 文件 ACL 仅 SYSTEM 与内置管理员组可写；写入由 LocalSystem 服务完成，本地用户经管道提交并由服务校验 |
 | **SET-03** | P1 | 开机自动启动机制：通过写入当前用户注册表启动项 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 实现 | 当前用户注册表分支，无需管理员提权即可配置生效 |
 
 ### 4.7 命令行工具（CLI）
