@@ -716,9 +716,23 @@ impl MultiVolumeEngine {
         let mut desired_keys: HashSet<String> = HashSet::new();
         for raw in configured_roots {
             let normalized = folder_source::normalize_folder_root(Path::new(raw));
-            let Ok((path, display_root)) = normalized else {
-                tracing::warn!(root = ?raw, "folder source ignored: invalid path");
-                continue;
+            let (path, display_root) = match normalized {
+                Ok(normalized) => normalized,
+                Err(err) => {
+                    if let Ok(unreachable) =
+                        folder_source::normalize_folder_root_syntax(Path::new(raw))
+                    {
+                        tracing::warn!(
+                            root = %unreachable,
+                            error = %err,
+                            "folder source is currently unreachable; keeping its index"
+                        );
+                        desired_keys.insert(unreachable.to_ascii_lowercase());
+                    } else {
+                        tracing::warn!(root = ?raw, "folder source ignored: invalid path");
+                    }
+                    continue;
+                }
             };
             if let Some(drive) = self.folder_source_volume_conflict(&path) {
                 tracing::warn!(
@@ -844,21 +858,23 @@ impl MultiVolumeEngine {
         if !folder_source::reserve_scan(&self.folder_scanning, source_id) {
             return Ok(false);
         }
-        let root = {
+        let (root, live) = {
             let mut folders = self.folder_sources.write().unwrap();
             let Some(source) = folders.get_mut(&source_id) else {
                 folder_source::release_scan(&self.folder_scanning, source_id);
                 return Err(format!("source {} is not indexed", source_id.0));
             };
             source.begin_scan();
-            source.root_path.clone()
+            (source.root_path.clone(), source.live_watch_enabled())
         };
         let has_watcher = {
             let mut watchers = self.folder_watchers.lock().unwrap();
             watchers.retain(|_, handle| !handle.is_finished());
             watchers.contains_key(&source_id)
         };
-        if !has_watcher {
+        if !live || !has_watcher {
+            let previous = self.folder_watchers.lock().unwrap().remove(&source_id);
+            drop(previous);
             self.start_folder_watcher_for(source_id, root);
         }
         if folder_source::spawn_reserved_scan(
@@ -1014,7 +1030,9 @@ impl MultiVolumeEngine {
     }
 
     pub fn remove_folder_source(&self, path: &Path, persist: bool) -> Result<bool, String> {
-        let (_, display) = folder_source::normalize_folder_root(path)?;
+        let display = folder_source::normalize_folder_root(path)
+            .map(|(_, display)| display)
+            .or_else(|_| folder_source::normalize_folder_root_syntax(path))?;
         let mut removed = false;
         self.apply_config_change(persist, |current| {
             let mut next = current.clone();
@@ -1028,6 +1046,10 @@ impl MultiVolumeEngine {
             Ok(next)
         })?;
         Ok(removed)
+    }
+
+    pub fn active_drives(&self) -> Vec<char> {
+        self.volumes.read().unwrap().keys().copied().collect()
     }
 
     pub fn rescan_source(&self, source_id: SourceId) -> Result<usize, String> {

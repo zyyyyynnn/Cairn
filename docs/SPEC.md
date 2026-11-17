@@ -82,7 +82,7 @@
 2. **免提权客户端安全操作**：仅允许在免提权 GUI 进程中，通过 Windows 原生 Win32 `IFileOperation` / `SHEmptyRecycleBin` API 规范触发删除到系统回收站、从回收站还原、永久删除与清空回收站，由 Windows Shell 原生承载进度与错误；日常删除与永久删除使用项目统一确认框，清空回收站保留 Windows 原生警告。严禁向后台服务暴露写管道。
 3. **平台与介质边界**：聚焦本机固定 NTFS 卷，不包含 macOS、Linux、云盘同步盘、网络共享（SMB/ETP）、远程查询管道。
 4. **功能边界**：不引入语义 / AI 向量搜索、OCR 图片文字识别、远程遥测上报、用户账号体系或动态外部插件系统。
-5. **Everything 1.5 非目标面**：不提供 HTTP/ETP/FTP 供数、Everything Server 多用户共享、动态插件生态、便携 ZIP、通用结果分组或 Everything IPC 字节兼容；1.5 没有通用 Groups 视图，Cairn 不以分组为对标项；结果内查找（Findbar）。
+5. **Everything 1.5 非目标面**：不提供 HTTP/ETP/FTP 供数、Everything Server 多用户共享、动态插件生态、便携 ZIP、通用结果分组或 Everything IPC 字节兼容；1.5 没有通用 Groups 视图，Cairn 不以分组为对标项；结果内查找（Findbar）亦不在范围。
 6. **索引平台边界**：所有索引源仍由已安装服务独占管理，不引入用户态回退或范围切换；映射网络盘、远程索引与 SMB 共享仍为非目标，文件夹源只覆盖服务身份可读取的路径。
 
 ### 2.4 能力判据体系（Criteria）

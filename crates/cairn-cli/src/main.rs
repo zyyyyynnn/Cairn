@@ -746,6 +746,19 @@ fn report_degraded_notice(err: &mut impl Write, degraded: Option<&QueryDegradedR
     }
 }
 
+fn sanitize_terminal(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_control() && ch != '\n' && ch != '\t' {
+                ' '
+            } else {
+                ch
+            }
+        })
+        .collect()
+}
+
 fn format_property_summary(props: &RecordPropertyData) -> Option<String> {
     let mut parts = Vec::new();
     if let Some(ms) = props.length_ms {
@@ -762,10 +775,10 @@ fn format_property_summary(props: &RecordPropertyData) -> Option<String> {
         }
     }
     if let Some(author) = props.author.as_deref().filter(|s| !s.is_empty()) {
-        parts.push(format!("author={author}"));
+        parts.push(format!("author={}", sanitize_terminal(author)));
     }
     if let Some(tags) = props.tags.as_deref().filter(|s| !s.is_empty()) {
-        parts.push(format!("tags={tags}"));
+        parts.push(format!("tags={}", sanitize_terminal(tags)));
     }
     if let Some((w, h)) = props.dimensions {
         parts.push(format!("dimensions={w}x{h}"));
@@ -986,7 +999,7 @@ fn execute_cli(
                 writeln!(buf, "  [{summary}]")?;
             }
             for snippet in row.snippets.iter().take(MAX_CLI_SNIPPETS) {
-                writeln!(buf, "  snippet: {snippet}")?;
+                writeln!(buf, "  snippet: {}", sanitize_terminal(snippet))?;
             }
             Ok(())
         },
@@ -1044,14 +1057,14 @@ fn write_csv_row(
     writer: &mut csv::Writer<impl Write>,
     r: &FileRowData,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let snippets = r.snippets.join(" | ");
+    let snippets = sanitize_terminal(&r.snippets.join(" | "));
     let props = r.properties.as_ref();
     let length_ms = props
         .and_then(|p| p.length_ms)
         .map(|v| v.to_string())
         .unwrap_or_default();
-    let author = props.and_then(|p| p.author.as_deref()).unwrap_or("");
-    let tags = props.and_then(|p| p.tags.as_deref()).unwrap_or("");
+    let author = sanitize_terminal(props.and_then(|p| p.author.as_deref()).unwrap_or(""));
+    let tags = sanitize_terminal(props.and_then(|p| p.tags.as_deref()).unwrap_or(""));
     let dimensions = props
         .and_then(|p| p.dimensions)
         .map(|(w, h)| format!("{w}x{h}"))
@@ -1070,8 +1083,8 @@ fn write_csv_row(
         &r.is_dir.to_string(),
         snippets.as_str(),
         length_ms.as_str(),
-        author,
-        tags,
+        author.as_str(),
+        tags.as_str(),
         dimensions.as_str(),
         framerate_mfps.as_str(),
     ])?;

@@ -27,6 +27,9 @@ pub fn extract_file_properties(path: &Path) -> Option<RecordPropertyData> {
         .extension()
         .and_then(|e| e.to_str())
         .map(|s| s.to_ascii_lowercase())?;
+    if !cairn_core::property_store::PROPERTY_INDEX_EXTENSIONS.contains(&ext.as_str()) {
+        return None;
+    }
 
     let data = extract_pure_rust_from_path(&ext, path).unwrap_or_default();
 
@@ -36,6 +39,9 @@ pub fn extract_file_properties(path: &Path) -> Option<RecordPropertyData> {
 /// Parses extended properties directly from an in-memory buffer for format `ext`.
 pub fn parse_properties_from_bytes(ext: &str, bytes: &[u8]) -> Option<RecordPropertyData> {
     let ext = ext.trim_start_matches('.').to_ascii_lowercase();
+    if !cairn_core::property_store::PROPERTY_INDEX_EXTENSIONS.contains(&ext.as_str()) {
+        return None;
+    }
     let data = match ext.as_str() {
         "png" => parse_png(bytes),
         "jpg" | "jpeg" => parse_jpeg(bytes),

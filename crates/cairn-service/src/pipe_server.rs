@@ -15,7 +15,7 @@ use crate::session::{QueryOwner, RowsError, SessionManager};
 use crate::sync_engine::MultiVolumeEngine;
 use cairn_core::query::QueryDegradedReason;
 use cairn_core::sort::SortSpec;
-use cairn_core::syntax::{parse_query_with, MAX_CONTENT_TERMS};
+use cairn_core::syntax::{parse_query_with, MAX_CHILD_FILTERS, MAX_CONTENT_TERMS};
 use cairn_protocol::codec::{encode_frame_into, peek_frame_header, try_decode_frame};
 use cairn_protocol::message::{
     ClientRequest, Envelope, FileRowData, ResponsePayload, ERROR_CODE_HANDSHAKE_REQUIRED,
@@ -428,7 +428,8 @@ fn process_request(
             // Request validation, not evaluation: the engine stays a pure evaluator, and a query
             // above the content-term limit is refused before any hit set is built. The check
             // precedes begin_query, which cancels every other in-flight query.
-            let content_terms = parse_query_with(&raw_query, &defaults).content_term_count();
+            let parsed = parse_query_with(&raw_query, &defaults);
+            let content_terms = parsed.content_term_count();
             if content_terms > MAX_CONTENT_TERMS {
                 return ResponsePayload::Error {
                     code: ERROR_CODE_QUERY_TOO_COMPLEX,
@@ -437,15 +438,17 @@ fn process_request(
                     ),
                 };
             }
-            if sort_spec.keys.len() > MAX_SORT_KEYS {
+            if parsed.child_filter_count() > MAX_CHILD_FILTERS {
                 return ResponsePayload::Error {
-                    code: ERROR_CODE_INVALID_REQUEST,
+                    code: ERROR_CODE_QUERY_TOO_COMPLEX,
                     message: format!(
-                        "query carries {} sort keys; the limit is {MAX_SORT_KEYS}",
-                        sort_spec.keys.len()
+                        "query carries {} child filters; the limit is {MAX_CHILD_FILTERS}",
+                        parsed.child_filter_count()
                     ),
                 };
             }
+            let mut sort_spec = sort_spec;
+            sort_spec.keys.truncate(MAX_SORT_KEYS);
             struct QueryReply {
                 session_id: u64,
                 total_matches: usize,
@@ -570,11 +573,17 @@ fn process_request(
                     )),
                 },
                 None => {
-                    let rescanned = engine.rescan_snapshot_volumes() + engine.rescan_folder_sources();
+                    let mut rescanned = 0;
+                    for drive in engine.active_drives() {
+                        if engine.rescan_volume(drive).is_ok() {
+                            rescanned += 1;
+                        }
+                    }
+                    rescanned += engine.rescan_folder_sources();
                     if rescanned > 0 {
                         Ok(())
                     } else {
-                        Err("no snapshot-mode volume or folder source was rescanned".to_string())
+                        Err("no indexed source was rescanned".to_string())
                     }
                 }
             };

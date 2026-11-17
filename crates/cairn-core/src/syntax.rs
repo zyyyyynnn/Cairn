@@ -24,6 +24,8 @@ const MAX_CONTENT_TERM_BYTES: usize = 4096;
 
 /// Maximum content terms allowed per query; enforced at the request boundary.
 pub const MAX_CONTENT_TERMS: usize = 16;
+/// Upper bound on distinct `child:` constraints in one query.
+pub const MAX_CHILD_FILTERS: usize = 8;
 
 /// Query-wide defaults applied to search items that do not state an explicit override.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -177,6 +179,18 @@ impl QueryExpr {
             }
             QueryExpr::Not(inner) => inner.content_term_count(),
         }
+    }
+
+    /// Number of `child:` constraints. Each distinct pattern allocates a per-record match table
+    /// during hierarchy evaluation, so the request boundary caps this count.
+    pub fn child_filter_count(&self) -> usize {
+        let mut count = 0;
+        self.visit_terms(&mut |term| {
+            if term.child_filter.is_some() {
+                count += 1;
+            }
+        });
+        count
     }
 
     /// Extracts all full-text content search queries defined by `content:` terms (CNT-06).

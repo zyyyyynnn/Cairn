@@ -15,7 +15,7 @@
 //! positions inside `rows`, so selection and keyboard navigation keep working when the fetched
 //! window moves.
 
-use cairn_protocol::message::FileRowData;
+use cairn_protocol::message::{FileRowData, MAX_SORT_KEYS};
 use std::collections::{HashSet, VecDeque};
 use std::ops::Range;
 
@@ -787,6 +787,10 @@ impl TableState {
     }
 
     pub fn shift_toggle_sort(&mut self, col: SortColumn) {
+        let already_present = self.sort_spec.keys.iter().any(|key| key.column == col);
+        if !already_present && self.sort_spec.keys.len() >= MAX_SORT_KEYS {
+            return;
+        }
         self.sort_spec
             .shift_toggle_column(col, SortDirection::Ascending);
     }

@@ -114,14 +114,18 @@ impl ServiceRuntime {
 
         let engine_folders = engine.clone();
         let folder_rescan_task = tokio::spawn(async move {
+            let mut last_rescan = tokio::time::Instant::now();
             loop {
+                tokio::time::sleep(Duration::from_secs(5)).await;
                 let secs = engine_folders.get_config().folder_rescan_interval_secs;
                 if secs == 0 {
-                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    last_rescan = tokio::time::Instant::now();
                     continue;
                 }
-                tokio::time::sleep(Duration::from_secs(secs)).await;
-                engine_folders.rescan_folder_sources();
+                if last_rescan.elapsed() >= Duration::from_secs(secs) {
+                    engine_folders.rescan_folder_sources();
+                    last_rescan = tokio::time::Instant::now();
+                }
             }
         });
 

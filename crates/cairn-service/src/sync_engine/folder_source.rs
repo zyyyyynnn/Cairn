@@ -9,6 +9,7 @@
 
 use super::index_journal::IndexJournal;
 use super::volume_status::VolumeStatus;
+use crate::exclusion::{ExclusionPath, ExclusionRules};
 use crate::filetime::system_time_to_filetime;
 use cairn_core::arena::NamePool;
 use cairn_core::frn_index::{hashmap_table_bytes, FrnLookup, IndexMemoryFootprint};
@@ -43,12 +44,9 @@ pub enum FolderWatchEvent {
     WatchFailed,
 }
 
-/// Normalizes and validates a folder source root.
-///
-/// Only local drive paths are accepted: UNC shares, device paths, relative paths and reparse-point
-/// roots are refused. The returned path is canonical, so `..`, short names and mixed separators
-/// resolve to one identity.
-pub fn normalize_folder_root(path: &Path) -> Result<(PathBuf, String), String> {
+/// Normalizes the path syntax without touching the filesystem. Used to keep an offline source in
+/// the configuration when its root is temporarily unreachable.
+pub(super) fn normalize_folder_root_syntax(path: &Path) -> Result<String, String> {
     let raw = path.to_string_lossy().replace('/', "\\");
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -70,8 +68,23 @@ pub fn normalize_folder_root(path: &Path) -> Result<(PathBuf, String), String> {
     if candidate.len() == 2 {
         candidate.push('\\');
     }
+    Ok(candidate)
+}
+
+/// Normalizes and validates a folder source root.
+///
+/// Only local drive paths are accepted: UNC shares, device paths, relative paths and reparse-point
+/// roots are refused. The returned path is canonical, so `..`, short names and mixed separators
+/// resolve to one identity.
+pub fn normalize_folder_root(path: &Path) -> Result<(PathBuf, String), String> {
+    let candidate = normalize_folder_root_syntax(path)?;
 
     let probe = Path::new(&candidate);
+    let drive = candidate
+        .chars()
+        .next()
+        .map(|ch| ch.to_ascii_uppercase())
+        .unwrap_or('C');
     let root_meta = fs::symlink_metadata(probe)
         .map_err(|err| format!("folder source {} is unreachable: {err}", probe.display()))?;
     if !root_meta.is_dir() {
@@ -193,12 +206,6 @@ fn metadata_record_fields(meta: &Metadata) -> (u16, bool, bool, u64, i64, i64) {
     (flags, is_dir, is_reparse, size, created_ts, modified_ts)
 }
 
-fn should_exclude_segment(name: &str, excluded_segments: &[String]) -> bool {
-    excluded_segments
-        .iter()
-        .any(|rule| !rule.contains(['\\', '/']) && name.eq_ignore_ascii_case(rule))
-}
-
 /// Directory-backed file index source matching NTFS `VolumeIndex` query/sort/row interfaces.
 pub struct FolderSource {
     pub source_id: SourceId,
@@ -212,6 +219,7 @@ pub struct FolderSource {
     frn_to_idx: FrnLookup,
     path_to_idx: HashMap<String, u32>,
     excluded_paths: Vec<String>,
+    exclusion_rules: ExclusionRules,
     live_watch_enabled: bool,
     scan_pending: bool,
     pending_events: Vec<FolderWatchEvent>,
@@ -243,6 +251,7 @@ impl FolderSource {
             frn_to_idx: FrnLookup::new(),
             path_to_idx: HashMap::new(),
             excluded_paths: Vec::new(),
+            exclusion_rules: ExclusionRules::default(),
             live_watch_enabled: false,
             scan_pending: false,
             pending_events: Vec::new(),
@@ -291,6 +300,10 @@ impl FolderSource {
 
     pub fn has_tombstones(&self) -> bool {
         self.has_tombstones
+    }
+
+    pub(crate) fn live_watch_enabled(&self) -> bool {
+        self.live_watch_enabled
     }
 
     pub fn is_active(&self) -> bool {
@@ -363,6 +376,7 @@ impl FolderSource {
 
     pub fn set_excluded_paths(&mut self, excluded_paths: &[String]) {
         self.excluded_paths = excluded_paths.to_vec();
+        self.exclusion_rules = ExclusionRules::parse(excluded_paths);
     }
 
     pub fn excluded_paths(&self) -> &[String] {
@@ -391,7 +405,7 @@ impl FolderSource {
     /// Rebuilds the folder tree index using an iterative filesystem walk, skipping junctions/symlinks
     /// to avoid cycles and marking the source `Offline` when the root is unreachable.
     pub fn rescan(&mut self, excluded_paths: &[String]) -> Result<usize, String> {
-        self.excluded_paths = excluded_paths.to_vec();
+        self.set_excluded_paths(excluded_paths);
         let root_meta = match fs::symlink_metadata(&self.root_path) {
             Ok(meta) => meta,
             Err(err) => {
@@ -448,10 +462,13 @@ impl FolderSource {
                     continue;
                 };
                 let entry_path = entry.path();
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if should_exclude_segment(&name, excluded_paths) {
+                if self
+                    .exclusion_rules
+                    .excludes(&ExclusionPath::new(&entry_path.to_string_lossy()))
+                {
                     continue;
                 }
+                let name = entry.file_name().to_string_lossy().into_owned();
                 let Ok(meta) = fs::symlink_metadata(&entry_path) else {
                     skipped = skipped.saturating_add(1);
                     continue;
@@ -463,9 +480,6 @@ impl FolderSource {
                 } else {
                     format!("{rel_dir}\\{}", name.to_ascii_lowercase())
                 };
-                if !excluded_paths.is_empty() && path_is_excluded(&rel_key, excluded_paths) {
-                    continue;
-                }
 
                 let idx = records.len() as u32;
                 let key = next_unique_key(&rel_key, &frn_to_idx);
@@ -569,12 +583,13 @@ impl FolderSource {
 
     fn tombstone_subtree(&mut self, rel_key: &str) -> Option<u64> {
         let prefix = format!("{rel_key}\\");
-        let targets: Vec<(String, u32)> = self
+        let mut targets: Vec<(String, u32)> = self
             .path_to_idx
             .iter()
             .filter(|(key, _)| key.as_str() == rel_key || key.starts_with(&prefix))
             .map(|(k, &idx)| (k.clone(), idx))
             .collect();
+        targets.sort_by_key(|entry| std::cmp::Reverse(entry.1));
 
         let mut primary_frn = None;
         for (key, idx) in targets {
@@ -601,7 +616,10 @@ impl FolderSource {
 
     fn upsert_live_path(&mut self, path: &Path) -> Option<(u64, JournalChangeKind)> {
         let (rel_key, name) = self.relative_key(path)?;
-        if path_is_excluded(&rel_key, &self.excluded_paths) {
+        if self
+            .exclusion_rules
+            .excludes(&ExclusionPath::new(&path.to_string_lossy()))
+        {
             return None;
         }
         let meta = fs::symlink_metadata(path).ok()?;
@@ -729,11 +747,14 @@ impl FolderSource {
                                 now_unix,
                             );
                         }
-                    } else if let Some((rel_key, _)) = self.relative_key(path) {
-                        if path.exists() && !path_is_excluded(&rel_key, &self.excluded_paths) {
-                            // A nested directory was created before our table saw it; trigger a quick rescan.
-                            needs_rescan = true;
-                        }
+                    } else if self.relative_key(path).is_some()
+                        && path.exists()
+                        && !self
+                            .exclusion_rules
+                            .excludes(&ExclusionPath::new(&path.to_string_lossy()))
+                    {
+                        // A nested directory was created before our table saw it; trigger a quick rescan.
+                        needs_rescan = true;
                     }
                 }
                 FolderWatchEvent::Removed(path) => {
@@ -969,20 +990,6 @@ fn install_scanned_source(
         .retain_source_keys(source_id, &present_keys);
 }
 
-fn path_is_excluded(rel_lower: &str, excluded_paths: &[String]) -> bool {
-    if excluded_paths.is_empty() {
-        return false;
-    }
-    rel_lower.split('\\').any(|segment| {
-        excluded_paths
-            .iter()
-            .any(|rule| !rule.contains(['\\', '/']) && segment.eq_ignore_ascii_case(rule))
-    }) || excluded_paths.iter().any(|rule| {
-        rule.contains(['\\', '/'])
-            && rel_lower.contains(&rule.replace('/', "\\").to_ascii_lowercase())
-    })
-}
-
 /// Active OS directory watcher handle whose drop cleanly cancels and joins its worker thread.
 pub(crate) struct FolderWatcherHandle {
     #[cfg(windows)]
@@ -1067,9 +1074,28 @@ pub(crate) fn spawn_folder_watcher(
     }
 
     // SAFETY: manual-reset Win32 event closed on FolderWatcherHandle::drop.
-    let stop_event = unsafe { CreateEventW(None, true, false, None) }.ok()?;
+    let stop_event = match unsafe { CreateEventW(None, true, false, None) } {
+        Ok(event) => event,
+        Err(_) => {
+            // SAFETY: dir_handle was opened above and is no longer used.
+            unsafe {
+                let _ = CloseHandle(dir_handle);
+            }
+            return None;
+        }
+    };
     // SAFETY: auto-reset overlapped IO completion event owned by watcher thread.
-    let io_event = unsafe { CreateEventW(None, false, false, None) }.ok()?;
+    let io_event = match unsafe { CreateEventW(None, false, false, None) } {
+        Ok(event) => event,
+        Err(_) => {
+            // SAFETY: both handles were opened above and are no longer used.
+            unsafe {
+                let _ = CloseHandle(stop_event);
+                let _ = CloseHandle(dir_handle);
+            }
+            return None;
+        }
+    };
 
     let dir_raw = dir_handle.0 as usize;
     let stop_raw = stop_event.0 as usize;
@@ -1265,6 +1291,12 @@ fn parse_notify_buffer(root: &Path, buf: &[u8]) -> Vec<FolderWatchEvent> {
             break;
         }
         offset = next;
+    }
+
+    // A rename split across two buffers leaves the old name without its new name here; report the
+    // removal now so the next buffer's Added event cannot leave a ghost row behind.
+    if let Some(old_path) = pending_old.take() {
+        events.push(FolderWatchEvent::Removed(old_path));
     }
 
     events

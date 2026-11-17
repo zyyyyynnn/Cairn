@@ -10,8 +10,9 @@
 //! property system is never queried from the elevated worker.
 
 use super::MultiVolumeEngine;
+use crate::exclusion::{ExclusionPath, ExclusionRules};
 use cairn_core::model::FileRecord;
-use cairn_core::property_store::SourceId;
+use cairn_core::property_store::{SourceId, PROPERTY_INDEX_EXTENSIONS};
 use cairn_protocol::status::{
     ContentIndexState, PropertyExtractResult, PropertyExtractTask, PropertyIndexStatus,
 };
@@ -24,12 +25,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const PROPERTY_BATCH_SIZE: usize = 64;
 const DEFAULT_PROPERTY_WORKER_TIMEOUT: Duration = Duration::from_secs(15);
-
-const PROPERTY_EXTENSIONS: &[&str] = &[
-    "png", "jpg", "jpeg", "gif", "bmp", "webp", "tif", "tiff", "mp3", "flac", "wav", "ogg", "m4a",
-    "aac", "wma", "mp4", "mkv", "avi", "mov", "wmv", "webm", "m4v", "docx", "xlsx", "pptx", "odt",
-    "ods", "odp", "pdf",
-];
 
 fn current_unix_ts() -> i64 {
     SystemTime::now()
@@ -53,7 +48,7 @@ impl Drop for PropertyRunGuard<'_> {
 
 pub fn is_property_eligible_extension(ext: &str) -> bool {
     !ext.is_empty()
-        && PROPERTY_EXTENSIONS
+        && PROPERTY_INDEX_EXTENSIONS
             .iter()
             .any(|candidate| candidate.eq_ignore_ascii_case(ext))
 }
@@ -140,6 +135,20 @@ impl MultiVolumeEngine {
         let cfg = self.config.read().unwrap().clone();
         let mut tasks = Vec::new();
         let mut seen = HashSet::new();
+        let path_rules = ExclusionRules::parse(&cfg.excluded_paths);
+        let content_rules = ExclusionRules::parse(&cfg.content_excluded_paths);
+        let self_dirs: Vec<String> = self
+            .self_data_dirs
+            .iter()
+            .map(|dir| dir.to_string_lossy().to_ascii_lowercase())
+            .collect();
+        let is_excluded = |path: &str| {
+            let prepared = ExclusionPath::new(path);
+            let lower = path.to_ascii_lowercase();
+            path_rules.excludes(&prepared)
+                || content_rules.excludes(&prepared)
+                || self_dirs.iter().any(|dir| lower.starts_with(dir))
+        };
 
         {
             let vols = self.volumes.read().unwrap();
@@ -173,6 +182,9 @@ impl MultiVolumeEngine {
                         vol.drive_letter,
                         idx as u32,
                     );
+                    if is_excluded(&path) {
+                        continue;
+                    }
                     tasks.push(PropertyExtractTask {
                         source_id,
                         record_key: rec.frn,
@@ -205,6 +217,9 @@ impl MultiVolumeEngine {
                         &folder.root_prefix,
                         idx as u32,
                     );
+                    if is_excluded(&path) {
+                        continue;
+                    }
                     tasks.push(PropertyExtractTask {
                         source_id: folder.source_id,
                         record_key: rec.frn,

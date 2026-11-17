@@ -19,6 +19,13 @@ const HAS_TAGS: u8 = 1 << 2;
 const HAS_DIMENSIONS: u8 = 1 << 3;
 const HAS_FRAMERATE: u8 = 1 << 4;
 
+/// Extensions the extended-property pipeline can extract. Kept in one place so eligibility and
+/// the worker parser cannot drift into queueing formats no parser handles.
+pub const PROPERTY_INDEX_EXTENSIONS: &[&str] = &[
+    "png", "jpg", "jpeg", "gif", "bmp", "webp", "wav", "avi", "flac", "mp3", "mp4", "m4a", "mov",
+    "m4v", "3gp", "pdf", "docx", "xlsx", "pptx", "odt", "ods", "odp",
+];
+
 /// First numeric [`SourceId`] assigned to indexed folder sources; `0..=25` identify NTFS drives.
 pub const FOLDER_SOURCE_ID_BASE: u32 = 1_000;
 

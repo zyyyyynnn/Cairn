@@ -1378,7 +1378,7 @@ impl VolumeIndex {
                             self.record_journal_event(
                                 &mut journal,
                                 frn,
-                                JournalChangeKind::Modified,
+                                JournalChangeKind::AttributeChanged,
                                 path,
                                 None,
                                 now_unix,
