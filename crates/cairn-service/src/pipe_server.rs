@@ -575,8 +575,11 @@ fn process_request(
                 None => {
                     let mut rescanned = 0;
                     for drive in engine.active_drives() {
-                        if engine.rescan_volume(drive).is_ok() {
-                            rescanned += 1;
+                        match engine.rescan_volume(drive) {
+                            Ok(_) => rescanned += 1,
+                            Err(reason) => {
+                                warn!(drive = %drive, error = %reason, "volume rescan failed");
+                            }
                         }
                     }
                     rescanned += engine.rescan_folder_sources();
@@ -1226,6 +1229,47 @@ mod tests {
         assert!(matches!(
             harness.handle(
                 content_query_request(MAX_CONTENT_TERMS),
+                CallerAuthorization::Administrator,
+            ),
+            ResponsePayload::QueryResult {
+                total_matches: 0,
+                ..
+            }
+        ));
+    }
+
+    fn child_filter_query_request(patterns: usize) -> ClientRequest {
+        let raw_query = (0..patterns)
+            .map(|i| format!("child:t{i}.rs"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        ClientRequest::Query {
+            query_id: 1,
+            raw_query,
+            defaults: Default::default(),
+            sort_spec: SortSpec::default(),
+            first_page_limit: 10,
+        }
+    }
+
+    #[test]
+    fn a_query_above_the_child_filter_limit_is_rejected_before_evaluation() {
+        use cairn_core::syntax::MAX_CHILD_FILTERS;
+        use cairn_protocol::message::ERROR_CODE_QUERY_TOO_COMPLEX;
+
+        let harness = Harness::new(ServiceConfig::default());
+        let (code, message) = denial(harness.handle(
+            child_filter_query_request(MAX_CHILD_FILTERS + 1),
+            CallerAuthorization::Administrator,
+        ));
+        assert_eq!(code, ERROR_CODE_QUERY_TOO_COMPLEX);
+        assert!(
+            message.contains(&MAX_CHILD_FILTERS.to_string()),
+            "{message}"
+        );
+        assert!(matches!(
+            harness.handle(
+                child_filter_query_request(MAX_CHILD_FILTERS),
                 CallerAuthorization::Administrator,
             ),
             ResponsePayload::QueryResult {

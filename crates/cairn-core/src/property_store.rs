@@ -148,6 +148,22 @@ fn stamp_u32(timestamp: i64) -> u32 {
     timestamp.clamp(0, u32::MAX as i64) as u32
 }
 
+fn rewrite_string_offset(off: &mut u32, len: &mut u16, source: &[u8], target: &mut Vec<u8>) {
+    if *len == 0 {
+        return;
+    }
+    let start = *off as usize;
+    let end = start.saturating_add(*len as usize);
+    if end > source.len() {
+        *off = 0;
+        *len = 0;
+        return;
+    }
+    let new_off = target.len() as u32;
+    target.extend_from_slice(&source[start..end]);
+    *off = new_off;
+}
+
 /// Sparse side-table storage for `length`, `author`, `tags`, `dimensions`, and `framerate`.
 #[derive(Clone, Debug, Default)]
 pub struct PropertySideTables {
@@ -292,9 +308,37 @@ impl PropertySideTables {
             .filter(|&(sid, key)| sid == source.0 && !present.contains(&key))
             .map(|(_, key)| key)
             .collect();
+        if stale.is_empty() {
+            return;
+        }
         for key in stale {
             self.remove(source, key);
         }
+        self.compact_strings();
+    }
+
+    /// Rebuilds the string arena from live slots, dropping values no slot references. Called after
+    /// full extractions and source pruning so repeated overwrites do not grow memory without bound.
+    pub fn compact_strings(&mut self) {
+        if self.strings.is_empty() {
+            return;
+        }
+        let mut compacted = Vec::with_capacity(self.strings.len());
+        for slot in &mut self.slots {
+            rewrite_string_offset(
+                &mut slot.author_off,
+                &mut slot.author_len,
+                &self.strings,
+                &mut compacted,
+            );
+            rewrite_string_offset(
+                &mut slot.tags_off,
+                &mut slot.tags_len,
+                &self.strings,
+                &mut compacted,
+            );
+        }
+        self.strings = compacted;
     }
 
     #[inline]
@@ -332,7 +376,10 @@ impl PropertySideTables {
     }
 
     fn intern_str(&mut self, s: &str) -> (u32, u16) {
-        let max_len = (u16::MAX as usize).min(s.len());
+        if self.strings.len() > 64 * 1024 * 1024 {
+            self.compact_strings();
+        }
+        let max_len = (4096usize).min(s.len());
         let mut valid_len = max_len;
         while valid_len > 0 && !s.is_char_boundary(valid_len) {
             valid_len -= 1;

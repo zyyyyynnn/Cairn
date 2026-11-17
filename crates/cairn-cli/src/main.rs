@@ -347,7 +347,7 @@ fn handle_stream_error(err: &mut impl Write, error: CliStreamError) -> ExitCode 
     match error {
         CliStreamError::Transport { context, error } => write_transport_error(err, context, error),
         CliStreamError::Service { code, message } => {
-            let _ = writeln!(err, "Search error {code}: {message}");
+            let _ = writeln!(err, "Search error {code}: {}", sanitize_terminal(&message));
             ExitCode::from(1)
         }
         CliStreamError::UnexpectedResponse => {
@@ -425,7 +425,11 @@ fn expect_control_payload(
         Err(error) => return Err(write_transport_error(err, context, error)),
     };
     if let ResponsePayload::Error { code, message } = &env.payload {
-        let _ = writeln!(err, "{context} error {code}: {message}");
+        let _ = writeln!(
+            err,
+            "{context} error {code}: {}",
+            sanitize_terminal(message)
+        );
         return Err(ExitCode::from(1));
     }
     Ok(env)
@@ -563,7 +567,7 @@ fn execute_subcommand(
                 return if success { code } else { ExitCode::from(1) };
             }
             if !success {
-                let _ = writeln!(err, "Reload config failed: {message}");
+                let _ = writeln!(err, "Reload config failed: {}", sanitize_terminal(&message));
                 return ExitCode::from(1);
             }
             write_io_result(writeln!(out, "{message}"), err)
@@ -716,6 +720,7 @@ fn render_sources_response(
         )?;
         writeln!(buf, "{}", "-".repeat(72))?;
         for s in sources {
+            let root = sanitize_terminal(&s.root_path);
             writeln!(
                 buf,
                 "{:<8} {:<12} {:<14} {:<10} {:<6} {}",
@@ -724,7 +729,7 @@ fn render_sources_response(
                 s.status.state_key(),
                 s.indexed_count,
                 if s.live_watch_enabled { "on" } else { "off" },
-                s.root_path
+                root
             )?;
         }
         buf.flush()
@@ -749,13 +754,7 @@ fn report_degraded_notice(err: &mut impl Write, degraded: Option<&QueryDegradedR
 fn sanitize_terminal(value: &str) -> String {
     value
         .chars()
-        .map(|ch| {
-            if ch.is_control() && ch != '\n' && ch != '\t' {
-                ' '
-            } else {
-                ch
-            }
-        })
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
         .collect()
 }
 
@@ -817,7 +816,7 @@ fn execute_cli(
         match &env.payload {
             ResponsePayload::StatusAck => {}
             ResponsePayload::Error { code, message } => {
-                let _ = writeln!(err, "Status error {code}: {message}");
+                let _ = writeln!(err, "Status error {code}: {}", sanitize_terminal(message));
                 return ExitCode::from(1);
             }
             _ => return unexpected_response(err),
@@ -932,7 +931,11 @@ fn execute_cli(
         let mut writer = match create_csv_writer(&csv_path) {
             Ok(writer) => writer,
             Err(error) => {
-                let _ = writeln!(err, "Failed to export CSV: {error}");
+                let _ = writeln!(
+                    err,
+                    "Failed to export CSV: {}",
+                    sanitize_terminal(&error.to_string())
+                );
                 return ExitCode::from(1);
             }
         };
@@ -946,7 +949,11 @@ fn execute_cli(
         ) {
             Ok(count) => count,
             Err(CliStreamError::Io(error)) => {
-                let _ = writeln!(err, "Failed to export CSV: {error}");
+                let _ = writeln!(
+                    err,
+                    "Failed to export CSV: {}",
+                    sanitize_terminal(&error.to_string())
+                );
                 return ExitCode::from(1);
             }
             Err(error) => return handle_stream_error(err, error),
@@ -988,11 +995,13 @@ fn execute_cli(
             } else {
                 format_size_bytes(row.size)
             };
+            let name = sanitize_terminal(&row.name);
+            let path = sanitize_terminal(&row.path);
             writeln!(
                 buf,
                 "{:<40} {:<60} {:>12}",
-                truncate_str(&row.name, 38),
-                truncate_str(&row.path, 58),
+                truncate_str(&name, 38),
+                truncate_str(&path, 58),
                 size_str
             )?;
             if let Some(summary) = row.properties.as_ref().and_then(format_property_summary) {
@@ -1058,6 +1067,8 @@ fn write_csv_row(
     r: &FileRowData,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let snippets = sanitize_terminal(&r.snippets.join(" | "));
+    let name = sanitize_terminal(&r.name);
+    let path = sanitize_terminal(&r.path);
     let props = r.properties.as_ref();
     let length_ms = props
         .and_then(|p| p.length_ms)
@@ -1075,8 +1086,8 @@ fn write_csv_row(
         .unwrap_or_default();
 
     writer.write_record([
-        r.name.as_str(),
-        r.path.as_str(),
+        name.as_str(),
+        path.as_str(),
         &r.size.to_string(),
         &r.modified_ts.to_string(),
         &r.created_ts.to_string(),

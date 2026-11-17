@@ -1071,7 +1071,7 @@ impl MultiVolumeEngine {
             .copied()
             .collect();
         ids.into_iter()
-            .filter(|&id| self.start_folder_scan(id).unwrap_or(false))
+            .filter(|&id| self.start_folder_scan(id).is_ok())
             .count()
     }
 

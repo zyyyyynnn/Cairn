@@ -184,13 +184,13 @@ impl QueryExpr {
     /// Number of `child:` constraints. Each distinct pattern allocates a per-record match table
     /// during hierarchy evaluation, so the request boundary caps this count.
     pub fn child_filter_count(&self) -> usize {
-        let mut count = 0;
+        let mut patterns = std::collections::HashSet::new();
         self.visit_terms(&mut |term| {
-            if term.child_filter.is_some() {
-                count += 1;
+            if let Some(pattern) = term.child_filter.as_deref() {
+                patterns.insert(pattern.to_owned());
             }
         });
-        count
+        patterns.len()
     }
 
     /// Extracts all full-text content search queries defined by `content:` terms (CNT-06).
@@ -1250,6 +1250,29 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(parse_query_with("a b", &content).content_term_count(), 2);
+    }
+
+    /// The child filter cap bounds distinct patterns because a repeated pattern answers the same
+    /// child lookup; eight distinct patterns pass and a ninth is what the pipe boundary refuses.
+    #[test]
+    fn child_filter_count_counts_distinct_patterns() {
+        assert_eq!(
+            parse_query("child:a child:a child:b").child_filter_count(),
+            2
+        );
+        let distinct = |n: usize| {
+            (0..n)
+                .map(|i| format!("child:t{i}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        assert_eq!(parse_query(&distinct(8)).child_filter_count(), 8);
+        assert_eq!(parse_query(&distinct(9)).child_filter_count(), 9);
+        assert_eq!(
+            parse_query("child:a childcount:>1 empty:").child_filter_count(),
+            1
+        );
+        assert_eq!(parse_query("ext:md report").child_filter_count(), 0);
     }
 
     /// A disjunction of positive content-only terms answers to one merged search, so the shape

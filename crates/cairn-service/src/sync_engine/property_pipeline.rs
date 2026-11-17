@@ -140,14 +140,24 @@ impl MultiVolumeEngine {
         let self_dirs: Vec<String> = self
             .self_data_dirs
             .iter()
-            .map(|dir| dir.to_string_lossy().to_ascii_lowercase())
+            .map(|dir| {
+                let lower = dir.to_string_lossy().to_ascii_lowercase();
+                if lower.ends_with('\\') {
+                    lower
+                } else {
+                    format!("{lower}\\")
+                }
+            })
             .collect();
         let is_excluded = |path: &str| {
             let prepared = ExclusionPath::new(path);
             let lower = path.to_ascii_lowercase();
             path_rules.excludes(&prepared)
                 || content_rules.excludes(&prepared)
-                || self_dirs.iter().any(|dir| lower.starts_with(dir))
+                || self_dirs.iter().any(|dir| {
+                    let root = dir.trim_end_matches('\\');
+                    lower == root || lower.starts_with(dir)
+                })
         };
 
         {

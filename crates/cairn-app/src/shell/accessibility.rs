@@ -443,7 +443,7 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         role: Role::ColumnHeader,
         messages: &["col_length"],
         named_by: "",
-        requirement: "UI-02, IDX-10",
+        requirement: "UI-02, IDX-12",
     },
     KeyControl {
         key: "column-author",
@@ -452,7 +452,7 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         role: Role::ColumnHeader,
         messages: &["col_author"],
         named_by: "",
-        requirement: "UI-02, IDX-10",
+        requirement: "UI-02, IDX-12",
     },
     KeyControl {
         key: "column-tags",
@@ -461,7 +461,7 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         role: Role::ColumnHeader,
         messages: &["col_tags"],
         named_by: "",
-        requirement: "UI-02, IDX-10",
+        requirement: "UI-02, IDX-12",
     },
     KeyControl {
         key: "column-dimensions",
@@ -470,7 +470,7 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         role: Role::ColumnHeader,
         messages: &["col_dimensions"],
         named_by: "",
-        requirement: "UI-02, IDX-10",
+        requirement: "UI-02, IDX-12",
     },
     KeyControl {
         key: "column-framerate",
@@ -479,7 +479,7 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         role: Role::ColumnHeader,
         messages: &["col_framerate"],
         named_by: "",
-        requirement: "UI-02, IDX-10",
+        requirement: "UI-02, IDX-12",
     },
     // The Recycle Bin reuses the path and date lanes for a different value. The
     // header still has to name what the lane holds, so each value has its own

@@ -42,7 +42,7 @@
 | 413 | `ERROR_CODE_TREE_NOT_INDEXED` | 请求路径不在活动卷索引内（Treemap 专用） |
 | 414 | `ERROR_CODE_TREE_NOT_DIRECTORY` | 请求路径是文件而非目录（Treemap 专用） |
 | 415 | `ERROR_CODE_TREE_TOO_LARGE` | 目录树超出单次响应的条目或载荷预算（Treemap 专用） |
-| 416 | `ERROR_CODE_QUERY_TOO_COMPLEX` | 内容检索项超过 `MAX_CONTENT_TERMS`（16），求值前整体拒绝 |
+| 416 | `ERROR_CODE_QUERY_TOO_COMPLEX` | 内容检索项超过 `MAX_CONTENT_TERMS`（16）或不同 `child:` 模式超过 `MAX_CHILD_FILTERS`（8），求值前整体拒绝 |
 | 417 | `ERROR_CODE_INVALID_REQUEST` | 请求参数无效或引用了未知来源 |
 
 413、414、415 只由 Treemap 的 `GetTree` 返回。
