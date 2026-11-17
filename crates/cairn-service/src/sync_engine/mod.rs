@@ -483,6 +483,21 @@ impl MultiVolumeEngine {
         let content_enabled = config.content_index_enabled;
         let property_enabled = config.property_index_enabled;
         let journal_enabled = config.index_journal_enabled;
+        let content_status = if content_enabled {
+            ContentIndexStatus {
+                state: ContentIndexState::Backfilling {
+                    processed: 0,
+                    total: 0,
+                },
+                ..Default::default()
+            }
+        } else {
+            ContentIndexStatus {
+                state: ContentIndexState::Disabled,
+                index_bytes: content_pipeline::content_dir_bytes(content_dir),
+                ..Default::default()
+            }
+        };
         let engine = Self {
             volumes: RwLock::new(map),
             folder_sources: Arc::new(RwLock::new(HashMap::new())),
@@ -515,17 +530,7 @@ impl MultiVolumeEngine {
             config: RwLock::new(config),
             config_apply_lock: Mutex::new(()),
             content_searcher: RwLock::new(None),
-            content_status: RwLock::new(if content_enabled {
-                ContentIndexStatus {
-                    state: ContentIndexState::Backfilling {
-                        processed: 0,
-                        total: 0,
-                    },
-                    ..Default::default()
-                }
-            } else {
-                ContentIndexStatus::default()
-            }),
+            content_status: RwLock::new(content_status),
             content_cancel: Arc::new(AtomicBool::new(false)),
             content_commands: Mutex::new(None),
             summary_cache: Mutex::new(Vec::new()),

@@ -263,12 +263,11 @@ fn render_journal_rows(
     let time_col_w = rems(8.75);
     let kind_col_w = rems(6.0);
 
-    let header = h_flex()
+    let header = v_flex()
         .w_full()
-        .h(rems(layout::ROW_HEIGHT))
         .px(rems(layout::SPACE_8))
-        .gap(rems(layout::SPACE_8))
-        .items_center()
+        .py(rems(layout::SPACE_4))
+        .gap(rems(layout::SPACE_4))
         .bg(tokens.table_head)
         .border_b(HAIRLINE)
         .border_color(tokens.border)
@@ -276,18 +275,23 @@ fn render_journal_rows(
         .font_weight(FontWeight::MEDIUM)
         .text_color(tokens.table_head_foreground)
         .child(
-            div()
-                .w(time_col_w)
-                .flex_shrink_0()
-                .child(col_time.to_string()),
+            h_flex()
+                .gap(rems(layout::SPACE_8))
+                .items_center()
+                .child(
+                    div()
+                        .w(time_col_w)
+                        .flex_shrink_0()
+                        .child(col_time.to_string()),
+                )
+                .child(
+                    div()
+                        .w(kind_col_w)
+                        .flex_shrink_0()
+                        .child(col_kind.to_string()),
+                ),
         )
-        .child(
-            div()
-                .w(kind_col_w)
-                .flex_shrink_0()
-                .child(col_kind.to_string()),
-        )
-        .child(div().min_w_0().flex_1().child(col_path.to_string()));
+        .child(div().w_full().child(col_path.to_string()));
 
     let scroll_list = v_flex()
         .id("index-journal-entries")
@@ -303,7 +307,7 @@ fn render_journal_rows(
                 i18n.get_text_with_args("journal_dialog_renamed_from", &args)
             });
 
-            h_flex()
+            v_flex()
                 .id(("index-journal-row", ix))
                 .w_full()
                 .min_h(rems(layout::ROW_HEIGHT))

@@ -452,6 +452,28 @@ impl CairnApp {
         self.results.snippet_preview = None;
     }
 
+    /// Local listings do not expose the created-time or property columns. Keep the direction,
+    /// but move an unsupported primary sort to the modification column they do show so the
+    /// header, sorting menu, and next launch agree.
+    pub(crate) fn normalize_local_listing_sort(&mut self) {
+        let (column, ascending) = self.results.table.primary_sort();
+        let supported = matches!(
+            column,
+            crate::table::model::SortColumn::Name
+                | crate::table::model::SortColumn::Path
+                | crate::table::model::SortColumn::Size
+                | crate::table::model::SortColumn::DateModified
+                | crate::table::model::SortColumn::Extension
+        );
+        if !supported {
+            self.results
+                .table
+                .set_primary_sort(crate::table::model::SortColumn::DateModified, ascending);
+            self.settings.columns.sort_spec = self.results.table.sort_spec.to_clause();
+            self.save_settings();
+        }
+    }
+
     /// Waits for the index poll instead of issuing a partial query: releases
     /// the superseded request and clears the stopped/refused state that would
     /// otherwise block the poll.

@@ -85,6 +85,7 @@ impl CairnApp {
         // Invalidate any in-flight query: its answer belongs to the table and
         // must not replace the listing that is about to be shown.
         self.take_table_for_local_rows();
+        self.normalize_local_listing_sort();
         // The bin is a location, not a search scope. The search box starts
         // empty and filters this listing in place; it must not run an index
         // query that would replace the location.

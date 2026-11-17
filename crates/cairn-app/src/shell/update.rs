@@ -411,7 +411,9 @@ impl CairnApp {
             .is_some_and(|menu| menu.group == MenuGroup::Help)
         {
             self.close_group();
-            self.query.search_focus.focus(window, cx);
+            if self.rename.draft.is_none() {
+                self.query.search_focus.focus(window, cx);
+            }
         }
         cx.notify();
         match result {

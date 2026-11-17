@@ -85,7 +85,7 @@ impl MultiVolumeEngine {
             } else {
                 self.content_cancel
                     .store(true, std::sync::atomic::Ordering::SeqCst);
-                self.set_content_state(ContentIndexState::Disabled);
+                self.set_content_disabled();
                 self.send_content_command(content_pipeline::ContentCommand::Cancel);
             }
         } else if next_enabled

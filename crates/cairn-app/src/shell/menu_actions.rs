@@ -816,17 +816,21 @@ impl CairnApp {
                 self.service.content.value.state,
                 ContentIndexState::Error(_)
             ),
-            GroupCommand::ClearContentSearch => !matches!(
-                self.service.content.value.state,
-                ContentIndexState::Ready
-                    | ContentIndexState::Backfilling { .. }
-                    | ContentIndexState::Error(_)
-            ),
+            GroupCommand::ClearContentSearch => {
+                let content = &self.service.content.value;
+                let has_content = content.indexed_documents > 0 || content.index_bytes > 0;
+                let failed = matches!(content.state, ContentIndexState::Error(_));
+                matches!(content.state, ContentIndexState::Backfilling { .. })
+                    || !(has_content || failed)
+            }
             GroupCommand::RestoreSelected
             | GroupCommand::RestoreAll
             | GroupCommand::EmptyRecycleBin => !self.recycle_bin.is_open(),
             GroupCommand::RenameSelected => self.recycle_bin.is_open(),
             GroupCommand::Submenu("menu_columns", _) | GroupCommand::ToggleColumn(_) => {
+                self.recycle_bin.is_open() || self.block_listing.is_some()
+            }
+            GroupCommand::SortBy(crate::table::model::SortColumn::DateCreated) => {
                 self.recycle_bin.is_open() || self.block_listing.is_some()
             }
             GroupCommand::RevealLocation | GroupCommand::ShowProperties => {
@@ -1468,6 +1472,91 @@ mod visibility_tests {
     use core::prelude::rust_2021::test;
 
     #[test]
+    fn clear_content_follows_content_or_failure_not_only_state() {
+        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
+            gpui_kit::init(cx);
+            let _ = gpui_kit::open_window(
+                gpui_kit::gpui::WindowOptions {
+                    show: false,
+                    focus: false,
+                    ..gpui_kit::gpui::WindowOptions::default()
+                },
+                cx,
+                |window, cx| {
+                    let app = cx.new(|cx| CairnApp::new(window, cx));
+                    app.update(cx, |this, _cx| {
+                        let mut status = cairn_protocol::status::ContentIndexStatus {
+                            state: ContentIndexState::Ready,
+                            indexed_documents: 0,
+                            index_bytes: 0,
+                            last_updated_ts: 0,
+                        };
+                        this.service.content.value = status.clone();
+                        assert!(this.command_is_hidden(GroupCommand::ClearContentSearch));
+
+                        status.state = ContentIndexState::Disabled;
+                        status.indexed_documents = 10;
+                        status.index_bytes = 0;
+                        this.service.content.value = status.clone();
+                        assert!(!this.command_is_hidden(GroupCommand::ClearContentSearch));
+
+                        status.indexed_documents = 0;
+                        status.index_bytes = 10;
+                        this.service.content.value = status.clone();
+                        assert!(!this.command_is_hidden(GroupCommand::ClearContentSearch));
+
+                        status.state = ContentIndexState::Backfilling {
+                            processed: 0,
+                            total: 10,
+                        };
+                        this.service.content.value = status.clone();
+                        assert!(this.command_is_hidden(GroupCommand::ClearContentSearch));
+
+                        status.state = ContentIndexState::Error("failed".to_string());
+                        status.indexed_documents = 0;
+                        this.service.content.value = status;
+                        assert!(!this.command_is_hidden(GroupCommand::ClearContentSearch));
+                    });
+                    cx.quit();
+                    app
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn local_listing_replaces_hidden_created_sort() {
+        use crate::table::model::{SortColumn, SortDirection, SortSpec};
+
+        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
+            gpui_kit::init(cx);
+            let _ = gpui_kit::open_window(
+                gpui_kit::gpui::WindowOptions {
+                    show: false,
+                    focus: false,
+                    ..gpui_kit::gpui::WindowOptions::default()
+                },
+                cx,
+                |window, cx| {
+                    let app = cx.new(|cx| CairnApp::new(window, cx));
+                    app.update(cx, |this, _cx| {
+                        this.results.table.sort_spec =
+                            SortSpec::single(SortColumn::Length, SortDirection::Descending);
+                        this.normalize_local_listing_sort();
+                        assert_eq!(
+                            this.results.table.primary_sort(),
+                            (SortColumn::DateModified, false)
+                        );
+                        assert_eq!(this.settings.columns.sort_spec, "modified-desc");
+                    });
+                    cx.quit();
+                    app
+                },
+            );
+        });
+    }
+
+    #[test]
     fn a_running_update_check_marks_the_help_row_loading() {
         gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
             gpui_kit::init(cx);
@@ -1722,6 +1811,12 @@ mod visibility_tests {
                         for col in crate::table::model::TableColumn::ALL {
                             assert!(this.command_is_hidden(GroupCommand::ToggleColumn(col)));
                         }
+                        assert!(this.command_is_hidden(GroupCommand::SortBy(
+                            crate::table::model::SortColumn::DateCreated
+                        )));
+                        assert!(!this.command_is_hidden(GroupCommand::SortBy(
+                            crate::table::model::SortColumn::Extension
+                        )));
                         assert!(!this.command_is_disabled(GroupCommand::ToggleColumn(
                             crate::table::model::TableColumn::Path
                         )));

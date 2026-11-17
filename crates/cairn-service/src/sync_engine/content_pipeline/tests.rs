@@ -1777,6 +1777,25 @@ fn worker_port_full_backfill_retries_transient_failure_without_sleeping() {
     assert!(!engine.backfill_marker_path().exists());
 }
 
+#[test]
+fn a_disabled_startup_reports_existing_content_files() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let content_dir = temp.path().join("content");
+    std::fs::create_dir_all(&content_dir).expect("content dir");
+    std::fs::write(content_dir.join("segment.bin"), b"index-segment").expect("segment");
+    let engine = MultiVolumeEngine::with_paths(
+        &temp.path().join("index"),
+        &content_dir,
+        &temp.path().join("service.toml"),
+        Vec::new(),
+        ServiceConfig {
+            content_index_enabled: false,
+            ..Default::default()
+        },
+    );
+    assert!(engine.content_index_status().index_bytes >= 13);
+}
+
 /// A positive conjunction must evaluate the full content hit set before the metadata filter;
 /// truncating at the content top-K first would drop a matching low-BM25 row that the `ext:`
 /// filter would have kept.

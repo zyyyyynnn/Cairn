@@ -16,6 +16,8 @@ mod backfill;
 mod status;
 mod worker_process;
 
+pub(in crate::sync_engine) use self::status::content_dir_bytes;
+
 use self::worker_process::worker_exit_is_transient;
 
 /// Format version of the completed-backfill marker. Bump it when the content index layout

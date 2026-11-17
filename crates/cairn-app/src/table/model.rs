@@ -786,6 +786,17 @@ impl TableState {
             .set_or_toggle_primary(col, SortDirection::Ascending);
     }
 
+    /// Replaces the sort with a single primary key, for local listings that only support the
+    /// columns their table shows.
+    pub fn set_primary_sort(&mut self, column: SortColumn, ascending: bool) {
+        let direction = if ascending {
+            SortDirection::Ascending
+        } else {
+            SortDirection::Descending
+        };
+        self.sort_spec = SortSpec::single(column, direction);
+    }
+
     pub fn shift_toggle_sort(&mut self, col: SortColumn) {
         let already_present = self.sort_spec.keys.iter().any(|key| key.column == col);
         if !already_present && self.sort_spec.keys.len() >= MAX_SORT_KEYS {

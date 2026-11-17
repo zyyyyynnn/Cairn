@@ -208,6 +208,7 @@ impl CairnApp {
         // The listing owns the table now: an index answer in flight is
         // cancelled and its session released before these rows are installed.
         self.take_table_for_local_rows();
+        self.normalize_local_listing_sort();
         self.query.rejection = None;
         self.query.degraded = None;
         self.leave_drive_view();
