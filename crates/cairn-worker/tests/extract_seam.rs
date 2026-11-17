@@ -236,7 +236,7 @@ fn pure_rust_parsers_extract_media_image_and_document_properties() {
     assert_eq!(pdf_props.author.as_deref(), Some("Cairn Team"));
     assert_eq!(pdf_props.tags.as_deref(), Some("rust,ntfs"));
 
-    // Corrupt Win32 COM fallback candidate returns cleanly without panic on Windows.
+    // Corrupt media candidate returns cleanly without panic.
     let unknown_bin = temp.path().join("unknown.avi");
     std::fs::write(&unknown_bin, b"RIFF\x00\x00\x00\x00AVI bad").expect("write dummy avi");
     let _ = extract_file_properties(&unknown_bin);

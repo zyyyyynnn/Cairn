@@ -28,15 +28,6 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 zip.workspace = true
 
-[dependencies.windows]
-workspace = true
-features = [
-    "Win32_Foundation",
-    "Win32_System_Com",
-    "Win32_UI_Shell",
-    "Win32_UI_Shell_PropertiesSystem",
-]
-
 [build-dependencies]
 winresource.workspace = true
 

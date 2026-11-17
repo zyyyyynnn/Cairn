@@ -25,7 +25,7 @@
 5. `cargo deny check`（许可证、安全漏洞与 yanked 检查；仓库已提供 `deny.toml`）
 6. `cargo run --release -p xtask -- bench-query --check`（CI `Test / Tooling` 执行全账本内存与查询延迟回归门禁）
 
-文档-only PR 只运行 `check-docs`；逐层测试、Tooling 与 Release job 跳过，Dependency Policy 与 Installer Package 以 no-op 成功结束。代码变更必须通过完整门禁，安装器打包等待质量检查通过。
+文档-only PR 跳过重作业，`Domain & System Test Suite` 以 no-op 成功结束；不单独运行 `check-docs`。代码变更必须通过完整门禁，安装器打包等待质量检查通过。
 
 `deny.toml` 只针对 `x86_64-pc-windows-msvc`；许可证白名单与 4 条 GPUI/font 栈的 unmaintained 例外均有理由记录。漏洞与 yanked 不设全局忽略，新增 ignore 必须附上游依据。
 

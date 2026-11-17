@@ -604,10 +604,15 @@ fn process_request(
             // engine compares the submitted value with the live one inside its configuration
             // write, so two concurrent submissions cannot both be decided against a stale value.
             match engine.apply_config_toml(&config_toml, caller.is_privileged()) {
-                Ok(()) => ResponsePayload::SetConfigAck {
-                    success: true,
-                    message: "Service configuration persisted and applied".to_string(),
-                },
+                Ok(()) => {
+                    if engine.get_config().property_index_enabled {
+                        engine.spawn_property_extraction();
+                    }
+                    ResponsePayload::SetConfigAck {
+                        success: true,
+                        message: "Service configuration persisted and applied".to_string(),
+                    }
+                }
                 Err(reason) => ResponsePayload::SetConfigAck {
                     success: false,
                     message: reason,
@@ -615,10 +620,15 @@ fn process_request(
             }
         }
         ClientRequest::ReloadConfig => match engine.reload_config() {
-            Ok(()) => ResponsePayload::ReloadConfigAck {
-                success: true,
-                message: "Service configuration reloaded from disk".to_string(),
-            },
+            Ok(()) => {
+                if engine.get_config().property_index_enabled {
+                    engine.spawn_property_extraction();
+                }
+                ResponsePayload::ReloadConfigAck {
+                    success: true,
+                    message: "Service configuration reloaded from disk".to_string(),
+                }
+            }
             Err(err_msg) => ResponsePayload::ReloadConfigAck {
                 success: false,
                 message: err_msg,

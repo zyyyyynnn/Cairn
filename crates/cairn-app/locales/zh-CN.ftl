@@ -57,7 +57,7 @@ col_author = 作者
 col_tags = 标签
 col_dimensions = 尺寸
 col_framerate = 帧速率
-menu_columns = 列
+menu_columns = 显示列
 col_ext = 扩展名
 
 # 溢出菜单里的条目：结果、查询、索引三段各自成组。
@@ -245,7 +245,7 @@ empty_content_backfilling_title = 正在建立内容索引；完成后才能搜�
 empty_content_error_title = 内容搜索不可用，文件名搜索仍可使用
 empty_content_unreadable_title = 内容搜索状态不可用，重新读取后再试
 query_too_complex_title = 内容检索词超过 { $limit } 个，减少后重新搜索
-query_degraded_property_index = 属性索引未开启，已跳过属性筛选与排序
+query_degraded_property_index = 属性索引未开启；含属性条件的查询不会返回结果
 result_content_match = 内容
 row_loading = 正在加载该段结果
 row_not_loaded = 尚未加载的结果

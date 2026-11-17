@@ -57,7 +57,7 @@ col_author = Author
 col_tags = Tags
 col_dimensions = Dimensions
 col_framerate = Framerate
-menu_columns = Columns
+menu_columns = Show columns
 col_ext = Extension
 
 query_undo = Undo
@@ -253,7 +253,7 @@ empty_content_backfilling_title = Building the content index; content search sta
 empty_content_error_title = Content search is unavailable; filename search still works
 empty_content_unreadable_title = Content search status is unavailable; read it again to retry
 query_too_complex_title = More than { $limit } content terms; remove some and search again
-query_degraded_property_index = Property index is off; property filters and sorts are skipped
+query_degraded_property_index = Property index is off; queries with property filters return no results
 result_content_match = Content
 row_loading = Loading this part of the results
 row_not_loaded = Result not loaded yet

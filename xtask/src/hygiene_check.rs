@@ -61,16 +61,26 @@ pub fn check_hygiene(workspace: &Path) -> Result<(), String> {
 
 fn check_workspace_lints(workspace: &Path, violations: &mut Vec<String>) -> Result<usize, String> {
     let root_toml = read_rel(workspace, Path::new("Cargo.toml"))?;
+    let required_lints = [
+        "unsafe_op_in_unsafe_fn = \"deny\"",
+        "undocumented_unsafe_blocks = \"deny\"",
+        "missing_safety_doc = \"deny\"",
+        "await_holding_lock = \"deny\"",
+        "too_many_arguments = \"deny\"",
+        "large_enum_variant = \"deny\"",
+        "dbg_macro = \"deny\"",
+        "todo = \"deny\"",
+        "unimplemented = \"deny\"",
+    ];
     if !root_toml.contains("[workspace.lints.rust]")
         || !root_toml.contains("[workspace.lints.rustdoc]")
         || !root_toml.contains("[workspace.lints.clippy]")
-        || !root_toml.contains("too_many_arguments = \"deny\"")
-        || !root_toml.contains("large_enum_variant = \"deny\"")
+        || required_lints.iter().any(|lint| !root_toml.contains(lint))
     {
-        violations.push(
-            "Cargo.toml must define [workspace.lints.rust], [workspace.lints.rustdoc], and [workspace.lints.clippy] (with too_many_arguments and large_enum_variant denied)"
-                .to_string(),
-        );
+        violations.push(format!(
+            "Cargo.toml must define the workspace lint sections and deny every required lint: {}",
+            required_lints.join(", ")
+        ));
     }
 
     for entry_rel in FORBID_UNSAFE_ENTRYPOINTS {
@@ -845,7 +855,7 @@ mod tests {
 
         fs::write(
             root.join("Cargo.toml"),
-            "[workspace.lints.rust]\nunsafe_op_in_unsafe_fn = \"deny\"\n[workspace.lints.rustdoc]\nbroken_intra_doc_links = \"deny\"\n[workspace.lints.clippy]\nundocumented_unsafe_blocks = \"deny\"\ntoo_many_arguments = \"deny\"\nlarge_enum_variant = \"deny\"\n",
+            "[workspace.lints.rust]\nunsafe_op_in_unsafe_fn = \"deny\"\n[workspace.lints.rustdoc]\nbroken_intra_doc_links = \"deny\"\nprivate_intra_doc_links = \"deny\"\n[workspace.lints.clippy]\nundocumented_unsafe_blocks = \"deny\"\nmissing_safety_doc = \"deny\"\nawait_holding_lock = \"deny\"\ntoo_many_arguments = \"deny\"\nlarge_enum_variant = \"deny\"\ndbg_macro = \"deny\"\ntodo = \"deny\"\nunimplemented = \"deny\"\n",
         )
         .expect("root cargo");
         fs::write(root.join("rustfmt.toml"), "edition = \"2021\"\n").expect("rustfmt");
