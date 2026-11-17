@@ -151,7 +151,13 @@ fn finish_subsystem_load<S>(
 ) -> bool {
     match result {
         Some(Ok(envelope)) => match envelope.payload {
-            ResponsePayload::Error { message, .. } => {
+            ResponsePayload::Error { code, message } => {
+                tracing::warn!(
+                    task = task_label,
+                    code,
+                    error = %message,
+                    "service request failed"
+                );
                 state.fail_load(message);
                 false
             }
@@ -161,16 +167,19 @@ fn finish_subsystem_load<S>(
                     true
                 }
                 Err(msg) => {
+                    tracing::warn!(task = task_label, error = %msg, "service request failed");
                     state.fail_load(msg);
                     false
                 }
             },
         },
         Some(Err(err)) => {
+            tracing::warn!(task = task_label, error = %err, "service request failed");
             state.fail_load(err.to_string());
             false
         }
         None => {
+            tracing::warn!(task = task_label, "service request stopped");
             state.fail_load(format!("{task_label} task stopped"));
             false
         }
@@ -663,6 +672,21 @@ impl CairnApp {
         .detach();
     }
 
+    /// Logs the technical failure and reports it through one localized title/body pair. Service
+    /// messages are English protocol text, so they stay in the log instead of the shell.
+    fn report_request_failure(
+        &mut self,
+        title_key: &str,
+        body_key: &str,
+        detail: impl std::fmt::Display,
+        cx: &mut Context<Self>,
+    ) {
+        tracing::warn!(request = title_key, error = %detail, "service request failed");
+        let title = self.i18n.get_text(title_key);
+        let body = self.i18n.get_text(body_key);
+        self.show_error_toast(title, body, cx);
+    }
+
     pub fn refresh_property_index_status(&mut self, cx: &mut Context<Self>) {
         if !self.service.property.begin_load() {
             return;
@@ -724,8 +748,12 @@ impl CairnApp {
                     None => Err("property index task stopped".to_string()),
                 };
                 if let Err(err) = res {
-                    let title = this.i18n.get_text("toast_property_index_failed_title");
-                    this.show_error_toast(title, err, cx);
+                    this.report_request_failure(
+                        "toast_property_index_failed_title",
+                        "toast_property_index_failed_body",
+                        err,
+                        cx,
+                    );
                 }
                 this.repaint_shell_and_overlays(cx);
             },
@@ -853,8 +881,12 @@ impl CairnApp {
                     None => Err("index journal task stopped".to_string()),
                 };
                 if let Err(err) = res {
-                    let title = this.i18n.get_text("toast_index_journal_failed_title");
-                    this.show_error_toast(title, err, cx);
+                    this.report_request_failure(
+                        "toast_index_journal_failed_title",
+                        "toast_index_journal_failed_body",
+                        err,
+                        cx,
+                    );
                 }
                 this.repaint_shell_and_overlays(cx);
             },
@@ -887,31 +919,33 @@ impl CairnApp {
             |session| async move { session.rescan(None).await },
             |this, result, cx| {
                 this.service.connection.set_control_pending(false);
-                match result {
+                let detail = match result {
                     Some(Ok(envelope)) => match envelope.payload {
                         ResponsePayload::RescanAck { success: true, .. } => {
                             let title = this.i18n.get_text("toast_rescan_started_title");
                             let body = this.i18n.get_text("toast_rescan_started_body");
                             this.show_info_toast(title, body, cx);
                             this.start_status_refresh(cx);
+                            None
                         }
-                        ResponsePayload::Error { message, .. } => {
-                            let title = this.i18n.get_text("toast_rescan_failed_title");
-                            this.show_error_toast(title, message, cx);
+                        ResponsePayload::Error { code, message } => {
+                            Some(format!("{code}: {message}"))
                         }
-                        _ => {
-                            let title = this.i18n.get_text("toast_rescan_failed_title");
-                            this.show_error_toast(title, "service refused rescan", cx);
+                        ResponsePayload::RescanAck { success: false, .. } => {
+                            Some("the service refused the rescan request".to_string())
                         }
+                        _ => Some("unexpected rescan response".to_string()),
                     },
-                    Some(Err(err)) => {
-                        let title = this.i18n.get_text("toast_rescan_failed_title");
-                        this.show_error_toast(title, err.to_string(), cx);
-                    }
-                    None => {
-                        let title = this.i18n.get_text("toast_rescan_failed_title");
-                        this.show_error_toast(title, "rescan task stopped", cx);
-                    }
+                    Some(Err(err)) => Some(err.to_string()),
+                    None => Some("rescan task stopped".to_string()),
+                };
+                if let Some(detail) = detail {
+                    this.report_request_failure(
+                        "toast_rescan_failed_title",
+                        "toast_rescan_failed_body",
+                        detail,
+                        cx,
+                    );
                 }
                 this.repaint_shell_and_overlays(cx);
             },
@@ -921,9 +955,9 @@ impl CairnApp {
     pub fn rescan_drive(&mut self, drive: char, cx: &mut Context<Self>) {
         let drive_upper = drive.to_ascii_uppercase();
         let Some(source_id) = source_id_for_drive(&self.service.sources, drive_upper) else {
-            let title = self.i18n.get_text("toast_rescan_failed_title");
-            self.show_error_toast(
-                title,
+            self.report_request_failure(
+                "toast_rescan_failed_title",
+                "toast_rescan_source_missing_body",
                 format!("no source registered for {drive_upper}:\\"),
                 cx,
             );
@@ -946,7 +980,7 @@ impl CairnApp {
             move |session| async move { session.rescan_source(source_id).await },
             move |this, result, cx| {
                 this.service.connection.set_control_pending(false);
-                match result {
+                let detail = match result {
                     Some(Ok(envelope)) => match envelope.payload {
                         ResponsePayload::RescanSourceAck { success: true, .. } => {
                             let title = this.i18n.get_text("toast_rescan_started_title");
@@ -958,24 +992,26 @@ impl CairnApp {
                             this.show_info_toast(title, body, cx);
                             this.start_status_refresh(cx);
                             this.refresh_sources(cx);
+                            None
                         }
-                        ResponsePayload::Error { message, .. } => {
-                            let title = this.i18n.get_text("toast_rescan_failed_title");
-                            this.show_error_toast(title, message, cx);
+                        ResponsePayload::Error { code, message } => {
+                            Some(format!("{code}: {message}"))
                         }
-                        _ => {
-                            let title = this.i18n.get_text("toast_rescan_failed_title");
-                            this.show_error_toast(title, "service refused source rescan", cx);
+                        ResponsePayload::RescanSourceAck { success: false, .. } => {
+                            Some("the service refused the source rescan".to_string())
                         }
+                        _ => Some("unexpected source rescan response".to_string()),
                     },
-                    Some(Err(err)) => {
-                        let title = this.i18n.get_text("toast_rescan_failed_title");
-                        this.show_error_toast(title, err.to_string(), cx);
-                    }
-                    None => {
-                        let title = this.i18n.get_text("toast_rescan_failed_title");
-                        this.show_error_toast(title, "source rescan task stopped", cx);
-                    }
+                    Some(Err(err)) => Some(err.to_string()),
+                    None => Some("source rescan task stopped".to_string()),
+                };
+                if let Some(detail) = detail {
+                    this.report_request_failure(
+                        "toast_rescan_failed_title",
+                        "toast_rescan_failed_body",
+                        detail,
+                        cx,
+                    );
                 }
                 this.repaint_shell_and_overlays(cx);
             },

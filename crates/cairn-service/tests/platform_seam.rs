@@ -5,7 +5,6 @@
 //! Integration seams for indexed platform sources, bounded change journal, real volume identity,
 //! metadata refresh attribute parity, isolated property extraction, and un-truncated conjunctions.
 
-use cairn_content::{ContentWriter, CONTENT_RESULT_TOP_K};
 use cairn_core::engine::CancellationToken;
 use cairn_core::property_store::{PropertyKind, SourceId};
 use cairn_core::query::QueryDegradedReason;
@@ -497,86 +496,4 @@ fn property_index_extracts_through_real_worker_and_recovers_from_corrupt_files()
     // Turning properties back off drops all side-table heap memory immediately.
     engine.set_property_index_enabled(false);
     assert_eq!(engine.memory_footprint().property_store_bytes, 0);
-}
-
-#[test]
-fn positive_content_conjunction_never_truncates_beyond_top_k_before_mft_filter() {
-    let temp = tempdir().expect("tempdir");
-    let index_dir = temp.path().join("index");
-    let content_dir = temp.path().join("content");
-
-    let total_docs = CONTENT_RESULT_TOP_K + 32;
-    let mut mft_items = Vec::with_capacity(total_docs);
-    {
-        let writer = ContentWriter::open_or_create(&content_dir).expect("writer");
-        for i in 1..=total_docs {
-            let frn = i as u64;
-            let is_target = i == total_docs;
-            let name = if is_target {
-                "target_match.rs".to_string()
-            } else {
-                format!("noise_{i}.txt")
-            };
-            let body = if is_target {
-                "alpha filler beta".to_string()
-            } else {
-                format!("alpha beta alpha beta alpha beta filler {i}")
-            };
-            mft_items.push(ExtractedItem {
-                frn,
-                parent_frn: 0,
-                name: name.clone(),
-                is_dir: false,
-                size: 64,
-                created_ts: 1,
-                modified_ts: 1,
-                flags: 0,
-                is_reparse_point: false,
-            });
-            writer
-                .index_document_deferred(2, frn, 64, 1, &format!("C:\\{name}"), &body)
-                .unwrap();
-        }
-        writer.commit().unwrap();
-        writer.finish().unwrap();
-    }
-
-    let mut vol = VolumeIndex::new('C');
-    vol.ingest_items(mft_items);
-
-    let cfg = ServiceConfig {
-        content_index_enabled: true,
-        excluded_paths: Vec::new(),
-        content_excluded_paths: Vec::new(),
-        ..Default::default()
-    };
-    let engine = MultiVolumeEngine::with_paths(
-        &index_dir,
-        &content_dir,
-        &temp.path().join("service.toml"),
-        vec![],
-        cfg,
-    );
-    engine.add_volume(vol);
-    engine.mark_content_ready_for_test(total_docs as u64);
-
-    let cancel = CancellationToken::new();
-    let outcome = engine.execute_search_multi(
-        "content:alpha content:beta ext:rs",
-        &QueryDefaults::default(),
-        &SortSpec::default(),
-        &cancel,
-    );
-    assert_eq!(
-        outcome.total, 1,
-        "positive conjunction must evaluate full hit set before MFT ext:rs filter, not truncate at top-K"
-    );
-    let item = outcome.items_for_test().pop().expect("single matched item");
-    assert!(
-        !outcome
-            .snippets
-            .get(&(item.source_id.0, total_docs as u64))
-            .is_none_or(Vec::is_empty),
-        "surviving low-BM25 row past top-K must still receive snippets"
-    );
 }

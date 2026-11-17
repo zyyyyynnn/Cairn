@@ -78,7 +78,7 @@ impl MultiVolumeEngine {
         status.state = ContentIndexState::Backfilling { processed, total };
     }
 
-    fn set_content_ready(&self, documents: u64, bytes: u64) {
+    pub(in crate::sync_engine) fn set_content_ready(&self, documents: u64, bytes: u64) {
         let mut status = self.content_status.write().unwrap();
         status.state = ContentIndexState::Ready;
         status.indexed_documents = documents;

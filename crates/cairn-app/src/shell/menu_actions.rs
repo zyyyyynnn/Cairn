@@ -1460,6 +1460,34 @@ mod visibility_tests {
     use core::prelude::rust_2021::test;
 
     #[test]
+    fn a_running_update_check_marks_the_help_row_loading() {
+        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
+            gpui_kit::init(cx);
+            let _ = gpui_kit::open_window(
+                gpui_kit::gpui::WindowOptions {
+                    show: false,
+                    focus: false,
+                    ..gpui_kit::gpui::WindowOptions::default()
+                },
+                cx,
+                |window, cx| {
+                    let app = cx.new(|cx| CairnApp::new(window, cx));
+                    app.update(cx, |this, cx| {
+                        this.is_checking_update = true;
+                        let view = cx.entity();
+                        let entries =
+                            menu_entries(this, &view, &[GroupCommand::CheckForUpdates], window, cx);
+                        assert!(entries[0].loading);
+                        assert!(entries[0].disabled);
+                    });
+                    cx.quit();
+                    app
+                },
+            );
+        });
+    }
+
+    #[test]
     fn escape_returns_from_a_block_listing_to_its_folder() {
         gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
             gpui_kit::init(cx);

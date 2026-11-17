@@ -84,14 +84,6 @@ impl SearchOutcome {
             degraded,
         }
     }
-
-    #[doc(hidden)]
-    pub fn items_for_test(&self) -> Vec<SearchResultItem> {
-        match &self.rows {
-            MatchSet::Items(items) => items.clone(),
-            MatchSet::AllFiles(_) => Vec::new(),
-        }
-    }
 }
 
 impl AllFilesView {

@@ -88,8 +88,6 @@ fn render_index_journal_dialog(
     let tokens = ShellTokens::current(cx);
     let surface = cairn_ui::theme::dialog_surface(cx.theme());
     let rem = window.rem_size();
-    let max_width = (window.viewport_size().width - rem * 4.0).max(rem * layout::DIALOG_WIDTH);
-    let dialog_width = (rem * 44.0).min(max_width);
     let list_max_height = (window.viewport_size().height * 0.5).clamp(rem * 12.0, rem * 24.0);
 
     let connected = app.service.connection.is_connected();
@@ -115,6 +113,7 @@ fn render_index_journal_dialog(
     let unavailable_text = app.i18n.get_text("journal_dialog_empty_unavailable");
     let off_text = app.i18n.get_text("journal_dialog_empty_off");
     let empty_text = app.i18n.get_text("journal_dialog_empty");
+    let error_body = app.i18n.get_text("journal_dialog_error_body");
 
     let switch_view = view.clone();
     let refresh_view = view.clone();
@@ -168,8 +167,8 @@ fn render_index_journal_dialog(
 
     let list_body = if !connected {
         empty_panel(unavailable_text, &tokens)
-    } else if let Some(err) = error_text {
-        empty_panel(err.to_string(), &tokens)
+    } else if error_text.is_some() {
+        empty_panel(error_body, &tokens)
     } else if !status.enabled {
         empty_panel(off_text, &tokens)
     } else if entries.is_empty() && loading {
@@ -220,7 +219,7 @@ fn render_index_journal_dialog(
         .child(surface_box);
 
     dialog
-        .width(dialog_width)
+        .width(rem * layout::DIALOG_WIDTH)
         .centered()
         .bg(surface)
         .entrance(DialogEntrance::FadeSlide)

@@ -14,6 +14,7 @@ use crate::service::elevation::{
     launch_elevated_installer, lock_verified_installer, ElevationError,
 };
 use crate::service::ipc_tasks::get_tokio_runtime;
+use crate::shell::command_groups::MenuGroup;
 use crate::shell::toast::ToastAction;
 use fluent_bundle::FluentArgs;
 use gpui_kit::gpui::*;
@@ -332,13 +333,9 @@ impl CairnApp {
     }
 
     pub(crate) fn start_update_check(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.is_checking_update {
+        if !self.begin_update_check(window, cx) {
             return;
         }
-        self.is_checking_update = true;
-        let checking_title = self.i18n.get_text("update_checking_title");
-        let checking_body = self.i18n.get_text("update_checking_body");
-        self.show_persistent_info_toast(checking_title, checking_body, cx);
 
         let handle = window.window_handle();
         let view = cx.entity().downgrade();
@@ -359,12 +356,40 @@ impl CairnApp {
         .detach();
     }
 
+    /// Moves the shell into the checking state and reopens the Help menu after the click that
+    /// started it: the popup dismisses itself on activation, so the row that carries the spinner
+    /// has to be shown again. Returns `false` when a check is already in flight.
+    fn begin_update_check(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.is_checking_update {
+            return false;
+        }
+        self.is_checking_update = true;
+        cx.notify();
+
+        let menu_view = cx.entity();
+        window.defer(cx, move |window, cx| {
+            menu_view.update(cx, |this, cx| {
+                if this.is_checking_update {
+                    this.show_group(MenuGroup::Help, window, cx);
+                }
+            });
+        });
+        true
+    }
+
     fn finish_update_check(
         &mut self,
         cx: &mut Context<Self>,
         result: Result<Option<ReleaseInfo>, UpdateError>,
     ) {
         self.is_checking_update = false;
+        if self
+            .open_group_menu
+            .as_ref()
+            .is_some_and(|menu| menu.group == MenuGroup::Help)
+        {
+            self.close_group();
+        }
         cx.notify();
         match result {
             Err(UpdateError::Incomplete) => {
@@ -611,6 +636,45 @@ mod tests {
         let release: GitHubRelease = serde_json::from_str(body).expect("valid release");
         assert_eq!(release.tag_name, "v0.2.0");
         assert_eq!(release.assets.len(), 2);
+    }
+
+    /// A manual check reports its progress in the Help menu row, not by taking the toast slot:
+    /// the row already renders a spinner while `is_checking_update` is set.
+    #[test]
+    fn starting_a_check_keeps_the_help_row_loading_instead_of_announcing_a_toast() {
+        use crate::shell::command_groups::MenuGroup;
+        use gpui_kit::AppContext;
+
+        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
+            gpui_kit::init(cx);
+            let _ = gpui_kit::open_window(
+                gpui_kit::gpui::WindowOptions {
+                    show: false,
+                    focus: false,
+                    ..gpui_kit::gpui::WindowOptions::default()
+                },
+                cx,
+                |window, cx| {
+                    let app = cx.new(|cx| crate::app::CairnApp::new(window, cx));
+                    app.update(cx, |this, cx| {
+                        this.dismiss_toast(cx);
+                        this.show_group(MenuGroup::Help, window, cx);
+                        this.start_update_check(window, cx);
+                        assert!(this.is_checking_update);
+                        assert!(
+                            this.toast.is_none(),
+                            "the checking phase belongs to the Help menu row"
+                        );
+                        assert!(this
+                            .open_group_menu
+                            .as_ref()
+                            .is_some_and(|menu| menu.group == MenuGroup::Help));
+                    });
+                    cx.quit();
+                    app
+                },
+            );
+        });
     }
 
     /// Network check for HTTP/TLS dependency changes: the real release API must answer through

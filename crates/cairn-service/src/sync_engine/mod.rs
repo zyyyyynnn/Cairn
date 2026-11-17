@@ -1125,18 +1125,6 @@ impl MultiVolumeEngine {
         Ok(self.index_journal_status())
     }
 
-    #[doc(hidden)]
-    pub fn mark_content_ready_for_test(&self, indexed_documents: u64) {
-        let bytes = self
-            .get_or_create_content_searcher()
-            .map_or(0, |s| s.index_size_bytes());
-        let mut status = self.content_status.write().unwrap();
-        status.state = ContentIndexState::Ready;
-        status.indexed_documents = indexed_documents;
-        status.index_bytes = bytes;
-        status.last_updated_ts = unix_now_secs();
-    }
-
     /// Aggregates resident heap allocations across all indexed sources and side tables.
     pub fn memory_footprint(&self) -> IndexMemoryFootprint {
         let mut total = IndexMemoryFootprint::default();

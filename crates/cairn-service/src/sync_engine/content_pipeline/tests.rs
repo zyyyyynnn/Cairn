@@ -7,8 +7,9 @@ use super::status::unix_now;
 use super::worker_process::worker_exit_is_transient;
 use super::*;
 use crate::config::ServiceConfig;
+use crate::sync_engine::search::MatchSet;
 use crate::sync_engine::{MultiVolumeEngine, VolumeIndex};
-use cairn_content::ContentIndex;
+use cairn_content::{ContentIndex, ContentWriter, CONTENT_RESULT_TOP_K};
 use cairn_core::engine::CancellationToken;
 use cairn_core::property_store::SourceId;
 use cairn_core::sort::{SortColumn, SortDirection, SortSpec};
@@ -1774,4 +1775,95 @@ fn worker_port_full_backfill_retries_transient_failure_without_sleeping() {
         ContentIndexState::Disabled
     );
     assert!(!engine.backfill_marker_path().exists());
+}
+
+/// A positive conjunction must evaluate the full content hit set before the metadata filter;
+/// truncating at the content top-K first would drop a matching low-BM25 row that the `ext:`
+/// filter would have kept.
+#[test]
+fn positive_content_conjunction_never_truncates_beyond_top_k_before_mft_filter() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let index_dir = temp.path().join("index");
+    let content_dir = temp.path().join("content");
+
+    let total_docs = CONTENT_RESULT_TOP_K + 32;
+    let mut mft_items = Vec::with_capacity(total_docs);
+    {
+        let writer = ContentWriter::open_or_create(&content_dir).expect("writer");
+        for i in 1..=total_docs {
+            let frn = i as u64;
+            let is_target = i == total_docs;
+            let name = if is_target {
+                "target_match.rs".to_string()
+            } else {
+                format!("noise_{i}.txt")
+            };
+            let body = if is_target {
+                "alpha filler beta".to_string()
+            } else {
+                format!("alpha beta alpha beta alpha beta filler {i}")
+            };
+            mft_items.push(ExtractedItem {
+                frn,
+                parent_frn: 0,
+                name: name.clone(),
+                is_dir: false,
+                size: 64,
+                created_ts: 1,
+                modified_ts: 1,
+                flags: 0,
+                is_reparse_point: false,
+            });
+            writer
+                .index_document_deferred(2, frn, 64, 1, &format!("C:\\{name}"), &body)
+                .unwrap();
+        }
+        writer.commit().unwrap();
+        writer.finish().unwrap();
+    }
+
+    let mut vol = VolumeIndex::new('C');
+    vol.ingest_items(mft_items);
+
+    let cfg = ServiceConfig {
+        content_index_enabled: true,
+        excluded_paths: Vec::new(),
+        content_excluded_paths: Vec::new(),
+        ..Default::default()
+    };
+    let engine = MultiVolumeEngine::with_paths(
+        &index_dir,
+        &content_dir,
+        &temp.path().join("service.toml"),
+        vec![],
+        cfg,
+    );
+    engine.add_volume(vol);
+    let bytes = engine
+        .get_or_create_content_searcher()
+        .map_or(0, |searcher| searcher.index_size_bytes());
+    engine.set_content_ready(total_docs as u64, bytes);
+
+    let cancel = CancellationToken::new();
+    let outcome = engine.execute_search_multi(
+        "content:alpha content:beta ext:rs",
+        &QueryDefaults::default(),
+        &SortSpec::default(),
+        &cancel,
+    );
+    assert_eq!(
+        outcome.total, 1,
+        "positive conjunction must evaluate full hit set before MFT ext:rs filter, not truncate at top-K"
+    );
+    let MatchSet::Items(items) = &outcome.rows else {
+        panic!("a text query produces a materialized match list");
+    };
+    let item = items.last().expect("single matched item");
+    assert!(
+        !outcome
+            .snippets
+            .get(&(item.source_id.0, total_docs as u64))
+            .is_none_or(Vec::is_empty),
+        "surviving low-BM25 row past top-K must still receive snippets"
+    );
 }

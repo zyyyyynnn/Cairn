@@ -405,8 +405,8 @@ pub struct CairnApp {
     pub toast: Option<crate::shell::toast::ToastState>,
     pub(crate) toast_serial: u64,
     pub table_reveal: TableRevealState,
-    /// True while the GitHub release check is in flight. The Help menu trigger carries the
-    /// loading icon; no separate waiting dialog is opened.
+    /// True while the GitHub release check is in flight. The Help menu row carries the loading
+    /// icon and the menu is reopened after the click; no separate waiting dialog or toast is opened.
     pub(crate) is_checking_update: bool,
     /// The live window resize and the cover it owns, judged by this window's own geometry.
     pub(crate) window_resize: crate::shell::window_resize::WindowResizeTracker,
