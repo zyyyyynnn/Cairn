@@ -10,6 +10,10 @@ use std::borrow::Cow;
 use gpui_kit::assets::{icon_assets, Assets};
 use gpui_kit::gpui::{AssetSource, Result, SharedString};
 
+pub(crate) const RADIO_DOT_ICON_PATH: &str = "icons/cairn-radio-dot.svg";
+const RADIO_DOT_SVG: &[u8] =
+    br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="5" fill="currentColor"/></svg>"#;
+
 icon_assets!(
     CairnExtraIcons,
     [
@@ -45,6 +49,9 @@ pub(crate) struct CairnAssets;
 
 impl AssetSource for CairnAssets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        if path == RADIO_DOT_ICON_PATH {
+            return Ok(Some(Cow::Borrowed(RADIO_DOT_SVG)));
+        }
         if let Some(bytes) = CairnExtraIcons.load(path)? {
             return Ok(Some(bytes));
         }
@@ -54,6 +61,9 @@ impl AssetSource for CairnAssets {
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         let mut names = Assets.list(path)?;
         names.extend(CairnExtraIcons.list(path)?);
+        if path.is_empty() || path == "icons" {
+            names.push(RADIO_DOT_ICON_PATH.into());
+        }
         names.sort();
         names.dedup();
         Ok(names)
@@ -132,6 +142,16 @@ mod tests {
                 "asset {icon:?} ({path}) is not an SVG document"
             );
         }
+    }
+
+    #[test]
+    fn radio_dot_icon_resolves_as_circle_svg() {
+        let bytes = CairnAssets
+            .load(super::RADIO_DOT_ICON_PATH)
+            .expect("radio dot icon query should succeed")
+            .expect("radio dot icon asset should exist");
+        let text = std::str::from_utf8(&bytes).expect("radio dot svg should be UTF-8");
+        assert!(text.contains("<svg") && text.contains("<circle"));
     }
 
     #[test]

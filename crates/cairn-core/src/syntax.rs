@@ -11,26 +11,23 @@
 //! - Negation `!`
 //! - Modifiers and functions
 
-use crate::filter::{DateFilter, SizeFilter};
+use crate::filter::{
+    parse_duration_filter, parse_framerate_filter, parse_u64_filter, AttribFilter, DateFilter,
+    DimensionsFilter, DupeMode, SizeFilter,
+};
+use crate::property_store::PropertyKind;
+use crate::sort::SortSpec;
 use serde::{Deserialize, Serialize};
 
-/// Content text longer than this is a paste, not a query. The tokenizer materializes every
-/// token of a content term, so an unbounded term is a memory hazard; an oversized term matches
-/// nothing like any other unusable item instead of failing the whole query.
+/// Maximum content term length accepted before rejecting as an oversized paste.
 const MAX_CONTENT_TERM_BYTES: usize = 4096;
 
-/// The most content terms one query may carry. Boolean evaluation resolves a complete hit set
-/// per term and probes every occurrence per record, so the count bounds the query's memory and
-/// scan cost; a query above it is refused whole at the request boundary.
+/// Maximum content terms allowed per query; enforced at the request boundary.
 pub const MAX_CONTENT_TERMS: usize = 16;
+/// Upper bound on distinct `child:` constraints in one query.
+pub const MAX_CHILD_FILTERS: usize = 8;
 
-/// Query-wide defaults: what a search item means when the item itself does not say.
-///
-/// The UI match toggles (case, whole word, path, regex, content) and the hidden/system
-/// filters are properties of the whole query, so they travel as this structure instead of
-/// being spliced into the query text. A modifier written in the text (`case:`, `no-case:`,
-/// `ww:`, `path:`, `no-path:`, `regex:`, `content:`) states its own value for that item and
-/// wins over the default; a default only ever widens or narrows items that state nothing.
+/// Query-wide defaults applied to search items that do not state an explicit override.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueryDefaults {
     pub case_sensitive: bool,
@@ -39,6 +36,10 @@ pub struct QueryDefaults {
     pub is_regex: bool,
     /// Route each item's text through content search instead of name/path matching.
     pub content: bool,
+    pub pinyin: bool,
+    pub ignore_punctuation: bool,
+    pub ignore_whitespace: bool,
+    pub ignore_diacritics: bool,
     pub exclude_hidden: bool,
     pub exclude_system: bool,
 }
@@ -59,13 +60,17 @@ impl QueryDefaults {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum QueryExpr {
-    Term(SearchTerm),
+    Term(Box<SearchTerm>),
     And(Vec<QueryExpr>),
     Or(Vec<QueryExpr>),
     Not(Box<QueryExpr>),
 }
 
 impl QueryExpr {
+    pub fn term(term: SearchTerm) -> Self {
+        Self::Term(Box::new(term))
+    }
+
     pub fn is_empty(&self) -> bool {
         match self {
             QueryExpr::Term(t) => t.is_empty(),
@@ -174,6 +179,18 @@ impl QueryExpr {
             }
             QueryExpr::Not(inner) => inner.content_term_count(),
         }
+    }
+
+    /// Number of `child:` constraints. Each distinct pattern allocates a per-record match table
+    /// during hierarchy evaluation, so the request boundary caps this count.
+    pub fn child_filter_count(&self) -> usize {
+        let mut patterns = std::collections::HashSet::new();
+        self.visit_terms(&mut |term| {
+            if let Some(pattern) = term.child_filter.as_deref() {
+                patterns.insert(pattern.to_owned());
+            }
+        });
+        patterns.len()
     }
 
     /// Extracts all full-text content search queries defined by `content:` terms (CNT-06).
@@ -315,12 +332,95 @@ impl QueryExpr {
                 .map(|stripped| QueryExpr::Not(Box::new(stripped))),
         }
     }
+
+    /// Returns `true` when this expression carries no filtering constraint (e.g., empty or `sort:` only).
+    pub fn is_unfiltered(&self) -> bool {
+        match self {
+            QueryExpr::Term(t) => t.is_unfiltered(),
+            QueryExpr::And(v) => v.iter().all(Self::is_unfiltered),
+            QueryExpr::Or(v) => !v.is_empty() && v.iter().all(Self::is_unfiltered),
+            QueryExpr::Not(_) => false,
+        }
+    }
+
+    /// Returns the last explicit `sort:` specification attached to the query, if any.
+    pub fn extract_sort_spec(&self) -> Option<SortSpec> {
+        let mut out = None;
+        self.visit_terms(&mut |t| {
+            if let Some(ref s) = t.sort_override {
+                out = Some(s.clone());
+            }
+        });
+        out
+    }
+
+    /// Collects the distinct [`PropertyKind`] side tables required by extended attribute filters.
+    pub fn required_property_kinds(&self) -> Vec<PropertyKind> {
+        let mut kinds = Vec::new();
+        self.visit_terms(&mut |t| {
+            if t.length_filter.is_some() {
+                kinds.push(PropertyKind::Length);
+            }
+            if t.author_filter.is_some() {
+                kinds.push(PropertyKind::Author);
+            }
+            if t.tags_filter.is_some() {
+                kinds.push(PropertyKind::Tags);
+            }
+            if t.dimensions_filter.is_some() {
+                kinds.push(PropertyKind::Dimensions);
+            }
+            if t.framerate_filter.is_some() {
+                kinds.push(PropertyKind::Framerate);
+            }
+        });
+        kinds.sort();
+        kinds.dedup();
+        kinds
+    }
+
+    /// Returns `true` when evaluation needs directory depth or child counts (`depth:`, `child*:`, `empty:`).
+    pub fn uses_hierarchy(&self) -> bool {
+        let mut needed = false;
+        self.visit_terms(&mut |t| {
+            if t.depth_filter.is_some()
+                || t.child_filter.is_some()
+                || t.child_count_filter.is_some()
+                || t.child_file_count_filter.is_some()
+                || t.child_folder_count_filter.is_some()
+                || t.empty_folder_only
+            {
+                needed = true;
+            }
+        });
+        needed
+    }
+
+    /// Returns `true` when evaluation needs duplicate/uniqueness counting (`dupe:`, `unique:`).
+    pub fn uses_dupes(&self) -> bool {
+        let mut needed = false;
+        self.visit_terms(&mut |t| {
+            if t.dupe_mode.is_some() {
+                needed = true;
+            }
+        });
+        needed
+    }
+
+    fn visit_terms(&self, visitor: &mut impl FnMut(&SearchTerm)) {
+        match self {
+            QueryExpr::Term(t) => visitor(t),
+            QueryExpr::And(subs) | QueryExpr::Or(subs) => {
+                for s in subs {
+                    s.visit_terms(visitor);
+                }
+            }
+            QueryExpr::Not(inner) => inner.visit_terms(visitor),
+        }
+    }
 }
 
 /// One search item of a [`QueryExpr`]: its text plus the modifiers that apply to that text.
-///
-/// The modifier booleans may come from the item's own token (`case:foo`) or from the query's
-/// [`QueryDefaults`]; see [`parse_query_with`].
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct SearchTerm {
     pub raw: String,
@@ -336,6 +436,10 @@ pub struct SearchTerm {
     pub suffix: bool,
     pub start_with: bool,
     pub end_with: bool,
+    pub pinyin: bool,
+    pub ignore_punctuation: bool,
+    pub ignore_whitespace: bool,
+    pub ignore_diacritics: bool,
     pub drive: Option<char>,
     pub ext_filter: Vec<String>,
     pub size_filter: Option<SizeFilter>,
@@ -343,22 +447,31 @@ pub struct SearchTerm {
     pub dc_filter: Option<DateFilter>,
     pub parent_filter: Option<String>,
     pub content_query: Option<String>,
-    /// Rejects records carrying `FLAG_HIDDEN` (query-wide default, never a text modifier).
+    pub len_filter: Option<SizeFilter>,
+    pub attrib_filter: Option<AttribFilter>,
+    pub depth_filter: Option<SizeFilter>,
+    pub child_filter: Option<String>,
+    pub child_count_filter: Option<SizeFilter>,
+    pub child_file_count_filter: Option<SizeFilter>,
+    pub child_folder_count_filter: Option<SizeFilter>,
+    pub empty_folder_only: bool,
+    pub dupe_mode: Option<DupeMode>,
+    pub length_filter: Option<SizeFilter>,
+    pub author_filter: Option<String>,
+    pub tags_filter: Option<String>,
+    pub dimensions_filter: Option<DimensionsFilter>,
+    pub framerate_filter: Option<SizeFilter>,
+    pub sort_override: Option<SortSpec>,
+    /// Rejects records carrying `FLAG_HIDDEN`.
     pub exclude_hidden: bool,
-    /// Rejects records carrying `FLAG_SYSTEM` (query-wide default, never a text modifier).
+    /// Rejects records carrying `FLAG_SYSTEM`.
     pub exclude_system: bool,
-    /// Marks a search item whose function value was empty or unparsable: `size:` with no
-    /// value, `size:notanumber`, `ext:` without any usable extension, or a dangling operand.
-    ///
-    /// Such an item matches nothing instead of degrading to "no constraint", which would
-    /// silently widen the whole query to every record. Option-only items (`case:`, `file:`)
-    /// are deliberately not covered: they are not parse failures.
+    /// Marks a search item whose function value was empty or unparsable.
     pub match_nothing: bool,
 }
 
 impl SearchTerm {
-    /// Builds an item that matches no record. Used for search items that cannot be parsed
-    /// into any constraint, so a malformed item can never match the whole index.
+    /// Builds an item that matches no record.
     pub fn match_nothing() -> Self {
         Self {
             match_nothing: true,
@@ -367,8 +480,15 @@ impl SearchTerm {
     }
 
     pub fn is_empty(&self) -> bool {
-        !self.match_nothing
-            && self.text.is_empty()
+        !self.match_nothing && self.has_no_constraints() && self.sort_override.is_none()
+    }
+
+    fn is_unfiltered(&self) -> bool {
+        !self.match_nothing && self.has_no_constraints()
+    }
+
+    fn has_no_constraints(&self) -> bool {
+        self.text.is_empty()
             && self.drive.is_none()
             && self.ext_filter.is_empty()
             && self.size_filter.is_none()
@@ -376,6 +496,20 @@ impl SearchTerm {
             && self.dc_filter.is_none()
             && self.parent_filter.is_none()
             && self.content_query.is_none()
+            && self.len_filter.is_none()
+            && self.attrib_filter.is_none()
+            && self.depth_filter.is_none()
+            && self.child_filter.is_none()
+            && self.child_count_filter.is_none()
+            && self.child_file_count_filter.is_none()
+            && self.child_folder_count_filter.is_none()
+            && !self.empty_folder_only
+            && self.dupe_mode.is_none()
+            && self.length_filter.is_none()
+            && self.author_filter.is_none()
+            && self.tags_filter.is_none()
+            && self.dimensions_filter.is_none()
+            && self.framerate_filter.is_none()
             && !self.file_only
             && !self.folder_only
             && !self.exclude_hidden
@@ -423,13 +557,13 @@ pub fn parse_query_with(input: &str, defaults: &QueryDefaults) -> QueryExpr {
         None => expr,
         Some(filter) => match expr {
             QueryExpr::And(subs) if subs.is_empty() => {
-                QueryExpr::And(vec![QueryExpr::Term(filter)])
+                QueryExpr::And(vec![QueryExpr::term(filter)])
             }
             QueryExpr::And(mut subs) => {
-                subs.insert(0, QueryExpr::Term(filter));
+                subs.insert(0, QueryExpr::term(filter));
                 QueryExpr::And(subs)
             }
-            other => QueryExpr::And(vec![QueryExpr::Term(filter), other]),
+            other => QueryExpr::And(vec![QueryExpr::term(filter), other]),
         },
     }
 }
@@ -574,9 +708,9 @@ impl<'a> QueryParser<'a> {
             if token.is_empty() {
                 // Dangling operator (`a|`, `a||b`, `!<>`): the item carries no constraint,
                 // so it must not act as "match everything" inside an OR/AND chain.
-                QueryExpr::Term(SearchTerm::match_nothing())
+                QueryExpr::term(SearchTerm::match_nothing())
             } else {
-                QueryExpr::Term(parse_search_term(&token, self.defaults))
+                QueryExpr::term(parse_search_term(&token, self.defaults))
             }
         }
     }
@@ -619,31 +753,43 @@ impl<'a> QueryParser<'a> {
     }
 }
 
-/// Which modifiers a token stated out loud. Those keep whatever value the token gave them;
-/// [`QueryDefaults`] only reach the items that stated nothing about a modifier.
+/// Modifiers explicitly stated on a token, shielding them from [`QueryDefaults`].
 #[derive(Default)]
 struct StatedModifiers {
     case: bool,
     whole_words: bool,
     path: bool,
     regex: bool,
+    pinyin: bool,
+    ignore_punctuation: bool,
+    ignore_whitespace: bool,
+    ignore_diacritics: bool,
 }
 
-/// Parses modifiers, functions, and text out of a single token.
-///
-/// Function tokens (`ext:`, `size:`, `dm:`, `dc:`, `parent:`, `content:`) and drive tokens
-/// consume the rest of the token and return early. They carry no search text, so no textual
-/// default of `defaults` can reach them.
+const MACRO_EXTENSIONS: [(&str, &str); 6] = [
+    ("audio", "mp3;wav;flac;aac;ogg;wma;m4a;opus;ape"),
+    (
+        "doc",
+        "doc;docx;xls;xlsx;ppt;pptx;pdf;txt;md;rtf;csv;odt;ods;odp",
+    ),
+    ("exe", "exe;bat;cmd;msi;ps1;vbs;com;scr"),
+    (
+        "image",
+        "jpg;jpeg;png;gif;bmp;webp;svg;ico;tiff;tif;psd;raw",
+    ),
+    ("video", "mp4;mkv;avi;mov;wmv;flv;webm;m4v;rmvb"),
+    ("zip", "zip;rar;7z;tar;gz;bz2;xz;iso;cab"),
+];
+
+/// Parses modifiers, functions, and search text out of a single token.
 pub fn parse_search_term(raw_token: &str, defaults: &QueryDefaults) -> SearchTerm {
     let mut term = SearchTerm {
         raw: raw_token.to_string(),
         ..Default::default()
     };
     let mut stated = StatedModifiers::default();
-
     let mut remaining = raw_token;
 
-    // Check for drive specification, e.g. "c:" or "D:"
     if remaining.len() == 2
         && remaining
             .chars()
@@ -655,208 +801,288 @@ pub fn parse_search_term(raw_token: &str, defaults: &QueryDefaults) -> SearchTer
         return term;
     }
 
-    // Process modifiers / functions in a loop
-    loop {
-        let mut matched = false;
-
-        if let Some(rest) = remaining.strip_prefix("case:") {
-            term.case_sensitive = true;
-            stated.case = true;
-            remaining = rest;
-            matched = true;
-        } else if let Some(rest) = remaining.strip_prefix("no-case:") {
-            term.case_sensitive = false;
-            stated.case = true;
-            remaining = rest;
-            matched = true;
-        } else if let Some(rest) = remaining.strip_prefix("ww:") {
-            term.whole_words = true;
-            stated.whole_words = true;
-            remaining = rest;
-            matched = true;
-        } else if let Some(rest) = remaining.strip_prefix("whole-words:") {
-            term.whole_words = true;
-            stated.whole_words = true;
-            remaining = rest;
-            matched = true;
-        } else if let Some(rest) = remaining.strip_prefix("no-whole-words:") {
-            term.whole_words = false;
-            stated.whole_words = true;
-            remaining = rest;
-            matched = true;
-        } else if let Some(rest) = remaining.strip_prefix("wfn:") {
-            term.whole_filename = true;
-            remaining = rest;
-            matched = true;
-        } else if let Some(rest) = remaining.strip_prefix("whole:") {
-            term.whole_filename = true;
-            remaining = rest;
-            matched = true;
-        } else if let Some(rest) = remaining.strip_prefix("entire:") {
-            term.whole_filename = true;
-            remaining = rest;
-            matched = true;
-        } else if let Some(rest) = remaining.strip_prefix("\\:") {
-            term.match_path = true;
-            stated.path = true;
-            remaining = rest;
-            matched = true;
-        } else if let Some(rest) = remaining.strip_prefix("path:") {
-            term.match_path = true;
-            stated.path = true;
-            remaining = rest;
-            matched = true;
-        } else if let Some(rest) = remaining.strip_prefix("no-path:") {
-            term.match_path = false;
-            stated.path = true;
-            remaining = rest;
-            matched = true;
-        } else if let Some(rest) = remaining.strip_prefix("regex:") {
-            term.is_regex = true;
-            stated.regex = true;
-            remaining = rest;
-            matched = true;
-        } else if let Some(rest) = remaining.strip_prefix("file:") {
-            term.file_only = true;
-            remaining = rest;
-            matched = true;
-        } else if let Some(rest) = remaining.strip_prefix("folder:") {
-            term.folder_only = true;
-            remaining = rest;
-            matched = true;
-        } else if let Some(rest) = remaining.strip_prefix("prefix:") {
-            term.prefix = true;
-            remaining = rest;
-            matched = true;
-        } else if let Some(rest) = remaining.strip_prefix("suffix:") {
-            term.suffix = true;
-            remaining = rest;
-            matched = true;
-        } else if let Some(rest) = remaining.strip_prefix("^:") {
-            term.start_with = true;
-            remaining = rest;
-            matched = true;
-        } else if let Some(rest) = remaining.strip_prefix("start-with:") {
-            term.start_with = true;
-            remaining = rest;
-            matched = true;
-        } else if let Some(rest) = remaining.strip_prefix("$:") {
-            term.end_with = true;
-            remaining = rest;
-            matched = true;
-        } else if let Some(rest) = remaining.strip_prefix("end-with:") {
-            term.end_with = true;
-            remaining = rest;
-            matched = true;
-        } else if let Some(rest) = remaining.strip_prefix("ext:") {
-            let val = unquote(rest);
-            term.ext_filter = val
-                .split(';')
-                .map(|s| {
-                    s.trim_start_matches("*.")
-                        .trim_start_matches('.')
-                        .to_ascii_lowercase()
-                })
-                .filter(|s| !s.is_empty())
-                .collect();
-            // An `ext:` without any usable extension is a broken filter, not "no filter".
-            term.match_nothing = term.ext_filter.is_empty();
-            return term;
-        } else if let Some(rest) = remaining.strip_prefix("size:") {
-            let val = unquote(rest);
-            term.size_filter = SizeFilter::parse(val);
-            term.match_nothing = term.size_filter.is_none();
-            return term;
-        } else if let Some(rest) = remaining.strip_prefix("dm:") {
-            let val = unquote(rest);
-            term.dm_filter = DateFilter::parse(val);
-            term.match_nothing = term.dm_filter.is_none();
-            return term;
-        } else if let Some(rest) = remaining.strip_prefix("date-modified:") {
-            let val = unquote(rest);
-            term.dm_filter = DateFilter::parse(val);
-            term.match_nothing = term.dm_filter.is_none();
-            return term;
-        } else if let Some(rest) = remaining.strip_prefix("dc:") {
-            let val = unquote(rest);
-            term.dc_filter = DateFilter::parse(val);
-            term.match_nothing = term.dc_filter.is_none();
-            return term;
-        } else if let Some(rest) = remaining.strip_prefix("date-created:") {
-            let val = unquote(rest);
-            term.dc_filter = DateFilter::parse(val);
-            term.match_nothing = term.dc_filter.is_none();
-            return term;
-        } else if let Some(rest) = remaining.strip_prefix("parent:") {
-            term.parent_filter = Some(unquote(rest).trim_end_matches('\\').to_string());
-            return term;
-        } else if let Some(rest) = remaining.strip_prefix("content:") {
-            apply_content_query(&mut term, unquote(rest));
-            return term;
-        } else if let Some(rest) = remaining.strip_prefix("audio:") {
-            term.ext_filter = "mp3;wav;flac;aac;ogg;wma;m4a;opus;ape"
-                .split(';')
-                .map(String::from)
-                .collect();
-            remaining = rest;
-            matched = true;
-        } else if let Some(rest) = remaining.strip_prefix("doc:") {
-            term.ext_filter = "doc;docx;xls;xlsx;ppt;pptx;pdf;txt;md;rtf;csv;odt;ods;odp"
-                .split(';')
-                .map(String::from)
-                .collect();
-            remaining = rest;
-            matched = true;
-        } else if let Some(rest) = remaining.strip_prefix("exe:") {
-            term.ext_filter = "exe;bat;cmd;msi;ps1;vbs;com;scr"
-                .split(';')
-                .map(String::from)
-                .collect();
-            remaining = rest;
-            matched = true;
-        } else if let Some(rest) = remaining.strip_prefix("image:") {
-            term.ext_filter = "jpg;jpeg;png;gif;bmp;webp;svg;ico;tiff;tif;psd;raw"
-                .split(';')
-                .map(String::from)
-                .collect();
-            remaining = rest;
-            matched = true;
-        } else if let Some(rest) = remaining.strip_prefix("video:") {
-            term.ext_filter = "mp4;mkv;avi;mov;wmv;flv;webm;m4v;rmvb"
-                .split(';')
-                .map(String::from)
-                .collect();
-            remaining = rest;
-            matched = true;
-        } else if let Some(rest) = remaining.strip_prefix("zip:") {
-            term.ext_filter = "zip;rar;7z;tar;gz;bz2;xz;iso;cab"
-                .split(';')
-                .map(String::from)
-                .collect();
-            remaining = rest;
-            matched = true;
+    while let Some((prefix, rest)) = remaining.split_once(':') {
+        match prefix {
+            "case" => {
+                term.case_sensitive = true;
+                stated.case = true;
+            }
+            "no-case" => {
+                term.case_sensitive = false;
+                stated.case = true;
+            }
+            "ww" | "whole-words" => {
+                term.whole_words = true;
+                stated.whole_words = true;
+            }
+            "no-whole-words" => {
+                term.whole_words = false;
+                stated.whole_words = true;
+            }
+            "wfn" | "whole" | "entire" => {
+                term.whole_filename = true;
+            }
+            "\\" | "path" => {
+                term.match_path = true;
+                stated.path = true;
+            }
+            "no-path" => {
+                term.match_path = false;
+                stated.path = true;
+            }
+            "regex" => {
+                term.is_regex = true;
+                stated.regex = true;
+            }
+            "file" => term.file_only = true,
+            "folder" => term.folder_only = true,
+            "empty" => term.empty_folder_only = true,
+            "prefix" => term.prefix = true,
+            "suffix" => term.suffix = true,
+            "^" | "start-with" => term.start_with = true,
+            "$" | "end-with" => term.end_with = true,
+            "pinyin" | "py" => {
+                term.pinyin = true;
+                stated.pinyin = true;
+            }
+            "no-pinyin" | "no-py" => {
+                term.pinyin = false;
+                stated.pinyin = true;
+            }
+            "diacritics" | "diac" => {
+                term.ignore_diacritics = false;
+                stated.ignore_diacritics = true;
+            }
+            "no-diacritics" | "no-diac" => {
+                term.ignore_diacritics = true;
+                stated.ignore_diacritics = true;
+            }
+            "ignore-punctuation" | "nopunc" | "no-punc" => {
+                term.ignore_punctuation = true;
+                stated.ignore_punctuation = true;
+            }
+            "no-ignore-punctuation" | "punc" => {
+                term.ignore_punctuation = false;
+                stated.ignore_punctuation = true;
+            }
+            "ignore-whitespace" | "nows" | "no-ws" => {
+                term.ignore_whitespace = true;
+                stated.ignore_whitespace = true;
+            }
+            "no-ignore-whitespace" | "ws" => {
+                term.ignore_whitespace = false;
+                stated.ignore_whitespace = true;
+            }
+            "ext" => {
+                let val = unquote(rest);
+                term.ext_filter = val
+                    .split(';')
+                    .map(|s| {
+                        s.trim_start_matches("*.")
+                            .trim_start_matches('.')
+                            .to_ascii_lowercase()
+                    })
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                term.match_nothing = term.ext_filter.is_empty();
+                return term;
+            }
+            "size" => {
+                term.size_filter = SizeFilter::parse(unquote(rest));
+                term.match_nothing = term.size_filter.is_none();
+                return term;
+            }
+            "dm" | "date-modified" => {
+                term.dm_filter = DateFilter::parse(unquote(rest));
+                term.match_nothing = term.dm_filter.is_none();
+                return term;
+            }
+            "dc" | "date-created" => {
+                term.dc_filter = DateFilter::parse(unquote(rest));
+                term.match_nothing = term.dc_filter.is_none();
+                return term;
+            }
+            "parent" => {
+                let normalized = unquote(rest)
+                    .replace('/', "\\")
+                    .trim_end_matches('\\')
+                    .to_string();
+                term.parent_filter = Some(normalized);
+                return term;
+            }
+            "content" => {
+                apply_content_query(&mut term, unquote(rest));
+                return term;
+            }
+            "len" | "name-len" => {
+                term.len_filter = parse_u64_filter(unquote(rest));
+                term.match_nothing = term.len_filter.is_none();
+                return term;
+            }
+            "attrib" | "attributes" => {
+                term.attrib_filter = AttribFilter::parse(unquote(rest));
+                term.match_nothing = term.attrib_filter.is_none();
+                return term;
+            }
+            "depth" | "parents" => {
+                term.depth_filter = parse_u64_filter(unquote(rest));
+                term.match_nothing = term.depth_filter.is_none();
+                return term;
+            }
+            "child" => {
+                let val = unquote(rest).trim();
+                if val.is_empty() {
+                    term.match_nothing = true;
+                } else {
+                    term.child_filter = Some(val.to_string());
+                }
+                return term;
+            }
+            "childcount" => {
+                term.child_count_filter = parse_u64_filter(unquote(rest));
+                term.match_nothing = term.child_count_filter.is_none();
+                return term;
+            }
+            "childfilecount" => {
+                term.child_file_count_filter = parse_u64_filter(unquote(rest));
+                term.match_nothing = term.child_file_count_filter.is_none();
+                return term;
+            }
+            "childfoldercount" => {
+                term.child_folder_count_filter = parse_u64_filter(unquote(rest));
+                term.match_nothing = term.child_folder_count_filter.is_none();
+                return term;
+            }
+            "dupe" => {
+                let val = unquote(rest).trim().to_ascii_lowercase();
+                match val.as_str() {
+                    "" | "name" => term.dupe_mode = Some(DupeMode::Name),
+                    "size" => term.dupe_mode = Some(DupeMode::Size),
+                    "namepart" | "stem" => term.dupe_mode = Some(DupeMode::NamePart),
+                    "name;size" | "size;name" | "all" => {
+                        term.dupe_mode = Some(DupeMode::NameAndSize)
+                    }
+                    _ => term.match_nothing = true,
+                }
+                return term;
+            }
+            "namedupe" => {
+                if unquote(rest).trim().is_empty() {
+                    term.dupe_mode = Some(DupeMode::Name);
+                } else {
+                    term.match_nothing = true;
+                }
+                return term;
+            }
+            "sizedupe" => {
+                if unquote(rest).trim().is_empty() {
+                    term.dupe_mode = Some(DupeMode::Size);
+                } else {
+                    term.match_nothing = true;
+                }
+                return term;
+            }
+            "namepartdupe" => {
+                if unquote(rest).trim().is_empty() {
+                    term.dupe_mode = Some(DupeMode::NamePart);
+                } else {
+                    term.match_nothing = true;
+                }
+                return term;
+            }
+            "unique" => {
+                let val = unquote(rest).trim().to_ascii_lowercase();
+                if val.is_empty() || val == "name" {
+                    term.dupe_mode = Some(DupeMode::UniqueName);
+                } else {
+                    term.match_nothing = true;
+                }
+                return term;
+            }
+            "length" | "duration" => {
+                term.length_filter = parse_duration_filter(unquote(rest));
+                term.match_nothing = term.length_filter.is_none();
+                return term;
+            }
+            "author" | "artist" => {
+                let val = unquote(rest).trim();
+                if val.is_empty() {
+                    term.match_nothing = true;
+                } else {
+                    term.author_filter = Some(val.to_string());
+                }
+                return term;
+            }
+            "tags" | "tag" => {
+                let val = unquote(rest).trim();
+                if val.is_empty() {
+                    term.match_nothing = true;
+                } else {
+                    term.tags_filter = Some(val.to_string());
+                }
+                return term;
+            }
+            "dimensions" | "dim" => {
+                term.dimensions_filter = DimensionsFilter::parse(unquote(rest));
+                term.match_nothing = term.dimensions_filter.is_none();
+                return term;
+            }
+            "width" => {
+                match parse_u64_filter(unquote(rest)) {
+                    Some(w) => {
+                        term.dimensions_filter = Some(DimensionsFilter {
+                            width: Some(w),
+                            height: None,
+                        });
+                    }
+                    None => term.match_nothing = true,
+                }
+                return term;
+            }
+            "height" => {
+                match parse_u64_filter(unquote(rest)) {
+                    Some(h) => {
+                        term.dimensions_filter = Some(DimensionsFilter {
+                            width: None,
+                            height: Some(h),
+                        });
+                    }
+                    None => term.match_nothing = true,
+                }
+                return term;
+            }
+            "framerate" | "fps" => {
+                term.framerate_filter = parse_framerate_filter(unquote(rest));
+                term.match_nothing = term.framerate_filter.is_none();
+                return term;
+            }
+            "sort" => {
+                match SortSpec::parse_clause(unquote(rest)) {
+                    Ok(spec) => term.sort_override = Some(spec),
+                    Err(_) => term.match_nothing = true,
+                }
+                return term;
+            }
+            _ => {
+                if let Some((_, exts)) = MACRO_EXTENSIONS.iter().find(|&&(k, _)| k == prefix) {
+                    term.ext_filter = exts.split(';').map(String::from).collect();
+                } else {
+                    break;
+                }
+            }
         }
-
-        if !matched {
-            break;
-        }
+        remaining = rest;
     }
 
-    // Strip surrounding quotes from search text
     let text = unquote(remaining).to_string();
 
-    // Check for drive prefix in text, e.g. "C:\Windows"
     if text.len() >= 3 && text.as_bytes()[1] == b':' && text.as_bytes()[2] == b'\\' {
         term.drive = Some(text.chars().next().unwrap().to_ascii_uppercase());
         term.match_path = true;
     }
-
-    // Wildcards: if contains * or ?, match whole filename
     if text.contains('*') || text.contains('?') {
         term.whole_filename = true;
     }
-
-    // Path rules: contains '\' matches path; ends with '\' matches folder
     if text.contains('\\') {
         term.match_path = true;
     }
@@ -866,7 +1092,6 @@ pub fn parse_search_term(raw_token: &str, defaults: &QueryDefaults) -> SearchTer
 
     term.text = text;
 
-    // Query-wide defaults reach only the modifiers this token did not state itself.
     if defaults.case_sensitive && !stated.case {
         term.case_sensitive = true;
     }
@@ -878,6 +1103,18 @@ pub fn parse_search_term(raw_token: &str, defaults: &QueryDefaults) -> SearchTer
     }
     if defaults.is_regex && !stated.regex {
         term.is_regex = true;
+    }
+    if defaults.pinyin && !stated.pinyin {
+        term.pinyin = true;
+    }
+    if defaults.ignore_punctuation && !stated.ignore_punctuation {
+        term.ignore_punctuation = true;
+    }
+    if defaults.ignore_whitespace && !stated.ignore_whitespace {
+        term.ignore_whitespace = true;
+    }
+    if defaults.ignore_diacritics && !stated.ignore_diacritics {
+        term.ignore_diacritics = true;
     }
     if defaults.content && !term.text.is_empty() {
         let text = std::mem::take(&mut term.text);
@@ -1013,6 +1250,29 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(parse_query_with("a b", &content).content_term_count(), 2);
+    }
+
+    /// The child filter cap bounds distinct patterns because a repeated pattern answers the same
+    /// child lookup; eight distinct patterns pass and a ninth is what the pipe boundary refuses.
+    #[test]
+    fn child_filter_count_counts_distinct_patterns() {
+        assert_eq!(
+            parse_query("child:a child:a child:b").child_filter_count(),
+            2
+        );
+        let distinct = |n: usize| {
+            (0..n)
+                .map(|i| format!("child:t{i}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        assert_eq!(parse_query(&distinct(8)).child_filter_count(), 8);
+        assert_eq!(parse_query(&distinct(9)).child_filter_count(), 9);
+        assert_eq!(
+            parse_query("child:a childcount:>1 empty:").child_filter_count(),
+            1
+        );
+        assert_eq!(parse_query("ext:md report").child_filter_count(), 0);
     }
 
     /// A disjunction of positive content-only terms answers to one merged search, so the shape
@@ -1437,7 +1697,7 @@ mod tests {
         // Off by default: an unchanged query keeps its old width, and a plain term is not
         // itself an attribute constraint.
         assert!(!parse_query("报告").is_empty());
-        assert!(QueryExpr::Term(SearchTerm::default()).is_empty());
+        assert!(QueryExpr::term(SearchTerm::default()).is_empty());
 
         // A textless query with the filter on is no longer "every record".
         let expr = parse_query_with("", &hidden);

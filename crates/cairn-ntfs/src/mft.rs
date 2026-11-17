@@ -37,13 +37,12 @@ pub fn parse_mft_record(
     sector_size: usize,
     default_record_num: u64,
 ) -> Result<Vec<ExtractedItem>, MftError> {
-    // 1. Apply USA fixup
     apply_fixup(record_buf, sector_size)?;
 
     let flags = u16::from_le_bytes([record_buf[0x16], record_buf[0x17]]);
     let in_use = (flags & RECORD_FLAG_IN_USE) != 0;
     if !in_use {
-        return Ok(Vec::new()); // Skip unallocated records
+        return Ok(Vec::new());
     }
 
     let is_dir = (flags & RECORD_FLAG_IS_DIR) != 0;
@@ -80,7 +79,8 @@ pub fn parse_mft_record(
     let mut items = Vec::with_capacity(attrs.file_names.len());
 
     for fn_attr in attrs.file_names {
-        let mut core_flags = 0u16;
+        let win32_attrs = attrs.dos_flags.unwrap_or(fn_attr.flags);
+        let mut core_flags = cairn_core::flags_from_win32_attributes(win32_attrs);
         if is_dir {
             core_flags |= cairn_core::FLAG_DIRECTORY;
         }

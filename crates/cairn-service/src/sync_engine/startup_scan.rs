@@ -99,11 +99,20 @@ impl MultiVolumeEngine {
             match cairn_ntfs::scan_live_volume_mft(drive, 4096) {
                 Ok(items) if !items.is_empty() => {
                     let count = items.len();
+                    let live_identity = cairn_ntfs::volume_identity::enumerate_volumes()
+                        .into_iter()
+                        .find(|id| {
+                            id.drive_letter
+                                .is_some_and(|ch| ch.eq_ignore_ascii_case(&drive))
+                        });
                     let mut lock = self.volumes.write().unwrap();
                     let vol = match lock.get_mut(&drive) {
                         Some(vol) => vol,
                         None => return Err(format!("volume {drive}: is not indexed")),
                     };
+                    if let Some(identity) = live_identity {
+                        vol.set_identity(identity);
+                    }
                     vol.ingest_items(items);
                     finalize_scanned_volume(&mut *vol, &self.index_dir, scan_start)?;
                     tracing::info!(
@@ -145,7 +154,7 @@ impl MultiVolumeEngine {
     /// Adds or replaces a volume in the multi-volume engine. A replacement starts one generation
     /// past the table it hides, so a query session created against the old table cannot page into
     /// records that now belong to the new one.
-    pub fn add_volume(&self, vol: VolumeIndex) {
+    pub fn add_volume(&self, mut vol: VolumeIndex) {
         let cfg = self.config.read().unwrap();
         if cfg
             .excluded_drives
@@ -154,21 +163,18 @@ impl MultiVolumeEngine {
         {
             return;
         }
+        let full_path_rules =
+            crate::exclusion::ExclusionRules::parse(&cfg.excluded_paths).uses_full_path_rules();
         drop(cfg);
+        vol.set_full_path_exclusion_rules(full_path_rules);
         let mut lock = self.volumes.write().unwrap();
         let generation = lock
             .get(&vol.drive_letter)
             .map(|previous| previous.generation().wrapping_add(1));
-        match generation {
-            Some(generation) => {
-                let mut vol = vol;
-                vol.set_generation(generation);
-                lock.insert(vol.drive_letter, vol);
-            }
-            None => {
-                lock.insert(vol.drive_letter, vol);
-            }
+        if let Some(generation) = generation {
+            vol.set_generation(generation);
         }
+        lock.insert(vol.drive_letter, vol);
     }
 
     /// Atomically saves all non-empty volume indexes to disk.
@@ -321,7 +327,12 @@ impl MultiVolumeEngine {
                             vol.journal_id = active_jid;
                             vol.last_usn = next_usn;
                             if !changes.is_empty() {
-                                vol.apply_usn_changes(changes);
+                                let mut journal = self.index_journal.lock().unwrap();
+                                vol.apply_usn_changes_with_journal(
+                                    changes,
+                                    Some(&mut *journal),
+                                    super::unix_now_secs(),
+                                );
                                 vol.clear_path_cache();
                             }
                             if is_live_poll_trackable(vol.status.state()) {

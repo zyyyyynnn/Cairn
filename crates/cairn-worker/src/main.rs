@@ -12,7 +12,8 @@
 
 use cairn_content::extractor::CompositeExtractor;
 use cairn_content::indexer::ContentWriter;
-use cairn_protocol::ContentIndexTask;
+use cairn_protocol::{ContentIndexTask, PropertyExtractResult, PropertyExtractTask};
+use cairn_worker::property_extract::extract_file_properties;
 use clap::Parser;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
@@ -24,10 +25,18 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 #[command(name = "CairnWorker", about = "Cairn Service Worker")]
 struct WorkerCli {
     /// Directory where Tantivy content index is stored
-    #[arg(short, long)]
-    index_dir: PathBuf,
+    #[arg(short, long, required_unless_present = "extract_properties")]
+    index_dir: Option<PathBuf>,
 
-    /// JSON Lines batch produced by the service: one ContentIndexTask per line
+    /// Extract extended file properties instead of writing the content index
+    #[arg(long)]
+    extract_properties: bool,
+
+    /// JSON Lines output path for property extraction mode
+    #[arg(long)]
+    out: Option<PathBuf>,
+
+    /// JSON Lines batch produced by the service
     #[arg(short, long)]
     batch: Option<PathBuf>,
 
@@ -36,7 +45,7 @@ struct WorkerCli {
     delete_batch: Option<PathBuf>,
 
     /// Maximum document bytes to extract per file
-    #[arg(long)]
+    #[arg(long, default_value_t = 2 * 1024 * 1024)]
     max_bytes: usize,
 
     /// Remove every document before applying this batch
@@ -211,8 +220,62 @@ fn run_worker<RB: BufRead, RD: BufRead, W: Write>(
     Ok(())
 }
 
+fn run_property_worker<RB: BufRead, W: Write>(
+    batch: Option<RB>,
+    out: &mut W,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(reader) = batch {
+        let mut malformed = 0u64;
+        for_each_non_empty_line(reader, |line| {
+            let task: PropertyExtractTask = match serde_json::from_str(line) {
+                Ok(task) => task,
+                Err(err) => {
+                    malformed += 1;
+                    error!("Malformed property task: {err}");
+                    return;
+                }
+            };
+            let properties = extract_file_properties(Path::new(&task.path));
+            let result = PropertyExtractResult {
+                source_id: task.source_id,
+                record_key: task.record_key,
+                modified_ts: task.modified_ts,
+                properties,
+            };
+            if let Ok(encoded) = serde_json::to_string(&result) {
+                let _ = writeln!(out, "{encoded}");
+            }
+        })?;
+        if malformed > 0 {
+            return Err(format!("{malformed} malformed property task(s)").into());
+        }
+        out.flush()?;
+    }
+    Ok(())
+}
+
 fn run(args: WorkerCli) -> Result<(), Box<dyn std::error::Error>> {
     let batch = args.batch.as_deref().map(open_buf_reader).transpose()?;
+    if args.extract_properties {
+        if let Some(out_path) = &args.out {
+            let mut file = File::create(out_path)?;
+            run_property_worker(batch, &mut file)?;
+            let stdout = std::io::stdout();
+            let mut lock = stdout.lock();
+            writeln!(lock, "{{}}")?;
+            lock.flush()?;
+        } else {
+            let stdout = std::io::stdout();
+            let mut lock = stdout.lock();
+            run_property_worker(batch, &mut lock)?;
+        }
+        return Ok(());
+    }
+
+    let index_dir = args
+        .index_dir
+        .as_deref()
+        .ok_or("--index-dir is required unless --extract-properties is set")?;
     let delete_batch = args
         .delete_batch
         .as_deref()
@@ -221,7 +284,7 @@ fn run(args: WorkerCli) -> Result<(), Box<dyn std::error::Error>> {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     run_worker(
-        &args.index_dir,
+        index_dir,
         batch,
         delete_batch,
         args.clear,
@@ -250,11 +313,20 @@ mod tests {
         ])
         .expect("parse custom");
 
-        assert_eq!(args.index_dir, PathBuf::from(r"C:\test\idx"));
+        assert_eq!(args.index_dir, Some(PathBuf::from(r"C:\test\idx")));
         assert_eq!(args.batch, Some(PathBuf::from(r"C:\test\batch.jsonl")));
         assert_eq!(args.delete_batch, Some(PathBuf::from(r"C:\test\del.jsonl")));
         assert_eq!(args.max_bytes, 4096);
         assert!(args.clear);
+    }
+
+    #[test]
+    fn malformed_property_task_fails_the_worker() {
+        use std::io::Cursor;
+
+        let mut out = Vec::new();
+        assert!(run_property_worker(Some(Cursor::new(b"not json\n")), &mut out).is_err());
+        assert!(out.is_empty());
     }
 
     #[test]
@@ -266,7 +338,6 @@ mod tests {
         let writer = ContentWriter::open_or_create(&idx_dir).expect("create writer");
         let extractor = CompositeExtractor::new();
 
-        // 1. Empty runs
         let (processed, failed) = apply_batches(
             &extractor,
             &writer,
@@ -279,7 +350,6 @@ mod tests {
         assert_eq!(processed, 0);
         assert_eq!(failed, 0);
 
-        // 2. Malformed deletions and tasks
         let del_file = temp.path().join("dels.jsonl");
         std::fs::write(&del_file, "not a json\n[1, 2]\n").expect("write dels");
 

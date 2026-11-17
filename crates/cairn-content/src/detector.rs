@@ -12,34 +12,32 @@ pub fn decode_bytes_to_string(bytes: &[u8]) -> String {
         return String::new();
     }
 
-    // 1. Check for BOM
     if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
-        // UTF-8 BOM
         return String::from_utf8_lossy(&bytes[3..]).to_string();
     }
     if bytes.starts_with(&[0xFF, 0xFE]) {
-        // UTF-16LE BOM
         let u16s: Vec<u16> = bytes[2..]
-            .chunks_exact(2)
-            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&pair| u16::from_le_bytes(pair))
             .collect();
         return String::from_utf16_lossy(&u16s);
     }
     if bytes.starts_with(&[0xFE, 0xFF]) {
-        // UTF-16BE BOM
         let u16s: Vec<u16> = bytes[2..]
-            .chunks_exact(2)
-            .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&pair| u16::from_be_bytes(pair))
             .collect();
         return String::from_utf16_lossy(&u16s);
     }
 
-    // 2. Fast path: check valid UTF-8
     if let Ok(s) = std::str::from_utf8(bytes) {
         return s.to_string();
     }
 
-    // 3. Fallback: chardetng detector + encoding_rs
     let mut detector = EncodingDetector::new(chardetng::Iso2022JpDetection::Allow);
     detector.feed(bytes, true);
     let encoding = detector.guess(None, chardetng::Utf8Detection::Allow);

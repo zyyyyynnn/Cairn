@@ -45,6 +45,7 @@ use crate::win32::{win32_code_from_hresult, WIN32_ERROR_USER_CANCELLED};
 pub fn active_window_handle() -> isize {
     #[cfg(windows)]
     {
+        // SAFETY: `GetForegroundWindow` reads the current desktop foreground HWND (or null if none).
         unsafe { GetForegroundWindow().0 as isize }
     }
     #[cfg(not(windows))]
@@ -87,6 +88,14 @@ pub fn open_file(path: &str) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     Ok(())
+}
+
+/// Opens an HTTP or HTTPS URL in the user's default browser via the Windows shell.
+pub fn open_url(url: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if !url.starts_with("https://") && !url.starts_with("http://") {
+        return Err("refusing to open non-HTTP URL".into());
+    }
+    open_file(url)
 }
 
 /// Opens the parent directory in Windows Explorer and selects (highlights) the item.
@@ -377,9 +386,9 @@ struct ComApartment {
 #[cfg(windows)]
 impl ComApartment {
     fn enter() -> Self {
-        Self {
-            initialized: unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok(),
-        }
+        // SAFETY: initializes COM on the calling thread; `ComApartment::drop` pairs cleanup on `Ok`.
+        let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
+        Self { initialized }
     }
 }
 
@@ -432,6 +441,7 @@ fn enumerate_recycle_bin() -> Result<Vec<BinEntry>, String> {
             return Err(format!("SHCreateItemFromIDList: {err}"));
         }
     };
+    // SAFETY: `bin_item` already copied the identity it needs; free the PIDL allocation here.
     unsafe { CoTaskMemFree(Some(bin_pidl.cast())) };
 
     // SAFETY: the bin item owns its identity; the enum handler enumerates
@@ -466,6 +476,7 @@ fn enumerate_recycle_bin() -> Result<Vec<BinEntry>, String> {
                     continue;
                 }
             };
+            // SAFETY: `normal_pwstr` is a CoTaskMem-allocated shell string returned by `GetDisplayName`.
             let normal_display = unsafe { shell_string(normal_pwstr) };
             // The Recycle Bin's normal display is the full original path, not the
             // name Explorer shows in its Name column. The file name of that path is
@@ -476,6 +487,7 @@ fn enumerate_recycle_bin() -> Result<Vec<BinEntry>, String> {
                 .map(str::to_string)
                 .filter(|name| !name.is_empty())
                 .unwrap_or(normal_display);
+            // SAFETY: `shell_item` is a live shell item from `IEnumShellItems::Next`.
             let is_dir = unsafe { shell_item.GetAttributes(SFGAO_FOLDER) }
                 .map(|flags: SFGAO_FLAGS| flags.contains(SFGAO_FOLDER))
                 .unwrap_or(false);
@@ -492,10 +504,13 @@ fn enumerate_recycle_bin() -> Result<Vec<BinEntry>, String> {
                     continue;
                 }
             };
+            // SAFETY: `shell_item` is a live shell item; `SIGDN_FILESYSPATH` returns a CoTaskMem string freed via `shell_string`.
             let fs_path = unsafe { shell_item.GetDisplayName(SIGDN_FILESYSPATH) }.ok();
+            // SAFETY: `item2` and `deleted_from_key` are valid; `shell_string` frees the returned CoTaskMem `PWSTR`.
             let original_dir = unsafe { item2.GetString(&deleted_from_key) }
                 .map(|pwstr| unsafe { shell_string(pwstr) })
                 .unwrap_or_default();
+            // SAFETY: `item2` and `deleted_date_key` are valid property-store arguments.
             let deleted_ts = unsafe { item2.GetFileTime(&deleted_date_key) }
                 .map(|filetime: FILETIME| {
                     let ticks =
@@ -503,7 +518,9 @@ fn enumerate_recycle_bin() -> Result<Vec<BinEntry>, String> {
                     cairn_core::time::filetime_ticks_to_unix_seconds(ticks)
                 })
                 .unwrap_or(0);
+            // SAFETY: `item2` and `size_key` are valid property-store arguments.
             let size = unsafe { item2.GetUInt64(&size_key) }.unwrap_or(0);
+            // SAFETY: `pwstr` came from `GetDisplayName(SIGDN_FILESYSPATH)` above and is consumed once here.
             let fs_path = fs_path
                 .map(|pwstr| unsafe { shell_string(pwstr) })
                 .unwrap_or_default();
@@ -1069,7 +1086,7 @@ pub fn rename_path(path: &std::path::Path, new_name: &str) -> Result<(), RenameE
             },
         )?;
 
-        let wide_name = to_wide_shell_path(new_name);
+        let wide_name = crate::win32::to_wide_literal(new_name);
         // SAFETY: both the source item and the null-terminated target name outlive the call; the
         // rename is queued on this handler.
         unsafe { operation.RenameItem(&item, PCWSTR(wide_name.as_ptr()), None) }.map_err(
@@ -1229,20 +1246,12 @@ fn same_file(first: &std::path::Path, second: &std::path::Path) -> bool {
     }
 }
 
-/// Null-terminated UTF-16 for the shell's display-name parser. The parser
-/// rejects the `\\?\` prefix (`E_INVALIDARG`), so callers hand it the plain
-/// form; the shell's own long-path support then decides.
-#[cfg(windows)]
-fn to_wide_shell_path(path: &str) -> Vec<u16> {
-    path.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
 /// Builds a shell item through the display-name parser and its PIDL, the form
 /// that handles long and CJK paths; destination parsing stays independent of
 /// the recycle-bin namespace item.
 #[cfg(windows)]
 fn shell_item_from_path(path: &str) -> Result<IShellItem, String> {
-    let wide = to_wide_shell_path(path);
+    let wide = crate::win32::to_wide_literal(path);
     let mut pidl: *mut windows::Win32::UI::Shell::Common::ITEMIDLIST = std::ptr::null_mut();
     let mut attributes = 0u32;
     // SAFETY: the wide name is null-terminated for the call; the shell owns
@@ -1420,7 +1429,7 @@ mod tests {
     #[test]
     fn the_shell_parser_never_receives_a_verbatim_path_prefix() {
         let long = format!(r"C:\{}", "a".repeat(300));
-        let wide = to_wide_shell_path(&long);
+        let wide = crate::win32::to_wide_literal(&long);
         let text = String::from_utf16(&wide[..wide.len() - 1]).expect("valid UTF-16");
         assert_eq!(text, long);
         assert!(!text.starts_with(r"\\?\"));
@@ -1521,5 +1530,18 @@ mod tests {
             vec!["CAFÉ.txt".to_string()],
             "the disk keeps the requested casing"
         );
+    }
+
+    #[test]
+    fn open_url_rejects_non_http_schemes() {
+        for rejected in [
+            "",
+            "C:\\Windows\\System32\\cmd.exe",
+            "file:///C:/Windows",
+            "javascript:alert(1)",
+            "ftp://example.com",
+        ] {
+            assert!(open_url(rejected).is_err(), "must reject {rejected:?}");
+        }
     }
 }

@@ -4,6 +4,7 @@
 
 //! `CairnSetup.exe`: the visible installer and the silent entry point.
 
+#![forbid(unsafe_code)]
 #![windows_subsystem = "windows"]
 
 fn main() {

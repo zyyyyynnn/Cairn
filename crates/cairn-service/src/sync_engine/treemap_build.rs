@@ -90,57 +90,104 @@ impl MultiVolumeEngine {
         path: &str,
         max_depth: usize,
     ) -> Result<Vec<TreeEntryData>, TreeUnavailable> {
-        let drive = path
-            .chars()
-            .next()
-            .map(|letter| letter.to_ascii_uppercase())
-            .ok_or(TreeUnavailable::NotIndexed)?;
-        let volumes = self.volumes.read().unwrap();
-        let volume = volumes.get(&drive).ok_or(TreeUnavailable::NotIndexed)?;
-        let dir_index = DirectorySizeIndex::build(volume.records(), volume.arena());
-
-        let is_root = path
-            .trim_end_matches('\\')
-            .eq_ignore_ascii_case(&format!("{drive}:"));
-        let (dir_idx, root_name) = if is_root {
-            (None, format!("{drive}:\\"))
-        } else {
-            let idx = dir_index
-                .resolve_path_to_idx(volume.records(), volume.arena(), path)
-                .flatten()
-                .ok_or(TreeUnavailable::NotIndexed)?;
-            let record = &volume.records()[idx as usize];
-            if !record.is_dir() {
-                return Err(TreeUnavailable::NotDirectory);
+        let trimmed = path.trim_end_matches('\\');
+        if let Some(drive) = cairn_core::path_cache::drive_letter_prefix(trimmed) {
+            let volumes = self.volumes.read().unwrap();
+            if let Some(volume) = volumes.get(&drive) {
+                let is_root = trimmed.eq_ignore_ascii_case(&format!("{drive}:"));
+                let root_prefix = format!("{drive}:\\");
+                let rel_or_abs = if is_root { "" } else { path };
+                return build_treemap_entries_for_slice(
+                    volume.records(),
+                    volume.arena(),
+                    is_root,
+                    &root_prefix,
+                    rel_or_abs,
+                    max_depth,
+                );
             }
-            (Some(idx), volume.record_name(record).to_string())
-        };
+        }
 
-        // The budget picks the depth, not the caller. A depth-capped subtree that
-        // cannot fit one response is still served one level shallower: every node
-        // carries its exact descendant total, so the Treemap renders the children
-        // it gets and its own aggregate blocks absorb the rest. Only a directory
-        // whose immediate children overflow the budget has no answer to give.
-        let (depth, entry_count) = budgeted_tree_depth(
-            |depth| dir_index.subtree_entry_count(dir_idx, depth),
+        let norm_req = cairn_core::path_cache::normalize_root(&path.replace('/', "\\"));
+        let folders = self.folder_sources.read().unwrap();
+        let folder = folders
+            .values()
+            .filter(|src| {
+                norm_req
+                    .to_ascii_lowercase()
+                    .starts_with(&src.root_prefix.to_ascii_lowercase())
+            })
+            .max_by_key(|src| src.root_prefix.len())
+            .ok_or(TreeUnavailable::NotIndexed)?;
+        let relative = norm_req[folder.root_prefix.len()..].trim_matches('\\');
+        let is_root = relative.is_empty();
+        build_treemap_entries_for_slice(
+            folder.records(),
+            folder.arena(),
+            is_root,
+            folder.display_root(),
+            relative,
             max_depth,
-            Self::MAX_TREE_ENTRIES,
         )
-        .ok_or(TreeUnavailable::TooLarge)?;
-        let tree =
-            dir_index.build_tree_node(volume.records(), volume.arena(), dir_idx, &root_name, depth);
-        let mut entries = Vec::with_capacity(entry_count);
-        flatten_tree(&tree, 0, &mut entries);
-        // A path above either budget cannot be answered in one response.
-        if entries.len() > Self::MAX_TREE_ENTRIES {
-            return Err(TreeUnavailable::TooLarge);
-        }
-        let estimated_bytes = entries.iter().fold(0usize, |total, entry| {
-            total.saturating_add(entry.name.len().saturating_add(Self::TREE_ENTRY_OVERHEAD))
-        });
-        if estimated_bytes > Self::MAX_TREE_PAYLOAD_BYTES {
-            return Err(TreeUnavailable::TooLarge);
-        }
-        Ok(entries)
     }
+}
+
+fn build_treemap_entries_for_slice(
+    records: &[cairn_core::FileRecord],
+    arena: &cairn_core::arena::NamePool,
+    is_root: bool,
+    root_name_for_root: &str,
+    subpath: &str,
+    max_depth: usize,
+) -> Result<Vec<TreeEntryData>, TreeUnavailable> {
+    let dir_index = DirectorySizeIndex::build(records, arena);
+    let (dir_idx, root_name) = if is_root {
+        (None, root_name_for_root.to_string())
+    } else {
+        let idx = dir_index
+            .resolve_path_to_idx(records, arena, subpath)
+            .flatten()
+            .ok_or(TreeUnavailable::NotIndexed)?;
+        let record = &records[idx as usize];
+        if !record.is_dir() {
+            return Err(TreeUnavailable::NotDirectory);
+        }
+        (
+            Some(idx),
+            arena
+                .get_name(record.name_offset, record.name_len)
+                .to_string(),
+        )
+    };
+
+    // The budget picks the depth, not the caller. A depth-capped subtree that
+    // cannot fit one response is still served one level shallower: every node
+    // carries its exact descendant total, so the Treemap renders the children
+    // it gets and its own aggregate blocks absorb the rest. Only a directory
+    // whose immediate children overflow the budget has no answer to give.
+    let (depth, entry_count) = budgeted_tree_depth(
+        |depth| dir_index.subtree_entry_count(dir_idx, depth),
+        max_depth,
+        MultiVolumeEngine::MAX_TREE_ENTRIES,
+    )
+    .ok_or(TreeUnavailable::TooLarge)?;
+    let tree = dir_index.build_tree_node(records, arena, dir_idx, &root_name, depth);
+    let mut entries = Vec::with_capacity(entry_count);
+    flatten_tree(&tree, 0, &mut entries);
+    // A path above either budget cannot be answered in one response.
+    if entries.len() > MultiVolumeEngine::MAX_TREE_ENTRIES {
+        return Err(TreeUnavailable::TooLarge);
+    }
+    let estimated_bytes = entries.iter().fold(0usize, |total, entry| {
+        total.saturating_add(
+            entry
+                .name
+                .len()
+                .saturating_add(MultiVolumeEngine::TREE_ENTRY_OVERHEAD),
+        )
+    });
+    if estimated_bytes > MultiVolumeEngine::MAX_TREE_PAYLOAD_BYTES {
+        return Err(TreeUnavailable::TooLarge);
+    }
+    Ok(entries)
 }

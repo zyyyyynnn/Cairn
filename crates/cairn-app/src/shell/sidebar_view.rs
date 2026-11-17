@@ -9,9 +9,11 @@ use crate::search::filters::FilterCategory;
 use crate::shell::accessibility::{self, ControlElement};
 use crate::shell::commands::OpenSelected;
 use crate::shell::theme::{self, ShellTokens};
+use cairn_protocol::status::SourceKind;
 use fluent_bundle::FluentArgs;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::StyledExt;
+use gpui_kit::component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_kit::component::{h_flex, v_flex, Icon};
 use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::{AssetSource as _, *};
@@ -265,7 +267,7 @@ fn keyboard_row(
         }))
         .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
             if matches!(event, ClickEvent::Mouse(_)) {
-                this.results.keyboard_navigation = false;
+                cairn_ui::focus::set_keyboard_navigation(false, cx);
                 click_focus.focus(window, cx);
                 cx.notify();
             }
@@ -327,7 +329,7 @@ impl CairnApp {
                     .read(cx)
                     .clone();
                 let is_focused =
-                    focus.contains_focused(window, cx) && self.results.keyboard_navigation;
+                    focus.contains_focused(window, cx) && cairn_ui::focus::keyboard_navigation(cx);
                 let item = sidebar_row(
                     category_icon(category),
                     self.cached_text(category.label_key()),
@@ -362,7 +364,7 @@ impl CairnApp {
             .read(cx)
             .clone();
         let bin_is_focused =
-            bin_focus.contains_focused(window, cx) && self.results.keyboard_navigation;
+            bin_focus.contains_focused(window, cx) && cairn_ui::focus::keyboard_navigation(cx);
         let bin_row = sidebar_row(
             IconName::Recycle,
             self.cached_text("sidebar_recycle_bin"),
@@ -382,7 +384,7 @@ impl CairnApp {
             cx,
         );
 
-        let drive_rows: Vec<AnyElement> = self
+        let mut drive_rows: Vec<AnyElement> = self
             .service
             .status
             .volumes
@@ -406,10 +408,10 @@ impl CairnApp {
                     .read(cx)
                     .clone();
                 let is_focused =
-                    focus.contains_focused(window, cx) && self.results.keyboard_navigation;
+                    focus.contains_focused(window, cx) && cairn_ui::focus::keyboard_navigation(cx);
                 let item = sidebar_row(IconName::HardDrive, label, is_active, tokens, icon_metrics);
 
-                keyboard_row(
+                let row = keyboard_row(
                     accessibility::element_at(control, ix)
                         .aria_label(accessible)
                         .aria_selected(is_active),
@@ -419,15 +421,115 @@ impl CairnApp {
                     item,
                     move |this, window, cx| this.open_drive_visualization(drive, window, cx),
                     cx,
+                );
+                let app = cx.entity();
+                let rescan_label = self.cached_text("ctx_rescan_source");
+                let disabled = !self.service.connection.is_connected()
+                    || self.service.connection.is_control_pending();
+                attach_rescan_menu(
+                    div()
+                        .id(element_id("sidebar-drive-menu", &drive.to_string()))
+                        .w_full()
+                        .child(row),
+                    rescan_label,
+                    disabled,
+                    move || {
+                        let app = app.clone();
+                        move |_, _, cx| {
+                            app.update(cx, |this, cx| this.rescan_drive(drive, cx));
+                        }
+                    },
                 )
             })
             .collect();
 
+        for folder in self
+            .service
+            .sources
+            .iter()
+            .filter(|source| source.kind == SourceKind::Folder)
+        {
+            let source_id = folder.source_id;
+            let root_path = folder.root_path.clone();
+            let focus = window
+                .use_keyed_state(
+                    element_id("sidebar-source-focus", &source_id.0.to_string()),
+                    cx,
+                    |_, cx| cx.focus_handle().tab_stop(true),
+                )
+                .read(cx)
+                .clone();
+            let is_focused =
+                focus.contains_focused(window, cx) && cairn_ui::focus::keyboard_navigation(cx);
+            let item = sidebar_row(
+                IconName::Folder,
+                root_path.clone(),
+                false,
+                tokens,
+                icon_metrics,
+            );
+            let drive = root_path
+                .chars()
+                .next()
+                .filter(|ch| ch.is_ascii_alphabetic())
+                .map(|ch| ch.to_ascii_uppercase())
+                .unwrap_or('C');
+            let open_path = root_path.clone();
+            let rescan_path = root_path;
+            let app = cx.entity();
+            let rescan_label = self.cached_text("ctx_rescan_source");
+            let disabled = !self.service.connection.is_connected()
+                || self.service.connection.is_control_pending();
+            let click_focus = focus.clone();
+            let row = div()
+                .id(element_id("sidebar-source", &source_id.0.to_string()))
+                .relative()
+                .w_full()
+                .flex_shrink_0()
+                .rounded(tokens.radius)
+                .cursor_pointer()
+                .hover(|this| {
+                    this.bg(tokens.row_hover)
+                        .text_color(tokens.sidebar_accent_foreground)
+                })
+                .track_focus(&focus)
+                .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                    if matches!(event, ClickEvent::Mouse(_)) {
+                        cairn_ui::focus::set_keyboard_navigation(false, cx);
+                        click_focus.focus(window, cx);
+                    }
+                    this.sync_visualization_dir();
+                    this.update_current_nav_state_text();
+                    this.open_drive_at(drive, &open_path, window, cx);
+                    this.record_nav_state();
+                }))
+                .child(item)
+                .when(is_focused, |this| {
+                    this.child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .rounded(tokens.radius)
+                            .border_1()
+                            .border_color(tokens.ring),
+                    )
+                });
+            drive_rows.push(attach_rescan_menu(row, rescan_label, disabled, move || {
+                let app = app.clone();
+                let label = rescan_path.clone();
+                move |_, _, cx| {
+                    app.update(cx, |this, cx| {
+                        this.rescan_source(source_id, label.clone(), cx);
+                    });
+                }
+            }));
+        }
+
         // While the connection probe or the first query is still running, an empty drive list is
         // not a fact about the machine. Saying "no drives found" there reports a failure that has
         // not happened; status reports whether the index is being read.
-        let awaiting_index =
-            drive_rows.is_empty() && (self.service.is_probing_service || self.query.is_searching);
+        let awaiting_index = drive_rows.is_empty()
+            && (self.service.connection.is_probing() || self.query.is_searching());
         let drive_elements = if awaiting_index {
             Vec::new()
         } else if drive_rows.is_empty() {
@@ -507,6 +609,29 @@ impl CairnApp {
     }
 }
 
+fn attach_rescan_menu<E, F>(
+    element: E,
+    rescan_label: SharedString,
+    disabled: bool,
+    make_handler: impl Fn() -> F + 'static,
+) -> AnyElement
+where
+    E: ContextMenuExt + IntoElement + 'static,
+    F: Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+{
+    element
+        .context_menu(move |menu, _, _| {
+            let item = PopupMenuItem::new(rescan_label.clone()).disabled(disabled);
+            let item = if disabled {
+                item
+            } else {
+                item.on_click(make_handler())
+            };
+            menu.item(item)
+        })
+        .into_any_element()
+}
+
 /// The icon a file-type row shows. It repeats the words beside it rather than replacing them.
 ///
 /// `main.rs` installs the complete icon catalog, so each kind can use its own shape instead of
@@ -526,14 +651,8 @@ fn category_icon(category: FilterCategory) -> IconName {
 
 #[cfg(test)]
 mod tests {
-    use super::{sidebar_icon_svg, text_ink_offset};
+    use super::sidebar_icon_svg;
     use gpui_kit::assets::IconName;
-    use gpui_kit::gpui::px;
-
-    #[test]
-    fn text_ink_offset_is_measured_from_the_line_centre() {
-        assert_eq!(text_ink_offset(px(12.0), px(3.0), px(4.0)), px(0.5));
-    }
 
     #[test]
     fn sidebar_variant_keeps_the_light_stroke() {

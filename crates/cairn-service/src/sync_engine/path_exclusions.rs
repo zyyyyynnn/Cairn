@@ -4,6 +4,7 @@
 
 //! One exclusion view for a query or a content batch.
 
+use super::folder_source::FolderSource;
 use super::volume_index::SUBTREE_EXCLUDED;
 use super::VolumeIndex;
 use crate::exclusion::{ExclusionPath, ExclusionRules};
@@ -33,10 +34,6 @@ impl PathExclusions {
                     .collect()
             })
         };
-        let full_path_rules = !rules.is_empty() && states.is_none();
-        for volume in volumes.values() {
-            volume.set_full_path_exclusion_rules(full_path_rules);
-        }
         Self { states, rules }
     }
 
@@ -65,6 +62,20 @@ impl PathExclusions {
             volume.records(),
             volume.arena(),
             volume.drive_letter,
+            index,
+        );
+        self.rules.excludes(&ExclusionPath::new(&path))
+    }
+
+    /// Whether one record of `folder` falls under the configured path exclusion rules.
+    pub(crate) fn excludes_folder(&self, folder: &FolderSource, index: u32) -> bool {
+        if self.rules.is_empty() {
+            return false;
+        }
+        let path = folder.path_cache().get_full_path_for_root(
+            folder.records(),
+            folder.arena(),
+            &folder.root_prefix,
             index,
         );
         self.rules.excludes(&ExclusionPath::new(&path))

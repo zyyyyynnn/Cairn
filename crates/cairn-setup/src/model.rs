@@ -178,6 +178,7 @@ pub fn program_files_root() -> PathBuf {
         use windows::Win32::UI::Shell::{SHGetFolderPathW, CSIDL_PROGRAM_FILES};
 
         let mut buffer = [0u16; 260];
+        // SAFETY: `buffer` is a writable stack buffer of MAX_PATH (260) UTF-16 code units as required by SHGetFolderPathW.
         if unsafe { SHGetFolderPathW(None, CSIDL_PROGRAM_FILES as i32, None, 0, &mut buffer) }
             .is_ok()
         {

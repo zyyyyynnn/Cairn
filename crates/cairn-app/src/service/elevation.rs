@@ -94,9 +94,9 @@ pub fn run_elevated_self(parameters: &str) -> Result<u32, ElevationError> {
     // exit-code read below.
     let wait = unsafe { WaitForSingleObject(process, INFINITE) };
     if wait != WAIT_OBJECT_0 {
-        // SAFETY: GetLastError reads the calling thread's last error set by the wait, and the
-        // process handle is paired with the successful ShellExecuteExW above.
+        // SAFETY: `GetLastError` reads the calling thread's error from the failed wait.
         let last_error = unsafe { GetLastError().0 };
+        // SAFETY: `process` is the handle returned by `ShellExecuteExW` above and is closed once here.
         unsafe {
             let _ = CloseHandle(process);
         }

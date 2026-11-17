@@ -21,3 +21,9 @@ features = [
     "Win32_System_IO",
     "Win32_Security",
 ]
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

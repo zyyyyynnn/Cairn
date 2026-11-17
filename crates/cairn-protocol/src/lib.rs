@@ -17,11 +17,14 @@ pub use codec::{
     FrameHeader, HEADER_SIZE, MAX_FRAME_PAYLOAD,
 };
 pub use message::{
-    ClientRequest, Envelope, FileRowData, QueryDefaults, ResponsePayload,
-    ERROR_CODE_ADMIN_ONLY_QUERY, ERROR_CODE_HANDSHAKE_REQUIRED,
+    ClientRequest, Envelope, FileRowData, PropertyKind, QueryDefaults, QueryDegradedReason,
+    RecordPropertyData, ResponsePayload, SortColumn, SortDirection, SortKey, SortSpec, SourceId,
+    ERROR_CODE_ADMIN_ONLY_QUERY, ERROR_CODE_HANDSHAKE_REQUIRED, ERROR_CODE_INVALID_REQUEST,
     ERROR_CODE_PROTOCOL_VERSION_MISMATCH, ERROR_CODE_SESSION_EXPIRED, ERROR_CODE_UNAUTHORIZED,
     MAX_TREE_DEPTH, PIPE_NAME, PRODUCT_VERSION, WIRE_GUARD,
 };
 pub use status::{
-    ContentIndexState, ContentIndexStatus, ContentIndexTask, VolumeState, VolumeStatusSummary,
+    ContentIndexState, ContentIndexStatus, ContentIndexTask, IndexJournalEntry, IndexJournalStatus,
+    JournalChangeKind, PropertyExtractResult, PropertyExtractTask, PropertyIndexStatus, SourceKind,
+    SourceStatusSummary, VolumeState, VolumeStatusSummary,
 };

@@ -4,8 +4,10 @@
 
 //! Volume access, sector reading, and MFT stream parsing.
 
-use crate::mft::{parse_mft_record, ExtractedItem};
-use rayon::prelude::*;
+use crate::mft::ExtractedItem;
+use crate::mft_reader::{
+    locate_mft_clusters_from_reader, scan_mft_from_reader, BlockReader, MftScanOptions,
+};
 use thiserror::Error;
 
 #[cfg(windows)]
@@ -37,55 +39,12 @@ pub enum VolumeError {
     Attribute(#[from] crate::attribute::AttributeParseError),
 }
 
-/// Enumerates all local fixed drive letters (e.g. ['C', 'D']).
+/// Enumerates all local fixed NTFS drive letters (e.g. ['C', 'D']).
 pub fn enumerate_fixed_drives() -> Vec<char> {
-    #[cfg(windows)]
-    {
-        use windows::Win32::Storage::FileSystem::{
-            GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW,
-        };
-        let mut drives = Vec::new();
-        // SAFETY: GetLogicalDrives has no parameters and simply returns a 32-bit drive bitmask.
-        let mask = unsafe { GetLogicalDrives() };
-        for i in 0..26 {
-            if (mask & (1 << i)) != 0 {
-                let letter = (b'A' + i as u8) as char;
-                let root_path: Vec<u16> = format!("{}:\\\0", letter).encode_utf16().collect();
-                // SAFETY: root_path is a valid null-terminated UTF-16 drive root string.
-                let drive_type = unsafe { GetDriveTypeW(PCWSTR(root_path.as_ptr())) };
-                // 3 corresponds to DRIVE_FIXED
-                if drive_type == 3 {
-                    let mut fs_name_buf = [0u16; 260];
-                    let res = unsafe {
-                        GetVolumeInformationW(
-                            PCWSTR(root_path.as_ptr()),
-                            None,
-                            None,
-                            None,
-                            None,
-                            Some(&mut fs_name_buf),
-                        )
-                    };
-                    if res.is_ok() {
-                        let fs_name = String::from_utf16_lossy(
-                            &fs_name_buf[..fs_name_buf
-                                .iter()
-                                .position(|&c| c == 0)
-                                .unwrap_or(fs_name_buf.len())],
-                        );
-                        if fs_name.eq_ignore_ascii_case("NTFS") {
-                            drives.push(letter);
-                        }
-                    }
-                }
-            }
-        }
-        drives
-    }
-    #[cfg(not(windows))]
-    {
-        vec!['C']
-    }
+    crate::volume_identity::enumerate_volumes()
+        .into_iter()
+        .filter_map(|vol| vol.drive_letter)
+        .collect()
 }
 
 /// Opens a raw volume device handle.
@@ -98,8 +57,17 @@ pub struct RawVolumeHandle {
 
 #[cfg(windows)]
 impl RawVolumeHandle {
+    /// Opens a drive root handle such as `\\.\C:`.
     pub fn open(drive_letter: char) -> Result<Self, VolumeError> {
         let dev_path = format!(r"\\.\{}:", drive_letter.to_ascii_uppercase());
+        Self::open_volume(&dev_path)
+    }
+
+    /// Opens a raw volume handle from a device path or Win32 Volume GUID (`\\?\Volume{...}`).
+    pub fn open_volume(volume_path: &str) -> Result<Self, VolumeError> {
+        // Raw volume CreateFileW handles reject trailing backslashes on `\\?\Volume{...}\`.
+        let trimmed = volume_path.trim_end_matches(['\\', '/']);
+        let dev_path = trimmed.to_string();
         let wide_path: Vec<u16> = dev_path.encode_utf16().chain(std::iter::once(0)).collect();
 
         // SAFETY: CreateFileW called with explicitly permitted sharing flags and valid null-terminated string.
@@ -175,6 +143,7 @@ impl RawVolumeHandle {
             )
         };
         if res.is_err() {
+            // SAFETY: GetLastError reads thread-local error state set by the failing DeviceIoControl call.
             let err = unsafe { windows::Win32::Foundation::GetLastError() };
             return Err(crate::usn::UsnError::QueryFailed(err.0));
         }
@@ -211,6 +180,7 @@ impl RawVolumeHandle {
             )
         };
         if res.is_err() {
+            // SAFETY: GetLastError reads thread-local error state set by the failing DeviceIoControl call.
             let err = unsafe { windows::Win32::Foundation::GetLastError() };
             return Err(crate::usn::UsnError::ReadFailed(err.0));
         }
@@ -232,9 +202,27 @@ impl Drop for RawVolumeHandle {
     }
 }
 
+#[cfg(windows)]
+impl BlockReader for RawVolumeHandle {
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize, std::io::Error> {
+        RawVolumeHandle::read_at(self, offset, buf)
+    }
+}
+
+struct ClosureBlockReader<F>(F);
+
+impl<F> BlockReader for ClosureBlockReader<F>
+where
+    F: FnMut(u64, &mut [u8]) -> Result<usize, std::io::Error>,
+{
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize, std::io::Error> {
+        (self.0)(offset, buf)
+    }
+}
+
 /// Locates the NTFS $MFT cluster runs and boot sector using a generic block reader function.
 pub fn locate_mft_clusters_with_read_at<F>(
-    mut read_at: F,
+    read_at: F,
 ) -> Result<
     (
         crate::boot_sector::NtfsBootSector,
@@ -245,54 +233,8 @@ pub fn locate_mft_clusters_with_read_at<F>(
 where
     F: FnMut(u64, &mut [u8]) -> Result<usize, std::io::Error>,
 {
-    // Read up to 4096 bytes for sector 0 to accommodate both 512e and 4Kn native sector drives
-    let mut boot_sector_buf = [0u8; 4096];
-    read_at(0, &mut boot_sector_buf)?;
-    let boot_sector = crate::boot_sector::NtfsBootSector::parse(&boot_sector_buf[..512])?;
-
-    let bytes_per_cluster = boot_sector.bytes_per_cluster();
-    let mft_start_offset = (boot_sector.mft_start_lcn as u64) * bytes_per_cluster;
-    let rec_size = boot_sector.mft_record_size as usize;
-    let sector_size = boot_sector.bytes_per_sector as usize;
-
-    let read_size = rec_size.max(sector_size);
-    let mut record0_buf = vec![0u8; read_size];
-    read_at(mft_start_offset, &mut record0_buf)?;
-
-    crate::fixup::apply_fixup(&mut record0_buf[..rec_size], sector_size)?;
-
-    let first_attr_offset = u16::from_le_bytes([record0_buf[0x14], record0_buf[0x15]]) as usize;
-    let attrs = crate::attribute::parse_attributes(&record0_buf[..rec_size], first_attr_offset)?;
-
-    let data_offset =
-        attrs
-            .data_runlist_offset
-            .ok_or(VolumeError::Mft(crate::mft::MftError::Attribute(
-                crate::attribute::AttributeParseError::BufferTooSmall(0),
-            )))?;
-
-    let runlist_offset =
-        u16::from_le_bytes([record0_buf[data_offset + 32], record0_buf[data_offset + 33]]) as usize;
-    let attr_len = u32::from_le_bytes([
-        record0_buf[data_offset + 4],
-        record0_buf[data_offset + 5],
-        record0_buf[data_offset + 6],
-        record0_buf[data_offset + 7],
-    ]) as usize;
-
-    if data_offset + runlist_offset >= rec_size
-        || data_offset + attr_len > rec_size
-        || runlist_offset >= attr_len
-    {
-        return Err(VolumeError::Runlist(
-            crate::runlist::RunlistError::UnexpectedEnd(0),
-        ));
-    }
-
-    let runlist_bytes = &record0_buf[data_offset + runlist_offset..data_offset + attr_len];
-    let runs = crate::runlist::parse_runlist(runlist_bytes, 0)?;
-
-    Ok((boot_sector, runs))
+    let mut reader = ClosureBlockReader(read_at);
+    locate_mft_clusters_from_reader(&mut reader)
 }
 
 /// Locates the NTFS $MFT cluster runs and boot sector from Sector 0 and Record 0.
@@ -315,63 +257,12 @@ pub fn scan_live_volume_mft(
     drive_letter: char,
     chunk_records: usize,
 ) -> Result<Vec<ExtractedItem>, VolumeError> {
-    let raw_vol = RawVolumeHandle::open(drive_letter)?;
-    let (boot_sector, runs) = locate_mft_clusters(&raw_vol)?;
-
-    let bytes_per_cluster = boot_sector.bytes_per_cluster();
-    let record_size = boot_sector.mft_record_size as usize;
-    let sector_size = boot_sector.bytes_per_sector as usize;
-    let mut all_items = Vec::new();
-
-    let chunk_size = chunk_records * record_size;
-    let mut buffer = vec![0u8; chunk_size];
-    let mut current_record_num = 0u64;
-
-    for run in runs {
-        let Some(lcn) = run.lcn else {
-            let sparse_records = (run.cluster_count * bytes_per_cluster) / (record_size as u64);
-            current_record_num += sparse_records;
-            continue;
-        };
-
-        let mut run_bytes_remaining = run.cluster_count * bytes_per_cluster;
-        let mut run_offset = (lcn as u64) * bytes_per_cluster;
-
-        while run_bytes_remaining > 0 {
-            let to_read = (chunk_size as u64).min(run_bytes_remaining) as usize;
-            let read_slice = &mut buffer[..to_read];
-            let bytes_read = raw_vol.read_at(run_offset, read_slice)?;
-            if bytes_read == 0 {
-                break;
-            }
-
-            let records_in_buf = bytes_read / record_size;
-            let mut chunks: Vec<(u64, Vec<u8>)> = Vec::with_capacity(records_in_buf);
-
-            for i in 0..records_in_buf {
-                let rec_num = current_record_num + i as u64;
-                if rec_num < 24 {
-                    continue;
-                }
-                let slice = &read_slice[i * record_size..(i + 1) * record_size];
-                chunks.push((rec_num, slice.to_vec()));
-            }
-
-            let parsed_items: Vec<ExtractedItem> = chunks
-                .into_par_iter()
-                .flat_map(|(rec_num, mut rec_bytes)| {
-                    parse_mft_record(&mut rec_bytes, sector_size, rec_num).unwrap_or_default()
-                })
-                .collect();
-
-            all_items.extend(parsed_items);
-            current_record_num += records_in_buf as u64;
-            run_offset += bytes_read as u64;
-            run_bytes_remaining = run_bytes_remaining.saturating_sub(bytes_read as u64);
-        }
-    }
-
-    Ok(all_items)
+    let mut raw_vol = RawVolumeHandle::open(drive_letter)?;
+    let res = scan_mft_from_reader(
+        &mut raw_vol,
+        MftScanOptions::default().with_chunk_records(chunk_records),
+    )?;
+    Ok(res.items)
 }
 
 #[cfg(not(windows))]
@@ -388,22 +279,22 @@ mod tests {
 
     #[test]
     fn test_locate_mft_clusters_synthetic() {
-        // 1. Build a synthetic NTFS Sector 0 (Boot Sector)
+        // Synthetic NTFS Boot Sector (512 bytes/sector, 8 sectors/cluster, 1024-byte MFT records, LCN 4).
         let mut boot_sector = vec![0u8; 512];
         boot_sector[3..11].copy_from_slice(b"NTFS    ");
-        boot_sector[0x0B..0x0D].copy_from_slice(&512u16.to_le_bytes()); // 512 bytes / sector
-        boot_sector[0x0D] = 8; // 8 sectors / cluster -> 4096 bytes / cluster
-        boot_sector[0x40] = 0xF6; // -10 -> 1024 bytes per MFT record
-        boot_sector[0x30..0x38].copy_from_slice(&4i64.to_le_bytes()); // MFT start LCN = 4 (offset 16384)
+        boot_sector[0x0B..0x0D].copy_from_slice(&512u16.to_le_bytes());
+        boot_sector[0x0D] = 8;
+        boot_sector[0x40] = 0xF6;
+        boot_sector[0x30..0x38].copy_from_slice(&4i64.to_le_bytes());
         boot_sector[0x48..0x50].copy_from_slice(&0x1122334455667788u64.to_le_bytes());
 
-        // 2. Build a synthetic Record 0 (1024 bytes) with non-resident $DATA runlist
+        // Synthetic Record 0 (1024 bytes) with USA fixup at 0x30 and non-resident $DATA runlist.
         let mut rec0 = vec![0u8; 1024];
         rec0[0..4].copy_from_slice(b"FILE");
-        rec0[4..6].copy_from_slice(&48u16.to_le_bytes()); // Update sequence offset = 48 (0x30)
-        rec0[6..8].copy_from_slice(&3u16.to_le_bytes()); // Update sequence size = 3 words
-        rec0[0x14..0x16].copy_from_slice(&56u16.to_le_bytes()); // First attribute offset = 56 (0x38)
-        rec0[0x16..0x18].copy_from_slice(&1u16.to_le_bytes()); // Flags: in use (1)
+        rec0[4..6].copy_from_slice(&48u16.to_le_bytes());
+        rec0[6..8].copy_from_slice(&3u16.to_le_bytes());
+        rec0[0x14..0x16].copy_from_slice(&56u16.to_le_bytes());
+        rec0[0x16..0x18].copy_from_slice(&1u16.to_le_bytes());
 
         // USA check word at offset 48
         rec0[48..50].copy_from_slice(&[0xAA, 0x55]);

@@ -2,11 +2,14 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+#![forbid(unsafe_code)]
+
 //! Cairn development, testing, and benchmark tasks (xtask).
 
 mod bench;
 mod corpus;
 mod docs_check;
+mod hygiene_check;
 mod i18n_check;
 mod size_check;
 
@@ -23,6 +26,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Run all fast repository gates (check-i18n, check-docs, check-size, check-hygiene)
+    Check {
+        /// The workspace root to check.
+        #[arg(default_value = ".")]
+        workspace: PathBuf,
+    },
     /// Check that every locale pair is aligned, and that the code reading them agrees
     CheckI18n {
         /// The workspace root that holds the crates.
@@ -38,6 +47,12 @@ enum Commands {
     /// Check that no Rust source file exceeds the 2000-line monolith limit
     CheckSize {
         /// The workspace root that holds the crates.
+        #[arg(default_value = ".")]
+        workspace: PathBuf,
+    },
+    /// Check workspace lint inheritance, ignored-test registry parity, comment markers, and copy symbols
+    CheckHygiene {
+        /// The workspace root to inspect.
         #[arg(default_value = ".")]
         workspace: PathBuf,
     },
@@ -69,6 +84,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::Check { workspace } => {
+            i18n_check::check_i18n(&workspace)?;
+            docs_check::check_docs(&workspace)?;
+            size_check::check_size(&workspace)?;
+            hygiene_check::check_hygiene(&workspace)?;
+        }
         Commands::CheckI18n { workspace } => {
             i18n_check::check_i18n(&workspace)?;
         }
@@ -77,6 +98,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::CheckSize { workspace } => {
             size_check::check_size(&workspace)?;
+        }
+        Commands::CheckHygiene { workspace } => {
+            hygiene_check::check_hygiene(&workspace)?;
         }
         Commands::Package { out_dir } => {
             package::run_package(out_dir)?;

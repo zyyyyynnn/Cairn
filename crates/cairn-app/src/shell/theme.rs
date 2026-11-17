@@ -49,7 +49,6 @@ pub fn rem(window: &Window) -> Pixels {
 /// role, never a palette position.
 #[derive(Clone, Copy, Debug)]
 pub struct ShellTokens {
-    // ---- surfaces ---------------------------------------------------------------
     pub background: Hsla,
     pub muted: Hsla,
     pub sidebar: Hsla,
@@ -61,21 +60,16 @@ pub struct ShellTokens {
     pub table_head_foreground: Hsla,
     /// Editable control outlines, held at 3:1 against the page and muted surfaces.
     pub control_stroke: Hsla,
-
-    // ---- ink ----------------------------------------------------------------------
     pub foreground: Hsla,
     pub muted_foreground: Hsla,
-    // ---- structure and interaction -------------------------------------------------
     pub border: Hsla,
     pub ring: Hsla,
     pub caret: Hsla,
     pub selection: Hsla,
     pub row_hover: Hsla,
-    // ---- emphasis, spent sparingly -------------------------------------------------
     pub warning_ink: Hsla,
     pub danger: Hsla,
     pub danger_foreground: Hsla,
-    // ---- shape --------------------------------------------------------------------
     /// Every app-owned corner: search box, sidebar rows, focus frames.
     pub radius: Pixels,
 }

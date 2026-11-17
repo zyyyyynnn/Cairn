@@ -298,7 +298,8 @@ mod tests {
             flags: 0,
             name_highlights: Vec::new(),
             path_highlights: Vec::new(),
-            snippet: None,
+            snippets: Vec::new(),
+            properties: None,
         }
     }
 

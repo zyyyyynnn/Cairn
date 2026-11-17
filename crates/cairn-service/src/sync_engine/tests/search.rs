@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{index_item, sized_item};
+use super::{index_item, sized_item, sort};
 use crate::sync_engine::{MatchSet, MultiVolumeEngine, VolumeIndex};
 use cairn_core::engine::CancellationToken;
 use cairn_core::sort::SortColumn;
@@ -40,8 +40,12 @@ fn engine_with_sorting_fixture() -> (tempfile::TempDir, MultiVolumeEngine) {
 
 fn result_names(engine: &MultiVolumeEngine, sort_by: SortColumn, sort_asc: bool) -> Vec<String> {
     let cancel = CancellationToken::new();
-    let outcome =
-        engine.execute_search_multi("", &QueryDefaults::default(), sort_by, sort_asc, &cancel);
+    let outcome = engine.execute_search_multi(
+        "",
+        &QueryDefaults::default(),
+        &sort(sort_by, sort_asc),
+        &cancel,
+    );
     let results = engine.test_items(outcome.rows);
     let total = outcome.total;
     assert_eq!(total, results.len());
@@ -102,12 +106,17 @@ fn a_folder_match_reports_its_recursive_space_once() {
 
     let cancel = CancellationToken::new();
     let defaults = QueryDefaults::default();
-    let folder = engine.execute_search_multi("folderX", &defaults, SortColumn::Name, true, &cancel);
+    let folder =
+        engine.execute_search_multi("folderX", &defaults, &sort(SortColumn::Name, true), &cancel);
     assert_eq!(folder.total, 1);
     assert_eq!(folder.total_bytes, 50, "the folder's recursive space");
 
-    let both =
-        engine.execute_search_multi("folderX|inside", &defaults, SortColumn::Name, true, &cancel);
+    let both = engine.execute_search_multi(
+        "folderX|inside",
+        &defaults,
+        &sort(SortColumn::Name, true),
+        &cancel,
+    );
     assert_eq!(both.total, 2);
     assert_eq!(
         both.total_bytes, 50,
@@ -124,8 +133,7 @@ fn a_filtered_query_does_not_rebuild_the_whole_volume_sort() {
     let outcome = engine.execute_search_multi(
         "alpha",
         &QueryDefaults::default(),
-        SortColumn::Name,
-        true,
+        &sort(SortColumn::Name, true),
         &cancel,
     );
     let results = engine.test_items(outcome.rows);
@@ -140,8 +148,7 @@ fn a_filtered_query_does_not_rebuild_the_whole_volume_sort() {
     let outcome = engine.execute_search_multi(
         "",
         &QueryDefaults::default(),
-        SortColumn::Name,
-        true,
+        &sort(SortColumn::Name, true),
         &cancel,
     );
     let total = outcome.total;
@@ -312,12 +319,10 @@ fn test_multi_volume_schwartzian_transform_sort() {
 
     let cancel = CancellationToken::new();
 
-    // 1. Sort by Name ascending (natural sort: file_1, file_2, file_10, file_20)
     let outcome = engine.execute_search_multi(
         "",
         &QueryDefaults::default(),
-        SortColumn::Name,
-        true,
+        &sort(SortColumn::Name, true),
         &cancel,
     );
     let results = engine.test_items(outcome.rows);
@@ -327,7 +332,7 @@ fn test_multi_volume_schwartzian_transform_sort() {
         results
             .iter()
             .map(|r| {
-                let vol = &vols[&r.drive_letter];
+                let vol = &vols[&r.source_id.drive_letter().unwrap()];
                 vol.record_name(&vol.records()[r.record_idx as usize])
                     .to_string()
             })
@@ -338,12 +343,10 @@ fn test_multi_volume_schwartzian_transform_sort() {
         ["file_1.txt", "file_2.txt", "file_10.txt", "file_20.txt"]
     );
 
-    // 2. Sort by Name descending
     let outcome = engine.execute_search_multi(
         "",
         &QueryDefaults::default(),
-        SortColumn::Name,
-        false,
+        &sort(SortColumn::Name, false),
         &cancel,
     );
     let results_desc = engine.test_items(outcome.rows);
@@ -351,7 +354,7 @@ fn test_multi_volume_schwartzian_transform_sort() {
         results_desc
             .iter()
             .map(|r| {
-                let vol = &vols[&r.drive_letter];
+                let vol = &vols[&r.source_id.drive_letter().unwrap()];
                 vol.record_name(&vol.records()[r.record_idx as usize])
                     .to_string()
             })
@@ -362,12 +365,10 @@ fn test_multi_volume_schwartzian_transform_sort() {
         ["file_20.txt", "file_10.txt", "file_2.txt", "file_1.txt"]
     );
 
-    // 3. Sort by Size ascending (10, 50, 100, 200)
     let outcome = engine.execute_search_multi(
         "",
         &QueryDefaults::default(),
-        SortColumn::Size,
-        true,
+        &sort(SortColumn::Size, true),
         &cancel,
     );
     let results_size = engine.test_items(outcome.rows);
@@ -375,19 +376,17 @@ fn test_multi_volume_schwartzian_transform_sort() {
         results_size
             .iter()
             .map(|r| {
-                let vol = &vols[&r.drive_letter];
+                let vol = &vols[&r.source_id.drive_letter().unwrap()];
                 vol.records()[r.record_idx as usize].size
             })
             .collect()
     });
     assert_eq!(sizes, [10, 50, 100, 200]);
 
-    // 4. Sort by DateModified ascending (100, 200, 300, 400)
     let outcome = engine.execute_search_multi(
         "",
         &QueryDefaults::default(),
-        SortColumn::DateModified,
-        true,
+        &sort(SortColumn::DateModified, true),
         &cancel,
     );
     let results_mod = engine.test_items(outcome.rows);
@@ -395,14 +394,13 @@ fn test_multi_volume_schwartzian_transform_sort() {
         results_mod
             .iter()
             .map(|r| {
-                let vol = &vols[&r.drive_letter];
+                let vol = &vols[&r.source_id.drive_letter().unwrap()];
                 vol.records()[r.record_idx as usize].modified_ts
             })
             .collect()
     });
     assert_eq!(dates, [100, 200, 300, 400]);
 
-    // 5. Sort by Extension ascending with mixed case
     let mut vol_e = VolumeIndex::new('E');
     vol_e.ingest_items(vec![
         ExtractedItem {
@@ -443,8 +441,7 @@ fn test_multi_volume_schwartzian_transform_sort() {
     let outcome = engine.execute_search_multi(
         "",
         &QueryDefaults::default(),
-        SortColumn::Extension,
-        true,
+        &sort(SortColumn::Extension, true),
         &cancel,
     );
     let results_ext = engine.test_items(outcome.rows);
@@ -452,7 +449,7 @@ fn test_multi_volume_schwartzian_transform_sort() {
         results_ext
             .iter()
             .map(|r| {
-                let vol = &vols[&r.drive_letter];
+                let vol = &vols[&r.source_id.drive_letter().unwrap()];
                 let rec = &vol.records()[r.record_idx as usize];
                 vol.arena()
                     .get_ext(rec.name_offset, rec.name_len, rec.ext_offset)
@@ -490,8 +487,7 @@ fn single_volume_filtered_sort_and_exclusions_keep_presorted_unbuilt() {
     let outcome = engine.execute_search_multi(
         "size:>1mb",
         &QueryDefaults::default(),
-        SortColumn::Name,
-        true,
+        &sort(SortColumn::Name, true),
         &cancel,
     );
     let results = engine.test_items(outcome.rows);
@@ -515,8 +511,7 @@ fn single_volume_filtered_sort_and_exclusions_keep_presorted_unbuilt() {
     let outcome = engine.execute_search_multi(
         "file: size:>1mb",
         &QueryDefaults::default(),
-        SortColumn::Name,
-        true,
+        &sort(SortColumn::Name, true),
         &cancel,
     );
     let file_results = engine.test_items(outcome.rows);
@@ -563,7 +558,8 @@ fn an_excluded_subtree_keeps_the_all_files_space_total() {
 
     let cancel = CancellationToken::new();
     let defaults = QueryDefaults::default();
-    let view = engine.execute_search_multi("C: ", &defaults, SortColumn::Name, true, &cancel);
+    let view =
+        engine.execute_search_multi("C: ", &defaults, &sort(SortColumn::Name, true), &cancel);
     assert!(matches!(view.rows, MatchSet::AllFiles(_)));
     assert_eq!(
         view.total, 2,
@@ -575,8 +571,12 @@ fn an_excluded_subtree_keeps_the_all_files_space_total() {
         "the matched root's recursive space includes the excluded subtree"
     );
 
-    let materialized =
-        engine.execute_search_multi("C: ", &defaults, SortColumn::DateCreated, true, &cancel);
+    let materialized = engine.execute_search_multi(
+        "C: ",
+        &defaults,
+        &sort(SortColumn::DateCreated, true),
+        &cancel,
+    );
     assert!(matches!(materialized.rows, MatchSet::Items(_)));
     assert_eq!(
         materialized.total_bytes, view.total_bytes,
@@ -586,7 +586,8 @@ fn an_excluded_subtree_keeps_the_all_files_space_total() {
     let plain_temp = tempfile::tempdir().expect("tempdir");
     let plain = MultiVolumeEngine::with_index_dir_and_drives(plain_temp.path(), vec![]);
     plain.add_volume(fixture());
-    let unruled = plain.execute_search_multi("C: ", &defaults, SortColumn::Name, true, &cancel);
+    let unruled =
+        plain.execute_search_multi("C: ", &defaults, &sort(SortColumn::Name, true), &cancel);
     assert_eq!(
         unruled.total_bytes,
         3 * 1024 * 1024 + 1024,
@@ -617,8 +618,7 @@ fn an_excluded_root_totals_the_visible_top_level_records() {
     let outcome = engine.execute_search_multi(
         "C: ",
         &QueryDefaults::default(),
-        SortColumn::Name,
-        true,
+        &sort(SortColumn::Name, true),
         &cancel,
     );
     assert!(matches!(outcome.rows, MatchSet::AllFiles(_)));
@@ -656,8 +656,7 @@ fn a_volume_without_a_root_record_totals_its_visible_top_level() {
     let outcome = engine.execute_search_multi(
         "C: ",
         &QueryDefaults::default(),
-        SortColumn::Name,
-        true,
+        &sort(SortColumn::Name, true),
         &cancel,
     );
     assert!(matches!(outcome.rows, MatchSet::AllFiles(_)));

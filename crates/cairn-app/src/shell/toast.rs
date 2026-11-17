@@ -42,9 +42,16 @@ pub(crate) enum ToastKind {
 
 type ToastRun = Arc<dyn Fn(&mut CairnApp, &mut Window, &mut Context<CairnApp>)>;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ToastActionStyle {
+    RetryIcon,
+    LabeledButton,
+}
+
 #[derive(Clone)]
 pub(crate) struct ToastAction {
     label: SharedString,
+    style: ToastActionStyle,
     run: ToastRun,
 }
 
@@ -55,6 +62,18 @@ impl ToastAction {
     ) -> Self {
         Self {
             label: label.into(),
+            style: ToastActionStyle::RetryIcon,
+            run: Arc::new(run),
+        }
+    }
+
+    pub(crate) fn labeled(
+        label: impl Into<SharedString>,
+        run: impl Fn(&mut CairnApp, &mut Window, &mut Context<CairnApp>) + 'static,
+    ) -> Self {
+        Self {
+            label: label.into(),
+            style: ToastActionStyle::LabeledButton,
             run: Arc::new(run),
         }
     }
@@ -80,7 +99,14 @@ impl CairnApp {
         message: impl Into<String>,
         cx: &mut Context<Self>,
     ) {
-        self.show_toast(ToastKind::Error, title.into(), message.into(), None, cx);
+        self.show_toast(
+            ToastKind::Error,
+            title.into(),
+            message.into(),
+            None,
+            false,
+            cx,
+        );
     }
 
     pub(crate) fn show_error_toast_with_action(
@@ -95,6 +121,7 @@ impl CairnApp {
             title.into(),
             message.into(),
             Some(action),
+            false,
             cx,
         );
     }
@@ -105,7 +132,47 @@ impl CairnApp {
         message: impl Into<String>,
         cx: &mut Context<Self>,
     ) {
-        self.show_toast(ToastKind::Info, title.into(), message.into(), None, cx);
+        self.show_toast(
+            ToastKind::Info,
+            title.into(),
+            message.into(),
+            None,
+            true,
+            cx,
+        );
+    }
+
+    pub(crate) fn show_persistent_info_toast(
+        &mut self,
+        title: impl Into<String>,
+        message: impl Into<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_toast(
+            ToastKind::Info,
+            title.into(),
+            message.into(),
+            None,
+            false,
+            cx,
+        );
+    }
+
+    pub(crate) fn show_info_toast_with_action(
+        &mut self,
+        title: impl Into<String>,
+        message: impl Into<String>,
+        action: ToastAction,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_toast(
+            ToastKind::Info,
+            title.into(),
+            message.into(),
+            Some(action),
+            false,
+            cx,
+        );
     }
 
     fn show_toast(
@@ -114,6 +181,7 @@ impl CairnApp {
         title: String,
         message: String,
         action: Option<ToastAction>,
+        auto_dismiss: bool,
         cx: &mut Context<Self>,
     ) {
         self.toast_serial = self.toast_serial.wrapping_add(1);
@@ -128,7 +196,7 @@ impl CairnApp {
 
         // A newer toast replaces this one before its timer fires; the serial
         // makes the stale timer a no-op instead of clearing the newer state.
-        if kind == ToastKind::Info {
+        if auto_dismiss {
             cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(TOAST_INFO_DURATION).await;
                 let _ = this.update(cx, |this, cx| {
@@ -321,7 +389,7 @@ impl CairnApp {
                             .child(
                                 div()
                                     .min_w_0()
-                                    .flex_shrink(1.0)
+                                    .flex_1()
                                     .text_sm()
                                     .line_height(relative(1.5))
                                     .text_color(tokens.muted_foreground)
@@ -330,14 +398,33 @@ impl CairnApp {
                             )
                             .when_some(action, |this, action| {
                                 let label = action.label().clone();
-                                let retry = accessibility::control("toast-retry");
-                                this.child(
-                                    icon_action(retry, AssetIconName::RotateCcw, label).on_click(
-                                        cx.listener(move |this, _, window, cx| {
-                                            this.run_toast_action(action.clone(), window, cx);
-                                        }),
+                                match action.style {
+                                    ToastActionStyle::RetryIcon => {
+                                        let retry = accessibility::control("toast-retry");
+                                        this.child(
+                                            icon_action(retry, AssetIconName::RotateCcw, label)
+                                                .on_click(cx.listener(
+                                                    move |this, _, window, cx| {
+                                                        this.run_toast_action(
+                                                            action.clone(),
+                                                            window,
+                                                            cx,
+                                                        );
+                                                    },
+                                                )),
+                                        )
+                                    }
+                                    ToastActionStyle::LabeledButton => this.child(
+                                        Button::new("toast-action")
+                                            .outline()
+                                            .small()
+                                            .label(label.clone())
+                                            .accessibility_label(label)
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.run_toast_action(action.clone(), window, cx);
+                                            })),
                                     ),
-                                )
+                                }
                             }),
                     ),
             )

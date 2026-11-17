@@ -37,11 +37,14 @@ fn the_footprint_arithmetic_keeps_its_components_independent() {
         folded_arena_bytes: 100_000,
         frn_lookup_bytes: 170_000,
         presorted_bytes: 40_000,
-        directory_sizes_bytes: 0,
+        property_store_bytes: 12_000,
+        directory_sizes_bytes: 80_000,
         path_cache_bytes: 1_024,
         scratch_bytes: 8_192,
     };
-    assert_eq!(footprint.total_bytes(), 899_216);
-    assert!((footprint.bytes_per_record() - 89.9216).abs() < 1e-9);
+    // Transient `directory_sizes_bytes` is excluded from resident `total_bytes()`.
+    assert_eq!(footprint.total_bytes(), 911_216);
+    assert_eq!(footprint.transient_bytes(), 80_000);
+    assert!((footprint.bytes_per_record() - 91.1216).abs() < 1e-9);
     assert_eq!(IndexMemoryFootprint::default().bytes_per_record(), 0.0);
 }

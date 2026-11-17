@@ -7,7 +7,11 @@
 use cairn_client::client::ClientError;
 use cairn_client::codec::{encode_frame, try_decode_frame};
 use cairn_client::message::{
-    ClientRequest, Envelope, QueryDefaults, ResponsePayload, SortColumn, WIRE_GUARD,
+    ClientRequest, Envelope, QueryDefaults, ResponsePayload, SortColumn, SortDirection, SortKey,
+    SortSpec, SourceId, WIRE_GUARD,
+};
+use cairn_client::status::{
+    IndexJournalStatus, PropertyIndexStatus, SourceKind, SourceStatusSummary, VolumeState,
 };
 use cairn_client::{CairnClient, ServiceSession};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -18,7 +22,7 @@ use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 use tokio::sync::{oneshot, Mutex};
 
 /// The fields a `Query` carries, captured to compare a request with its replay.
-type SentQuery = (u64, String, QueryDefaults, SortColumn, bool, usize);
+type SentQuery = (u64, String, QueryDefaults, SortSpec, usize);
 
 fn unique_pipe_name(tag: &str) -> String {
     static NEXT: AtomicUsize = AtomicUsize::new(1);
@@ -96,23 +100,55 @@ async fn session_reuses_one_connection_per_slot_across_rpcs() {
                             }
                         }
                         ClientRequest::GetStatus => ResponsePayload::StatusAck,
-                        ClientRequest::Query { query_id, .. } => ResponsePayload::QueryResult {
+                        ClientRequest::Query {
+                            query_id,
+                            sort_spec,
+                            ..
+                        } => ResponsePayload::QueryResult {
                             query_id,
                             session_id: 77,
                             total_matches: 1,
                             total_bytes: 128,
                             first_page: Vec::new(),
+                            applied_sort: sort_spec,
+                            degraded: None,
                         },
+                        ClientRequest::GetTree { path, .. } => ResponsePayload::TreeResult {
+                            path,
+                            entries: Vec::new(),
+                        },
+                        ClientRequest::GetSources => ResponsePayload::SourcesResult {
+                            sources: vec![SourceStatusSummary {
+                                source_id: SourceId(2),
+                                kind: SourceKind::NtfsVolume,
+                                root_path: r"C:\".to_string(),
+                                volume_guid: "guid-c".to_string(),
+                                status: VolumeState::Synced,
+                                indexed_count: 100,
+                                live_watch_enabled: true,
+                            }],
+                        },
+                        ClientRequest::Rescan { volume_id } => ResponsePayload::RescanAck {
+                            volume_id,
+                            success: true,
+                        },
+                        ClientRequest::GetPropertyIndexStatus => {
+                            ResponsePayload::PropertyIndexStatus {
+                                status: PropertyIndexStatus::default(),
+                            }
+                        }
+                        ClientRequest::GetIndexJournal { .. } => {
+                            ResponsePayload::IndexJournalResult {
+                                status: IndexJournalStatus::default(),
+                                entries: Vec::new(),
+                            }
+                        }
                         ClientRequest::GetRows {
                             session_id, offset, ..
                         } => ResponsePayload::RowsResult {
                             session_id,
                             offset,
                             rows: Vec::new(),
-                        },
-                        ClientRequest::GetTree { path, .. } => ResponsePayload::TreeResult {
-                            path,
-                            entries: Vec::new(),
                         },
                         other => panic!("unexpected request: {other:?}"),
                     };
@@ -133,14 +169,23 @@ async fn session_reuses_one_connection_per_slot_across_rpcs() {
             1,
             "notes",
             QueryDefaults::default(),
-            SortColumn::Name,
-            true,
+            &SortSpec::default(),
             50,
         )
         .await
         .expect("query");
     session.get_rows(77, 50, 50).await.expect("get_rows");
     session.get_tree(r"C:\", 3).await.expect("get_tree");
+    session.get_sources().await.expect("get_sources");
+    session.rescan(None).await.expect("rescan");
+    session
+        .get_property_index_status()
+        .await
+        .expect("get_property_index_status");
+    session
+        .get_index_journal(0, 10)
+        .await
+        .expect("get_index_journal");
     drop(session);
 
     server_task.await.expect("server finish");
@@ -286,8 +331,7 @@ async fn a_retried_query_carries_the_same_request() {
                     query_id,
                     raw_query,
                     defaults,
-                    sort_column,
-                    sort_asc,
+                    sort_spec,
                     first_page_limit,
                 } => {
                     if !cached_query_answered {
@@ -300,6 +344,8 @@ async fn a_retried_query_carries_the_same_request() {
                                 total_matches: 1,
                                 total_bytes: 32,
                                 first_page: Vec::new(),
+                                applied_sort: sort_spec,
+                                degraded: None,
                             },
                         )
                         .await;
@@ -309,8 +355,7 @@ async fn a_retried_query_carries_the_same_request() {
                         query_id,
                         raw_query,
                         defaults,
-                        sort_column,
-                        sort_asc,
+                        sort_spec,
                         first_page_limit,
                     ));
                     // Close before answering: the cached connection dies under the request.
@@ -333,16 +378,14 @@ async fn a_retried_query_carries_the_same_request() {
                     query_id,
                     raw_query,
                     defaults,
-                    sort_column,
-                    sort_asc,
+                    sort_spec,
                     first_page_limit,
                 } => {
                     queries_srv.lock().await.push((
                         query_id,
                         raw_query,
                         defaults,
-                        sort_column,
-                        sort_asc,
+                        sort_spec.clone(),
                         first_page_limit,
                     ));
                     ResponsePayload::QueryResult {
@@ -351,6 +394,8 @@ async fn a_retried_query_carries_the_same_request() {
                         total_matches: 1,
                         total_bytes: 64,
                         first_page: Vec::new(),
+                        applied_sort: sort_spec,
+                        degraded: None,
                     }
                 }
                 other => panic!("unexpected req on conn 2: {other:?}"),
@@ -365,8 +410,7 @@ async fn a_retried_query_carries_the_same_request() {
             8,
             "warm",
             QueryDefaults::default(),
-            SortColumn::Name,
-            true,
+            &SortSpec::default(),
             10,
         )
         .await
@@ -375,15 +419,14 @@ async fn a_retried_query_carries_the_same_request() {
         warm.payload,
         ResponsePayload::QueryResult { session_id: 11, .. }
     ));
+    let requested_sort = SortSpec {
+        keys: vec![
+            SortKey::new(SortColumn::Size, SortDirection::Descending),
+            SortKey::new(SortColumn::Name, SortDirection::Ascending),
+        ],
+    };
     let query = session
-        .query(
-            9,
-            "notes",
-            QueryDefaults::default(),
-            SortColumn::Size,
-            false,
-            25,
-        )
+        .query(9, "notes", QueryDefaults::default(), &requested_sort, 25)
         .await
         .expect("the retried query answers on the new connection");
     assert!(matches!(
@@ -406,8 +449,7 @@ async fn a_retried_query_carries_the_same_request() {
             9,
             "notes".to_string(),
             QueryDefaults::default(),
-            SortColumn::Size,
-            false,
+            requested_sort,
             25,
         ),
         "the replay carries the request the caller sent"
@@ -490,6 +532,8 @@ async fn cancel_uses_independent_connection_while_query_is_in_flight() {
                             total_matches: 0,
                             total_bytes: 0,
                             first_page: Vec::new(),
+                            applied_sort: SortSpec::default(),
+                            degraded: None,
                         },
                     )
                     .await;
@@ -509,8 +553,7 @@ async fn cancel_uses_independent_connection_while_query_is_in_flight() {
                 42,
                 "slow",
                 QueryDefaults::default(),
-                SortColumn::Name,
-                true,
+                &SortSpec::default(),
                 200,
             )
             .await

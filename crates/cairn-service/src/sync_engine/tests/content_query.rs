@@ -54,15 +54,17 @@ fn matched_content_frns(engine: &MultiVolumeEngine, query: &str) -> Vec<u64> {
     let outcome = engine.execute_search_multi(
         query,
         &QueryDefaults::default(),
-        SortColumn::Name,
-        true,
+        &sort(SortColumn::Name, true),
         &cancel,
     );
     let results = engine.test_items(outcome.rows);
     let volumes = engine.volumes.read().unwrap();
     let mut frns: Vec<u64> = results
         .iter()
-        .map(|item| volumes[&item.drive_letter].records()[item.record_idx as usize].frn)
+        .map(|item| {
+            let drive = item.source_id.drive_letter().unwrap();
+            volumes[&drive].records()[item.record_idx as usize].frn
+        })
         .collect();
     frns.sort_unstable();
     frns
@@ -209,8 +211,7 @@ fn an_or_content_query_keeps_snippets_on_content_hit_rows() {
     let outcome = engine.execute_search_multi(
         "content:needle|content:quarterly",
         &QueryDefaults::default(),
-        SortColumn::Name,
-        true,
+        &sort(SortColumn::Name, true),
         &cancel,
     );
     let results = engine.test_items(outcome.rows);
@@ -218,9 +219,10 @@ fn an_or_content_query_keeps_snippets_on_content_hit_rows() {
     assert_eq!(results.len(), 3);
     let volumes = engine.volumes.read().unwrap();
     for item in &results {
-        let frn = volumes[&item.drive_letter].records()[item.record_idx as usize].frn;
+        let drive = item.source_id.drive_letter().unwrap();
+        let frn = volumes[&drive].records()[item.record_idx as usize].frn;
         assert!(
-            snippets.contains_key(&(item.drive_letter, frn)),
+            snippets.contains_key(&(item.source_id.0, frn)),
             "row frn {frn} matched its content term and must carry a snippet"
         );
     }
@@ -233,8 +235,7 @@ fn a_negated_content_term_never_supplies_a_content_snippet() {
     let outcome = engine.execute_search_multi(
         "report|!content:needle",
         &QueryDefaults::default(),
-        SortColumn::Name,
-        true,
+        &sort(SortColumn::Name, true),
         &cancel,
     );
     let results = engine.test_items(outcome.rows);
@@ -242,7 +243,10 @@ fn a_negated_content_term_never_supplies_a_content_snippet() {
     let volumes = engine.volumes.read().unwrap();
     let mut frns: Vec<u64> = results
         .iter()
-        .map(|item| volumes[&item.drive_letter].records()[item.record_idx as usize].frn)
+        .map(|item| {
+            let drive = item.source_id.drive_letter().unwrap();
+            volumes[&drive].records()[item.record_idx as usize].frn
+        })
         .collect();
     frns.sort_unstable();
     assert_eq!(
@@ -251,9 +255,10 @@ fn a_negated_content_term_never_supplies_a_content_snippet() {
         "the union of the report branch and the negated term must be present"
     );
     for item in &results {
-        let frn = volumes[&item.drive_letter].records()[item.record_idx as usize].frn;
+        let drive = item.source_id.drive_letter().unwrap();
+        let frn = volumes[&drive].records()[item.record_idx as usize].frn;
         assert!(
-            !snippets.contains_key(&(item.drive_letter, frn)),
+            !snippets.contains_key(&(item.source_id.0, frn)),
             "row frn {frn} must not carry a snippet from a negated content term"
         );
     }
@@ -272,8 +277,7 @@ fn a_cancelled_query_returns_no_rows_in_either_content_shape() {
         let outcome = engine.execute_search_multi(
             query,
             &QueryDefaults::default(),
-            SortColumn::Name,
-            true,
+            &sort(SortColumn::Name, true),
             &cancel,
         );
         let results = engine.test_items(outcome.rows);

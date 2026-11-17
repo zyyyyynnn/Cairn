@@ -25,11 +25,6 @@ use crate::model::Screen;
 
 /// One physical platform surface: the caption row is 34 px at every zoom, like the product shell.
 const TITLE_BAR_HEIGHT: Pixels = px(34.0);
-const CAPTION_WIDTH: Pixels = px(34.0);
-/// The focus frame's box around the caption glyph. It stays clear of the window's native frame
-/// and rounded corner, and leaves the full-cell hover surface untouched. The size is chosen so the
-/// frame and the glyph land on the same pixel grid at the common display scales.
-const CAPTION_FOCUS_SIZE: Pixels = px(22.0);
 /// Chrome horizontal inset (12 px), matching the product shell's title bar and footer margins.
 const PAGE_INSET: Pixels = px(12.0);
 /// Single vertical spacing token (16 px) for the main body area between title, description,
@@ -265,7 +260,7 @@ impl SetupApp {
             .aria_label(label)
             .track_focus(&focus)
             .flex()
-            .w(CAPTION_WIDTH)
+            .w(cairn_ui::focus::CAPTION_WIDTH)
             .h_full()
             .items_center()
             .justify_center()
@@ -296,27 +291,15 @@ impl SetupApp {
                         }
                     })
             })
-            .child(
-                div()
-                    .relative()
-                    .size(CAPTION_FOCUS_SIZE)
-                    .flex()
-                    .flex_shrink_0()
-                    .items_center()
-                    .justify_center()
-                    .child(Icon::new(icon).size(rems(UI_ICON_SIZE)))
-                    .when_some(
-                        cairn_ui::focus::edge(
-                            &focus,
-                            tokens.foreground,
-                            px(0.0),
-                            cairn_ui::focus::keyboard_navigation(cx),
-                            window,
-                            cx,
-                        ),
-                        |this, ring| this.child(ring),
-                    ),
-            )
+            .child(cairn_ui::focus::caption_glyph(
+                icon,
+                UI_ICON_SIZE,
+                &focus,
+                tokens.foreground,
+                cairn_ui::focus::keyboard_navigation(cx),
+                window,
+                cx,
+            ))
             .into_any_element()
     }
 }
@@ -482,9 +465,9 @@ impl SetupApp {
             Screen::License => self.render_license(tokens, window, cx),
             Screen::Location => self.render_location(tokens, window, cx),
             Screen::Installing => self.render_installing(tokens),
-            Screen::Finished => self.render_installed(tokens, true),
+            Screen::Finished => self.render_finished(tokens),
             Screen::Failed => self.render_failed(tokens),
-            Screen::Maintenance => self.render_installed(tokens, false),
+            Screen::Maintenance => self.render_maintenance(tokens),
             Screen::Uninstall => self.render_uninstall_confirm(tokens, cx),
             Screen::Uninstalling => self.render_uninstalling(tokens),
             Screen::Uninstalled => self.render_uninstalled(tokens),
@@ -696,51 +679,54 @@ impl SetupApp {
             .into_any_element()
     }
 
-    /// One installed surface for both contexts: the success page after a fresh install and the
-    /// maintenance page shown when setup is launched on an installed machine. The header, icon and
-    /// actions are identical; only the supporting line changes.
-    fn render_installed(&self, tokens: &Tokens, fresh: bool) -> AnyElement {
+    fn render_finished(&self, tokens: &Tokens) -> AnyElement {
+        let mut details = vec![self.paragraph("finish_body", tokens).into_any_element()];
+        if self.restart_required {
+            details.push(
+                div()
+                    .text_sm()
+                    .text_color(tokens.muted_foreground)
+                    .child(self.i18n.get("finish_restart"))
+                    .into_any_element(),
+            );
+        }
+        self.render_installed_page(tokens, details)
+    }
+
+    fn render_maintenance(&self, tokens: &Tokens) -> AnyElement {
+        let version = self
+            .installed
+            .as_ref()
+            .map(|product| product.version.as_str())
+            .unwrap_or_default();
+        let version_line = if self
+            .installed
+            .as_ref()
+            .is_some_and(|product| product.is_newer_than_package())
+        {
+            self.i18n
+                .format("maintenance_newer", &[("version", version)])
+        } else {
+            self.i18n
+                .format("maintenance_installed", &[("version", version)])
+        };
+        let detail = div()
+            .text_sm()
+            .text_color(tokens.foreground)
+            .child(version_line)
+            .into_any_element();
+        self.render_installed_page(tokens, vec![detail])
+    }
+
+    fn render_installed_page(&self, tokens: &Tokens, details: Vec<AnyElement>) -> AnyElement {
         let icon = Icon::new(IconName::CircleCheck)
             .size(PAGE_ICON)
             .text_color(tokens.foreground)
             .into_any_element();
         let mut page = v_flex()
             .gap(MAIN_GAP)
-            .child(self.title_row(icon, "finish_title"));
-        if fresh {
-            page = page.child(self.paragraph("finish_body", tokens));
-            if self.restart_required {
-                page = page.child(
-                    div()
-                        .text_sm()
-                        .text_color(tokens.muted_foreground)
-                        .child(self.i18n.get("finish_restart")),
-                );
-            }
-        } else {
-            let version = self
-                .installed
-                .as_ref()
-                .map(|product| product.version.as_str())
-                .unwrap_or_default();
-            let version_line = if self
-                .installed
-                .as_ref()
-                .is_some_and(|product| product.is_newer_than_package())
-            {
-                self.i18n
-                    .format("maintenance_newer", &[("version", version)])
-            } else {
-                self.i18n
-                    .format("maintenance_installed", &[("version", version)])
-            };
-            page = page.child(
-                div()
-                    .text_sm()
-                    .text_color(tokens.foreground)
-                    .child(version_line),
-            );
-        }
+            .child(self.title_row(icon, "finish_title"))
+            .children(details);
         if let Some(notice) = self.notice {
             page = page.child(
                 div()
@@ -756,11 +742,7 @@ impl SetupApp {
 
     fn render_failed(&self, tokens: &Tokens) -> AnyElement {
         let uninstall = self.is_uninstall() || self.uninstall_attempted;
-        let missing_install = uninstall
-            && self
-                .error
-                .as_ref()
-                .is_some_and(|error| error.key == "error_not_installed");
+        let missing_install = uninstall && self.error == Some("error_not_installed");
         let title = if missing_install {
             "uninstall_missing_title"
         } else if uninstall {
@@ -771,16 +753,12 @@ impl SetupApp {
         let detail = if missing_install {
             Some(self.i18n.get("uninstall_missing_body"))
         } else {
-            self.error.as_ref().map(|error| {
-                // The uninstall flow names the same failures in uninstall terms: a person who
-                // came to remove Cairn must not read the installer's wording.
+            self.error.map(|key| {
                 let key = if uninstall {
-                    crate::model::uninstall_error_key(error.key)
+                    crate::model::uninstall_error_key(key)
                 } else {
-                    error.key
+                    key
                 };
-                // The raw MSI code is an internal token: it belongs in the log, not on the page.
-                // The page says what happened and points at the log entry.
                 self.i18n.get(key)
             })
         };
@@ -985,11 +963,7 @@ impl SetupApp {
                     actions.push(self.log_button(cx));
                 }
                 let uninstall = self.is_uninstall() || self.uninstall_attempted;
-                let uninstall_invalid = uninstall
-                    && self
-                        .error
-                        .as_ref()
-                        .is_some_and(|error| error.key == "error_msi_invalid");
+                let uninstall_invalid = uninstall && self.error == Some("error_msi_invalid");
                 if uninstall_invalid {
                     // A damaged saved package cannot be retried into working, so the page's one
                     // recovery is the file cleanup. It keeps the log beside it and leaves the way
@@ -1020,13 +994,7 @@ impl SetupApp {
                     // cannot be retried from this window. A failed forced cleanup cannot either:
                     // it may have stopped because a newer install appeared, and retrying would
                     // remove that install. Transient MSI failures can be retried.
-                    if !self.forced_cleanup
-                        && failure_offers_retry(
-                            self.error
-                                .as_ref()
-                                .map(|error| error.key)
-                                .unwrap_or_default(),
-                        )
+                    if !self.forced_cleanup && failure_offers_retry(self.error.unwrap_or_default())
                     {
                         actions.push(
                             Button::new("setup-retry")

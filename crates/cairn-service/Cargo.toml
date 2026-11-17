@@ -18,6 +18,7 @@ path = "src/main.rs"
 cairn-core.workspace = true
 cairn-ntfs.workspace = true
 cairn-content.workspace = true
+cairn-worker.workspace = true
 cairn-protocol.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -53,3 +54,6 @@ cairn-client.workspace = true
 
 [build-dependencies]
 winresource.workspace = true
+
+[lints]
+workspace = true

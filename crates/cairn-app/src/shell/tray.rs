@@ -40,20 +40,24 @@ pub(crate) fn find_main_window() -> Option<windows::Win32::Foundation::HWND> {
     }
 
     unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
-        let ctx = &mut *(lparam.0 as *mut EnumCtx);
-        let mut title_buf = [0u16; 64];
-        let title_len = GetWindowTextW(hwnd, &mut title_buf);
-        if title_len > 0 {
-            let title = String::from_utf16_lossy(&title_buf[..title_len as usize]);
-            if title == crate::WINDOW_TITLE {
-                ctx.found = Some(hwnd);
-                return BOOL(0);
+        // SAFETY: `lparam` is `&mut EnumCtx` valid for the synchronous `EnumWindows` call, and `hwnd` is a Win32 enumerated window handle.
+        unsafe {
+            let ctx = &mut *(lparam.0 as *mut EnumCtx);
+            let mut title_buf = [0u16; 64];
+            let title_len = GetWindowTextW(hwnd, &mut title_buf);
+            if title_len > 0 {
+                let title = String::from_utf16_lossy(&title_buf[..title_len as usize]);
+                if title == crate::WINDOW_TITLE {
+                    ctx.found = Some(hwnd);
+                    return BOOL(0);
+                }
             }
+            BOOL(1)
         }
-        BOOL(1)
     }
 
     let mut ctx = EnumCtx { found: None };
+    // SAFETY: `EnumWindows` invokes `enum_proc` synchronously while `ctx` stays alive on this stack frame.
     unsafe {
         let _ = EnumWindows(Some(enum_proc), LPARAM(&mut ctx as *mut _ as isize));
     }
@@ -68,6 +72,7 @@ pub(crate) fn activate_existing_cairn_window() -> bool {
     let Some(hwnd) = find_main_window() else {
         return false;
     };
+    // SAFETY: `hwnd` was returned by `find_main_window` for the Cairn window.
     unsafe {
         let _ = ShowWindow(hwnd, SW_RESTORE);
         let _ = BringWindowToTop(hwnd);
@@ -87,9 +92,12 @@ pub(crate) fn toggle_main_window() {
     let Some(hwnd) = find_main_window() else {
         return;
     };
+    // SAFETY: `hwnd` is a top-level HWND matched by `find_main_window`.
     let visible = unsafe { IsWindowVisible(hwnd).as_bool() };
+    // SAFETY: `GetForegroundWindow` reads the current foreground window handle from User32.
     let foreground = unsafe { GetForegroundWindow() } == hwnd;
     if visible && foreground {
+        // SAFETY: `hwnd` is a visible foreground Cairn window targeted for tray hide.
         unsafe {
             let _ = ShowWindow(hwnd, SW_HIDE);
         }

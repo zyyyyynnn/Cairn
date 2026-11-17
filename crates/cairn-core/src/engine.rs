@@ -6,8 +6,10 @@
 
 use crate::arena::NamePool;
 use crate::model::FileRecord;
-use crate::path_cache::DirectoryPathCache;
+use crate::path_cache::{root_path_for_drive, DirectoryPathCache};
+use crate::pinyin::pinyin_matches_with_options;
 use crate::syntax::{QueryExpr, SearchTerm};
+use crate::text_match::{normalize_for_match, TextMatchOptions};
 use memchr::memmem::Finder;
 use rayon::prelude::*;
 use regex::Regex;
@@ -39,12 +41,23 @@ impl CancellationToken {
     }
 }
 
-/// Resolves whether a content term's full-text hits include one record, keyed by the record's
-/// index in the evaluated table. The in-memory engine has no content index of its own, so the
-/// caller that owns it supplies the membership test; the term string is the content query text.
+/// Resolves whether a content term's full-text hits include one record, keyed by record index.
 pub type ContentHitResolver<'a> = &'a (dyn Fn(&str, u32) -> bool + Sync);
 
-/// Evaluates a `QueryExpr` against indexed file records in parallel, preserving the specified record order if given.
+pub(crate) type ExtraTermEval<'a> = &'a (dyn Fn(&SearchTerm, &FileRecord, u32) -> bool + Sync);
+
+#[derive(Clone, Copy)]
+pub(crate) struct EvalContext<'a> {
+    pub records: &'a [FileRecord],
+    pub arena: &'a NamePool,
+    pub path_cache: &'a DirectoryPathCache,
+    pub root: &'a Arc<str>,
+    pub drive_letter: Option<char>,
+    pub content_hit: Option<ContentHitResolver<'a>>,
+    pub extra_term_eval: Option<ExtraTermEval<'a>>,
+}
+
+/// Evaluates a `QueryExpr` against indexed file records in parallel, preserving order if given.
 pub fn execute_query_ordered(
     records: &[FileRecord],
     arena: &NamePool,
@@ -54,20 +67,20 @@ pub fn execute_query_ordered(
     order: Option<&[u32]>,
     cancel: &CancellationToken,
 ) -> Vec<u32> {
-    execute_query_inner(
+    let root = root_path_for_drive(drive_letter);
+    let ctx = EvalContext {
         records,
         arena,
         path_cache,
-        drive_letter,
-        query,
-        order,
-        None,
-        cancel,
-    )
+        root: &root,
+        drive_letter: Some(drive_letter),
+        content_hit: None,
+        extra_term_eval: None,
+    };
+    execute_query_with_context(&ctx, query, order, cancel)
 }
 
-/// Evaluates `query` with `content:` terms resolved through `content_hit`. The boolean structure
-/// (And/Or/Not) applies uniformly to metadata and content terms.
+/// Evaluates `query` with `content:` terms resolved through `content_hit`.
 pub fn execute_query_with_content(
     records: &[FileRecord],
     arena: &NamePool,
@@ -77,48 +90,43 @@ pub fn execute_query_with_content(
     content_hit: ContentHitResolver<'_>,
     cancel: &CancellationToken,
 ) -> Vec<u32> {
-    execute_query_inner(
+    let root = root_path_for_drive(drive_letter);
+    let ctx = EvalContext {
         records,
         arena,
         path_cache,
-        drive_letter,
-        query,
-        None,
-        Some(content_hit),
-        cancel,
-    )
+        root: &root,
+        drive_letter: Some(drive_letter),
+        content_hit: Some(content_hit),
+        extra_term_eval: None,
+    };
+    execute_query_with_context(&ctx, query, None, cancel)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn execute_query_inner(
-    records: &[FileRecord],
-    arena: &NamePool,
-    path_cache: &DirectoryPathCache,
-    drive_letter: char,
+pub(crate) fn execute_query_with_context(
+    ctx: &EvalContext<'_>,
     query: &QueryExpr,
     order: Option<&[u32]>,
-    content_hit: Option<ContentHitResolver<'_>>,
     cancel: &CancellationToken,
 ) -> Vec<u32> {
     if query.is_empty() {
         if cancel.is_cancelled() {
             return Vec::new();
         }
-        // Return all non-tombstone records
         if let Some(order_indices) = order {
             let mut matched = Vec::with_capacity(order_indices.len());
             for (i, &idx) in order_indices.iter().enumerate() {
                 if (i & 0x3FFF) == 0 && cancel.is_cancelled() {
                     return Vec::new();
                 }
-                if !records[idx as usize].is_tombstone() {
+                if !ctx.records[idx as usize].is_tombstone() {
                     matched.push(idx);
                 }
             }
             return matched;
         } else {
-            let mut matched = Vec::with_capacity(records.len());
-            for (idx, rec) in records.iter().enumerate() {
+            let mut matched = Vec::with_capacity(ctx.records.len());
+            for (idx, rec) in ctx.records.iter().enumerate() {
                 if (idx & 0x3FFF) == 0 && cancel.is_cancelled() {
                     return Vec::new();
                 }
@@ -140,21 +148,11 @@ fn execute_query_inner(
 
         let mut matched = Vec::new();
         for &idx in chunk {
-            let rec = &records[idx as usize];
+            let rec = &ctx.records[idx as usize];
             if rec.is_tombstone() {
                 continue;
             }
-
-            if evaluate_compiled_expr(
-                rec,
-                idx,
-                records,
-                arena,
-                path_cache,
-                drive_letter,
-                &compiled,
-                content_hit,
-            ) {
+            if evaluate_compiled_expr(rec, idx, ctx, &compiled) {
                 if matched.is_empty() {
                     matched.reserve(64);
                 }
@@ -171,21 +169,11 @@ fn execute_query_inner(
 
         let mut matched = Vec::new();
         for idx in range {
-            let rec = &records[idx as usize];
+            let rec = &ctx.records[idx as usize];
             if rec.is_tombstone() {
                 continue;
             }
-
-            if evaluate_compiled_expr(
-                rec,
-                idx,
-                records,
-                arena,
-                path_cache,
-                drive_letter,
-                &compiled,
-                content_hit,
-            ) {
+            if evaluate_compiled_expr(rec, idx, ctx, &compiled) {
                 if matched.is_empty() {
                     matched.reserve(64);
                 }
@@ -201,7 +189,7 @@ fn execute_query_inner(
             .flat_map(scan_chunk)
             .collect()
     } else {
-        let total = records.len() as u32;
+        let total = ctx.records.len() as u32;
         let num_chunks = total.div_ceil(chunk_size as u32);
         (0..num_chunks)
             .into_par_iter()
@@ -497,6 +485,9 @@ struct CompiledTermPlan {
     finder: Finder<'static>,
     regex: Option<Regex>,
     glob: Option<CompiledGlob>,
+    text_opts: TextMatchOptions,
+    normalized_query: String,
+    normalized_glob: Option<CompiledGlob>,
 }
 
 impl CompiledTermPlan {
@@ -515,6 +506,23 @@ impl CompiledTermPlan {
         } else {
             None
         };
+        let text_opts = TextMatchOptions {
+            case_sensitive: term.case_sensitive,
+            ignore_punctuation: term.ignore_punctuation,
+            ignore_whitespace: term.ignore_whitespace,
+            ignore_diacritics: term.ignore_diacritics,
+        };
+        let normalized_query = if text_opts.needs_custom_normalization() {
+            normalize_for_match(&term.text, text_opts)
+        } else {
+            String::new()
+        };
+        let normalized_glob =
+            if term.whole_filename && !term.is_regex && text_opts.needs_custom_normalization() {
+                Some(CompiledGlob::compile(&normalized_query, true))
+            } else {
+                None
+            };
         let ascii_lower_bytes = if term.text.is_ascii() {
             Some(
                 term.text
@@ -537,6 +545,9 @@ impl CompiledTermPlan {
             finder,
             regex,
             glob,
+            text_opts,
+            normalized_query,
+            normalized_glob,
         }
     }
 }
@@ -560,121 +571,52 @@ impl CompiledExpr {
     }
 }
 
-/// Precompiled query execution state ready to evaluate individual records without reallocations.
-pub struct CompiledQuery {
-    plan: CompiledExpr,
-}
-
-impl CompiledQuery {
-    pub fn compile(query: &QueryExpr) -> Self {
-        Self {
-            plan: CompiledExpr::compile(query),
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn evaluate_record(
-        &self,
-        rec: &FileRecord,
-        idx: u32,
-        records: &[FileRecord],
-        arena: &NamePool,
-        path_cache: &DirectoryPathCache,
-        drive_letter: char,
-    ) -> bool {
-        evaluate_compiled_expr(
-            rec,
-            idx,
-            records,
-            arena,
-            path_cache,
-            drive_letter,
-            &self.plan,
-            None,
-        )
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
 fn evaluate_compiled_expr(
     rec: &FileRecord,
     idx: u32,
-    records: &[FileRecord],
-    arena: &NamePool,
-    path_cache: &DirectoryPathCache,
-    drive_letter: char,
+    ctx: &EvalContext<'_>,
     expr: &CompiledExpr,
-    content_hit: Option<ContentHitResolver<'_>>,
 ) -> bool {
     match expr {
-        CompiledExpr::Term(plan) => evaluate_compiled_term(
-            rec,
-            idx,
-            records,
-            arena,
-            path_cache,
-            drive_letter,
-            plan,
-            content_hit,
-        ),
-        CompiledExpr::And(terms) => terms.iter().all(|sub| {
-            evaluate_compiled_expr(
-                rec,
-                idx,
-                records,
-                arena,
-                path_cache,
-                drive_letter,
-                sub,
-                content_hit,
-            )
-        }),
-        CompiledExpr::Or(terms) => terms.iter().any(|sub| {
-            evaluate_compiled_expr(
-                rec,
-                idx,
-                records,
-                arena,
-                path_cache,
-                drive_letter,
-                sub,
-                content_hit,
-            )
-        }),
-        CompiledExpr::Not(inner) => !evaluate_compiled_expr(
-            rec,
-            idx,
-            records,
-            arena,
-            path_cache,
-            drive_letter,
-            inner,
-            content_hit,
-        ),
+        CompiledExpr::Term(plan) => evaluate_compiled_term(rec, idx, ctx, plan),
+        CompiledExpr::And(terms) => terms
+            .iter()
+            .all(|sub| evaluate_compiled_expr(rec, idx, ctx, sub)),
+        CompiledExpr::Or(terms) => terms
+            .iter()
+            .any(|sub| evaluate_compiled_expr(rec, idx, ctx, sub)),
+        CompiledExpr::Not(inner) => !evaluate_compiled_expr(rec, idx, ctx, inner),
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[inline]
+fn has_extra_constraints(term: &SearchTerm) -> bool {
+    term.depth_filter.is_some()
+        || term.child_filter.is_some()
+        || term.child_count_filter.is_some()
+        || term.child_file_count_filter.is_some()
+        || term.child_folder_count_filter.is_some()
+        || term.empty_folder_only
+        || term.dupe_mode.is_some()
+        || term.length_filter.is_some()
+        || term.author_filter.is_some()
+        || term.tags_filter.is_some()
+        || term.dimensions_filter.is_some()
+        || term.framerate_filter.is_some()
+}
+
 fn evaluate_compiled_term(
     rec: &FileRecord,
     idx: u32,
-    records: &[FileRecord],
-    arena: &NamePool,
-    path_cache: &DirectoryPathCache,
-    drive_letter: char,
+    ctx: &EvalContext<'_>,
     plan: &CompiledTermPlan,
-    content_hit: Option<ContentHitResolver<'_>>,
 ) -> bool {
     let term = &plan.term;
 
-    // 0. Unparsable search item (e.g. a lone `size:`): constrain to nothing rather than
-    //    silently matching every record.
     if term.match_nothing {
         return false;
     }
 
-    // 1. Fast filters: file_only / folder_only, then the query-wide attribute constraints
-    //    a `QueryDefaults` put on this item (hidden and system records are opt-out).
     if term.exclude_hidden && rec.is_hidden() {
         return false;
     }
@@ -684,25 +626,31 @@ fn evaluate_compiled_term(
     if term.file_only && rec.is_dir() {
         return false;
     }
-    if term.folder_only && !rec.is_dir() {
+    if (term.folder_only || term.empty_folder_only) && !rec.is_dir() {
         return false;
     }
-
-    // 2. Drive filter
-    if let Some(req_drive) = term.drive {
-        if !drive_letter.eq_ignore_ascii_case(&req_drive) {
+    if let Some(af) = term.attrib_filter {
+        if !af.matches(rec.flags) {
             return false;
         }
     }
 
-    // 3. Extension filter
+    if let Some(req_drive) = term.drive {
+        if ctx
+            .drive_letter
+            .is_none_or(|d| !d.eq_ignore_ascii_case(&req_drive))
+        {
+            return false;
+        }
+    }
+
     if !term.ext_filter.is_empty() {
         if !rec.has_ext() {
             return false;
         }
-        let ext = arena.get_ext(rec.name_offset, rec.name_len, rec.ext_offset);
-        // SPEC QRY-04: `ext:` entries support `*` and `?`. Wildcard-free entries keep the exact
-        // comparison so the common `ext:md` case does not pay for glob character allocation.
+        let ext = ctx
+            .arena
+            .get_ext(rec.name_offset, rec.name_len, rec.ext_offset);
         let matched = if !plan.ext_has_glob {
             term.ext_filter
                 .iter()
@@ -721,14 +669,17 @@ fn evaluate_compiled_term(
         }
     }
 
-    // 4. Size filter
     if let Some(ref size_filter) = term.size_filter {
         if !size_filter.matches(rec.size) {
             return false;
         }
     }
-
-    // 5. Date filters
+    if let Some(ref len_filter) = term.len_filter {
+        let name = ctx.arena.get_name(rec.name_offset, rec.name_len);
+        if !len_filter.matches(name.chars().count() as u64) {
+            return false;
+        }
+    }
     if let Some(ref dm_filter) = term.dm_filter {
         if !dm_filter.matches(rec.modified_ts) {
             return false;
@@ -740,9 +691,10 @@ fn evaluate_compiled_term(
         }
     }
 
-    // 6. Parent path filter
     if let Some(ref parent_req) = term.parent_filter {
-        let actual_parent = path_cache.get_parent_path(records, arena, drive_letter, idx);
+        let actual_parent =
+            ctx.path_cache
+                .get_parent_path_with_root(ctx.records, ctx.arena, ctx.root, idx);
         let trimmed_parent = actual_parent.trim_end_matches('\\');
         let trimmed_req = parent_req.trim_end_matches('\\');
         if !trimmed_parent.eq_ignore_ascii_case(trimmed_req) {
@@ -750,25 +702,27 @@ fn evaluate_compiled_term(
         }
     }
 
-    // 7. Content search filter (CNT-06)
-    // The MFT in-memory engine only matches file metadata and paths. When a term requires
-    // content matching, only the caller's hit resolver can answer it; without one the term must
-    // never falsely match all files.
-    if let Some(ref content_query) = term.content_query {
-        return content_hit.is_some_and(|hit| hit(content_query, idx));
+    if has_extra_constraints(term) && !ctx.extra_term_eval.is_some_and(|eval| eval(term, rec, idx))
+    {
+        return false;
     }
 
-    // 8. Text match
+    if let Some(ref content_query) = term.content_query {
+        return ctx.content_hit.is_some_and(|hit| hit(content_query, idx));
+    }
+
     if term.text.is_empty() {
         return true;
     }
 
     if term.match_path {
-        let full_path = path_cache.get_full_path(records, arena, drive_letter, idx);
+        let full_path =
+            ctx.path_cache
+                .get_full_path_with_root(ctx.records, ctx.arena, ctx.root, idx);
         match_compiled_text(&full_path, None, plan)
     } else {
-        let name = arena.get_name(rec.name_offset, rec.name_len);
-        let folded_name = arena.get_folded(rec.name_offset, rec.name_len);
+        let name = ctx.arena.get_name(rec.name_offset, rec.name_len);
+        let folded_name = ctx.arena.get_folded(rec.name_offset, rec.name_len);
         if term.is_regex
             || term.whole_filename
             || term.case_sensitive
@@ -777,6 +731,8 @@ fn evaluate_compiled_term(
             || term.suffix
             || term.start_with
             || term.end_with
+            || term.pinyin
+            || plan.text_opts.needs_custom_normalization()
         {
             match_compiled_text(name, Some(folded_name), plan)
         } else {
@@ -870,9 +826,66 @@ fn word_ends_with(word: &str, query: &str, query_lower: &str, case_sensitive: bo
     }
 }
 
+fn match_normalized_text(
+    norm_target: &str,
+    norm_query: &str,
+    term: &SearchTerm,
+    regex: Option<&Regex>,
+    norm_glob: Option<&CompiledGlob>,
+) -> bool {
+    if term.is_regex {
+        return regex.is_some_and(|re| re.is_match(norm_target));
+    }
+    if let Some(glob) = norm_glob {
+        return glob.matches(norm_target, None, true);
+    }
+    if term.start_with {
+        return norm_target.starts_with(norm_query);
+    }
+    if term.end_with {
+        return norm_target.ends_with(norm_query);
+    }
+    if term.whole_words {
+        return norm_target
+            .split(|c: char| !c.is_alphanumeric())
+            .any(|w| w == norm_query);
+    }
+    if term.prefix && term.suffix {
+        return norm_target
+            .split(|c: char| !c.is_alphanumeric())
+            .any(|w| w.starts_with(norm_query) && w.ends_with(norm_query));
+    }
+    if term.prefix {
+        return norm_target
+            .split(|c: char| !c.is_alphanumeric())
+            .any(|w| w.starts_with(norm_query));
+    }
+    if term.suffix {
+        return norm_target
+            .split(|c: char| !c.is_alphanumeric())
+            .any(|w| w.ends_with(norm_query));
+    }
+    norm_target.contains(norm_query)
+}
+
 fn match_compiled_text(target: &str, folded_bytes: Option<&[u8]>, plan: &CompiledTermPlan) -> bool {
     let term = &plan.term;
     let query = term.text.as_str();
+
+    if term.pinyin {
+        return pinyin_matches_with_options(target, query, plan.text_opts);
+    }
+
+    if plan.text_opts.needs_custom_normalization() {
+        let norm = normalize_for_match(target, plan.text_opts);
+        return match_normalized_text(
+            &norm,
+            &plan.normalized_query,
+            term,
+            plan.regex.as_ref(),
+            plan.normalized_glob.as_ref(),
+        );
+    }
 
     if term.is_regex {
         return plan.regex.as_ref().is_some_and(|re| re.is_match(target));
@@ -1260,7 +1273,6 @@ mod tests {
         let path_cache = DirectoryPathCache::new();
         let cancel = CancellationToken::new();
 
-        // 1. Pure content query (content:架构) - MUST NOT match all files (CNT-06)
         let q_content = parse_query("content:架构");
         let matches = execute_query(&records, &pool, &path_cache, 'C', &q_content, &cancel);
         assert_eq!(
@@ -1269,7 +1281,6 @@ mod tests {
             "content: query must not match files when content search is not evaluated"
         );
 
-        // 2. Combined extension and content query (ext:md content:架构)
         let q_combined = parse_query("ext:md content:架构");
         let matches_combined =
             execute_query(&records, &pool, &path_cache, 'C', &q_combined, &cancel);
@@ -1279,7 +1290,6 @@ mod tests {
             "ext:md content:架构 must not falsely match readme.md without content hit"
         );
 
-        // 3. Normal metadata queries should still match correctly
         let q_ext = parse_query("ext:md");
         let matches_ext = execute_query(&records, &pool, &path_cache, 'C', &q_ext, &cancel);
         assert_eq!(matches_ext.len(), 1);
@@ -1385,7 +1395,6 @@ mod tests {
         let path_cache = DirectoryPathCache::new();
         let cancel = CancellationToken::new();
 
-        // 1. prefix: matches start of any word bounded by non-alphanumeric chars
         let q_pref1 = parse_query("prefix:cair");
         let m1 = execute_query(&records, &pool, &path_cache, 'C', &q_pref1, &cancel);
         assert_eq!(m1, vec![0]);
@@ -1399,7 +1408,6 @@ mod tests {
         let m_mid = execute_query(&records, &pool, &path_cache, 'C', &q_pref_mid, &cancel);
         assert_eq!(m_mid.len(), 0);
 
-        // 2. suffix: matches end of any word
         let q_suff1 = parse_query("suffix:rn");
         let s1 = execute_query(&records, &pool, &path_cache, 'C', &q_suff1, &cancel);
         assert_eq!(s1, vec![0]);
@@ -1413,7 +1421,6 @@ mod tests {
         let s_mid = execute_query(&records, &pool, &path_cache, 'C', &q_suff_mid, &cancel);
         assert_eq!(s_mid.len(), 0);
 
-        // 3. Unicode Chinese word boundaries
         let q_zh_pref = parse_query("prefix:测");
         let m_zh = execute_query(&records, &pool, &path_cache, 'C', &q_zh_pref, &cancel);
         assert_eq!(m_zh, vec![1]);
@@ -1443,38 +1450,6 @@ mod tests {
             });
         }
         (pool, records)
-    }
-
-    #[test]
-    fn compiled_query_matches_execute_query_for_regex_and_repeated_terms() {
-        use crate::syntax::parse_query;
-
-        let mut names = vec!["report.log"; 2_000];
-        names.push("vision_report.txt");
-        names.push("notes.md");
-        let (pool, records) = records_of(&names);
-        let path_cache = DirectoryPathCache::new();
-        let cancel = CancellationToken::new();
-
-        for q in [
-            "regex:^report",
-            "regex:log|regex:log regex:log",
-            "regex:rep.* regex:vi.*",
-        ] {
-            let expr = parse_query(q);
-            let compiled = CompiledQuery::compile(&expr);
-            let full = execute_query(&records, &pool, &path_cache, 'C', &expr, &cancel);
-            let via_compiled: Vec<u32> = records
-                .iter()
-                .enumerate()
-                .filter_map(|(i, rec)| {
-                    compiled
-                        .evaluate_record(rec, i as u32, &records, &pool, &path_cache, 'C')
-                        .then_some(i as u32)
-                })
-                .collect();
-            assert_eq!(via_compiled, full, "mismatch for compiled query {q}");
-        }
     }
 
     /// An unparsable pattern matches nothing, exactly as the per-record compilation did.
@@ -1557,32 +1532,6 @@ mod tests {
 
         // A record whose attributes were never recorded (flags 0) is never treated as hidden.
         assert!(!records[0].is_hidden() && !records[0].is_system());
-    }
-
-    #[test]
-    fn compiled_query_handles_path_and_prefix_terms_without_divergence() {
-        use crate::syntax::parse_query;
-
-        let names = ["sub_report_file.txt", "report.log", "other.txt"];
-        let (pool, records) = records_of(&names);
-        let path_cache = DirectoryPathCache::new();
-        let cancel = CancellationToken::new();
-
-        for q in ["path:report prefix:sub", "report report report"] {
-            let expr = parse_query(q);
-            let compiled = CompiledQuery::compile(&expr);
-            let full = execute_query(&records, &pool, &path_cache, 'C', &expr, &cancel);
-            let via_compiled: Vec<u32> = records
-                .iter()
-                .enumerate()
-                .filter_map(|(i, rec)| {
-                    compiled
-                        .evaluate_record(rec, i as u32, &records, &pool, &path_cache, 'C')
-                        .then_some(i as u32)
-                })
-                .collect();
-            assert_eq!(via_compiled, full, "mismatch for compiled query {q}");
-        }
     }
 
     #[test]

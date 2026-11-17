@@ -11,12 +11,13 @@ use crate::shell::accessibility::{self, ControlElement};
 use crate::shell::status_bar::format_count;
 use crate::shell::theme::{self, ShellTokens};
 use cairn_core::format_size_bytes;
+use cairn_protocol::message::QueryDegradedReason;
 use fluent_bundle::FluentArgs;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::Disableable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::status_bar::StatusBar;
-use gpui_kit::component::{h_flex, Sizable as _};
+use gpui_kit::component::{h_flex, Icon, Sizable as _};
 use gpui_kit::gpui::*;
 
 /// The band marks a loading state only while the current view has nothing to show.
@@ -60,28 +61,27 @@ impl CairnApp {
                     .child(text)
                     .into_any_element(),
             );
+        } else if self.recycle_bin.is_loading() {
+            view_name = "recycle-bin";
+            summary_loading = true;
+            icon_loading = true;
         } else if let Some(items) = self.recycle_bin.rows() {
             view_name = "recycle-bin";
-            if self.recycle_bin.is_loading() {
-                summary_loading = true;
-                icon_loading = true;
-            } else {
-                let count_text = {
-                    let mut args = FluentArgs::new();
-                    args.set("count", items.len() as i64);
-                    args.set("count_text", format_count(items.len()));
-                    self.i18n.get_text_with_args("status_objects_count", &args)
-                };
-                summary_aria = Some(count_text.clone());
-                summary = Some(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .font_features(theme::tabular_figures())
-                        .child(count_text)
-                        .into_any_element(),
-                );
-            }
+            let count_text = {
+                let mut args = FluentArgs::new();
+                args.set("count", items.len() as i64);
+                args.set("count_text", format_count(items.len()));
+                self.i18n.get_text_with_args("status_objects_count", &args)
+            };
+            summary_aria = Some(count_text.clone());
+            summary = Some(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .font_features(theme::tabular_figures())
+                    .child(count_text)
+                    .into_any_element(),
+            );
         } else if let Some(listing) = self.block_listing.as_ref() {
             let count_text = {
                 let mut args = FluentArgs::new();
@@ -219,13 +219,13 @@ impl CairnApp {
             summary_loading = status_waiting(
                 awaiting_results,
                 index_loading,
-                self.query.is_searching,
-                self.service.is_probing_service,
+                self.query.is_searching(),
+                self.service.connection.is_probing(),
             );
             // Paging keeps the refresh control: rows already on screen are not a first-page wait.
             icon_loading = summary_loading;
             if !summary_loading
-                && self.service.is_service_connected
+                && self.service.connection.is_connected()
                 && self.service.status.has_objects_summary()
             {
                 let text = self.service.status.objects_summary_text(&self.i18n);
@@ -299,12 +299,46 @@ impl CairnApp {
             })
             .child(refresh);
 
+        let mut right: Option<AnyElement> = None;
+        let in_index_table = !self.recycle_bin.is_open()
+            && self.block_listing.is_none()
+            && self.drive_view.is_none();
+        if in_index_table && !summary_loading {
+            if let Some(degraded) = &self.query.degraded {
+                let notice = match degraded {
+                    QueryDegradedReason::PropertyIndexDisabled { .. } => {
+                        self.cached_text("query_degraded_property_index")
+                    }
+                };
+                summary_aria = Some(match summary_aria.take() {
+                    Some(existing) => format!("{existing} {notice}"),
+                    None => notice.to_string(),
+                });
+                right = Some(
+                    h_flex()
+                        .items_center()
+                        .gap(rems(layout::SPACE_4))
+                        .flex_shrink_0()
+                        .text_sm()
+                        .text_color(tokens.warning_ink)
+                        .child(
+                            Icon::new(IconName::TriangleAlert)
+                                .xsmall()
+                                .flex_shrink_0()
+                                .text_color(tokens.warning_ink),
+                        )
+                        .child(notice)
+                        .into_any_element(),
+                );
+            }
+        }
+
         // Opt-in acceptance trace (`CAIRN_PERF_LOG`): the visible summary and the loading state,
         // never a hidden animated value.
         crate::shell::perf::mark(&format!(
             "status frame summary={summary_aria:?} bytes={} summary_loading={summary_loading} icon_loading={icon_loading} view={view_name} qid={}",
             self.service.status.objects_bytes(),
-            self.query.query_id,
+            self.query.query_id(),
         ));
 
         let aria_summary: SharedString =
@@ -321,8 +355,6 @@ impl CairnApp {
             .items_center()
             .gap(rems(layout::SPACE_4))
             .child(refresh_slot);
-        // The summary is only rendered once there is a completed result set, so the band does not
-        // shift when it appears.
         if let Some(summary) = summary {
             left = left.child(div().min_w_0().flex_1().truncate().child(summary));
         }
@@ -338,8 +370,6 @@ impl CairnApp {
                 div()
                     .flex_shrink_0()
                     .font_features(theme::tabular_figures())
-                    // The window root clears Treemap selection on every left
-                    // press; the reset is a control, not a click on the canvas.
                     .on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, _, cx| {
                         cx.stop_propagation()
                     })
@@ -359,25 +389,24 @@ impl CairnApp {
             );
         }
 
-        let status_bar = StatusBar::new()
+        let mut status_bar = StatusBar::new()
             .h(rems(layout::STATUS_HEIGHT))
             .flex_shrink_0()
             .px(rems(layout::CONTENT_INSET))
             .border_t_1()
             .border_color(tokens.border)
-            // The count is a live value; its digits must not reflow as results arrive.
             .font_features(theme::tabular_figures())
             .text_sm()
             .bg(tokens.status_bar)
             .text_color(tokens.muted_foreground)
-            // The summary can carry a full path; let it ellipsize in the bar.
             .left(left);
+        if let Some(right_slot) = right {
+            status_bar = status_bar.right(right_slot);
+        }
 
         accessibility::element(bar)
             .aria_label(aria_summary)
-            // The status band is fixed-height chrome. Without this it is the
-            // first child the column can shrink when the result band's content
-            // is taller than the window, and the count disappears entirely.
+            // Keep chrome pinned at its fixed height when results overflow taller than the window.
             .flex_shrink_0()
             .on_mouse_down(
                 MouseButton::Left,
@@ -386,13 +415,8 @@ impl CairnApp {
             .child(status_bar)
     }
 
-    /// Refreshes whichever data surface the status band is describing. The loading/refresh
-    /// control is the same in the table and Treemap; it starts a new query, a new Treemap scan,
-    /// a new bin listing, or a service probe instead of animating a value.
     pub(crate) fn refresh_current_view(&mut self, cx: &mut Context<Self>) {
         if self.recycle_bin.is_open() {
-            // The bin loader owns the session; setting the flag again would make two
-            // authors of the same fact.
             self.begin_recycle_bin_load(cx);
             cx.notify();
             return;
@@ -407,7 +431,7 @@ impl CairnApp {
             }
             return;
         }
-        if !self.service.is_service_connected {
+        if !self.service.connection.is_connected() {
             self.check_service_connection(cx);
             return;
         }
@@ -421,15 +445,8 @@ mod tests {
     use super::status_waiting;
 
     #[test]
-    fn a_loaded_table_is_not_waiting_on_a_background_index() {
-        assert!(
-            !status_waiting(false, true, false, false),
-            "a volume catching up must not keep the status mark turning over visible rows"
-        );
-    }
-
-    #[test]
-    fn an_empty_table_waits_for_its_first_results() {
+    fn status_waiting_requires_empty_table_and_active_work() {
+        assert!(!status_waiting(false, true, true, true));
         assert!(status_waiting(true, true, false, false));
         assert!(status_waiting(true, false, true, false));
         assert!(status_waiting(true, false, false, true));

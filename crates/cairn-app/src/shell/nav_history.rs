@@ -294,7 +294,6 @@ mod tests {
                         assert_eq!(this.nav_history_index, 0);
                         assert_eq!(this.nav_history[0].filter, FilterCategory::All);
 
-                        // Step 1: User navigates to Document filter
                         this.query.active_filter = FilterCategory::Document;
                         this.record_nav_state();
 
@@ -303,7 +302,6 @@ mod tests {
                         assert_eq!(this.nav_history.len(), 2);
                         assert_eq!(this.nav_history_index, 1);
 
-                        // Step 2: User navigates to Picture filter
                         this.query.active_filter = FilterCategory::Picture;
                         this.record_nav_state();
 
@@ -312,18 +310,16 @@ mod tests {
                         assert_eq!(this.nav_history.len(), 3);
                         assert_eq!(this.nav_history_index, 2);
 
-                        // Step 3: Go back to Document
                         this.go_back(window, cx);
                         assert_eq!(this.query.active_filter, FilterCategory::Document);
                         assert_eq!(this.nav_history_index, 1);
                         assert!(this.can_go_back());
                         assert!(this.can_go_forward());
 
-                        // Step 4: Branch by navigating to Executable while at Document
+                        // Branching from an earlier entry truncates forward history.
                         this.query.active_filter = FilterCategory::Executable;
                         this.record_nav_state();
 
-                        // History should now be: All, Document, Executable (Picture dropped)
                         assert_eq!(this.nav_history.len(), 3);
                         assert_eq!(this.nav_history_index, 2);
                         assert_eq!(this.nav_history[0].filter, FilterCategory::All);
@@ -332,21 +328,18 @@ mod tests {
                         assert!(this.can_go_back());
                         assert!(!this.can_go_forward());
 
-                        // Step 5: Go back to Document
                         this.go_back(window, cx);
                         assert_eq!(this.query.active_filter, FilterCategory::Document);
                         assert_eq!(this.nav_history_index, 1);
                         assert!(this.can_go_back());
                         assert!(this.can_go_forward());
 
-                        // Step 6: Go back to All
                         this.go_back(window, cx);
                         assert_eq!(this.query.active_filter, FilterCategory::All);
                         assert_eq!(this.nav_history_index, 0);
                         assert!(!this.can_go_back());
                         assert!(this.can_go_forward());
 
-                        // Step 7: Advance forward back to Executable
                         this.go_forward(window, cx);
                         assert_eq!(this.query.active_filter, FilterCategory::Document);
                         assert_eq!(this.nav_history_index, 1);
@@ -382,24 +375,19 @@ mod tests {
                     let app = cx.new(|cx| CairnApp::new(window, cx));
 
                     app.update(cx, |this, cx| {
-                        // 1. Initial state at table index 0
                         assert_eq!(this.nav_history_index, 0);
                         assert!(this.drive_view.is_none());
 
-                        // 2. Open drive visualization for 'C'
                         this.open_drive_visualization('C', window, cx);
                         assert_eq!(this.nav_history_index, 1);
                         assert_eq!(this.drive_view, Some('C'));
 
-                        // 3. Navigate directly to a browsing path C:\Windows without drill-back history
                         this.open_drive_at('C', r"C:\Windows", window, cx);
 
-                        // 4. Leave drive view by going back to table
                         this.go_back(window, cx);
                         assert_eq!(this.nav_history_index, 0);
                         assert!(this.drive_view.is_none());
 
-                        // Verify that the drive history entry at index 1 recorded C:\Windows
                         let recorded_dir = this.nav_history[1]
                             .visualization
                             .as_ref()
@@ -410,7 +398,6 @@ mod tests {
                             "drive history entry must preserve browsing path when leaving drive view"
                         );
 
-                        // 5. Go forward back into drive view
                         this.go_forward(window, cx);
                         assert_eq!(this.nav_history_index, 1);
                         assert_eq!(this.drive_view, Some('C'));
@@ -419,12 +406,10 @@ mod tests {
                             Some(r"C:\Windows")
                         );
 
-                        // 6. Switch directly to drive D and navigate to D:\Games
                         this.open_drive_visualization('D', window, cx);
                         assert_eq!(this.drive_view, Some('D'));
                         this.open_drive_at('D', r"D:\Games", window, cx);
 
-                        // 7. Go back: must restore Drive C at C:\Windows
                         this.go_back(window, cx);
                         assert_eq!(this.drive_view, Some('C'));
                         assert_eq!(
@@ -432,7 +417,6 @@ mod tests {
                             Some(r"C:\Windows")
                         );
 
-                        // 8. Go forward: must restore Drive D at D:\Games
                         this.go_forward(window, cx);
                         assert_eq!(this.drive_view, Some('D'));
                         assert_eq!(

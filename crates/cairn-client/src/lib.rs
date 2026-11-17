@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+#![forbid(unsafe_code)]
+
 //! `cairn-client`: Async Named Pipe client library for Cairn GUI and CLI frontends.
 
 pub mod client;

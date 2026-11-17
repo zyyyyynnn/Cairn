@@ -35,7 +35,7 @@ impl MultiVolumeEngine {
     ) -> Result<(), String> {
         let _serialized = self.config_apply_lock.lock().unwrap();
         let path = self.config_path.clone();
-        let (previous_enabled, applied) = {
+        let (previous_enabled, previous_property_enabled, applied) = {
             let mut cfg = self.config.write().unwrap();
             let next = build(&cfg)?;
             if persist {
@@ -43,8 +43,9 @@ impl MultiVolumeEngine {
                     .map_err(|e| format!("could not persist {}: {e}", path.display()))?;
             }
             let previous_enabled = cfg.content_index_enabled;
+            let previous_property_enabled = cfg.property_index_enabled;
             *cfg = next.clone();
-            (previous_enabled, next)
+            (previous_enabled, previous_property_enabled, next)
         };
         if persist {
             // Only a configuration that reached the protected file is trusted; a plain in-memory
@@ -52,7 +53,17 @@ impl MultiVolumeEngine {
             self.config_trusted.store(true, Ordering::SeqCst);
         }
         self.apply_content_switch(previous_enabled, applied.content_index_enabled);
+        if previous_property_enabled != applied.property_index_enabled
+            || self.property_tables.read().unwrap().is_enabled() != applied.property_index_enabled
+        {
+            self.apply_property_index_switch(applied.property_index_enabled);
+        }
+        {
+            let mut journal = self.index_journal.lock().unwrap();
+            journal.set_enabled(applied.index_journal_enabled);
+        }
         self.retain_indexed_volumes(&applied);
+        self.sync_folder_sources_from_config(&applied.folder_sources, &applied.excluded_paths);
         Ok(())
     }
 
@@ -74,7 +85,7 @@ impl MultiVolumeEngine {
             } else {
                 self.content_cancel
                     .store(true, std::sync::atomic::Ordering::SeqCst);
-                self.set_content_state(ContentIndexState::Disabled);
+                self.set_content_disabled();
                 self.send_content_command(content_pipeline::ContentCommand::Cancel);
             }
         } else if next_enabled
@@ -92,14 +103,19 @@ impl MultiVolumeEngine {
         }
     }
 
-    /// Drops volumes whose drive is no longer indexed (IDX-01).
+    /// Drops unindexed drives and updates each surviving volume's full-path exclusion mode.
     fn retain_indexed_volumes(&self, cfg: &ServiceConfig) {
+        let full_path_rules =
+            crate::exclusion::ExclusionRules::parse(&cfg.excluded_paths).uses_full_path_rules();
         let mut lock = self.volumes.write().unwrap();
         lock.retain(|&d, _| {
             !cfg.excluded_drives
                 .iter()
                 .any(|&ex| ex.eq_ignore_ascii_case(&d))
         });
+        for vol in lock.values_mut() {
+            vol.set_full_path_exclusion_rules(full_path_rules);
+        }
     }
 
     /// Reloads configuration from the service configuration file and applies it (SVC-05, IDX-09).

@@ -4,7 +4,7 @@
 
 //! USN (Update Sequence Number) Change Journal monitoring and event parser.
 
-use cairn_core::{FLAG_DIRECTORY, FLAG_REPARSE_POINT};
+use cairn_core::flags_from_win32_attributes;
 use thiserror::Error;
 
 pub const FSCTL_QUERY_USN_JOURNAL: u32 = 0x000900F4;
@@ -23,17 +23,9 @@ pub const USN_REASON_CLOSE: u32 = 0x80000000;
 pub const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x00000010;
 pub const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x00000400;
 
-/// Translates the Win32 attributes carried by a USN record into the directory/reparse flag bits an
-/// indexed record keeps. Other attributes are not part of the compact record.
+/// Translates the Win32 attributes carried by a USN record into `FileRecord` flag bits.
 pub fn file_record_flags(attributes: u32) -> u16 {
-    let mut flags = 0u16;
-    if attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
-        flags |= FLAG_DIRECTORY;
-    }
-    if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-        flags |= FLAG_REPARSE_POINT;
-    }
-    flags
+    flags_from_win32_attributes(attributes)
 }
 
 #[derive(Error, Debug)]
@@ -167,8 +159,10 @@ pub fn parse_usn_records(buf: &[u8]) -> (i64, Vec<UsnChange>) {
                     scratch.clear();
                     scratch.extend(
                         name_bytes
-                            .chunks_exact(2)
-                            .map(|c| u16::from_le_bytes([c[0], c[1]])),
+                            .as_chunks::<2>()
+                            .0
+                            .iter()
+                            .map(|&pair| u16::from_le_bytes(pair)),
                     );
                     String::from_utf16_lossy(scratch)
                 } else {
@@ -227,6 +221,10 @@ pub fn parse_usn_records(buf: &[u8]) -> (i64, Vec<UsnChange>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cairn_core::{
+        FLAG_ARCHIVE, FLAG_DIRECTORY, FLAG_HIDDEN, FLAG_REPARSE_POINT, FLAG_SYSTEM,
+        WIN32_ATTR_ARCHIVE, WIN32_ATTR_HIDDEN, WIN32_ATTR_SYSTEM,
+    };
 
     #[test]
     fn test_delete_priority() {
@@ -290,6 +288,10 @@ mod tests {
             file_record_flags(FILE_ATTRIBUTE_DIRECTORY) & FLAG_DIRECTORY,
             FLAG_DIRECTORY
         );
+        assert_eq!(
+            file_record_flags(WIN32_ATTR_HIDDEN | WIN32_ATTR_SYSTEM | WIN32_ATTR_ARCHIVE),
+            FLAG_HIDDEN | FLAG_SYSTEM | FLAG_ARCHIVE
+        );
     }
 
     #[test]
@@ -343,7 +345,7 @@ mod tests {
         let mut buf = Vec::new();
         buf.extend_from_slice(&5000i64.to_le_bytes());
 
-        // 1. Unclosed non-rename record must be skipped even with non-UTF-16 odd payload.
+        // Unclosed non-rename record must be skipped even with non-UTF-16 odd payload.
         push_record(
             &mut buf,
             10,
@@ -352,7 +354,7 @@ mod tests {
             0,
             &[0xFF, 0x00, 0xAA],
         );
-        // 2. Deleted closed record carries no name; odd filename bytes must be ignored.
+        // Deleted closed record carries no name; odd filename bytes must be ignored.
         push_record(
             &mut buf,
             11,
@@ -361,7 +363,6 @@ mod tests {
             0,
             &[0xAA, 0xBB, 0xCC],
         );
-        // 3. Created record with Unicode UTF-16 filename.
         let unicode_bytes: Vec<u8> = "设计文档.md"
             .encode_utf16()
             .flat_map(u16::to_le_bytes)
@@ -374,7 +375,7 @@ mod tests {
             0,
             &unicode_bytes,
         );
-        // 4. Rename old & new (without USN_REASON_CLOSE, because rename records arrive unclosed).
+        // Rename old & new (without USN_REASON_CLOSE, because rename records arrive unclosed).
         let old_bytes: Vec<u8> = "old.txt"
             .encode_utf16()
             .flat_map(u16::to_le_bytes)
@@ -385,7 +386,7 @@ mod tests {
             .collect();
         push_record(&mut buf, 13, 1, USN_REASON_RENAME_OLD_NAME, 0, &old_bytes);
         push_record(&mut buf, 13, 2, USN_REASON_RENAME_NEW_NAME, 0, &new_bytes);
-        // 5. DataChanged & BasicInfoChanged carry no filename.
+        // DataChanged & BasicInfoChanged carry no filename.
         push_record(
             &mut buf,
             14,

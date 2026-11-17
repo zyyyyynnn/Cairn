@@ -293,7 +293,7 @@ impl MultiVolumeEngine {
             .into_iter()
             .filter_map(|(drive, index, frn, path)| {
                 let metadata = std::fs::symlink_metadata(path).ok()?;
-                let (is_dir, is_reparse) = directory_and_reparse(&metadata);
+                let (is_dir, _) = directory_and_reparse(&metadata);
                 Some(RefreshedMetadata {
                     drive,
                     metadata: RefreshedRecordMetadata {
@@ -302,8 +302,8 @@ impl MultiVolumeEngine {
                         size: if is_dir { 0 } else { metadata.len() },
                         created_ts: crate::filetime::system_time_to_filetime(metadata.created()),
                         modified_ts: crate::filetime::system_time_to_filetime(metadata.modified()),
-                        is_dir,
-                        is_reparse,
+                        win32_attributes:
+                            crate::sync_engine::folder_source::metadata_win32_attributes(&metadata),
                     },
                 })
             })
@@ -376,7 +376,7 @@ impl MultiVolumeEngine {
 
         let cfg = self.get_config();
         if !cfg.content_index_enabled {
-            self.set_content_state(ContentIndexState::Disabled);
+            self.set_content_disabled();
             return;
         }
 
@@ -392,7 +392,7 @@ impl MultiVolumeEngine {
             let mut start = 0usize;
             loop {
                 if self.content_cancel.load(Ordering::SeqCst) {
-                    self.set_content_state(ContentIndexState::Disabled);
+                    self.set_content_disabled();
                     return;
                 }
                 let (tasks, next) = self.next_content_batch(drive, start, &rules);
@@ -411,7 +411,7 @@ impl MultiVolumeEngine {
                         self.set_content_progress(processed, total);
                     }
                     BatchOutcome::Cancelled => {
-                        self.set_content_state(ContentIndexState::Disabled);
+                        self.set_content_disabled();
                         return;
                     }
                     BatchOutcome::Failed(failure) => {
@@ -428,7 +428,7 @@ impl MultiVolumeEngine {
             match self.run_worker_batch_with(port, &[], &[], true) {
                 BatchOutcome::Completed => {}
                 BatchOutcome::Cancelled => {
-                    self.set_content_state(ContentIndexState::Disabled);
+                    self.set_content_disabled();
                     return;
                 }
                 BatchOutcome::Failed(failure) => {
@@ -439,7 +439,7 @@ impl MultiVolumeEngine {
         }
 
         if self.content_cancel.load(Ordering::SeqCst) {
-            self.set_content_state(ContentIndexState::Disabled);
+            self.set_content_disabled();
             return;
         }
         self.reopen_content_index_ready();
@@ -470,12 +470,12 @@ impl MultiVolumeEngine {
         }
         let cfg = self.get_config();
         if !cfg.content_index_enabled {
-            self.set_content_state(ContentIndexState::Disabled);
+            self.set_content_disabled();
             return;
         }
         if self.content_cancel.load(Ordering::SeqCst) {
             self.drop_content_searcher();
-            self.set_content_state(ContentIndexState::Disabled);
+            self.set_content_disabled();
             return;
         }
 
@@ -489,7 +489,7 @@ impl MultiVolumeEngine {
                 BatchOutcome::Completed => {}
                 BatchOutcome::Cancelled => {
                     self.drop_content_searcher();
-                    self.set_content_state(ContentIndexState::Disabled);
+                    self.set_content_disabled();
                     return;
                 }
                 BatchOutcome::Failed(failure) => {
@@ -502,7 +502,7 @@ impl MultiVolumeEngine {
             for (chunk_index, chunk) in tasks.chunks(CONTENT_BATCH_SIZE).enumerate() {
                 if self.content_cancel.load(Ordering::SeqCst) {
                     self.drop_content_searcher();
-                    self.set_content_state(ContentIndexState::Disabled);
+                    self.set_content_disabled();
                     return;
                 }
                 // Deletions travel with the last chunk so one worker process applies the whole
@@ -516,7 +516,7 @@ impl MultiVolumeEngine {
                     BatchOutcome::Completed => {}
                     BatchOutcome::Cancelled => {
                         self.drop_content_searcher();
-                        self.set_content_state(ContentIndexState::Disabled);
+                        self.set_content_disabled();
                         return;
                     }
                     BatchOutcome::Failed(failure) => {

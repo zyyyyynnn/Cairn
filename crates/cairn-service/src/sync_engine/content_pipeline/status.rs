@@ -8,16 +8,40 @@ use super::{
     BackfillMarker, BatchOutcome, ContentCommand, CONTENT_BACKFILL_MARKER,
     CONTENT_BACKFILL_MARKER_TMP, CONTENT_BACKFILL_SCHEMA,
 };
-use cairn_content::{ContentIndex, ContentIndexError, ContentSearcher};
+use cairn_content::{ContentIndexError, ContentSearcher, ContentWriter};
 use cairn_protocol::status::{ContentIndexState, ContentIndexStatus};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::config::ServiceConfig;
 use crate::sync_engine::MultiVolumeEngine;
+
+/// Sums the content index files currently on disk, without following links. Used only on
+/// lifecycle transitions, never by the status poll.
+pub(in crate::sync_engine) fn content_dir_bytes(path: &Path) -> u64 {
+    fn walk(dir: &Path) -> u64 {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return 0;
+        };
+        entries
+            .flatten()
+            .filter_map(|entry| {
+                let file_type = entry.file_type().ok()?;
+                if file_type.is_file() {
+                    entry.metadata().ok().map(|meta| meta.len())
+                } else if file_type.is_dir() {
+                    Some(walk(&entry.path()))
+                } else {
+                    None
+                }
+            })
+            .sum()
+    }
+    walk(path)
+}
 
 impl MultiVolumeEngine {
     fn set_content_searcher(&self, searcher: Arc<ContentSearcher>) {
@@ -55,7 +79,7 @@ impl MultiVolumeEngine {
     pub fn clear_content_index(&self) -> Result<(), ContentIndexError> {
         self.drop_content_searcher();
         self.remove_backfill_marker();
-        let index = ContentIndex::open_or_create(&self.content_dir)?;
+        let index = ContentWriter::open_or_create(&self.content_dir)?;
         let cleared = index.clear();
         let finished = index.finish();
         cleared?;
@@ -73,12 +97,23 @@ impl MultiVolumeEngine {
         status.state = state;
     }
 
+    /// Leaves the disabled state with an honest footprint: a cancelled or disabled build keeps
+    /// index files on disk, so the shell can still offer to clear them.
+    pub(in crate::sync_engine) fn set_content_disabled(&self) {
+        let bytes = content_dir_bytes(&self.content_dir);
+        let mut status = self.content_status.write().unwrap();
+        status.state = ContentIndexState::Disabled;
+        status.indexed_documents = 0;
+        status.index_bytes = bytes;
+        status.last_updated_ts = 0;
+    }
+
     pub(in crate::sync_engine) fn set_content_progress(&self, processed: u64, total: u64) {
         let mut status = self.content_status.write().unwrap();
         status.state = ContentIndexState::Backfilling { processed, total };
     }
 
-    fn set_content_ready(&self, documents: u64, bytes: u64) {
+    pub(in crate::sync_engine) fn set_content_ready(&self, documents: u64, bytes: u64) {
         let mut status = self.content_status.write().unwrap();
         status.state = ContentIndexState::Ready;
         status.indexed_documents = documents;
@@ -299,7 +334,7 @@ impl MultiVolumeEngine {
                 self.remove_backfill_marker();
                 // Release the searcher and its mapped segments; a later start reopens the index.
                 self.drop_content_searcher();
-                self.set_content_state(ContentIndexState::Disabled);
+                self.set_content_disabled();
             }
             ContentCommand::Clear => self.run_clear_content(),
         }
@@ -336,7 +371,11 @@ impl MultiVolumeEngine {
         }
         drop(sender);
         if self.clear_content_index().is_ok() {
-            self.set_content_state(ContentIndexState::Disabled);
+            let mut status = self.content_status.write().unwrap();
+            status.state = ContentIndexState::Disabled;
+            status.indexed_documents = 0;
+            status.index_bytes = 0;
+            status.last_updated_ts = 0;
             return true;
         }
         false
@@ -434,7 +473,7 @@ impl MultiVolumeEngine {
             || !self.config.read().unwrap().content_index_enabled
         {
             self.drop_content_searcher();
-            self.set_content_state(ContentIndexState::Disabled);
+            self.set_content_disabled();
             return;
         }
         match ContentSearcher::open(&self.content_dir) {
@@ -443,7 +482,7 @@ impl MultiVolumeEngine {
                     || !self.config.read().unwrap().content_index_enabled
                 {
                     self.drop_content_searcher();
-                    self.set_content_state(ContentIndexState::Disabled);
+                    self.set_content_disabled();
                     return;
                 }
                 let documents = match searcher.document_count() {

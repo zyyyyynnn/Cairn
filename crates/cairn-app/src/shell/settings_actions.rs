@@ -9,13 +9,15 @@
 use crate::app::{layout, CairnApp};
 use crate::search::filters::FilterCategory;
 use crate::search::ResultSetChange;
+use crate::shell::command_groups::ZoomPreset;
 use crate::shell::commands::{
-    CycleFilterCategory, ToggleCaseSensitive, ToggleMatchPath, ToggleRegex, ToggleWholeWord,
+    CycleFilterCategory, ResetZoom, ToggleCaseSensitive, ToggleMatchPath, ToggleRegex,
+    ToggleSidebar, ToggleWholeWord, ZoomIn, ZoomOut,
 };
 use crate::shell::menu_actions::ToggleFlag;
 use crate::shell::settings::THEME_SYSTEM;
 use crate::shell::theme;
-use crate::table::model::{ColumnBoundary, ColumnWidths, SortColumn};
+use crate::table::model::{ColumnBoundary, ColumnWidths, SortColumn, TableColumn};
 use gpui_kit::gpui::*;
 
 impl CairnApp {
@@ -24,16 +26,27 @@ impl CairnApp {
         cx.notify();
     }
 
+    pub(crate) fn toggle_sidebar_action(
+        &mut self,
+        _: &ToggleSidebar,
+        _w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_sidebar(cx);
+    }
+
+    #[cfg(not(test))]
     pub fn save_settings(&mut self) {
         if let Err(e) = self.settings.save() {
             tracing::warn!("Failed to save settings: {}", e);
         }
     }
 
-    pub fn toggle_table_sort(&mut self, col: SortColumn, cx: &mut Context<Self>) {
-        self.results.table.toggle_sort(col);
-        self.settings.columns.sort_column = col.key().to_string();
-        self.settings.columns.sort_asc = self.results.table.sort_asc;
+    #[cfg(test)]
+    pub fn save_settings(&mut self) {}
+
+    fn commit_sort_spec_change(&mut self, cx: &mut Context<Self>) {
+        self.settings.columns.sort_spec = self.results.table.sort_spec.to_clause();
         self.save_settings();
         if self.recycle_bin.is_open() {
             // The bin is an in-memory listing, so its order is applied here instead
@@ -45,6 +58,32 @@ impl CairnApp {
         } else {
             self.request_result_set(ResultSetChange::InPlace, cx);
         }
+        cx.notify();
+    }
+
+    pub fn toggle_table_sort(&mut self, col: SortColumn, cx: &mut Context<Self>) {
+        self.results.table.toggle_sort(col);
+        self.commit_sort_spec_change(cx);
+    }
+
+    pub fn shift_toggle_table_sort(&mut self, col: SortColumn, cx: &mut Context<Self>) {
+        self.results.table.shift_toggle_sort(col);
+        self.commit_sort_spec_change(cx);
+    }
+
+    /// Shows or hides one table column in index queries. Locked columns remain visible, and hiding
+    /// a sorted column prunes it from `sort_spec` so the active order stays inspectable.
+    pub(crate) fn toggle_table_column(&mut self, col: TableColumn, cx: &mut Context<Self>) {
+        if col.is_locked() || self.recycle_bin.is_open() || self.block_listing.is_some() {
+            return;
+        }
+        let shown = !self.settings.columns.is_column_shown(col);
+        self.settings.columns.set_column_shown(col, shown);
+        if !shown && self.results.table.remove_sort_column(col.sort_column()) {
+            self.commit_sort_spec_change(cx);
+            return;
+        }
+        self.save_settings();
         cx.notify();
     }
 
@@ -90,17 +129,8 @@ impl CairnApp {
 
     /// Reverses the direction of the column that is already sorting the results.
     pub(super) fn toggle_sort_direction(&mut self, cx: &mut Context<Self>) {
-        self.results.table.sort_asc = !self.results.table.sort_asc;
-        self.settings.columns.sort_asc = self.results.table.sort_asc;
-        self.save_settings();
-        if self.recycle_bin.is_open() {
-            self.sort_recycle_bin(cx);
-        } else if self.block_listing.is_some() {
-            self.sort_block_listing(cx);
-        } else {
-            self.request_result_set(ResultSetChange::InPlace, cx);
-        }
-        cx.notify();
+        self.results.table.reverse_primary_sort();
+        self.commit_sort_spec_change(cx);
     }
 
     fn toggle_flag(&mut self, flag: ToggleFlag, cx: &mut Context<Self>) {
@@ -116,6 +146,31 @@ impl CairnApp {
             ToggleFlag::MatchPath => self.query.match_path = !self.query.match_path,
             ToggleFlag::Regex => self.query.use_regex = !self.query.use_regex,
         }
+        self.request_result_set(ResultSetChange::InPlace, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_exclude_hidden(&mut self, cx: &mut Context<Self>) {
+        self.toggle_exclusion_filter(ExclusionFlag::Hidden, cx);
+    }
+
+    pub(crate) fn toggle_exclude_system(&mut self, cx: &mut Context<Self>) {
+        self.toggle_exclusion_filter(ExclusionFlag::System, cx);
+    }
+
+    fn toggle_exclusion_filter(&mut self, flag: ExclusionFlag, cx: &mut Context<Self>) {
+        if self.recycle_bin.is_open() || self.block_listing.is_some() {
+            return;
+        }
+        match flag {
+            ExclusionFlag::Hidden => {
+                self.settings.exclude_hidden = !self.settings.exclude_hidden;
+            }
+            ExclusionFlag::System => {
+                self.settings.exclude_system = !self.settings.exclude_system;
+            }
+        }
+        self.save_settings();
         self.request_result_set(ResultSetChange::InPlace, cx);
         cx.notify();
     }
@@ -247,8 +302,26 @@ impl CairnApp {
         self.zoom_level = zoom;
         self.settings.zoom_level = zoom;
         self.save_settings();
-        cx.notify();
+        self.repaint_shell_and_overlays(cx);
     }
+
+    pub(crate) fn zoom_in(&mut self, _: &ZoomIn, _w: &mut Window, cx: &mut Context<Self>) {
+        self.set_zoom(ZoomPreset::step_up(self.zoom_level).value(), cx);
+    }
+
+    pub(crate) fn zoom_out(&mut self, _: &ZoomOut, _w: &mut Window, cx: &mut Context<Self>) {
+        self.set_zoom(ZoomPreset::step_down(self.zoom_level).value(), cx);
+    }
+
+    pub(crate) fn reset_zoom(&mut self, _: &ResetZoom, _w: &mut Window, cx: &mut Context<Self>) {
+        self.set_zoom(ZoomPreset::Standard.value(), cx);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ExclusionFlag {
+    Hidden,
+    System,
 }
 
 #[cfg(test)]
@@ -330,6 +403,114 @@ mod tests {
                         let case_sensitive = this.query.case_sensitive;
                         this.toggle_flag(ToggleFlag::Case, cx);
                         assert_ne!(this.query.case_sensitive, case_sensitive);
+
+                        let hidden = this.settings.exclude_hidden;
+                        let system = this.settings.exclude_system;
+                        this.toggle_exclude_hidden(cx);
+                        this.toggle_exclude_system(cx);
+                        assert_eq!(this.settings.exclude_hidden, hidden);
+                        assert_eq!(this.settings.exclude_system, system);
+                    });
+
+                    cx.quit();
+                    app
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn ui_zoom_and_sidebar_actions_update_state_and_theme() {
+        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
+            gpui_kit::init(cx);
+            let _ = gpui_kit::open_window(
+                gpui_kit::gpui::WindowOptions {
+                    show: false,
+                    focus: false,
+                    ..gpui_kit::gpui::WindowOptions::default()
+                },
+                cx,
+                |window, cx| {
+                    let app = cx.new(|cx| CairnApp::new(window, cx));
+
+                    app.update(cx, |this, cx| {
+                        let initially_collapsed = this.sidebar_collapsed;
+                        this.toggle_sidebar_action(
+                            &crate::shell::commands::ToggleSidebar,
+                            window,
+                            cx,
+                        );
+                        assert_ne!(this.sidebar_collapsed, initially_collapsed);
+
+                        this.set_zoom(
+                            crate::shell::command_groups::ZoomPreset::Standard.value(),
+                            cx,
+                        );
+                        let standard_font = gpui_kit::component::Theme::global(cx).font_size;
+                        this.zoom_in(&crate::shell::commands::ZoomIn, window, cx);
+                        assert_eq!(
+                            this.zoom_level,
+                            crate::shell::command_groups::ZoomPreset::Relaxed.value()
+                        );
+                        assert_eq!(
+                            this.settings.zoom_level,
+                            crate::shell::command_groups::ZoomPreset::Relaxed.value()
+                        );
+                        assert!(gpui_kit::component::Theme::global(cx).font_size > standard_font);
+
+                        this.zoom_out(&crate::shell::commands::ZoomOut, window, cx);
+                        assert_eq!(
+                            this.zoom_level,
+                            crate::shell::command_groups::ZoomPreset::Standard.value()
+                        );
+
+                        this.zoom_out(&crate::shell::commands::ZoomOut, window, cx);
+                        assert_eq!(
+                            this.zoom_level,
+                            crate::shell::command_groups::ZoomPreset::Compact.value()
+                        );
+                        assert!(gpui_kit::component::Theme::global(cx).font_size < standard_font);
+
+                        this.reset_zoom(&crate::shell::commands::ResetZoom, window, cx);
+                        assert_eq!(
+                            this.zoom_level,
+                            crate::shell::command_groups::ZoomPreset::Standard.value()
+                        );
+
+                        this.settings.exclude_hidden = false;
+                        this.settings.exclude_system = false;
+                        this.toggle_exclude_hidden(cx);
+                        this.toggle_exclude_system(cx);
+                        assert!(this.settings.exclude_hidden);
+                        assert!(this.settings.exclude_system);
+
+                        use crate::table::model::{OptionalColumn, TableColumn};
+                        this.settings.columns = Default::default();
+                        this.results.table.sort_spec = cairn_core::sort::SortSpec::default();
+                        this.toggle_table_column(TableColumn::Name, cx);
+                        assert!(this.settings.columns.is_column_shown(TableColumn::Name));
+
+                        let full_min_width = this.table_min_width();
+                        this.toggle_table_sort(SortColumn::Path, cx);
+                        this.toggle_table_column(TableColumn::Path, cx);
+                        assert!(!this.settings.columns.show_path);
+                        assert_eq!(this.settings.columns.sort_spec, "name-asc");
+                        assert!(this.table_min_width() < full_min_width);
+
+                        this.toggle_table_column(TableColumn::Optional(OptionalColumn::Length), cx);
+                        assert!(this.settings.columns.show_length);
+
+                        this.toggle_table_sort(SortColumn::Size, cx);
+                        this.shift_toggle_table_sort(SortColumn::Length, cx);
+                        assert_eq!(this.settings.columns.sort_spec, "size-asc,length-asc");
+
+                        this.toggle_table_column(TableColumn::Optional(OptionalColumn::Length), cx);
+                        assert!(!this.settings.columns.show_length);
+                        assert_eq!(this.settings.columns.sort_spec, "size-asc");
+
+                        this.block_listing = Some(block_listing());
+                        this.toggle_table_column(TableColumn::Optional(OptionalColumn::Author), cx);
+                        assert!(!this.settings.columns.show_author);
                     });
 
                     cx.quit();

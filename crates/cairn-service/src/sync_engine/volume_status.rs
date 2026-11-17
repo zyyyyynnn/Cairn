@@ -3,9 +3,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Volume status transitions. The journal ledger's catch-up is the only path that can produce
-//! `Synced`; every newly chosen state goes through [`VolumeStatus::set`], which rejects it, so no
-//! scan, poll or recovery path can hand-pick freshness without a journal position. [`VolumeStatus::restore`]
-//! only rolls back a state the volume already held.
+//! `Synced` for a volume; a folder source reaches `Synced` only through an active live watcher.
+//! Every newly chosen state goes through [`VolumeStatus::set`], which rejects `Synced`, so no
+//! scan, poll or recovery path can hand-pick freshness without a journal position or a watcher.
+//! [`VolumeStatus::restore`] only rolls back a state the volume already held.
 
 use super::journal_reconciliation::catch_up_state;
 use cairn_protocol::status::VolumeState;
@@ -30,6 +31,21 @@ impl VolumeStatus {
             "Synced is produced only by journal reconciliation"
         );
         self.0 = state;
+    }
+
+    /// Marks a directory-backed source after a complete subtree walk. Only a live watcher can
+    /// claim `Synced`; a scan-only source stays in `SnapshotMode`.
+    pub(super) fn mark_folder_scanned(&mut self, live_watch: bool) {
+        self.0 = if live_watch {
+            VolumeState::Synced
+        } else {
+            VolumeState::SnapshotMode
+        };
+    }
+
+    /// Marks a folder source synchronized once its watcher is armed and delivering events.
+    pub(super) fn mark_folder_live(&mut self) {
+        self.0 = VolumeState::Synced;
     }
 
     /// Restores a state captured earlier, such as the pre-scan state of a volume whose rescan

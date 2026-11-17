@@ -11,10 +11,33 @@ use crate::service::config_submission::{
     self, IndexScopeChange, SubmissionOutcome, SubmissionState,
 };
 use crate::service::service_issue::{should_try_silent_start, ServiceIssue};
-use cairn_protocol::status::VolumeStatusSummary;
+use cairn_client::client::ClientError;
+use cairn_protocol::message::{Envelope, ResponsePayload, SourceId};
+use cairn_protocol::status::{
+    ContentIndexState, SourceKind, SourceStatusSummary, VolumeStatusSummary,
+};
 use gpui_kit::gpui::{AsyncApp, Context};
 use std::sync::OnceLock;
 use std::time::Duration;
+
+pub(crate) fn source_id_for_drive(
+    sources: &[SourceStatusSummary],
+    drive: char,
+) -> Option<SourceId> {
+    let drive_upper = drive.to_ascii_uppercase();
+    sources
+        .iter()
+        .find(|source| {
+            source.kind == SourceKind::NtfsVolume
+                && source
+                    .root_path
+                    .chars()
+                    .next()
+                    .is_some_and(|ch| ch.to_ascii_uppercase() == drive_upper)
+        })
+        .map(|source| source.source_id)
+        .or_else(|| SourceId::for_drive(drive_upper))
+}
 
 #[derive(Clone, Copy)]
 enum ContentAction {
@@ -27,13 +50,11 @@ enum ContentAction {
 /// on every batch.
 const STATUS_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const STATUS_RETRY_INTERVAL: Duration = Duration::from_millis(250);
+const SUBSYSTEM_BACKFILL_POLL_INTERVAL: Duration = Duration::from_millis(700);
 const STATUS_MAX_CONSECUTIVE_FAILURES: u32 = 3;
-/// Connection attempts keep the status poll alive across an SCM auto-restart: the retry loop
-/// sleeps 250 ms per attempt, so 40 attempts cover about ten seconds (the restart delay is 5 s).
+/// 40 x 250 ms covers ~10 s across SCM's 5 s service restart delay.
 const STATUS_MAX_CONNECT_FAILURES: u32 = 40;
 
-/// Which wait a failure belongs to: reconnecting to a restarting service keeps the ten-second
-/// window, while a service that answers but fails its request is terminal after three tries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum StatusFailure {
     Connect,
@@ -51,13 +72,6 @@ fn failure_is_terminal(kind: StatusFailure, consecutive_failures: u32) -> bool {
     consecutive_failures >= failure_limit(kind)
 }
 
-/// What the status poll does after one answer, and whether it keeps polling.
-///
-/// A query over a growing index is a full scan of a partial index: its total is not final, and
-/// repeating it for every batch spends the indexer's CPU to publish a number that will change
-/// again. The poll therefore only waits while volumes load, then asks a visible table once for
-/// the result set of the completed index. If an answer is still on its way, wait for it. A hidden
-/// table (Treemap/Recycle Bin) never receives a background query.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum StatusRefreshDecision {
     RefreshAndStop,
@@ -79,12 +93,7 @@ fn status_refresh_decision(
     }
 }
 
-/// Whether two status samples differ in anything the window actually shows.
-///
-/// The indexed count drives no visible label: the band publishes only a completed query's total,
-/// and the sidebar shows the volume's state. A growing count therefore must not repaint the
-/// window, or a long build repaints at the poll rate for a number nobody can see. The state,
-/// identity and presence of a volume are visible and do repaint.
+/// Counts alone are not rendered while volumes load; only state/identity/presence transitions need a repaint.
 fn volume_status_visibility_changed(
     previous: &[VolumeStatusSummary],
     next: &[VolumeStatusSummary],
@@ -99,7 +108,6 @@ fn volume_status_visibility_changed(
 }
 
 /// Bounded multi-threaded Tokio runtime for desktop IPC operations.
-/// Explicitly capped to 2 worker threads and 4 blocking threads to minimize idle heap/stack footprint.
 pub fn get_tokio_runtime() -> &'static tokio::runtime::Runtime {
     static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
     RT.get_or_init(|| {
@@ -112,15 +120,78 @@ pub fn get_tokio_runtime() -> &'static tokio::runtime::Runtime {
     })
 }
 
+async fn wait_for_service_pipe(
+    session: &cairn_client::ServiceSession,
+) -> (Result<Vec<VolumeStatusSummary>, ClientError>, bool) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        if let Ok(envelope) = session.get_status().await {
+            return (Ok(envelope.volumes), true);
+        }
+    }
+    let installed =
+        tokio::task::spawn_blocking(crate::service::service_control::service_is_installed)
+            .await
+            .unwrap_or(false);
+    (
+        Err(ClientError::ConnectFailed(std::io::Error::new(
+            std::io::ErrorKind::NotConnected,
+            "Service did not answer after starting",
+        ))),
+        installed,
+    )
+}
+
+fn finish_subsystem_load<S>(
+    state: &mut crate::service::SubsystemState<S>,
+    result: Option<Result<Envelope<ResponsePayload>, ClientError>>,
+    task_label: &str,
+    extract: impl FnOnce(ResponsePayload) -> Result<S, String>,
+) -> bool {
+    match result {
+        Some(Ok(envelope)) => match envelope.payload {
+            ResponsePayload::Error { code, message } => {
+                tracing::warn!(
+                    task = task_label,
+                    code,
+                    error = %message,
+                    "service request failed"
+                );
+                state.fail_load(message);
+                false
+            }
+            payload => match extract(payload) {
+                Ok(value) => {
+                    state.finish_load(value);
+                    true
+                }
+                Err(msg) => {
+                    tracing::warn!(task = task_label, error = %msg, "service request failed");
+                    state.fail_load(msg);
+                    false
+                }
+            },
+        },
+        Some(Err(err)) => {
+            tracing::warn!(task = task_label, error = %err, "service request failed");
+            state.fail_load(err.to_string());
+            false
+        }
+        None => {
+            tracing::warn!(task = task_label, "service request stopped");
+            state.fail_load(format!("{task_label} task stopped"));
+            false
+        }
+    }
+}
+
 impl CairnApp {
-    /// Asks the service whether it is there, and records which kind of answer came back (SVC-03,
-    /// SVC-04). One probe, one owner method: the window's first frame and the retry control in the
-    /// service-issue band both go through here, so a retry cannot speak a different protocol from the
-    /// startup check.
+    /// Probes service reachability without requesting UAC elevation.
     pub fn check_service_connection(&mut self, cx: &mut Context<Self>) {
         let runtime = get_tokio_runtime();
         let session = self.service.session.clone();
-        self.service.is_probing_service = true;
+        self.service.connection.set_probing(true);
         cx.spawn(async move |this, cx: &mut AsyncApp| {
             let (tx, rx) = tokio::sync::oneshot::channel();
             crate::shell::perf::mark("probe start");
@@ -140,21 +211,23 @@ impl CairnApp {
 
             let outcome = rx.await;
             let _ = this.update(cx, |this: &mut CairnApp, cx| {
-                this.service.is_probing_service = false;
+                this.service.connection.set_probing(false);
                 match outcome {
-                    Ok(res) => match res {
-                        Ok(envelope) => {
-                            this.apply_service_connected(envelope.volumes, cx);
-                        }
-                        Err(e) => {
-                            this.service.is_service_connected = false;
-                            let issue = ServiceIssue::from_client_error(&e);
-                            this.handle_probe_failure(issue, cx);
-                        }
-                    },
+                    Ok(Ok(envelope)) => {
+                        this.apply_service_connected(envelope.volumes, cx);
+                    }
+                    Ok(Err(e)) => {
+                        let issue = ServiceIssue::from_client_error(&e);
+                        let installed = this.service.connection.is_installed();
+                        let attempted = this.service.connection.silent_start_attempted();
+                        this.service
+                            .connection
+                            .mark_disconnected(installed, issue, false, attempted);
+                        this.handle_probe_failure(issue, cx);
+                    }
                     Err(e) => {
                         tracing::warn!("Cairn connection probe task lost: {e}");
-                        this.service.is_service_connected = false;
+                        this.service.connection.mark_lost_running();
                         this.handle_probe_failure(ServiceIssue::NotRunning, cx);
                     }
                 }
@@ -164,11 +237,7 @@ impl CairnApp {
         .detach();
     }
 
-    /// Distinguishes "installed but not answering" from "not installed" without ever elevating.
-    /// Opening the window only asks this question; starting the service is an explicit action.
-    /// Polls the service while any volume is building or catching up. The probe's first answer can
-    /// be `CatchingUp(0)`, and without this loop the GUI would keep that stale snapshot forever:
-    /// the capsule would freeze at "synchronizing".
+    /// Polls the service while any volume is building or catching up.
     pub(crate) fn start_status_refresh(&mut self, cx: &mut Context<Self>) {
         if self.service.is_refreshing_status || !self.service.status.is_any_loading() {
             return;
@@ -228,15 +297,11 @@ impl CairnApp {
             while let Some(outcome) = rx.recv().await {
                 let keep_going = this
                     .update(cx, |this: &mut CairnApp, cx| {
-                        if !this.service.is_service_connected {
+                        if !this.service.connection.is_connected() {
                             return false;
                         }
                         match outcome {
                             Ok(envelope) => {
-                                // Only a sample that changes what the window shows is worth a
-                                // frame. A growing indexed count is not visible anywhere in the
-                                // loading state, so repainting for it would cost a full frame ten
-                                // times a second while the index builds.
                                 let visible_change = volume_status_visibility_changed(
                                     &this.service.status.volumes,
                                     &envelope.volumes,
@@ -245,14 +310,12 @@ impl CairnApp {
                                 let now_loading = this.service.status.is_any_loading();
                                 let table_visible =
                                     !this.recycle_bin.is_open() && this.drive_view.is_none();
-                                // The count is owned by the query result set, not by the raw
-                                // volume total. Status polling only refreshes rows and state.
                                 if visible_change {
                                     cx.notify();
                                 }
                                 match status_refresh_decision(
                                     now_loading,
-                                    this.query.is_searching,
+                                    this.query.is_searching(),
                                     table_visible,
                                 ) {
                                     StatusRefreshDecision::RefreshAndStop => {
@@ -264,9 +327,7 @@ impl CairnApp {
                                 }
                             }
                             Err(error) => {
-                                this.service.is_service_connected = false;
-                                this.service.service_issue =
-                                    Some(ServiceIssue::from_client_error(&error));
+                                this.service.connection.note_client_error(&error);
                                 cx.notify();
                                 false
                             }
@@ -290,32 +351,35 @@ impl CairnApp {
         volumes: Vec<VolumeStatusSummary>,
         cx: &mut Context<Self>,
     ) {
-        self.service.is_service_connected = true;
-        self.service.service_issue = None;
-        self.service.service_installed = true;
-        self.service.has_attempted_silent_start = false;
+        self.service.connection.mark_connected();
         self.service.status.update_volumes(volumes);
         self.start_status_refresh(cx);
-        // A connection probe must not replace the location the person is reading;
-        // the bin does not need the index. The request owner decides whether the
-        // table is empty enough to need an entrance.
         if !self.recycle_bin.is_open() {
             self.request_result_set(ResultSetChange::Probe, cx);
         }
         self.refresh_content_status(cx);
+        self.refresh_property_index_status(cx);
+        self.refresh_index_journal_status(cx);
+        self.refresh_sources(cx);
     }
 
-    /// Records a failed probe. Checks SCM registration off the main UI thread, and when the
-    /// service is installed but stopped, attempts one silent SCM start before showing recovery UI.
+    /// Checks SCM registration off the main UI thread and attempts one silent start when stopped.
     fn handle_probe_failure(&mut self, issue: ServiceIssue, cx: &mut Context<Self>) {
         if issue != ServiceIssue::NotRunning {
-            self.service.service_issue = Some(issue);
+            let installed = self.service.connection.is_installed();
+            let probing = self.service.connection.is_probing();
+            let attempted = self.service.connection.silent_start_attempted();
+            self.service
+                .connection
+                .mark_disconnected(installed, issue, probing, attempted);
             cx.notify();
             return;
         }
-        let try_silent = !self.service.has_attempted_silent_start;
-        self.service.has_attempted_silent_start = true;
-        self.service.is_probing_service = true;
+        let try_silent = !self.service.connection.silent_start_attempted();
+        let installed = self.service.connection.is_installed();
+        self.service
+            .connection
+            .mark_disconnected(installed, ServiceIssue::NotRunning, true, true);
         cx.spawn(async move |this, cx: &mut AsyncApp| {
             let (tx, rx) = tokio::sync::oneshot::channel();
             get_tokio_runtime().spawn_blocking(move || {
@@ -331,42 +395,39 @@ impl CairnApp {
             });
             let (installed, silent_started) = rx.await.unwrap_or((false, false));
             let _ = this.update(cx, |this: &mut CairnApp, cx| {
-                this.service.is_probing_service = false;
-                this.service.service_installed = installed;
+                this.service.connection.set_probing(false);
                 if silent_started {
-                    this.poll_service_after_start(cx, false);
+                    this.poll_service_until_ready(cx);
                     return;
                 }
-                this.service.service_issue = Some(if installed {
+                let issue = if installed {
                     ServiceIssue::NotRunning
                 } else {
                     ServiceIssue::NotInstalled
-                });
+                };
+                this.service
+                    .connection
+                    .mark_disconnected(installed, issue, false, true);
                 cx.notify();
             });
         })
         .detach();
     }
 
-    /// The retry path the service-issue band offers (SVC-03). While a probe is already in flight the
-    /// request is dropped: the band's own control is the guard, and re-entering here would otherwise
-    /// run two probes that answer in whichever order they finish.
     pub fn retry_service_connection(&mut self, cx: &mut Context<Self>) {
-        if self.service.is_probing_service {
+        if self.service.connection.is_probing() {
             return;
         }
         self.check_service_connection(cx);
         cx.notify();
     }
 
-    /// The explicit action behind the offline band's button: ask SCM to start the installed service
-    /// through one UAC elevation, then poll for its pipe. A service that is not installed is reported
-    /// as such and never triggers a UAC prompt.
+    /// Asks SCM to start the installed service through one UAC elevation, then polls for its pipe.
     pub fn start_service(&mut self, cx: &mut Context<Self>) {
-        if self.service.is_probing_service {
+        if self.service.connection.is_probing() {
             return;
         }
-        self.service.is_probing_service = true;
+        self.service.connection.set_probing(true);
         cx.notify();
         cx.spawn(async move |this, cx: &mut AsyncApp| {
             let (tx, rx) = tokio::sync::oneshot::channel();
@@ -375,24 +436,61 @@ impl CairnApp {
             });
             let installed = rx.await.unwrap_or(false);
             let _ = this.update(cx, |this: &mut CairnApp, cx| {
-                this.service.is_probing_service = false;
-                this.service.service_installed = installed;
                 if !installed {
-                    this.service.service_issue = Some(ServiceIssue::NotInstalled);
+                    let attempted = this.service.connection.silent_start_attempted();
+                    this.service.connection.mark_disconnected(
+                        false,
+                        ServiceIssue::NotInstalled,
+                        false,
+                        attempted,
+                    );
                     cx.notify();
                     return;
                 }
-                this.poll_service_after_start(cx, true);
+                this.launch_elevated_service_then_poll(cx);
             });
         })
         .detach();
     }
 
-    /// Polls the pipe after an explicit elevation or a silent SCM start. `elevate` is the only
-    /// difference: both paths end in the same "is the pipe answering?" loop, so a service that is
-    /// still Starting is not reported as offline on the very next frame.
-    fn poll_service_after_start(&mut self, cx: &mut Context<Self>, elevate: bool) {
-        self.service.is_probing_service = true;
+    fn launch_elevated_service_then_poll(&mut self, cx: &mut Context<Self>) {
+        self.spawn_service_connection_task(cx, move |session| async move {
+            let launched = tokio::task::spawn_blocking(
+                crate::service::service_control::start_service_elevated,
+            )
+            .await;
+            if !matches!(launched, Ok(Ok(()))) {
+                let installed = tokio::task::spawn_blocking(
+                    crate::service::service_control::service_is_installed,
+                )
+                .await
+                .unwrap_or(false);
+                return (
+                    Err(ClientError::ConnectFailed(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "Service start was cancelled or refused",
+                    ))),
+                    installed,
+                );
+            }
+            wait_for_service_pipe(&session).await
+        });
+    }
+
+    fn poll_service_until_ready(&mut self, cx: &mut Context<Self>) {
+        self.spawn_service_connection_task(cx, |session| async move {
+            wait_for_service_pipe(&session).await
+        });
+    }
+
+    fn spawn_service_connection_task<F, Fut>(&mut self, cx: &mut Context<Self>, work: F)
+    where
+        F: FnOnce(cairn_client::ServiceSession) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = (Result<Vec<VolumeStatusSummary>, ClientError>, bool)>
+            + Send
+            + 'static,
+    {
+        self.service.connection.set_probing(true);
         cx.notify();
 
         let runtime = get_tokio_runtime();
@@ -400,77 +498,29 @@ impl CairnApp {
         cx.spawn(async move |this, cx: &mut AsyncApp| {
             let (tx, rx) = tokio::sync::oneshot::channel();
             runtime.spawn(async move {
-                if elevate {
-                    // UAC and the elevated process are blocking; keep them off the IPC runtime's
-                    // worker threads.
-                    let launched = tokio::task::spawn_blocking(
-                        crate::service::service_control::start_service_elevated,
-                    )
-                    .await;
-                    if !matches!(launched, Ok(Ok(()))) {
-                        let installed = tokio::task::spawn_blocking(
-                            crate::service::service_control::service_is_installed,
-                        )
-                        .await
-                        .unwrap_or(false);
-                        let _ = tx.send((
-                            Err(cairn_client::client::ClientError::ConnectFailed(
-                                std::io::Error::new(
-                                    std::io::ErrorKind::PermissionDenied,
-                                    "Service start was cancelled or refused",
-                                ),
-                            )),
-                            installed,
-                        ));
-                        return;
-                    }
-                }
-                // The service reports Running only after its data layout is secured; the pipe
-                // becomes available at the same point. Connection attempts fail fast now, so this
-                // loop owns the whole cold-start budget instead of inheriting a per-attempt wait.
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-                while std::time::Instant::now() < deadline {
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                    if let Ok(status) = session.get_status().await {
-                        let _ = tx.send((Ok(status), true));
-                        return;
-                    }
-                }
-                let installed = tokio::task::spawn_blocking(
-                    crate::service::service_control::service_is_installed,
-                )
-                .await
-                .unwrap_or(false);
-                let _ = tx.send((
-                    Err(cairn_client::client::ClientError::ConnectFailed(
-                        std::io::Error::new(
-                            std::io::ErrorKind::NotConnected,
-                            "Service did not answer after starting",
-                        ),
-                    )),
-                    installed,
-                ));
+                let _ = tx.send(work(session).await);
             });
 
             let outcome = rx.await;
             let _ = this.update(cx, |this: &mut CairnApp, cx| {
-                this.service.is_probing_service = false;
+                this.service.connection.set_probing(false);
                 match outcome {
-                    Ok((Ok(envelope), _)) => {
-                        this.apply_service_connected(envelope.volumes, cx);
+                    Ok((Ok(volumes), _)) => {
+                        this.apply_service_connected(volumes, cx);
                     }
                     Ok((Err(_), installed)) => {
-                        this.service.is_service_connected = false;
-                        this.service.service_installed = installed;
-                        this.service.service_issue = Some(if installed {
+                        let issue = if installed {
                             ServiceIssue::NotRunning
                         } else {
                             ServiceIssue::NotInstalled
-                        });
+                        };
+                        let attempted = this.service.connection.silent_start_attempted();
+                        this.service
+                            .connection
+                            .mark_disconnected(installed, issue, false, attempted);
                     }
                     Err(_) => {
-                        this.service.is_service_connected = false;
-                        this.service.service_issue = Some(ServiceIssue::NotRunning);
+                        this.service.connection.mark_lost_running();
                     }
                 }
                 cx.notify();
@@ -479,76 +529,72 @@ impl CairnApp {
         .detach();
     }
 
-    /// Reads the service's content-index lifecycle. While a backfill is running, one delayed
-    /// follow-up keeps the progress fresh without a permanent polling loop.
-    pub fn refresh_content_status(&mut self, cx: &mut Context<Self>) {
-        if self.service.content_status_loading {
-            return;
-        }
-        self.service.content_status_loading = true;
+    fn spawn_service_task<T, Fut, OnDone>(
+        &mut self,
+        cx: &mut Context<Self>,
+        work: impl FnOnce(cairn_client::ServiceSession) -> Fut + Send + 'static,
+        on_done: OnDone,
+    ) where
+        T: Send + 'static,
+        Fut: std::future::Future<Output = T> + Send + 'static,
+        OnDone: FnOnce(&mut CairnApp, Option<T>, &mut Context<Self>) + 'static,
+    {
         let session = self.service.session.clone();
         cx.spawn(async move |this, cx: &mut AsyncApp| {
             let (tx, rx) = tokio::sync::oneshot::channel();
             get_tokio_runtime().spawn(async move {
-                let _ = tx.send(session.get_content_index_status().await);
+                let _ = tx.send(work(session).await);
             });
-
-            let result = rx.await;
-            this.update(cx, |this: &mut CairnApp, cx| {
-                this.service.content_status_loading = false;
-                match result {
-                    Ok(Ok(envelope)) => {
-                        this.service.content_status_error = None;
-                        this.service.content_action_error = None;
-                        if let cairn_protocol::message::ResponsePayload::ContentIndexStatus {
-                            status,
-                        } = envelope.payload
-                        {
-                            this.service.content_status = status;
-                        } else {
-                            tracing::warn!(
-                                "content index status: the service answered with a different payload"
-                            );
-                            this.service.content_status_error =
-                                Some("the service answered with a different payload".to_string());
-                        }
-                    }
-                    Ok(Err(err)) => {
-                        tracing::warn!("content index status read failed: {err}");
-                        this.service.content_status_error = Some(err.to_string());
-                    }
-                    Err(panic) => {
-                        tracing::warn!("content index status task stopped: {panic}");
-                        this.service.content_status_error =
-                            Some(format!("the content-index status task stopped: {panic}"));
-                    }
-                }
-                let follow_up = matches!(
-                    this.service.content_status.state,
-                    cairn_protocol::status::ContentIndexState::Backfilling { .. }
-                ) && this.service.content_status_error.is_none();
-                this.repaint_shell_and_overlays(cx);
-                if follow_up {
-                    this.schedule_content_status_refresh(cx);
-                }
-            })
-            .ok();
+            let result = rx.await.ok();
+            let _ = this.update(cx, |this: &mut CairnApp, cx| {
+                on_done(this, result, cx);
+            });
         })
         .detach();
     }
 
-    fn schedule_content_status_refresh(&mut self, cx: &mut Context<Self>) {
+    fn schedule_delayed_refresh(
+        &mut self,
+        cx: &mut Context<Self>,
+        refresh: fn(&mut CairnApp, &mut Context<Self>),
+    ) {
         cx.spawn(async move |this, cx: &mut AsyncApp| {
-            // GPUI's executor owns this task; Tokio's timer would panic with no reactor.
             cx.background_executor()
-                .timer(std::time::Duration::from_millis(700))
+                .timer(SUBSYSTEM_BACKFILL_POLL_INTERVAL)
                 .await;
-            this.update(cx, |this: &mut CairnApp, cx| {
-                this.refresh_content_status(cx)
-            })
-            .ok();
+            let _ = this.update(cx, |this: &mut CairnApp, cx| refresh(this, cx));
         })
         .detach();
+    }
+
+    pub fn refresh_content_status(&mut self, cx: &mut Context<Self>) {
+        if !self.service.content.begin_load() {
+            return;
+        }
+        self.spawn_service_task(
+            cx,
+            |session| async move { session.get_content_index_status().await },
+            |this, result, cx| {
+                let ok = finish_subsystem_load(
+                    &mut this.service.content,
+                    result,
+                    "content-index status",
+                    |payload| match payload {
+                        ResponsePayload::ContentIndexStatus { status } => Ok(status),
+                        _ => Err("the service answered with a different payload".to_string()),
+                    },
+                );
+                let follow_up = ok
+                    && matches!(
+                        this.service.content.value.state,
+                        ContentIndexState::Backfilling { .. }
+                    );
+                this.repaint_shell_and_overlays(cx);
+                if follow_up {
+                    this.schedule_delayed_refresh(cx, Self::refresh_content_status);
+                }
+            },
+        );
     }
 
     pub fn set_content_index_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
@@ -560,11 +606,9 @@ impl CairnApp {
     }
 
     fn run_content_action(&mut self, action: ContentAction, cx: &mut Context<Self>) {
-        if self.service.content_action_pending {
+        if !self.service.content.begin_action() {
             return;
         }
-        self.service.content_action_pending = true;
-        self.service.content_action_error = None;
         self.repaint_shell_and_overlays(cx);
 
         let session = self.service.session.clone();
@@ -592,9 +636,7 @@ impl CairnApp {
                         }
                         ContentAction::Clear => match session.clear_content_index().await {
                             Ok(envelope) => match envelope.payload {
-                                cairn_protocol::message::ResponsePayload::ClearContentIndexAck {
-                                    success: true,
-                                } => Ok(()),
+                                ResponsePayload::ClearContentIndexAck { success: true } => Ok(()),
                                 _ => Err("the service did not accept the clear".to_string()),
                             },
                             Err(err) => Err(err.to_string()),
@@ -607,20 +649,20 @@ impl CairnApp {
 
             let outcome = rx.await;
             this.update(cx, |this: &mut CairnApp, cx| {
-                this.service.content_action_pending = false;
                 match outcome {
                     Ok(Ok(())) => {
-                        this.service.content_action_error = None;
+                        this.service.content.finish_action_ok();
                         this.refresh_content_status(cx);
                     }
                     Ok(Err(err)) => {
                         tracing::warn!("content index action failed: {err}");
-                        this.service.content_action_error = Some(err);
+                        this.service.content.finish_action_err(err);
                     }
                     Err(panic) => {
                         tracing::warn!("content index action task stopped: {panic}");
-                        this.service.content_action_error =
-                            Some(format!("the content-index action task stopped: {panic}"));
+                        this.service.content.finish_action_err(format!(
+                            "the content-index action task stopped: {panic}"
+                        ));
                     }
                 }
                 this.repaint_shell_and_overlays(cx);
@@ -628,6 +670,352 @@ impl CairnApp {
             .ok();
         })
         .detach();
+    }
+
+    /// Logs the technical failure and reports it through one localized title/body pair. Service
+    /// messages are English protocol text, so they stay in the log instead of the shell.
+    fn report_request_failure(
+        &mut self,
+        title_key: &str,
+        body_key: &str,
+        detail: impl std::fmt::Display,
+        cx: &mut Context<Self>,
+    ) {
+        tracing::warn!(request = title_key, error = %detail, "service request failed");
+        let title = self.i18n.get_text(title_key);
+        let body = self.i18n.get_text(body_key);
+        self.show_error_toast(title, body, cx);
+    }
+
+    pub fn refresh_property_index_status(&mut self, cx: &mut Context<Self>) {
+        if !self.service.property.begin_load() {
+            return;
+        }
+        self.spawn_service_task(
+            cx,
+            |session| async move { session.get_property_index_status().await },
+            |this, result, cx| {
+                let ok = finish_subsystem_load(
+                    &mut this.service.property,
+                    result,
+                    "property index status",
+                    |payload| match payload {
+                        ResponsePayload::PropertyIndexStatus { status } => Ok(status),
+                        _ => Err("unexpected property index status payload".to_string()),
+                    },
+                );
+                let follow_up = ok
+                    && matches!(
+                        this.service.property.value.state,
+                        ContentIndexState::Backfilling { .. }
+                    );
+                this.repaint_shell_and_overlays(cx);
+                if follow_up {
+                    this.schedule_delayed_refresh(cx, Self::refresh_property_index_status);
+                }
+            },
+        );
+    }
+
+    pub fn set_property_index_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if !self.service.property.begin_action() {
+            return;
+        }
+        self.repaint_shell_and_overlays(cx);
+        self.spawn_service_task(
+            cx,
+            move |session| async move { session.set_property_index_enabled(enabled).await },
+            |this, result, cx| {
+                this.service.property.action_pending = false;
+                let res = match result {
+                    Some(Ok(envelope)) => match envelope.payload {
+                        ResponsePayload::PropertyIndexStatus { status } => {
+                            let backfill =
+                                matches!(status.state, ContentIndexState::Backfilling { .. });
+                            this.service.property.finish_load(status);
+                            if backfill {
+                                this.schedule_delayed_refresh(
+                                    cx,
+                                    Self::refresh_property_index_status,
+                                );
+                            }
+                            Ok(())
+                        }
+                        ResponsePayload::Error { message, .. } => Err(message),
+                        _ => Err("unexpected property index update response".to_string()),
+                    },
+                    Some(Err(err)) => Err(err.to_string()),
+                    None => Err("property index task stopped".to_string()),
+                };
+                if let Err(err) = res {
+                    this.report_request_failure(
+                        "toast_property_index_failed_title",
+                        "toast_property_index_action_failed_body",
+                        err,
+                        cx,
+                    );
+                }
+                this.repaint_shell_and_overlays(cx);
+            },
+        );
+    }
+
+    pub fn refresh_index_journal_status(&mut self, cx: &mut Context<Self>) {
+        if !self.service.journal.begin_load() {
+            return;
+        }
+        self.spawn_service_task(
+            cx,
+            |session| async move { session.get_index_journal(0, 0).await },
+            |this, result, cx| {
+                finish_subsystem_load(
+                    &mut this.service.journal,
+                    result,
+                    "index journal status",
+                    |payload| match payload {
+                        ResponsePayload::IndexJournalResult { status, .. }
+                        | ResponsePayload::IndexJournalStatus { status } => Ok(status),
+                        _ => Err("unexpected index journal payload".to_string()),
+                    },
+                );
+                this.repaint_shell_and_overlays(cx);
+            },
+        );
+    }
+
+    pub fn refresh_index_journal_dialog(&mut self, cx: &mut Context<Self>) {
+        const JOURNAL_DIALOG_LIMIT: usize = 200;
+
+        if !self.service.journal_entries.begin_load() {
+            return;
+        }
+        let initial_after = self
+            .service
+            .journal
+            .value
+            .newest_seq
+            .saturating_sub(JOURNAL_DIALOG_LIMIT as u64);
+        self.repaint_shell_and_overlays(cx);
+        self.spawn_service_task(
+            cx,
+            move |session| async move {
+                let first = session
+                    .get_index_journal(initial_after, JOURNAL_DIALOG_LIMIT)
+                    .await;
+                let Ok(envelope) = first else {
+                    return first;
+                };
+                if let ResponsePayload::IndexJournalResult { ref status, .. } = envelope.payload {
+                    let latest_after = status
+                        .newest_seq
+                        .saturating_sub(JOURNAL_DIALOG_LIMIT as u64);
+                    if latest_after > initial_after {
+                        return session
+                            .get_index_journal(latest_after, JOURNAL_DIALOG_LIMIT)
+                            .await;
+                    }
+                }
+                Ok(envelope)
+            },
+            |this, result, cx| {
+                match result {
+                    Some(Ok(envelope)) => match envelope.payload {
+                        ResponsePayload::IndexJournalResult {
+                            status,
+                            mut entries,
+                        } => {
+                            entries.reverse();
+                            this.service.journal.finish_load(status);
+                            this.service.journal_entries.finish_load(entries);
+                        }
+                        ResponsePayload::Error { message, .. } => {
+                            this.service.journal_entries.fail_load(message);
+                        }
+                        _ => {
+                            this.service
+                                .journal_entries
+                                .fail_load("unexpected index journal payload");
+                        }
+                    },
+                    Some(Err(err)) => {
+                        this.service.journal_entries.fail_load(err.to_string());
+                    }
+                    None => {
+                        this.service
+                            .journal_entries
+                            .fail_load("index journal task stopped");
+                    }
+                }
+                this.repaint_shell_and_overlays(cx);
+            },
+        );
+    }
+
+    pub fn set_index_journal_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if !self.service.journal.begin_action() {
+            return;
+        }
+        self.repaint_shell_and_overlays(cx);
+        self.spawn_service_task(
+            cx,
+            move |session| async move { session.set_index_journal_enabled(enabled).await },
+            |this, result, cx| {
+                this.service.journal.action_pending = false;
+                let res = match result {
+                    Some(Ok(envelope)) => match envelope.payload {
+                        ResponsePayload::IndexJournalStatus { status }
+                        | ResponsePayload::IndexJournalResult { status, .. } => {
+                            let is_enabled = status.enabled;
+                            this.service.journal.finish_load(status);
+                            if is_enabled {
+                                this.refresh_index_journal_dialog(cx);
+                            } else {
+                                this.service.journal_entries.finish_load(Vec::new());
+                            }
+                            Ok(())
+                        }
+                        ResponsePayload::Error { message, .. } => Err(message),
+                        _ => Err("unexpected index journal update response".to_string()),
+                    },
+                    Some(Err(err)) => Err(err.to_string()),
+                    None => Err("index journal task stopped".to_string()),
+                };
+                if let Err(err) = res {
+                    this.report_request_failure(
+                        "toast_index_journal_failed_title",
+                        "toast_index_journal_action_failed_body",
+                        err,
+                        cx,
+                    );
+                }
+                this.repaint_shell_and_overlays(cx);
+            },
+        );
+    }
+
+    pub fn refresh_sources(&mut self, cx: &mut Context<Self>) {
+        self.spawn_service_task(
+            cx,
+            |session| async move { session.get_sources().await },
+            |this, result, cx| {
+                if let Some(Ok(envelope)) = result {
+                    if let ResponsePayload::SourcesResult { sources } = envelope.payload {
+                        this.service.sources = sources;
+                        cx.notify();
+                    }
+                }
+            },
+        );
+    }
+
+    pub fn rescan_all(&mut self, cx: &mut Context<Self>) {
+        if self.service.connection.is_control_pending() {
+            return;
+        }
+        self.service.connection.set_control_pending(true);
+        self.repaint_shell_and_overlays(cx);
+        self.spawn_service_task(
+            cx,
+            |session| async move { session.rescan(None).await },
+            |this, result, cx| {
+                this.service.connection.set_control_pending(false);
+                let detail = match result {
+                    Some(Ok(envelope)) => match envelope.payload {
+                        ResponsePayload::RescanAck { success: true, .. } => {
+                            let title = this.i18n.get_text("toast_rescan_started_title");
+                            let body = this.i18n.get_text("toast_rescan_started_body");
+                            this.show_info_toast(title, body, cx);
+                            this.start_status_refresh(cx);
+                            None
+                        }
+                        ResponsePayload::Error { code, message } => {
+                            Some(format!("{code}: {message}"))
+                        }
+                        ResponsePayload::RescanAck { success: false, .. } => {
+                            Some("the service refused the rescan request".to_string())
+                        }
+                        _ => Some("unexpected rescan response".to_string()),
+                    },
+                    Some(Err(err)) => Some(err.to_string()),
+                    None => Some("rescan task stopped".to_string()),
+                };
+                if let Some(detail) = detail {
+                    this.report_request_failure(
+                        "toast_rescan_failed_title",
+                        "toast_rescan_failed_body",
+                        detail,
+                        cx,
+                    );
+                }
+                this.repaint_shell_and_overlays(cx);
+            },
+        );
+    }
+
+    pub fn rescan_drive(&mut self, drive: char, cx: &mut Context<Self>) {
+        let drive_upper = drive.to_ascii_uppercase();
+        let Some(source_id) = source_id_for_drive(&self.service.sources, drive_upper) else {
+            self.report_request_failure(
+                "toast_rescan_failed_title",
+                "toast_rescan_source_missing_body",
+                format!("no source registered for {drive_upper}:\\"),
+                cx,
+            );
+            return;
+        };
+        let mut args = fluent_bundle::FluentArgs::new();
+        args.set("drive", drive_upper.to_string());
+        let label = self.i18n.get_text_with_args("drive_label", &args);
+        self.rescan_source(source_id, label, cx);
+    }
+
+    pub fn rescan_source(&mut self, source_id: SourceId, label: String, cx: &mut Context<Self>) {
+        if self.service.connection.is_control_pending() {
+            return;
+        }
+        self.service.connection.set_control_pending(true);
+        self.repaint_shell_and_overlays(cx);
+        self.spawn_service_task(
+            cx,
+            move |session| async move { session.rescan_source(source_id).await },
+            move |this, result, cx| {
+                this.service.connection.set_control_pending(false);
+                let detail = match result {
+                    Some(Ok(envelope)) => match envelope.payload {
+                        ResponsePayload::RescanSourceAck { success: true, .. } => {
+                            let title = this.i18n.get_text("toast_rescan_started_title");
+                            let mut args = fluent_bundle::FluentArgs::new();
+                            args.set("source", label.as_str());
+                            let body = this
+                                .i18n
+                                .get_text_with_args("toast_rescan_source_started_body", &args);
+                            this.show_info_toast(title, body, cx);
+                            this.start_status_refresh(cx);
+                            this.refresh_sources(cx);
+                            None
+                        }
+                        ResponsePayload::Error { code, message } => {
+                            Some(format!("{code}: {message}"))
+                        }
+                        ResponsePayload::RescanSourceAck { success: false, .. } => {
+                            Some("the service refused the source rescan".to_string())
+                        }
+                        _ => Some("unexpected source rescan response".to_string()),
+                    },
+                    Some(Err(err)) => Some(err.to_string()),
+                    None => Some("source rescan task stopped".to_string()),
+                };
+                if let Some(detail) = detail {
+                    this.report_request_failure(
+                        "toast_rescan_failed_title",
+                        "toast_rescan_failed_body",
+                        detail,
+                        cx,
+                    );
+                }
+                this.repaint_shell_and_overlays(cx);
+            },
+        );
     }
 }
 
@@ -720,6 +1108,39 @@ mod tests {
             status_refresh_decision(false, false, false),
             StatusRefreshDecision::Stop,
             "a hidden table has nothing to refresh when loading ends"
+        );
+    }
+
+    #[test]
+    fn source_id_resolves_drive_from_sources_or_drive_fallback() {
+        use cairn_protocol::message::SourceId;
+        use cairn_protocol::status::{SourceKind, SourceStatusSummary, VolumeState};
+
+        let custom_c = SourceId(99);
+        let sources = vec![
+            SourceStatusSummary {
+                source_id: SourceId(200),
+                kind: SourceKind::Folder,
+                root_path: r"C:\Projects".to_string(),
+                volume_guid: String::new(),
+                status: VolumeState::Synced,
+                indexed_count: 10,
+                live_watch_enabled: true,
+            },
+            SourceStatusSummary {
+                source_id: custom_c,
+                kind: SourceKind::NtfsVolume,
+                root_path: r"C:\".to_string(),
+                volume_guid: "guid-c".to_string(),
+                status: VolumeState::Synced,
+                indexed_count: 100,
+                live_watch_enabled: true,
+            },
+        ];
+        assert_eq!(super::source_id_for_drive(&sources, 'c'), Some(custom_c));
+        assert_eq!(
+            super::source_id_for_drive(&sources, 'd'),
+            SourceId::for_drive('D')
         );
     }
 }

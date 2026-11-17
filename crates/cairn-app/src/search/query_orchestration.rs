@@ -7,7 +7,6 @@
 use crate::app::{layout, CairnApp, HighlightSpan};
 use crate::search::coordinator::{MonotonicClock, SearchCommand, SearchPlan, ServiceTransport};
 use crate::service::ipc_tasks::get_tokio_runtime;
-use crate::service::service_issue::ServiceIssue;
 use gpui_kit::gpui::{AsyncApp, Context, Pixels, Point};
 use std::ops::Range;
 
@@ -285,9 +284,9 @@ impl CairnApp {
             return;
         }
         if !rows_page_ready(
-            self.service.is_service_connected,
-            self.query.is_searching,
-            self.service.is_probing_service,
+            self.service.connection.is_connected(),
+            self.query.is_searching(),
+            self.service.connection.is_probing(),
             self.query.is_fetching_more,
             self.query.active_session_id.is_some(),
         ) {
@@ -328,9 +327,9 @@ impl CairnApp {
             return self.needs_recycle_bin_page(visible);
         }
         rows_page_ready(
-            self.service.is_service_connected,
-            self.query.is_searching,
-            self.service.is_probing_service,
+            self.service.connection.is_connected(),
+            self.query.is_searching(),
+            self.service.connection.is_probing(),
             self.query.is_fetching_more,
             self.query.active_session_id.is_some(),
         ) && self
@@ -346,12 +345,10 @@ impl CairnApp {
     pub fn schedule_text_search(&mut self, cx: &mut Context<Self>) {
         self.discard_rename(cx);
         if self.recycle_bin.is_open() {
-            self.query.is_searching = false;
             self.filter_recycle_bin(cx);
             return;
         }
         if self.block_listing.is_some() {
-            self.query.is_searching = false;
             self.filter_block_listing(cx);
             return;
         }
@@ -439,8 +436,6 @@ impl CairnApp {
         }
         let mut transport = QueuedTransport::default();
         self.query.coordinator.cancel_in_flight(&mut transport);
-        self.query.query_id = self.query.coordinator.current_query_id();
-        self.query.is_searching = false;
         self.query.is_fetching_more = false;
         self.spawn_queued_cancels(transport.cancels);
         true
@@ -451,7 +446,32 @@ impl CairnApp {
     /// active session released, so it cannot splice into the new rows.
     pub(crate) fn take_table_for_local_rows(&mut self) {
         self.supersede_index_query();
+        self.query.coordinator.set_cancelled(false);
         self.query.active_session_id = None;
+        self.query.degraded = None;
+        self.results.snippet_preview = None;
+    }
+
+    /// Local listings do not expose the created-time or property columns. Keep the direction,
+    /// but move an unsupported primary sort to the modification column they do show so the
+    /// header, sorting menu, and next launch agree.
+    pub(crate) fn normalize_local_listing_sort(&mut self) {
+        let (column, ascending) = self.results.table.primary_sort();
+        let supported = matches!(
+            column,
+            crate::table::model::SortColumn::Name
+                | crate::table::model::SortColumn::Path
+                | crate::table::model::SortColumn::Size
+                | crate::table::model::SortColumn::DateModified
+                | crate::table::model::SortColumn::Extension
+        );
+        if !supported {
+            self.results
+                .table
+                .set_primary_sort(crate::table::model::SortColumn::DateModified, ascending);
+            self.settings.columns.sort_spec = self.results.table.sort_spec.to_clause();
+            self.save_settings();
+        }
     }
 
     /// Waits for the index poll instead of issuing a partial query: releases
@@ -462,8 +482,7 @@ impl CairnApp {
         // An empty query is never refused, so a refusal of the cleared text must not
         // outlive it and block the all-files view once the index settles.
         self.query.rejection = None;
-        // An explicit trigger is a new state: a stop belongs to the query it stopped.
-        self.query.cancelled = false;
+        self.query.degraded = None;
         self.query.coordinator.set_cancelled(false);
         self.start_status_refresh(cx);
         cx.notify();
@@ -472,9 +491,7 @@ impl CairnApp {
     /// Records a failed exchange. A timeout keeps the connection (and the rows
     /// already in hand) usable; every other failure marks the service down.
     fn note_service_error(&mut self, error: &cairn_client::client::ClientError) {
-        self.service.is_service_connected =
-            !matches!(error, cairn_client::client::ClientError::Timeout);
-        self.service.service_issue = Some(ServiceIssue::from_client_error(error));
+        self.service.connection.note_client_error(error);
     }
 
     /// Cancels the in-flight query without changing the text or the rows already shown. The local
@@ -484,7 +501,6 @@ impl CairnApp {
         if !self.supersede_index_query() {
             return;
         }
-        self.query.cancelled = true;
         // A stopped first page reveals the band through the same entrance an empty answer uses.
         self.note_table_empty(cx);
         cx.notify();
@@ -504,9 +520,7 @@ impl CairnApp {
         }
         // A cancelled query is a stop, not a pause: only explicit input asks
         // for a new one.
-        if self.query.is_searching
-            || self.query.cancelled
-            || !self.query.coordinator.can_background_refresh()
+        if !self.query.coordinator.can_background_refresh()
             || self.recycle_bin.is_open()
             || self.drive_view.is_some()
             || self.query.rejection.is_some()
@@ -516,19 +530,21 @@ impl CairnApp {
         self.run_query(cx, ResultSetChange::Background);
     }
 
-    fn build_search_command(&self, reset_scroll_on_apply: bool) -> SearchCommand {
-        let raw_text = self.query.search_input.text.trim().to_string();
-        let query_defaults = cairn_protocol::message::QueryDefaults {
+    pub(crate) fn query_defaults(&self) -> cairn_protocol::message::QueryDefaults {
+        cairn_protocol::message::QueryDefaults {
             case_sensitive: self.query.case_sensitive,
             whole_words: self.query.whole_word,
             match_path: self.query.match_path,
             is_regex: self.query.use_regex,
-            // Content is a query syntax (`content:`), not a modal toggle. The service gates it on
-            // the master switch.
-            content: false,
-            exclude_hidden: false,
-            exclude_system: false,
-        };
+            exclude_hidden: self.settings.exclude_hidden,
+            exclude_system: self.settings.exclude_system,
+            ..cairn_protocol::message::QueryDefaults::default()
+        }
+    }
+
+    fn build_search_command(&self, reset_scroll_on_apply: bool) -> SearchCommand {
+        let raw_text = self.query.search_input.text.trim().to_string();
+        let query_defaults = self.query_defaults();
         let mut query = raw_text;
         if let Some(mac) = self.query.active_filter.query_macro() {
             query = format!("{mac} {query}");
@@ -539,8 +555,7 @@ impl CairnApp {
         SearchCommand {
             query,
             defaults: query_defaults,
-            sort_column: self.results.table.sort_column,
-            sort_asc: self.results.table.sort_asc,
+            sort_spec: self.results.table.sort_spec.clone(),
             page_size: layout::RESULT_PAGE_SIZE,
             reset_scroll_on_apply,
         }
@@ -552,12 +567,10 @@ impl CairnApp {
         // and IME commit all arrive here, so this one branch keeps the location
         // stable for every text path.
         if self.recycle_bin.is_open() {
-            self.query.is_searching = false;
             self.filter_recycle_bin(cx);
             return;
         }
         if self.block_listing.is_some() {
-            self.query.is_searching = false;
             self.filter_block_listing(cx);
             return;
         }
@@ -584,10 +597,8 @@ impl CairnApp {
     }
 
     fn apply_coordinator_dispatch(&mut self, transport: QueuedTransport, cx: &mut Context<Self>) {
-        self.query.query_id = self.query.coordinator.current_query_id();
         self.query.rejection = None;
-        self.query.cancelled = self.query.coordinator.is_cancelled();
-        self.query.is_searching = self.query.coordinator.is_searching();
+        self.query.degraded = None;
         self.recycle_bin.leave();
         self.spawn_queued_cancels(transport.cancels);
 
@@ -604,14 +615,7 @@ impl CairnApp {
             get_tokio_runtime().spawn(async move {
                 let started = std::time::Instant::now();
                 let res = session
-                    .query(
-                        qid,
-                        &cmd.query,
-                        cmd.defaults,
-                        cmd.sort_column,
-                        cmd.sort_asc,
-                        cmd.page_size,
-                    )
+                    .query(qid, &cmd.query, cmd.defaults, &cmd.sort_spec, cmd.page_size)
                     .await;
                 crate::shell::perf::mark(&format!(
                     "query ipc {:.3}ms",
@@ -622,14 +626,13 @@ impl CairnApp {
 
             let res = rx.await;
             this.update(cx, |this: &mut CairnApp, cx| {
-                if qid != this.query.query_id {
+                if qid != this.query.query_id() {
                     return;
                 }
                 let res = match res {
                     Ok(res) => res,
                     Err(e) => {
                         this.query.coordinator.abort_waiting_on_error(qid);
-                        this.query.is_searching = this.query.coordinator.is_searching();
                         tracing::warn!("Cairn query response task lost: {e}");
                         cx.notify();
                         return;
@@ -640,57 +643,13 @@ impl CairnApp {
                         let Some(reset_scroll) = this.query.coordinator.accept_response(qid) else {
                             return;
                         };
-                        this.query.is_searching = this.query.coordinator.is_searching();
-                        this.service.is_service_connected = true;
-                        this.service.service_issue = None;
+                        this.service.connection.mark_connected();
                         this.service.status.update_volumes(envelope.volumes);
                         this.start_status_refresh(cx);
-                        match envelope.payload {
-                            cairn_protocol::message::ResponsePayload::QueryResult {
-                                session_id,
-                                total_matches,
-                                total_bytes,
-                                first_page,
-                                ..
-                            } => {
-                                this.query.rejection = None;
-                                this.query.cancelled = false;
-                                this.query.active_session_id = Some(session_id);
-                                if reset_scroll {
-                                    this.results.rows_scroll.set_offset(Point::default());
-                                    this.results.table.scroll_top = 0.0;
-                                    this.results.table.set_rows(first_page, total_matches);
-                                } else {
-                                    this.results.table.refresh_rows(first_page, total_matches);
-                                }
-                                this.discard_rename_if_row_unloaded(cx);
-                                crate::shell::perf::mark(&format!(
-                                    "query applied id={qid} total={total_matches}"
-                                ));
-                                this.note_table_content(cx);
-                                if total_matches == 0 {
-                                    this.note_table_empty(cx);
-                                }
-                                this.service
-                                    .status
-                                    .set_objects_summary(total_matches, total_bytes);
-                            }
-                            cairn_protocol::message::ResponsePayload::Error { code, .. } => {
-                                this.query.rejection = QueryRejection::from_error_code(code);
-                                this.query.cancelled = false;
-                                if this.query.rejection.is_some() {
-                                    this.results.table.set_rows(Vec::new(), 0);
-                                    this.query.active_session_id = None;
-                                    this.service.status.clear_objects_count();
-                                    this.note_table_empty(cx);
-                                }
-                            }
-                            _ => {}
-                        }
+                        this.apply_query_payload(reset_scroll, envelope.payload, cx);
                     }
                     Err(e) => {
                         this.query.coordinator.abort_waiting_on_error(qid);
-                        this.query.is_searching = this.query.coordinator.is_searching();
                         tracing::warn!("Cairn IPC query error: {}", e);
                         this.note_service_error(&e);
                     }
@@ -702,13 +661,68 @@ impl CairnApp {
         .detach();
     }
 
+    pub(crate) fn apply_query_payload(
+        &mut self,
+        reset_scroll: bool,
+        payload: cairn_protocol::message::ResponsePayload,
+        cx: &mut Context<Self>,
+    ) {
+        match payload {
+            cairn_protocol::message::ResponsePayload::QueryResult {
+                query_id,
+                session_id,
+                total_matches,
+                total_bytes,
+                first_page,
+                applied_sort,
+                degraded,
+            } => {
+                self.query.rejection = None;
+                self.query.degraded = degraded;
+                self.results.snippet_preview = None;
+                self.query.active_session_id = Some(session_id);
+                self.results.table.sort_spec = applied_sort;
+                if reset_scroll {
+                    self.results.rows_scroll.set_offset(Point::default());
+                    self.results.table.scroll_top = 0.0;
+                    self.results.table.set_rows(first_page, total_matches);
+                } else {
+                    self.results.table.refresh_rows(first_page, total_matches);
+                }
+                self.discard_rename_if_row_unloaded(cx);
+                crate::shell::perf::mark(&format!(
+                    "query applied id={query_id} total={total_matches}"
+                ));
+                self.note_table_content(cx);
+                if total_matches == 0 {
+                    self.note_table_empty(cx);
+                }
+                self.service
+                    .status
+                    .set_objects_summary(total_matches, total_bytes);
+            }
+            cairn_protocol::message::ResponsePayload::Error { code, .. } => {
+                self.query.rejection = QueryRejection::from_error_code(code);
+                self.query.degraded = None;
+                self.results.snippet_preview = None;
+                if self.query.rejection.is_some() {
+                    self.results.table.set_rows(Vec::new(), 0);
+                    self.query.active_session_id = None;
+                    self.service.status.clear_objects_count();
+                    self.note_table_empty(cx);
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Fetches one `(offset, limit)` window of the active session and installs it.
     pub fn fetch_rows(&mut self, offset: usize, limit: usize, cx: &mut Context<Self>) {
         let Some(session_id) = self.query.active_session_id else {
             return;
         };
         self.query.is_fetching_more = true;
-        let current_qid = self.query.query_id;
+        let current_qid = self.query.query_id();
         // A page fetched after a background refresh replaces the stale window; remember which
         // offset that is so a response already in flight cannot be mistaken for it.
         self.results.table.note_page_request(offset);
@@ -728,7 +742,7 @@ impl CairnApp {
                 // set this table no longer shows, even when the query id still matches.
                 if !page_response_is_current(
                     current_qid,
-                    this.query.query_id,
+                    this.query.query_id(),
                     session_id,
                     this.query.active_session_id,
                 ) {
@@ -754,8 +768,7 @@ impl CairnApp {
                     }
                     Err(e) => {
                         tracing::warn!("Cairn page fetch task lost: {e}");
-                        this.service.is_service_connected = false;
-                        this.service.service_issue = Some(ServiceIssue::NotRunning);
+                        this.service.connection.mark_lost_running();
                     }
                 }
                 cx.notify();
@@ -971,19 +984,20 @@ mod tests {
                     let app = cx.new(|cx| CairnApp::new(window, cx));
 
                     app.update(cx, |this, cx| {
-                        this.query.cancelled = true;
-                        let id = this.query.query_id;
+                        this.query.coordinator.set_cancelled(true);
+                        let id = this.query.query_id();
                         this.refresh_results(cx);
-                        assert!(!this.query.is_searching);
+                        assert!(!this.query.is_searching());
                         assert_eq!(
-                            this.query.query_id, id,
+                            this.query.query_id(),
+                            id,
                             "a status refresh must not issue a query behind a stop"
                         );
 
-                        this.query.cancelled = false;
+                        this.query.coordinator.set_cancelled(false);
                         this.refresh_results(cx);
                         assert!(
-                            this.query.is_searching,
+                            this.query.is_searching(),
                             "an explicit state resumes the query"
                         );
                     });
@@ -1013,16 +1027,118 @@ mod tests {
                     app.update(cx, |this, cx| {
                         this.query.search_input.set_text("report");
                         this.request_result_set(ResultSetChange::InPlace, cx);
-                        assert!(this.query.is_searching);
-                        let before = this.query.query_id;
+                        assert!(this.query.is_searching());
+                        let before = this.query.query_id();
                         this.cancel_in_flight_query(cx);
-                        assert!(!this.query.is_searching);
-                        assert!(this.query.cancelled);
+                        assert!(!this.query.is_searching());
+                        assert!(this.query.is_cancelled());
                         assert_eq!(
-                            this.query.query_id,
+                            this.query.query_id(),
                             before + 1,
                             "the late answer belongs to a superseded id"
                         );
+                    });
+
+                    cx.quit();
+                    app
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn build_search_command_forwards_exclusion_settings() {
+        use gpui_kit::gpui::AppContext as _;
+        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
+            gpui_kit::init(cx);
+            let _ = gpui_kit::open_window(
+                gpui_kit::gpui::WindowOptions {
+                    show: false,
+                    focus: false,
+                    ..gpui_kit::gpui::WindowOptions::default()
+                },
+                cx,
+                |window, cx| {
+                    let app = cx.new(|cx| CairnApp::new(window, cx));
+
+                    app.update(cx, |this, _cx| {
+                        this.settings.exclude_hidden = true;
+                        this.settings.exclude_system = true;
+                        let cmd = this.build_search_command(true);
+                        assert!(cmd.defaults.exclude_hidden);
+                        assert!(cmd.defaults.exclude_system);
+
+                        this.settings.exclude_hidden = false;
+                        this.settings.exclude_system = false;
+                        let cmd = this.build_search_command(true);
+                        assert!(!cmd.defaults.exclude_hidden);
+                        assert!(!cmd.defaults.exclude_system);
+                    });
+
+                    cx.quit();
+                    app
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn degraded_query_result_sets_notice_and_syncs_applied_sort_until_cleared() {
+        use cairn_core::property_store::PropertyKind;
+        use cairn_core::sort::{SortColumn, SortDirection, SortSpec};
+        use cairn_protocol::message::{QueryDegradedReason, ResponsePayload};
+        use gpui_kit::gpui::AppContext as _;
+
+        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
+            gpui_kit::init(cx);
+            let _ = gpui_kit::open_window(
+                gpui_kit::gpui::WindowOptions {
+                    show: false,
+                    focus: false,
+                    ..gpui_kit::gpui::WindowOptions::default()
+                },
+                cx,
+                |window, cx| {
+                    let app = cx.new(|cx| CairnApp::new(window, cx));
+
+                    app.update(cx, |this, cx| {
+                        this.results.table.sort_spec =
+                            SortSpec::single(SortColumn::Length, SortDirection::Descending);
+                        let degraded = QueryDegradedReason::PropertyIndexDisabled {
+                            requested: vec![PropertyKind::Length],
+                        };
+                        let fallback_sort =
+                            SortSpec::single(SortColumn::Name, SortDirection::Ascending);
+                        this.apply_query_payload(
+                            true,
+                            ResponsePayload::QueryResult {
+                                query_id: 1,
+                                session_id: 9,
+                                total_matches: 1,
+                                total_bytes: 42,
+                                first_page: Vec::new(),
+                                applied_sort: fallback_sort.clone(),
+                                degraded: Some(degraded.clone()),
+                            },
+                            cx,
+                        );
+                        assert_eq!(this.query.degraded, Some(degraded));
+                        assert_eq!(this.results.table.sort_spec, fallback_sort);
+
+                        this.apply_query_payload(
+                            true,
+                            ResponsePayload::QueryResult {
+                                query_id: 2,
+                                session_id: 10,
+                                total_matches: 0,
+                                total_bytes: 0,
+                                first_page: Vec::new(),
+                                applied_sort: SortSpec::default(),
+                                degraded: None,
+                            },
+                            cx,
+                        );
+                        assert_eq!(this.query.degraded, None);
                     });
 
                     cx.quit();

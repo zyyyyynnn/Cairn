@@ -10,8 +10,7 @@ use crate::app::CairnApp;
 use crate::search::filters::FilterCategory;
 use crate::search::ResultSetChange;
 use crate::shell::commands::{DeleteSelected, RestoreAll, RestoreSelected};
-use crate::shell::dialogs;
-use crate::shell::menu_actions::{style_confirmation_alert, style_confirmation_alert_with_variant};
+use crate::shell::dialogs::{self, confirmation_alert, confirmation_alert_with_variant};
 use crate::shell::os::{
     delete_permanently_from_recycle_bin, delete_to_recycle_bin, empty_recycle_bin,
     restore_from_recycle_bin, BinOperationError, RecycleBinItem,
@@ -86,7 +85,7 @@ impl CairnApp {
         // Invalidate any in-flight query: its answer belongs to the table and
         // must not replace the listing that is about to be shown.
         self.take_table_for_local_rows();
-        self.query.cancelled = false;
+        self.normalize_local_listing_sort();
         // The bin is a location, not a search scope. The search box starts
         // empty and filters this listing in place; it must not run an index
         // query that would replace the location.
@@ -164,7 +163,7 @@ impl CairnApp {
         let cancel = self.i18n.get_text("delete_confirm_cancel");
         let view = cx.entity();
         window.open_alert_dialog(cx, move |alert, window, app| {
-            style_confirmation_alert(alert, window, app, ok.clone(), cancel.clone())
+            confirmation_alert(alert, window, app, ok.clone(), cancel.clone())
                 .child(dialogs::body(title.clone(), description.clone(), window))
                 .confirm()
                 .on_ok({
@@ -248,7 +247,7 @@ impl CairnApp {
         let cancel = self.i18n.get_text("delete_confirm_cancel");
         let view = cx.entity();
         window.open_alert_dialog(cx, move |alert, window, app| {
-            style_confirmation_alert(alert, window, app, ok.clone(), cancel.clone())
+            confirmation_alert(alert, window, app, ok.clone(), cancel.clone())
                 .child(dialogs::body(title.clone(), description.clone(), window))
                 .confirm()
                 .on_ok({
@@ -286,7 +285,7 @@ impl CairnApp {
         let generation = self.recycle_bin.generation();
         self.sync_bin_selection_keys();
         let anchor = self.explicit_bin_selection_indices().first().copied();
-        self.recycle_bin.set_loading(true);
+        self.recycle_bin.set_mutating(true);
         cx.notify();
         let (tx, rx) = tokio::sync::oneshot::channel();
         std::thread::spawn(move || {
@@ -295,7 +294,7 @@ impl CairnApp {
         cx.spawn(async move |this, cx| {
             let Ok((outcome, listing)) = rx.await else {
                 let _ = this.update(cx, |this, cx| {
-                    this.recycle_bin.set_loading(false);
+                    this.recycle_bin.set_mutating(false);
                     cx.notify();
                 });
                 return;
@@ -393,7 +392,7 @@ impl CairnApp {
         let cancel = self.i18n.get_text("delete_confirm_cancel");
         let view = cx.entity();
         window.open_alert_dialog(cx, move |alert, window, app| {
-            style_confirmation_alert_with_variant(
+            confirmation_alert_with_variant(
                 alert,
                 window,
                 app,
@@ -438,7 +437,7 @@ impl CairnApp {
         let cancel = self.i18n.get_text("delete_confirm_cancel");
         let view = cx.entity();
         window.open_alert_dialog(cx, move |alert, window, app| {
-            style_confirmation_alert(alert, window, app, ok.clone(), cancel.clone())
+            confirmation_alert(alert, window, app, ok.clone(), cancel.clone())
                 .child(dialogs::body(title.clone(), description.clone(), window))
                 .confirm()
                 .on_ok({
@@ -640,13 +639,13 @@ mod bin_command_tests {
                         this.block_listing =
                             Some(BlockListing::new(r"C:\Windows".to_string(), 2, Vec::new()));
                         this.query.search_input.set_text("amd64");
-                        this.query.cancelled = true;
+                        this.query.coordinator.set_cancelled(true);
                         this.open_recycle_bin(window, cx);
                         assert!(this.block_listing.is_none());
                         assert_eq!(this.nav_history[entry].text, "kept query");
                         assert!(this.query.search_input.text.is_empty());
                         assert!(
-                            !this.query.cancelled,
+                            !this.query.is_cancelled(),
                             "the bin is a new location, not the cancelled query"
                         );
                     });

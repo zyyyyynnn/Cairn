@@ -95,6 +95,8 @@ jobs:
         run: cargo run -p xtask -- check-size
       - name: Documentation links
         run: cargo run -p xtask -- check-docs
+      - name: Repository hygiene
+        run: cargo run -p xtask -- check-hygiene
 
   deny:
     name: Dependency Policy
@@ -182,8 +184,11 @@ jobs:
           save-if: false
       - name: Build the content worker
         run: cargo build -p cairn-worker
-      - name: Content backfill end-to-end test
-        run: cargo test -p cairn-service a_full_backfill_reaches_ready_and_indexes_existing_files -- --ignored
+      - name: Content and property worker end-to-end tests
+        shell: pwsh
+        run: |
+          cargo test -p cairn-service a_full_backfill_reaches_ready_and_indexes_existing_files -- --ignored
+          cargo test -p cairn-service --test platform_seam property_index_extracts_through_real_worker_and_recovers_from_corrupt_files -- --ignored
 
   tooling:
     name: Test / Tooling

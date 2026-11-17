@@ -4,8 +4,10 @@
 
 //! Query session cache and pagination manager with multi-volume support.
 
+use crate::sync_engine::folder_source::FolderSource;
 use crate::sync_engine::{AllFilesView, MatchSet, SearchResultItem, VolumeIndex};
 use cairn_core::engine::CancellationToken;
+use cairn_core::property_store::{PropertySideTables, SourceId};
 use cairn_protocol::message::FileRowData;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -54,15 +56,15 @@ impl Clock for SystemClock {
 pub enum RowsError {
     /// The session was evicted (LRU) or never existed.
     UnknownSession,
-    /// The volume's record table was rebuilt since the query, so the cached indices are stale.
-    Stale { drive_letter: char },
+    /// The source's record table was rebuilt since the query, so the cached indices are stale.
+    Stale { source_id: SourceId },
 }
 
 pub struct QuerySession {
     owner: QueryOwner,
     pub pre_folded_terms: Vec<Vec<u8>>,
     rows: MatchSet,
-    pub snippets: HashMap<(char, u64), String>,
+    pub snippets: HashMap<(u32, u64), Vec<String>>,
     pub created_nanos: u64,
     pub last_accessed_nanos: AtomicU64,
 }
@@ -214,7 +216,7 @@ impl SessionManager {
         owner: QueryOwner,
         rows: MatchSet,
         highlight_terms: Vec<String>,
-        snippets: HashMap<(char, u64), String>,
+        snippets: HashMap<(u32, u64), Vec<String>>,
     ) -> u64 {
         let session_id = self.next_session_id.fetch_add(1, Ordering::Relaxed);
         let mut lock = self.sessions.write().unwrap();
@@ -274,36 +276,67 @@ impl SessionManager {
         self.sessions.write().unwrap().remove(&session_id);
     }
 
-    /// Fetches rows across all indexed volumes for an active session.
+    /// Fetches rows across all indexed sources for an active session.
     ///
-    /// A page is only served while every volume it touches still has the generation observed at
+    /// A page is only served while every source it touches still has the generation observed at
     /// query time. Serving indices from a replaced table would show another file's row or an
     /// out-of-range index, so the page is refused instead.
     pub fn get_rows_multi(
         &self,
+        owner: &QueryOwner,
         session_id: u64,
         offset: usize,
         limit: usize,
-        volumes: &HashMap<char, VolumeIndex>,
+        sources: &SourceTables<'_>,
+    ) -> Result<Vec<FileRowData>, RowsError> {
+        let lock = self.sessions.read().unwrap();
+        let session = lock.get(&session_id).ok_or(RowsError::UnknownSession)?;
+        if session.owner != *owner {
+            return Err(RowsError::UnknownSession);
+        }
+        session
+            .last_accessed_nanos
+            .store(self.clock.now_nanos(), Ordering::Relaxed);
+        page_session(session, offset, limit, sources)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn get_rows_multi_unchecked(
+        &self,
+        session_id: u64,
+        offset: usize,
+        limit: usize,
+        sources: &SourceTables<'_>,
     ) -> Result<Vec<FileRowData>, RowsError> {
         let lock = self.sessions.read().unwrap();
         let session = lock.get(&session_id).ok_or(RowsError::UnknownSession)?;
         session
             .last_accessed_nanos
             .store(self.clock.now_nanos(), Ordering::Relaxed);
-
-        match &session.rows {
-            MatchSet::Items(items) => rows_for_items(
-                session,
-                items,
-                offset,
-                limit,
-                &session.pre_folded_terms,
-                |item| volumes.get(&item.drive_letter),
-            ),
-            MatchSet::AllFiles(view) => rows_for_all_files(view, offset, limit, volumes),
-        }
+        page_session(session, offset, limit, sources)
     }
+}
+
+const MAX_ROWS_PAGE: usize = 10_000;
+
+fn page_session(
+    session: &QuerySession,
+    offset: usize,
+    limit: usize,
+    sources: &SourceTables<'_>,
+) -> Result<Vec<FileRowData>, RowsError> {
+    let limit = limit.min(MAX_ROWS_PAGE);
+    match &session.rows {
+        MatchSet::Items(items) => rows_for_items(session, items, offset, limit, sources),
+        MatchSet::AllFiles(view) => rows_for_all_files(view, offset, limit, sources),
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct SourceTables<'a> {
+    pub volumes: &'a HashMap<char, VolumeIndex>,
+    pub folders: &'a HashMap<SourceId, FolderSource>,
+    pub properties: &'a PropertySideTables,
 }
 
 /// Pages one live all-files view: the volume's order is the answer, filtered by the
@@ -312,16 +345,26 @@ fn rows_for_all_files(
     view: &AllFilesView,
     offset: usize,
     limit: usize,
-    volumes: &HashMap<char, VolumeIndex>,
+    sources: &SourceTables<'_>,
 ) -> Result<Vec<FileRowData>, RowsError> {
-    let Some(volume) = volumes.get(&view.drive_letter) else {
+    let Some(volume) = sources.volumes.get(&view.drive_letter) else {
         return Err(RowsError::Stale {
-            drive_letter: view.drive_letter,
+            source_id: view.source_id,
         });
     };
     let mut rows = Vec::new();
     let current = view.visit_visible(volume, offset, limit, |idx| {
-        if let Some(row) = volume.build_file_row(idx, &[], |_| None) {
+        if let Some(row) = volume.table_view().build_file_row(
+            idx,
+            &[],
+            |_| Vec::new(),
+            |frn, modified_ts| {
+                sources
+                    .properties
+                    .get(view.source_id, frn, modified_ts)
+                    .map(|v| v.to_owned())
+            },
+        ) {
             rows.push(row);
         }
     });
@@ -329,19 +372,18 @@ fn rows_for_all_files(
         Ok(rows)
     } else {
         Err(RowsError::Stale {
-            drive_letter: view.drive_letter,
+            source_id: view.source_id,
         })
     }
 }
 
-/// Materializes one page of a session against the current volume tables.
-fn rows_for_items<'a>(
+/// Materializes one page of a session against the current volume and folder source tables.
+fn rows_for_items(
     session: &QuerySession,
     items: &[SearchResultItem],
     offset: usize,
     limit: usize,
-    folded_terms: &[Vec<u8>],
-    volume_of: impl Fn(&SearchResultItem) -> Option<&'a VolumeIndex>,
+    sources: &SourceTables<'_>,
 ) -> Result<Vec<FileRowData>, RowsError> {
     let end = offset.saturating_add(limit).min(items.len());
     if offset >= items.len() {
@@ -352,17 +394,47 @@ fn rows_for_items<'a>(
     let mut rows = Vec::with_capacity(slice.len());
 
     for item in slice {
-        let Some(vol) = volume_of(item) else {
+        let Some(source) = item
+            .source_id
+            .drive_letter()
+            .and_then(|drive| sources.volumes.get(&drive).map(VolumeIndex::table_view))
+            .or_else(|| {
+                sources
+                    .folders
+                    .get(&item.source_id)
+                    .map(FolderSource::table_view)
+            })
+        else {
             continue;
         };
-        if vol.generation() != item.generation {
+        if source.generation != item.generation {
             return Err(RowsError::Stale {
-                drive_letter: item.drive_letter,
+                source_id: item.source_id,
             });
         }
-        if let Some(row) = vol.build_file_row(item.record_idx, folded_terms, |frn| {
-            session.snippets.get(&(item.drive_letter, frn)).cloned()
-        }) {
+        let Some(record) = source.records.get(item.record_idx as usize) else {
+            continue;
+        };
+        if record.is_tombstone() {
+            continue;
+        }
+        if let Some(row) = source.build_file_row(
+            item.record_idx,
+            &session.pre_folded_terms,
+            |frn| {
+                session
+                    .snippets
+                    .get(&(item.source_id.0, frn))
+                    .cloned()
+                    .unwrap_or_default()
+            },
+            |frn, modified_ts| {
+                sources
+                    .properties
+                    .get(item.source_id, frn, modified_ts)
+                    .map(|v| v.to_owned())
+            },
+        ) {
             rows.push(row);
         }
     }
@@ -373,6 +445,7 @@ fn rows_for_items<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cairn_core::property_store::RecordPropertyData;
     use cairn_ntfs::mft::ExtractedItem;
     use cairn_ntfs::usn::UsnChange;
     use std::collections::HashMap;
@@ -395,10 +468,35 @@ mod tests {
 
     fn item(generation: u64) -> SearchResultItem {
         SearchResultItem {
-            drive_letter: 'C',
+            source_id: SourceId::for_drive('C').unwrap(),
             record_idx: 0,
             generation,
         }
+    }
+
+    fn drive_c() -> SourceId {
+        SourceId::for_drive('C').unwrap()
+    }
+
+    fn get_rows(
+        sessions: &SessionManager,
+        session_id: u64,
+        offset: usize,
+        limit: usize,
+        volumes: &HashMap<char, VolumeIndex>,
+    ) -> Result<Vec<FileRowData>, RowsError> {
+        let folders = HashMap::new();
+        let props = PropertySideTables::disabled();
+        sessions.get_rows_multi_unchecked(
+            session_id,
+            offset,
+            limit,
+            &SourceTables {
+                volumes,
+                folders: &folders,
+                properties: &props,
+            },
+        )
     }
 
     fn owner(pid: u32) -> QueryOwner {
@@ -406,6 +504,28 @@ mod tests {
             client_pid: pid,
             user_sid: "S-1-5-21-test".to_string(),
         }
+    }
+
+    #[test]
+    fn a_session_is_invisible_to_another_owner() {
+        let sessions = SessionManager::new(1, DEFAULT_SESSION_TTL, SystemClock::new());
+        let session_id = create_items(&sessions, owner(1), Vec::new());
+        let volumes = HashMap::new();
+        let folders = HashMap::new();
+        let props = PropertySideTables::disabled();
+        let tables = SourceTables {
+            volumes: &volumes,
+            folders: &folders,
+            properties: &props,
+        };
+
+        assert_eq!(
+            sessions.get_rows_multi(&owner(2), session_id, 0, 10, &tables),
+            Err(RowsError::UnknownSession)
+        );
+        assert!(sessions
+            .get_rows_multi(&owner(1), session_id, 0, 10, &tables)
+            .is_ok());
     }
 
     fn create_items(
@@ -451,8 +571,10 @@ mod tests {
         let volumes = HashMap::from([(drive_letter, volume)]);
         let exclusion_epoch = volumes[&drive_letter].exclusion_epoch();
         let exclusions = crate::sync_engine::path_exclusions::PathExclusions::new(&volumes, rules);
+        let source_id = SourceId::for_drive(drive_letter).unwrap();
         (
             AllFilesView {
+                source_id,
                 drive_letter,
                 sort_by,
                 sort_asc,
@@ -479,16 +601,12 @@ mod tests {
             HashMap::new(),
         );
 
-        let first = sessions
-            .get_rows_multi(id, 0, 2, &volumes)
-            .expect("first page");
+        let first = get_rows(&sessions, id, 0, 2, &volumes).expect("first page");
         assert_eq!(first.len(), 2);
         assert_eq!(first[0].name, "a.txt");
         assert_eq!(first[1].name, "b.txt");
 
-        let second = sessions
-            .get_rows_multi(id, 2, 2, &volumes)
-            .expect("second page");
+        let second = get_rows(&sessions, id, 2, 2, &volumes).expect("second page");
         assert_eq!(second.len(), 1);
         assert_eq!(second[0].name, "c.txt");
     }
@@ -523,7 +641,7 @@ mod tests {
                 is_new_name: true,
             }]);
         assert!(
-            sessions.get_rows_multi(id, 0, 2, &volumes).is_ok(),
+            get_rows(&sessions, id, 0, 2, &volumes).is_ok(),
             "an ordinary rename keeps the view"
         );
 
@@ -538,8 +656,10 @@ mod tests {
                 is_new_name: true,
             }]);
         assert_eq!(
-            sessions.get_rows_multi(id, 0, 2, &volumes),
-            Err(RowsError::Stale { drive_letter: 'C' })
+            get_rows(&sessions, id, 0, 2, &volumes),
+            Err(RowsError::Stale {
+                source_id: drive_c()
+            })
         );
     }
 
@@ -554,9 +674,7 @@ mod tests {
             Vec::new(),
             HashMap::new(),
         );
-        let page = sessions
-            .get_rows_multi(id, 0, 2, &volumes)
-            .expect("first page");
+        let page = get_rows(&sessions, id, 0, 2, &volumes).expect("first page");
         assert_eq!(page[0].name, "c.txt");
         assert_eq!(page[1].name, "b.txt");
     }
@@ -581,8 +699,10 @@ mod tests {
             .expect("volume")
             .ensure_presorted_column(cairn_core::sort::SortColumn::Size);
         assert_eq!(
-            sessions.get_rows_multi(id, 0, 2, &volumes),
-            Err(RowsError::Stale { drive_letter: 'C' })
+            get_rows(&sessions, id, 0, 2, &volumes),
+            Err(RowsError::Stale {
+                source_id: drive_c()
+            })
         );
     }
 
@@ -593,8 +713,7 @@ mod tests {
         let session_id = create_items(&sessions, owner(7), vec![item(vol.generation())]);
         let volumes = HashMap::from([('C', vol)]);
 
-        let rows = sessions
-            .get_rows_multi(session_id, 0, 10, &volumes)
+        let rows = get_rows(&sessions, session_id, 0, 10, &volumes)
             .expect("a valid session must page normally");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].name, "notes.txt");
@@ -609,10 +728,14 @@ mod tests {
 
         // Replacing the table (rescan, reload, compaction) invalidates every cached record index.
         volumes.get_mut(&'C').unwrap().clear();
-        let error = sessions
-            .get_rows_multi(session_id, 0, 10, &volumes)
+        let error = get_rows(&sessions, session_id, 0, 10, &volumes)
             .expect_err("a stale page must not be served");
-        assert_eq!(error, RowsError::Stale { drive_letter: 'C' });
+        assert_eq!(
+            error,
+            RowsError::Stale {
+                source_id: drive_c()
+            }
+        );
     }
 
     #[test]
@@ -623,7 +746,7 @@ mod tests {
         let first = create_items(&sessions, owner(7), vec![item(0)]);
         create_items(&sessions, owner(7), Vec::new());
         assert_eq!(
-            sessions.get_rows_multi(first, 0, 10, &volumes),
+            get_rows(&sessions, first, 0, 10, &volumes),
             Err(RowsError::UnknownSession)
         );
     }
@@ -671,17 +794,17 @@ mod tests {
 
         // Access s1, making s2 the least recently accessed
         clock.advance(Duration::from_millis(20));
-        assert!(sessions.get_rows_multi(s1, 0, 10, &volumes).is_ok());
+        assert!(get_rows(&sessions, s1, 0, 10, &volumes).is_ok());
 
         // Create s3: capacity is 2, so s2 should be evicted because s1 was accessed more recently
         let s3 = create_items(&sessions, owner(7), vec![item(gen)]);
 
-        assert!(sessions.get_rows_multi(s1, 0, 10, &volumes).is_ok());
+        assert!(get_rows(&sessions, s1, 0, 10, &volumes).is_ok());
         assert_eq!(
-            sessions.get_rows_multi(s2, 0, 10, &volumes),
+            get_rows(&sessions, s2, 0, 10, &volumes),
             Err(RowsError::UnknownSession)
         );
-        assert!(sessions.get_rows_multi(s3, 0, 10, &volumes).is_ok());
+        assert!(get_rows(&sessions, s3, 0, 10, &volumes).is_ok());
     }
 
     #[test]
@@ -702,7 +825,7 @@ mod tests {
         clock.advance(Duration::from_secs(299));
         let _s2 = create_items(&sessions, owner(7), vec![item(gen)]);
         assert!(
-            sessions.get_rows_multi(s1, 0, 10, &volumes).is_ok(),
+            get_rows(&sessions, s1, 0, 10, &volumes).is_ok(),
             "session accessed before TTL must stay live"
         );
 
@@ -710,7 +833,7 @@ mod tests {
         clock.advance(Duration::from_secs(300));
         let _s3 = create_items(&sessions, owner(7), vec![item(gen)]);
         assert_eq!(
-            sessions.get_rows_multi(s1, 0, 10, &volumes),
+            get_rows(&sessions, s1, 0, 10, &volumes),
             Err(RowsError::UnknownSession)
         );
     }
@@ -740,16 +863,16 @@ mod tests {
                 let v = volumes.clone();
                 scope.spawn(move || {
                     for _ in 0..25 {
-                        assert!(s.get_rows_multi(s1, 0, 10, &v).is_ok());
+                        assert!(get_rows(&s, s1, 0, 10, &v).is_ok());
                     }
                 });
             }
         });
 
         let _s3 = create_items(&sessions, owner(7), vec![item(gen)]);
-        assert!(sessions.get_rows_multi(s1, 0, 10, &volumes).is_ok());
+        assert!(get_rows(&sessions, s1, 0, 10, &volumes).is_ok());
         assert_eq!(
-            sessions.get_rows_multi(s2, 0, 10, &volumes),
+            get_rows(&sessions, s2, 0, 10, &volumes),
             Err(RowsError::UnknownSession)
         );
     }
@@ -837,19 +960,17 @@ mod tests {
 
         sessions.release_client(&mine);
         assert!(
-            sessions.get_rows_multi(my_session, 0, 10, &volumes).is_ok(),
+            get_rows(&sessions, my_session, 0, 10, &volumes).is_ok(),
             "a remaining connection keeps the session"
         );
 
         sessions.release_client(&mine);
         assert_eq!(
-            sessions.get_rows_multi(my_session, 0, 10, &volumes),
+            get_rows(&sessions, my_session, 0, 10, &volumes),
             Err(RowsError::UnknownSession)
         );
         assert!(
-            sessions
-                .get_rows_multi(other_session, 0, 10, &volumes)
-                .is_ok(),
+            get_rows(&sessions, other_session, 0, 10, &volumes).is_ok(),
             "another client's session is untouched"
         );
     }
@@ -867,5 +988,90 @@ mod tests {
         sessions.release_client(&mine);
         assert!(my_query.is_cancelled());
         assert!(!other_query.is_cancelled());
+    }
+
+    #[test]
+    fn folder_source_items_preserve_snippets_and_properties() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("docs");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("report.mp4"), "clip").unwrap();
+
+        let source_id = SourceId(1001);
+        let mut source = FolderSource::new(source_id, &root).expect("folder source");
+        source.rescan(&[]).expect("rescan folder source");
+        let (idx, frn, modified_ts) = source
+            .records()
+            .iter()
+            .enumerate()
+            .find_map(|(i, rec)| {
+                let name = source.arena().get_name(rec.name_offset, rec.name_len);
+                (name == "report.mp4").then_some((i as u32, rec.frn, rec.modified_ts))
+            })
+            .expect("indexed report.mp4");
+        let gen = source.generation();
+
+        let mut props = PropertySideTables::new(true);
+        let expected_props = RecordPropertyData {
+            length_ms: Some(12_500),
+            author: Some("Cairn".to_string()),
+            tags: Some("demo".to_string()),
+            dimensions: Some((1920, 1080)),
+            framerate_mfps: Some(60_000),
+        };
+        assert!(props.upsert(source_id, frn, &expected_props, modified_ts));
+
+        let mut snippets = HashMap::new();
+        snippets.insert(
+            (source_id.0, frn),
+            vec!["first snippet".to_string(), "second snippet".to_string()],
+        );
+
+        let sessions = SessionManager::default();
+        let session_id = sessions.create_session(
+            owner(11),
+            MatchSet::Items(vec![SearchResultItem {
+                source_id,
+                record_idx: idx,
+                generation: gen,
+            }]),
+            vec!["report".to_string()],
+            snippets,
+        );
+
+        let volumes = HashMap::new();
+        let mut folders = HashMap::from([(source_id, source)]);
+        let rows = sessions
+            .get_rows_multi_unchecked(
+                session_id,
+                0,
+                10,
+                &SourceTables {
+                    volumes: &volumes,
+                    folders: &folders,
+                    properties: &props,
+                },
+            )
+            .expect("folder source row");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "report.mp4");
+        assert_eq!(rows[0].snippets, vec!["first snippet", "second snippet"]);
+        assert_eq!(rows[0].properties.as_ref(), Some(&expected_props));
+
+        // Rescanning advances folder generation -> stale error names the folder source id.
+        folders.get_mut(&source_id).unwrap().rescan(&[]).unwrap();
+        assert_eq!(
+            sessions.get_rows_multi_unchecked(
+                session_id,
+                0,
+                10,
+                &SourceTables {
+                    volumes: &volumes,
+                    folders: &folders,
+                    properties: &props,
+                },
+            ),
+            Err(RowsError::Stale { source_id })
+        );
     }
 }

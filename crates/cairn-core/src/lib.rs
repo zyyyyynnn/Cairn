@@ -17,22 +17,39 @@ pub mod frn_index;
 pub mod index_file;
 pub mod model;
 pub mod path_cache;
+pub mod pinyin;
+mod pinyin_data;
+pub mod property_store;
+pub mod query;
 pub mod sort;
 pub mod syntax;
+pub mod text_match;
 pub mod time;
 pub mod treemap;
 
 pub use arena::NamePool;
 pub use engine::{execute_query, execute_query_ordered, glob_match, CancellationToken};
-pub use filter::{DateFilter, DateOp, SizeFilter, SizeOp};
+pub use filter::{
+    AttribFilter, DateFilter, DateOp, DimensionsFilter, DupeMode, SizeFilter, SizeOp,
+};
 pub use format::format_size_bytes;
 pub use frn_index::{FrnLookup, IndexMemoryFootprint};
 pub use model::{
-    FileRecord, FLAG_ARCHIVE, FLAG_COMPRESSED, FLAG_DIRECTORY, FLAG_HIDDEN, FLAG_REPARSE_POINT,
-    FLAG_SPARSE, FLAG_SYSTEM, FLAG_TOMBSTONE,
+    flags_from_win32_attributes, FileRecord, FLAG_ARCHIVE, FLAG_COMPRESSED, FLAG_DIRECTORY,
+    FLAG_HIDDEN, FLAG_INDEXED_ATTRIBUTES_MASK, FLAG_READONLY, FLAG_REPARSE_POINT, FLAG_SPARSE,
+    FLAG_SYSTEM, FLAG_TOMBSTONE, WIN32_ATTR_ARCHIVE, WIN32_ATTR_COMPRESSED, WIN32_ATTR_DIRECTORY,
+    WIN32_ATTR_HIDDEN, WIN32_ATTR_READONLY, WIN32_ATTR_REPARSE_POINT, WIN32_ATTR_SPARSE_FILE,
+    WIN32_ATTR_SYSTEM,
 };
-pub use path_cache::DirectoryPathCache;
-pub use sort::{sort_indices, PresortedIndices, SortColumn, SortDirection};
+pub use path_cache::{normalize_root, DirectoryPathCache};
+pub use property_store::{
+    PropertyKind, PropertySideTables, RecordPropertyData, RecordPropertyView, SourceId,
+    FOLDER_SOURCE_ID_BASE,
+};
+pub use sort::{
+    compare_cross_source_records, sort_indices_with_spec, PresortedIndices, SortColumn,
+    SortContext, SortDirection, SortKey, SortSpec,
+};
 pub use syntax::{
     parse_query, parse_query_with, parse_search_term, QueryDefaults, QueryExpr, SearchTerm,
 };

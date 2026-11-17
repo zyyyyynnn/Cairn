@@ -3,7 +3,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #![forbid(unsafe_code)]
-#![allow(clippy::chunks_exact_to_as_chunks)]
 
 //! `cairn-content`: Full-text content search engine with Tantivy,
 //! CJK Bigram + Latin tokenizer, auto encoding detection, and document text extractors.
@@ -21,7 +20,7 @@ pub use extractor::{
     TextExtractor,
 };
 pub use indexer::{
-    ContentHit, ContentIndex, ContentIndexError, ContentSearcher, ContentWriter,
-    CONTENT_RESULT_TOP_K,
+    create_snippets, ContentHit, ContentIndex, ContentIndexError, ContentSearcher, ContentWriter,
+    CONTENT_RESULT_TOP_K, MAX_CONTENT_SNIPPETS,
 };
 pub use tokenizer::{CjkBigramLatinTokenizer, CJK_BIGRAM_LATIN_TOKENIZER};

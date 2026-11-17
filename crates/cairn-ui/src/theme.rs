@@ -907,7 +907,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::field_reassign_with_default)]
     fn one_interaction_fill_lights_rows_controls_and_menu_items() {
         for dark in [false, true] {
             let theme = product_theme(dark);

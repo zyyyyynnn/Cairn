@@ -13,12 +13,15 @@ use crate::caller_auth::{authenticate_pipe_client, authorize, CallerAuthorizatio
 use crate::security::SafeSecurityDescriptor;
 use crate::session::{QueryOwner, RowsError, SessionManager};
 use crate::sync_engine::MultiVolumeEngine;
-use cairn_core::syntax::{parse_query_with, MAX_CONTENT_TERMS};
+use cairn_core::query::QueryDegradedReason;
+use cairn_core::sort::SortSpec;
+use cairn_core::syntax::{parse_query_with, MAX_CHILD_FILTERS, MAX_CONTENT_TERMS};
 use cairn_protocol::codec::{encode_frame_into, peek_frame_header, try_decode_frame};
 use cairn_protocol::message::{
     ClientRequest, Envelope, FileRowData, ResponsePayload, ERROR_CODE_HANDSHAKE_REQUIRED,
-    ERROR_CODE_PROTOCOL_VERSION_MISMATCH, ERROR_CODE_QUERY_TOO_COMPLEX, ERROR_CODE_SESSION_EXPIRED,
-    MAX_TREE_DEPTH, PIPE_NAME, PRODUCT_VERSION, WIRE_GUARD,
+    ERROR_CODE_INVALID_REQUEST, ERROR_CODE_PROTOCOL_VERSION_MISMATCH, ERROR_CODE_QUERY_TOO_COMPLEX,
+    ERROR_CODE_SESSION_EXPIRED, MAX_SORT_KEYS, MAX_TREE_DEPTH, PIPE_NAME, PRODUCT_VERSION,
+    WIRE_GUARD,
 };
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -92,7 +95,6 @@ impl PipeServer {
             server.connect().await?;
             let connected_server = server;
 
-            // Immediately create next pipe instance to listen for concurrent clients
             server = self.create_pipe_instance(false)?;
 
             let engine = self.engine.clone();
@@ -388,7 +390,7 @@ fn version_mismatch(server_guard: u16, client_guard: u16) -> ResponsePayload {
 
 fn process_request(
     req: ClientRequest,
-    engine: &MultiVolumeEngine,
+    engine: &Arc<MultiVolumeEngine>,
     sessions: &SessionManager,
     caller: CallerAuthorization,
     owner: &QueryOwner,
@@ -420,14 +422,14 @@ fn process_request(
             query_id,
             raw_query,
             defaults,
-            sort_column,
-            sort_asc,
+            sort_spec,
             first_page_limit,
         } => {
             // Request validation, not evaluation: the engine stays a pure evaluator, and a query
             // above the content-term limit is refused before any hit set is built. The check
             // precedes begin_query, which cancels every other in-flight query.
-            let content_terms = parse_query_with(&raw_query, &defaults).content_term_count();
+            let parsed = parse_query_with(&raw_query, &defaults);
+            let content_terms = parsed.content_term_count();
             if content_terms > MAX_CONTENT_TERMS {
                 return ResponsePayload::Error {
                     code: ERROR_CODE_QUERY_TOO_COMPLEX,
@@ -436,52 +438,84 @@ fn process_request(
                     ),
                 };
             }
+            if parsed.child_filter_count() > MAX_CHILD_FILTERS {
+                return ResponsePayload::Error {
+                    code: ERROR_CODE_QUERY_TOO_COMPLEX,
+                    message: format!(
+                        "query carries {} child filters; the limit is {MAX_CHILD_FILTERS}",
+                        parsed.child_filter_count()
+                    ),
+                };
+            }
+            let mut sort_spec = sort_spec;
+            sort_spec.keys.truncate(MAX_SORT_KEYS);
+            struct QueryReply {
+                session_id: u64,
+                total_matches: usize,
+                total_bytes: u64,
+                first_page: Vec<FileRowData>,
+                applied_sort: SortSpec,
+                degraded: Option<QueryDegradedReason>,
+            }
             let query_cancel = sessions.begin_query(owner, query_id);
-            // A table or order change between the search and its first page refuses the page.
-            // Answering the query again against the new state hides that race from the client;
-            // the fallback keeps today's recovery path when the retry loses the same race.
-            let mut answered: Option<(u64, usize, u64, Vec<FileRowData>)> = None;
-            let mut fallback: Option<(u64, usize, u64, Vec<FileRowData>)> = None;
+            let mut answered: Option<QueryReply> = None;
+            let mut fallback: Option<QueryReply> = None;
             for attempt in 0..2 {
-                let outcome = engine.execute_search_multi(
-                    &raw_query,
-                    &defaults,
-                    sort_column,
-                    sort_asc,
-                    &query_cancel,
-                );
+                let outcome =
+                    engine.execute_search_multi(&raw_query, &defaults, &sort_spec, &query_cancel);
                 let total_matches = outcome.total;
                 let total_bytes = outcome.total_bytes;
+                let applied_sort = outcome.applied_sort;
+                let degraded = outcome.degraded;
                 let session_id = sessions.create_session(
                     owner.clone(),
                     outcome.rows,
                     outcome.highlight_terms,
                     outcome.snippets,
                 );
-                let first_page = engine.with_volumes(|vols| {
-                    sessions.get_rows_multi(session_id, 0, first_page_limit, vols)
+                let first_page = engine.with_sources_for_rows(|sources| {
+                    sessions.get_rows_multi(owner, session_id, 0, first_page_limit, &sources)
                 });
                 match first_page {
                     Ok(rows) => {
-                        answered = Some((session_id, total_matches, total_bytes, rows));
+                        answered = Some(QueryReply {
+                            session_id,
+                            total_matches,
+                            total_bytes,
+                            first_page: rows,
+                            applied_sort,
+                            degraded,
+                        });
                         break;
                     }
                     Err(err) => {
-                        // The session is dropped rather than serving rows from the new table
-                        // under old offsets; its next page answers 410 and the client re-asks.
                         warn!(
                             "query session {session_id} expired before its first page \
                              (attempt {}): {err:?}",
                             attempt + 1
                         );
                         sessions.invalidate(session_id);
-                        fallback = Some((session_id, total_matches, total_bytes, Vec::new()));
+                        fallback = Some(QueryReply {
+                            session_id,
+                            total_matches,
+                            total_bytes,
+                            first_page: Vec::new(),
+                            applied_sort,
+                            degraded,
+                        });
                     }
                 }
             }
             sessions.finish_query(owner, query_id);
 
-            let (session_id, total_matches, total_bytes, first_page) = answered
+            let QueryReply {
+                session_id,
+                total_matches,
+                total_bytes,
+                first_page,
+                applied_sort,
+                degraded,
+            } = answered
                 .or(fallback)
                 .expect("the first attempt always answers or falls back");
             ResponsePayload::QueryResult {
@@ -490,6 +524,8 @@ fn process_request(
                 total_matches,
                 total_bytes,
                 first_page,
+                applied_sort,
+                degraded,
             }
         }
         ClientRequest::GetRows {
@@ -497,8 +533,9 @@ fn process_request(
             offset,
             limit,
         } => {
-            let rows = engine
-                .with_volumes(|vols| sessions.get_rows_multi(session_id, offset, limit, vols));
+            let rows = engine.with_sources_for_rows(|sources| {
+                sessions.get_rows_multi(owner, session_id, offset, limit, &sources)
+            });
             match rows {
                 Ok(rows) => ResponsePayload::RowsResult {
                     session_id,
@@ -536,10 +573,20 @@ fn process_request(
                     )),
                 },
                 None => {
-                    if engine.rescan_snapshot_volumes() > 0 {
+                    let mut rescanned = 0;
+                    for drive in engine.active_drives() {
+                        match engine.rescan_volume(drive) {
+                            Ok(_) => rescanned += 1,
+                            Err(reason) => {
+                                warn!(drive = %drive, error = %reason, "volume rescan failed");
+                            }
+                        }
+                    }
+                    rescanned += engine.rescan_folder_sources();
+                    if rescanned > 0 {
                         Ok(())
                     } else {
-                        Err("no snapshot-mode volume was rescanned".to_string())
+                        Err("no indexed source was rescanned".to_string())
                     }
                 }
             };
@@ -569,10 +616,15 @@ fn process_request(
             // engine compares the submitted value with the live one inside its configuration
             // write, so two concurrent submissions cannot both be decided against a stale value.
             match engine.apply_config_toml(&config_toml, caller.is_privileged()) {
-                Ok(()) => ResponsePayload::SetConfigAck {
-                    success: true,
-                    message: "Service configuration persisted and applied".to_string(),
-                },
+                Ok(()) => {
+                    if engine.get_config().property_index_enabled {
+                        engine.spawn_property_extraction();
+                    }
+                    ResponsePayload::SetConfigAck {
+                        success: true,
+                        message: "Service configuration persisted and applied".to_string(),
+                    }
+                }
                 Err(reason) => ResponsePayload::SetConfigAck {
                     success: false,
                     message: reason,
@@ -580,10 +632,15 @@ fn process_request(
             }
         }
         ClientRequest::ReloadConfig => match engine.reload_config() {
-            Ok(()) => ResponsePayload::ReloadConfigAck {
-                success: true,
-                message: "Service configuration reloaded from disk".to_string(),
-            },
+            Ok(()) => {
+                if engine.get_config().property_index_enabled {
+                    engine.spawn_property_extraction();
+                }
+                ResponsePayload::ReloadConfigAck {
+                    success: true,
+                    message: "Service configuration reloaded from disk".to_string(),
+                }
+            }
             Err(err_msg) => ResponsePayload::ReloadConfigAck {
                 success: false,
                 message: err_msg,
@@ -609,6 +666,77 @@ fn process_request(
             let accepted = engine.request_clear_content_index();
             ResponsePayload::ClearContentIndexAck {
                 success: disabled && accepted,
+            }
+        }
+        ClientRequest::GetSources => ResponsePayload::SourcesResult {
+            sources: engine.get_sources(),
+        },
+        ClientRequest::AddFolderSource { path } => {
+            match engine.add_folder_source(std::path::Path::new(&path), true) {
+                Ok(_) => ResponsePayload::SourcesResult {
+                    sources: engine.get_sources(),
+                },
+                Err(message) => ResponsePayload::Error {
+                    code: ERROR_CODE_INVALID_REQUEST,
+                    message,
+                },
+            }
+        }
+        ClientRequest::RemoveFolderSource { path } => {
+            match engine.remove_folder_source(std::path::Path::new(&path), true) {
+                Ok(true) => ResponsePayload::SourcesResult {
+                    sources: engine.get_sources(),
+                },
+                Ok(false) => ResponsePayload::Error {
+                    code: ERROR_CODE_INVALID_REQUEST,
+                    message: format!("folder source is not configured: {path}"),
+                },
+                Err(message) => ResponsePayload::Error {
+                    code: ERROR_CODE_INVALID_REQUEST,
+                    message,
+                },
+            }
+        }
+        ClientRequest::RescanSource { source_id } => {
+            let success = match engine.rescan_source(source_id) {
+                Ok(_) => true,
+                Err(reason) => {
+                    info!("rescan of source {} did not run: {reason}", source_id.0);
+                    false
+                }
+            };
+            ResponsePayload::RescanSourceAck { source_id, success }
+        }
+        ClientRequest::GetPropertyIndexStatus => ResponsePayload::PropertyIndexStatus {
+            status: engine.property_index_status(),
+        },
+        ClientRequest::SetPropertyIndexEnabled { enabled } => {
+            match engine.set_property_index_enabled_persisted(enabled, true) {
+                Ok(status) => {
+                    if enabled {
+                        engine.spawn_property_extraction();
+                    }
+                    ResponsePayload::PropertyIndexStatus { status }
+                }
+                Err(message) => ResponsePayload::Error {
+                    code: ERROR_CODE_INVALID_REQUEST,
+                    message,
+                },
+            }
+        }
+        ClientRequest::GetIndexJournal { after_seq, limit } => {
+            ResponsePayload::IndexJournalResult {
+                status: engine.index_journal_status(),
+                entries: engine.get_index_journal(after_seq, limit),
+            }
+        }
+        ClientRequest::SetIndexJournalEnabled { enabled } => {
+            match engine.set_index_journal_enabled_persisted(enabled, true) {
+                Ok(status) => ResponsePayload::IndexJournalStatus { status },
+                Err(message) => ResponsePayload::Error {
+                    code: ERROR_CODE_INVALID_REQUEST,
+                    message,
+                },
             }
         }
     }
@@ -654,7 +782,7 @@ mod tests {
 
     struct Harness {
         _dirs: tempfile::TempDir,
-        engine: MultiVolumeEngine,
+        engine: Arc<MultiVolumeEngine>,
         sessions: SessionManager,
     }
 
@@ -662,13 +790,13 @@ mod tests {
         fn new(config: ServiceConfig) -> Self {
             let dirs = tempfile::tempdir().expect("tempdir");
             let root = dirs.path().to_path_buf();
-            let engine = MultiVolumeEngine::with_paths(
+            let engine = Arc::new(MultiVolumeEngine::with_paths(
                 &root.join("index"),
                 &root.join("content"),
                 &root.join("service.toml"),
                 vec![],
                 config,
-            );
+            ));
             Self {
                 _dirs: dirs,
                 engine,
@@ -837,8 +965,7 @@ mod tests {
                 query_id: 1,
                 raw_query: "rs".to_string(),
                 defaults: Default::default(),
-                sort_column: SortColumn::Name,
-                sort_asc: true,
+                sort_spec: SortSpec::default(),
                 first_page_limit: 10,
             },
             ClientRequest::GetRows {
@@ -923,8 +1050,7 @@ mod tests {
     #[test]
     fn rescan_reports_failure_instead_of_claiming_success() {
         let harness = Harness::new(ServiceConfig::default());
-        // No volume is indexed in this harness, so a rescan cannot succeed; the old code answered
-        // `success: true` unconditionally.
+        // No volume is indexed in this harness, so rescan requests must return failure.
         match harness.handle(
             ClientRequest::Rescan { volume_id: None },
             CallerAuthorization::Administrator,
@@ -987,8 +1113,7 @@ mod tests {
                 query_id: 1,
                 raw_query: "notes".to_string(),
                 defaults: Default::default(),
-                sort_column: SortColumn::Name,
-                sort_asc: true,
+                sort_spec: SortSpec::default(),
                 first_page_limit: 10,
             },
             CallerAuthorization::Administrator,
@@ -1069,8 +1194,7 @@ mod tests {
             query_id: 1,
             raw_query,
             defaults: Default::default(),
-            sort_column: SortColumn::Name,
-            sort_asc: true,
+            sort_spec: SortSpec::default(),
             first_page_limit: 10,
         }
     }
@@ -1105,6 +1229,47 @@ mod tests {
         assert!(matches!(
             harness.handle(
                 content_query_request(MAX_CONTENT_TERMS),
+                CallerAuthorization::Administrator,
+            ),
+            ResponsePayload::QueryResult {
+                total_matches: 0,
+                ..
+            }
+        ));
+    }
+
+    fn child_filter_query_request(patterns: usize) -> ClientRequest {
+        let raw_query = (0..patterns)
+            .map(|i| format!("child:t{i}.rs"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        ClientRequest::Query {
+            query_id: 1,
+            raw_query,
+            defaults: Default::default(),
+            sort_spec: SortSpec::default(),
+            first_page_limit: 10,
+        }
+    }
+
+    #[test]
+    fn a_query_above_the_child_filter_limit_is_rejected_before_evaluation() {
+        use cairn_core::syntax::MAX_CHILD_FILTERS;
+        use cairn_protocol::message::ERROR_CODE_QUERY_TOO_COMPLEX;
+
+        let harness = Harness::new(ServiceConfig::default());
+        let (code, message) = denial(harness.handle(
+            child_filter_query_request(MAX_CHILD_FILTERS + 1),
+            CallerAuthorization::Administrator,
+        ));
+        assert_eq!(code, ERROR_CODE_QUERY_TOO_COMPLEX);
+        assert!(
+            message.contains(&MAX_CHILD_FILTERS.to_string()),
+            "{message}"
+        );
+        assert!(matches!(
+            harness.handle(
+                child_filter_query_request(MAX_CHILD_FILTERS),
                 CallerAuthorization::Administrator,
             ),
             ResponsePayload::QueryResult {
@@ -1246,8 +1411,7 @@ mod tests {
                     query_id: 1,
                     raw_query: "notes".to_string(),
                     defaults: Default::default(),
-                    sort_column: SortColumn::Name,
-                    sort_asc: true,
+                    sort_spec: SortSpec::default(),
                     first_page_limit: 10,
                 },
             )
@@ -1313,5 +1477,148 @@ mod tests {
         shrink_oversized_write_buf(&mut large);
         assert!(large.capacity() <= WRITE_BUF_RETAIN_BYTES * 2);
         assert!(large.capacity() >= WRITE_BUF_RETAIN_BYTES);
+    }
+
+    #[test]
+    fn platform_source_property_and_journal_requests_round_trip_with_auth_enforced() {
+        use cairn_core::property_store::SourceId;
+        use cairn_protocol::message::ERROR_CODE_UNAUTHORIZED;
+        use cairn_protocol::status::SourceKind;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let watch = dir.path().join("docs");
+        std::fs::create_dir_all(&watch).unwrap();
+        std::fs::write(watch.join("plan.txt"), "hello").unwrap();
+
+        let harness = Harness::new(ServiceConfig {
+            excluded_paths: Vec::new(),
+            ..ServiceConfig::default()
+        });
+
+        // Pre-populate a folder source without privileged service.toml persistence so the IPC
+        // read/query/rescan/journal endpoints can be exercised deterministically unprivileged.
+        let added = harness
+            .engine
+            .add_folder_source(&watch, false)
+            .expect("register in-memory folder source");
+        assert_eq!(added.kind, SourceKind::Folder);
+
+        let folder_id =
+            match harness.handle(ClientRequest::GetSources, CallerAuthorization::StandardUser) {
+                ResponsePayload::SourcesResult { sources } => {
+                    sources
+                        .into_iter()
+                        .find(|s| s.kind == SourceKind::Folder)
+                        .expect("folder source")
+                        .source_id
+                }
+                other => panic!("unexpected GetSources response: {other:?}"),
+            };
+
+        assert!(matches!(
+            harness.handle(
+                ClientRequest::RescanSource {
+                    source_id: folder_id
+                },
+                CallerAuthorization::StandardUser,
+            ),
+            ResponsePayload::RescanSourceAck {
+                source_id,
+                success: true
+            } if source_id == folder_id
+        ));
+        assert!(matches!(
+            harness.handle(
+                ClientRequest::RescanSource {
+                    source_id: SourceId(99_999),
+                },
+                CallerAuthorization::StandardUser,
+            ),
+            ResponsePayload::RescanSourceAck {
+                source_id: SourceId(99_999),
+                success: false,
+            }
+        ));
+
+        match harness.handle(
+            ClientRequest::Query {
+                query_id: 4,
+                raw_query: "length:>0".to_string(),
+                defaults: Default::default(),
+                sort_spec: SortSpec::single(
+                    SortColumn::Size,
+                    cairn_core::sort::SortDirection::Descending,
+                ),
+                first_page_limit: 10,
+            },
+            CallerAuthorization::StandardUser,
+        ) {
+            ResponsePayload::QueryResult {
+                degraded,
+                applied_sort,
+                ..
+            } => {
+                assert_eq!(
+                    degraded,
+                    Some(QueryDegradedReason::PropertyIndexDisabled {
+                        requested: vec![cairn_core::property_store::PropertyKind::Length],
+                    })
+                );
+                assert_eq!(applied_sort.primary().column, SortColumn::Size);
+            }
+            other => panic!("unexpected degraded QueryResult: {other:?}"),
+        }
+
+        // Toggle in-memory property index & inspect status + journal over IPC.
+        let status = harness.engine.set_property_index_enabled(true);
+        assert!(status.enabled);
+        match harness.handle(
+            ClientRequest::GetPropertyIndexStatus,
+            CallerAuthorization::StandardUser,
+        ) {
+            ResponsePayload::PropertyIndexStatus { status } => assert!(status.enabled),
+            other => panic!("unexpected GetPropertyIndexStatus: {other:?}"),
+        }
+        assert!(matches!(
+            harness.handle(
+                ClientRequest::GetIndexJournal {
+                    after_seq: 0,
+                    limit: 50
+                },
+                CallerAuthorization::StandardUser,
+            ),
+            ResponsePayload::IndexJournalResult { .. }
+        ));
+
+        // Persisting mutations pass caller auth (`!= 401/403`); when unprivileged on Windows,
+        // `save_atomic_secure` fails closed instead of silently skipping ACL enforcement.
+        for req in [
+            ClientRequest::AddFolderSource {
+                path: watch.to_string_lossy().into_owned(),
+            },
+            ClientRequest::SetPropertyIndexEnabled { enabled: false },
+            ClientRequest::SetIndexJournalEnabled { enabled: false },
+            ClientRequest::RemoveFolderSource {
+                path: watch.to_string_lossy().into_owned(),
+            },
+        ] {
+            let (code, _) =
+                denial(harness.handle(req.clone(), CallerAuthorization::Unauthenticated));
+            assert_eq!(code, ERROR_CODE_UNAUTHORIZED, "{req:?}");
+
+            match harness.handle(req, CallerAuthorization::StandardUser) {
+                ResponsePayload::Error { code, message } => {
+                    assert_eq!(code, ERROR_CODE_INVALID_REQUEST);
+                    assert!(
+                        message.contains("could not persist"),
+                        "unexpected persistence failure message: {message}"
+                    );
+                }
+                ResponsePayload::SourcesResult { .. }
+                | ResponsePayload::PropertyIndexStatus { .. }
+                | ResponsePayload::IndexJournalStatus { .. } => {}
+                other => panic!("unexpected persistence mutation response: {other:?}"),
+            }
+        }
     }
 }

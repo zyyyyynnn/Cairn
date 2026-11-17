@@ -4,39 +4,42 @@
 
 //! Named Pipe IPC protocol messages and row formats.
 
-use crate::status::{ContentIndexStatus, VolumeStatusSummary};
-pub use cairn_core::sort::SortColumn;
+use crate::status::{
+    ContentIndexStatus, IndexJournalEntry, IndexJournalStatus, PropertyIndexStatus,
+    SourceStatusSummary, VolumeStatusSummary,
+};
+pub use cairn_core::property_store::{PropertyKind, RecordPropertyData, SourceId};
+pub use cairn_core::query::QueryDegradedReason;
+pub use cairn_core::sort::{SortColumn, SortDirection, SortKey, SortSpec};
 pub use cairn_core::syntax::QueryDefaults;
 use serde::{Deserialize, Serialize};
 
-/// The product version both ends are built from, e.g. `0.1.0`. Cargo owns this string; no part of
-/// it is maintained by hand.
+/// Product version from Cargo workspace metadata.
 pub const PRODUCT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// The guard both ends exchange before any request is accepted: the product version's major and
-/// minor. postcard is not self-describing, so a frame from another layout would decode into shifted
-/// fields rather than fail, and this guard is the only thing that can catch that (SVC-03).
+/// Wire guard exchanged at `Hello` handshake and carried in every frame header.
 ///
-/// It is derived, never written. A patch release cannot change the wire, so two builds agree exactly
-/// when their `major.minor` agree, and a layout change ships as a product version change instead of
-/// a hand-incremented counter that someone has to remember.
-pub const WIRE_GUARD: u16 = pack_major_minor(PRODUCT_VERSION);
+/// Encodes `major.minor.patch` so any protocol-bearing patch bump (`0.2.1`) rejects older
+/// builds (`0.2.0`) before `postcard` deserialization (SPEC SVC-03).
+pub const WIRE_GUARD: u16 = pack_wire_guard(PRODUCT_VERSION);
 
-const fn pack_major_minor(version: &str) -> u16 {
+const fn pack_wire_guard(version: &str) -> u16 {
     let bytes = version.as_bytes();
-    let mut major = 0u32;
-    let mut minor = 0u32;
+    let mut parts = [0u32; 3];
+    let mut part = 0usize;
     let mut index = 0usize;
-    while index < bytes.len() && bytes[index] != b'.' {
-        major = major * 10 + (bytes[index] - b'0') as u32;
+    while index < bytes.len() && part < 3 {
+        let b = bytes[index];
+        if b == b'.' {
+            part += 1;
+        } else if b >= b'0' && b <= b'9' {
+            parts[part] = parts[part] * 10 + (b - b'0') as u32;
+        } else {
+            break;
+        }
         index += 1;
     }
-    index += 1;
-    while index < bytes.len() && bytes[index] != b'.' {
-        minor = minor * 10 + (bytes[index] - b'0') as u32;
-        index += 1;
-    }
-    ((major << 8) | minor) as u16
+    (((parts[0] & 0x0F) << 12) | ((parts[1] & 0x3F) << 6) | (parts[2] & 0x3F)) as u16
 }
 
 pub const PIPE_NAME: &str = r"\\.\pipe\Cairn.Service";
@@ -66,6 +69,8 @@ pub const ERROR_CODE_TREE_TOO_LARGE: u32 = 415;
 /// The query carries more content terms than one evaluation may resolve
 /// (`cairn_core::syntax::MAX_CONTENT_TERMS`); the request is refused before evaluation.
 pub const ERROR_CODE_QUERY_TOO_COMPLEX: u32 = 416;
+/// The request parameters are invalid or refer to an unknown source.
+pub const ERROR_CODE_INVALID_REQUEST: u32 = 417;
 
 /// The deepest tree one response may carry: three levels stay inside the entry and frame budgets
 /// on a full drive (about 42k entries on a 1.8M-record index). A subtree that still overflows is
@@ -75,6 +80,9 @@ pub const ERROR_CODE_QUERY_TOO_COMPLEX: u32 = 416;
 /// The service clamps every `GetTree` to it and the client asks for exactly it, so a request is
 /// never silently answered shallower than the layout it was built for.
 pub const MAX_TREE_DEPTH: usize = 3;
+
+/// Upper bound on multi-key sort clauses accepted from a client.
+pub const MAX_SORT_KEYS: usize = 8;
 
 /// Requests accepted from a pipe client.
 ///
@@ -93,8 +101,7 @@ pub enum ClientRequest {
         query_id: u64,
         raw_query: String,
         defaults: QueryDefaults,
-        sort_column: SortColumn,
-        sort_asc: bool,
+        sort_spec: SortSpec,
         first_page_limit: usize,
     },
     Cancel {
@@ -125,6 +132,35 @@ pub enum ClientRequest {
     GetTree {
         path: String,
         max_depth: usize,
+    },
+    /// Returns every indexed source (NTFS volumes and folder sources).
+    GetSources,
+    /// Registers and starts indexing a folder source.
+    AddFolderSource {
+        path: String,
+    },
+    /// Stops monitoring and removes a folder source from the index.
+    RemoveFolderSource {
+        path: String,
+    },
+    /// Triggers a rescan for a single indexed source.
+    RescanSource {
+        source_id: SourceId,
+    },
+    /// Reads the current state of the optional extended-property index.
+    GetPropertyIndexStatus,
+    /// Enables or disables optional extended-property indexing and persists the setting.
+    SetPropertyIndexEnabled {
+        enabled: bool,
+    },
+    /// Queries bounded read-only index journal entries after `after_seq`.
+    GetIndexJournal {
+        after_seq: u64,
+        limit: usize,
+    },
+    /// Enables or disables index journal recording.
+    SetIndexJournalEnabled {
+        enabled: bool,
     },
 }
 
@@ -158,6 +194,8 @@ pub enum ResponsePayload {
         /// nothing.
         total_bytes: u64,
         first_page: Vec<FileRowData>,
+        applied_sort: SortSpec,
+        degraded: Option<QueryDegradedReason>,
     },
     RowsResult {
         session_id: u64,
@@ -202,13 +240,25 @@ pub enum ResponsePayload {
         code: u32,
         message: String,
     },
-    /// The acknowledgement of a cancelled query. A cancel says nothing about the worker's
-    /// state, so it answers with its own acknowledgement.
-    ///
-    /// It sits at the end of the enum on purpose. postcard writes a variant as its position, so a
-    /// payload inserted in the middle would move every slot behind it — including the rejection a
-    /// peer of another protocol version has to read (SVC-03).
+    /// The acknowledgement of a cancelled query.
     CancelAck,
+    SourcesResult {
+        sources: Vec<SourceStatusSummary>,
+    },
+    RescanSourceAck {
+        source_id: SourceId,
+        success: bool,
+    },
+    PropertyIndexStatus {
+        status: PropertyIndexStatus,
+    },
+    IndexJournalResult {
+        status: IndexJournalStatus,
+        entries: Vec<IndexJournalEntry>,
+    },
+    IndexJournalStatus {
+        status: IndexJournalStatus,
+    },
 }
 
 /// One node of a [`ResponsePayload::TreeResult`]. A depth-capped leaf (a
@@ -238,7 +288,8 @@ pub struct FileRowData {
     pub flags: u16,
     pub name_highlights: Vec<(usize, usize)>,
     pub path_highlights: Vec<(usize, usize)>,
-    pub snippet: Option<String>,
+    pub snippets: Vec<String>,
+    pub properties: Option<RecordPropertyData>,
 }
 
 #[cfg(test)]
@@ -253,7 +304,7 @@ mod tests {
     /// another protocol version with the rejection, and that peer has to be able to read it, or a
     /// service that needs updating looks like a broken one (SVC-03). A payload inserted in the
     /// middle of the enum would move every slot behind it, so a new payload is appended instead.
-    const PUBLISHED_RESPONSE_SLOTS: [(&str, u8); 14] = [
+    const PUBLISHED_RESPONSE_SLOTS: [(&str, u8); 19] = [
         ("hello_ack", 0),
         ("query_result", 1),
         ("rows_result", 2),
@@ -268,12 +319,17 @@ mod tests {
         ("tree_result", 11),
         ("error", 12),
         ("cancel_ack", 13),
+        ("sources_result", 14),
+        ("rescan_source_ack", 15),
+        ("property_index_status", 16),
+        ("index_journal_result", 17),
+        ("index_journal_status", 18),
     ];
 
     /// The slot each published request occupies on the wire. A request is only decoded by a peer
     /// of the same protocol version, so the rule is the same: a renamed request keeps its slot and
     /// a new one is appended.
-    const PUBLISHED_REQUEST_SLOTS: [(&str, u8); 13] = [
+    const PUBLISHED_REQUEST_SLOTS: [(&str, u8); 21] = [
         ("hello", 0),
         ("query", 1),
         ("cancel", 2),
@@ -287,6 +343,14 @@ mod tests {
         ("cancel_content_index", 10),
         ("clear_content_index", 11),
         ("get_tree", 12),
+        ("get_sources", 13),
+        ("add_folder_source", 14),
+        ("remove_folder_source", 15),
+        ("rescan_source", 16),
+        ("get_property_index_status", 17),
+        ("set_property_index_enabled", 18),
+        ("get_index_journal", 19),
+        ("set_index_journal_enabled", 20),
     ];
 
     /// One payload per published slot, in the published order.
@@ -307,6 +371,8 @@ mod tests {
                     total_matches: 0,
                     total_bytes: 0,
                     first_page: Vec::new(),
+                    applied_sort: SortSpec::default(),
+                    degraded: None,
                 },
             ),
             (
@@ -374,6 +440,38 @@ mod tests {
                 },
             ),
             ("cancel_ack", ResponsePayload::CancelAck),
+            (
+                "sources_result",
+                ResponsePayload::SourcesResult {
+                    sources: Vec::new(),
+                },
+            ),
+            (
+                "rescan_source_ack",
+                ResponsePayload::RescanSourceAck {
+                    source_id: SourceId(0),
+                    success: true,
+                },
+            ),
+            (
+                "property_index_status",
+                ResponsePayload::PropertyIndexStatus {
+                    status: PropertyIndexStatus::default(),
+                },
+            ),
+            (
+                "index_journal_result",
+                ResponsePayload::IndexJournalResult {
+                    status: IndexJournalStatus::default(),
+                    entries: Vec::new(),
+                },
+            ),
+            (
+                "index_journal_status",
+                ResponsePayload::IndexJournalStatus {
+                    status: IndexJournalStatus::default(),
+                },
+            ),
         ]
     }
 
@@ -393,8 +491,7 @@ mod tests {
                     query_id: 1,
                     raw_query: String::new(),
                     defaults: QueryDefaults::default(),
-                    sort_column: SortColumn::Name,
-                    sort_asc: true,
+                    sort_spec: SortSpec::single(SortColumn::Name, SortDirection::Ascending),
                     first_page_limit: 0,
                 },
             ),
@@ -429,6 +526,44 @@ mod tests {
                     path: String::new(),
                     max_depth: 0,
                 },
+            ),
+            ("get_sources", ClientRequest::GetSources),
+            (
+                "add_folder_source",
+                ClientRequest::AddFolderSource {
+                    path: String::new(),
+                },
+            ),
+            (
+                "remove_folder_source",
+                ClientRequest::RemoveFolderSource {
+                    path: String::new(),
+                },
+            ),
+            (
+                "rescan_source",
+                ClientRequest::RescanSource {
+                    source_id: SourceId(0),
+                },
+            ),
+            (
+                "get_property_index_status",
+                ClientRequest::GetPropertyIndexStatus,
+            ),
+            (
+                "set_property_index_enabled",
+                ClientRequest::SetPropertyIndexEnabled { enabled: false },
+            ),
+            (
+                "get_index_journal",
+                ClientRequest::GetIndexJournal {
+                    after_seq: 0,
+                    limit: 0,
+                },
+            ),
+            (
+                "set_index_journal_enabled",
+                ClientRequest::SetIndexJournalEnabled { enabled: false },
             ),
         ]
     }
@@ -486,15 +621,17 @@ mod tests {
         }
     }
 
-    /// The guard is derived from the product version, so it cannot drift from it and nobody has to
-    /// remember to raise a counter: a patch release keeps the wire, a minor release changes it.
+    /// Deriving the guard from `major.minor.patch` ensures any protocol-bearing patch bump (`0.2.1`)
+    /// rejects an older peer (`0.2.0`) at the handshake instead of misreading shifted fields.
     #[test]
-    fn the_wire_guard_is_the_product_versions_major_and_minor() {
-        assert_eq!(pack_major_minor("0.1.0"), 0x0001);
-        assert_eq!(pack_major_minor("0.1.9"), 0x0001);
-        assert_eq!(pack_major_minor("1.2.3"), 0x0102);
-        assert_eq!(pack_major_minor("0.10.5"), 0x000A);
-        assert_eq!(WIRE_GUARD, pack_major_minor(PRODUCT_VERSION));
+    fn the_wire_guard_tracks_full_product_version() {
+        assert_eq!(pack_wire_guard("0.1.0"), 0x0040);
+        assert_eq!(pack_wire_guard("0.2.0"), 0x0080);
+        assert_eq!(pack_wire_guard("0.2.1"), 0x0081);
+        assert_ne!(pack_wire_guard("0.2.1"), 0x0002);
+        assert_eq!(pack_wire_guard("1.2.3"), 0x1083);
+        assert_eq!(pack_wire_guard("0.10.5"), 0x0285);
+        assert_eq!(WIRE_GUARD, pack_wire_guard(PRODUCT_VERSION));
     }
 
     /// The rejection is the one payload a peer of another protocol version must be able to read:

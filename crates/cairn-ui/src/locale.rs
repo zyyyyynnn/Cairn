@@ -14,6 +14,7 @@ pub fn system_language() -> &'static str {
     {
         use windows::Win32::Globalization::GetUserDefaultUILanguage;
         // LANGID: the low 10 bits are the primary language. 0x04 is Chinese.
+        // SAFETY: `GetUserDefaultUILanguage` takes no arguments and reads process/user UI language state.
         let langid = unsafe { GetUserDefaultUILanguage() };
         if langid & 0x03ff == 0x04 {
             LANGUAGE_ZH_CN

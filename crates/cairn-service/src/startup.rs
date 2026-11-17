@@ -78,10 +78,8 @@ impl ServiceRuntime {
             layout: _layout,
         } = self;
 
-        // 1. Background USN polling task. A volume that is still replaying a backlog is polled at
-        //    50ms so a cold start drains in seconds; once every volume is Synced the normal 500ms
-        //    cadence resumes. The sync state stays CatchingUp until this reaches Synced, so the
-        //    fast path is what keeps "loading" from meaning "stuck".
+        // Poll backlog volumes at 50ms so cold-start CatchingUp drains in seconds before returning
+        // to the 500ms steady cadence once every volume is Synced.
         let engine_usn = engine.clone();
         let usn_task = tokio::spawn(async move {
             loop {
@@ -91,7 +89,6 @@ impl ServiceRuntime {
             }
         });
 
-        // 2. Periodic atomic index persistence task (every 5 minutes)
         let engine_persist = engine.clone();
         let persist_task = tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(300));
@@ -103,13 +100,32 @@ impl ServiceRuntime {
             }
         });
 
-        // 3. Periodic snapshot volumes rescan task (every 5 minutes) (IDX-08)
+        engine.ensure_folder_sources_loaded();
+        engine.spawn_property_extraction();
+
         let engine_snapshot = engine.clone();
         let snapshot_task = tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(300));
             loop {
                 interval.tick().await;
                 engine_snapshot.rescan_snapshot_volumes();
+            }
+        });
+
+        let engine_folders = engine.clone();
+        let folder_rescan_task = tokio::spawn(async move {
+            let mut last_rescan = tokio::time::Instant::now();
+            loop {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                let secs = engine_folders.get_config().folder_rescan_interval_secs;
+                if secs == 0 {
+                    last_rescan = tokio::time::Instant::now();
+                    continue;
+                }
+                if last_rescan.elapsed() >= Duration::from_secs(secs) {
+                    engine_folders.rescan_folder_sources();
+                    last_rescan = tokio::time::Instant::now();
+                }
             }
         });
 
@@ -129,7 +145,9 @@ impl ServiceRuntime {
         usn_task.abort();
         persist_task.abort();
         snapshot_task.abort();
+        folder_rescan_task.abort();
         engine.stop_content_worker();
+        engine.stop_property_extraction();
 
         info!("Saving all volume indexes to disk on service shutdown...");
         match engine.save_all_indexes() {

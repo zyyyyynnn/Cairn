@@ -8,7 +8,7 @@
 use cairn_core::engine::CancellationToken;
 use cairn_core::frn_index::IndexMemoryFootprint;
 use cairn_core::model::{FileRecord, FLAG_DIRECTORY};
-use cairn_core::sort::SortColumn;
+use cairn_core::sort::SortSpec;
 use cairn_core::syntax::QueryDefaults;
 use cairn_ntfs::mft::ExtractedItem;
 use cairn_service::sync_engine::{MultiVolumeEngine, VolumeIndex};
@@ -320,12 +320,13 @@ pub fn run_benchmark(
     println!("{}", "-".repeat(62));
 
     let defaults = QueryDefaults::default();
+    let sort_spec = SortSpec::default();
     let cancel = CancellationToken::new();
     let mut measurements = Vec::with_capacity(benchmark_queries.len());
 
     for &q in &benchmark_queries {
         for _ in 0..2 {
-            let _ = engine.execute_search_multi(q, &defaults, SortColumn::Name, true, &cancel);
+            let _ = engine.execute_search_multi(q, &defaults, &sort_spec, &cancel);
         }
 
         let mut latencies = Vec::with_capacity(effective_runs);
@@ -333,8 +334,7 @@ pub fn run_benchmark(
 
         for _ in 0..effective_runs {
             let t0 = Instant::now();
-            let outcome =
-                engine.execute_search_multi(q, &defaults, SortColumn::Name, true, &cancel);
+            let outcome = engine.execute_search_multi(q, &defaults, &sort_spec, &cancel);
             latencies.push(t0.elapsed());
             match_count = outcome.total;
         }
@@ -421,6 +421,7 @@ mod tests {
             folded_arena_bytes: 160_000,
             frn_lookup_bytes: 180_000,
             presorted_bytes: 0,
+            property_store_bytes: 0,
             directory_sizes_bytes: 0,
             path_cache_bytes: 8_000,
             scratch_bytes: 0,

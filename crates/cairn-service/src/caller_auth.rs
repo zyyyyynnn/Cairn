@@ -84,13 +84,21 @@ fn access_class(req: &ClientRequest) -> AccessClass {
         | ClientRequest::GetRows { .. }
         | ClientRequest::GetStatus
         | ClientRequest::GetConfig
-        | ClientRequest::Rescan { .. }
+        | ClientRequest::GetContentIndexStatus
+        | ClientRequest::GetTree { .. }
+        | ClientRequest::GetSources
+        | ClientRequest::GetPropertyIndexStatus
+        | ClientRequest::GetIndexJournal { .. } => AccessClass::Read,
+        ClientRequest::Rescan { .. }
         | ClientRequest::SetConfig { .. }
         | ClientRequest::ReloadConfig
-        | ClientRequest::GetContentIndexStatus
         | ClientRequest::CancelContentIndex
         | ClientRequest::ClearContentIndex
-        | ClientRequest::GetTree { .. } => AccessClass::Read,
+        | ClientRequest::AddFolderSource { .. }
+        | ClientRequest::RemoveFolderSource { .. }
+        | ClientRequest::RescanSource { .. }
+        | ClientRequest::SetPropertyIndexEnabled { .. }
+        | ClientRequest::SetIndexJournalEnabled { .. } => AccessClass::IndexMutation,
     }
 }
 
@@ -98,6 +106,7 @@ fn access_class(req: &ClientRequest) -> AccessClass {
 pub enum AccessClass {
     Handshake,
     Read,
+    IndexMutation,
 }
 
 /// Authorization decision for one request, evaluated per request so that configuration changes
@@ -111,7 +120,7 @@ pub fn authorize(
 ) -> Result<(), (u32, String)> {
     match access_class(req) {
         AccessClass::Handshake => Ok(()),
-        AccessClass::Read => {
+        AccessClass::Read | AccessClass::IndexMutation => {
             if admin_only_query && !caller.is_privileged() {
                 return Err((
                     ERROR_CODE_ADMIN_ONLY_QUERY,
@@ -156,7 +165,9 @@ mod platform {
         /// the calling OS thread only, so the caller must not yield the thread (no `.await`) while
         /// the guard is alive.
         unsafe fn begin(pipe: HANDLE) -> Result<Self, CallerAuthError> {
-            match ImpersonateNamedPipeClient(pipe) {
+            // SAFETY: caller guarantees `pipe` is a connected named pipe handle that remains valid
+            // on the current OS thread for the lifetime of the returned `Impersonation` guard.
+            match unsafe { ImpersonateNamedPipeClient(pipe) } {
                 Ok(()) => Ok(Self),
                 Err(_) => Err(CallerAuthError::ImpersonationFailed(last_os_error())),
             }
@@ -295,7 +306,7 @@ mod platform {
             .map_err(|err| CallerAuthError::TokenUnavailable(err.to_string()))?;
         // SAFETY: GetTokenInformation(TokenUser) filled the buffer with a TOKEN_USER header whose
         // `User.Sid` points into the very same buffer, which lives until the SID has been rendered.
-        let user = &*(user_buffer.as_ptr() as *const TOKEN_USER);
+        let user = unsafe { &*(user_buffer.as_ptr() as *const TOKEN_USER) };
         let user_sid =
             sid_to_string(user.User.Sid).unwrap_or_else(|| "<unrenderable-sid>".to_string());
 
@@ -315,12 +326,14 @@ mod platform {
                 continue;
             };
             let mut member = BOOL::default();
-            // SAFETY: `sid_buffer` holds a valid well-known SID for the duration of the call.
-            let probe = CheckTokenMembership(
-                Some(token),
-                PSID(sid_buffer.as_ptr() as *mut core::ffi::c_void),
-                &mut member,
-            );
+            // SAFETY: `token` is an impersonated access token handle and `sid_buffer` holds a valid well-known SID.
+            let probe = unsafe {
+                CheckTokenMembership(
+                    Some(token),
+                    PSID(sid_buffer.as_ptr() as *mut core::ffi::c_void),
+                    &mut member,
+                )
+            };
             match probe {
                 Ok(()) => {
                     groups_readable = true;
@@ -390,33 +403,69 @@ mod tests {
             query_id: 1,
             raw_query: "rs".to_string(),
             defaults: Default::default(),
-            sort_column: cairn_core::sort::SortColumn::Name,
-            sort_asc: true,
+            sort_spec: cairn_core::sort::SortSpec::default(),
             first_page_limit: 50,
         }
     }
 
     #[test]
-    fn index_configuration_and_rescan_are_read_class_for_local_users() {
+    fn access_classes_separate_handshake_read_and_index_mutation() {
         for req in [
-            ClientRequest::ReloadConfig,
-            ClientRequest::ClearContentIndex,
-            ClientRequest::Rescan { volume_id: None },
-            ClientRequest::SetConfig {
-                config_toml: String::new(),
+            ClientRequest::Hello {
+                client_version: 1,
+                pid: 1,
+            },
+            ClientRequest::Cancel { query_id: 1 },
+        ] {
+            assert_eq!(access_class(&req), AccessClass::Handshake, "{req:?}");
+        }
+
+        for req in [
+            query(),
+            ClientRequest::GetRows {
+                session_id: 1,
+                offset: 0,
+                limit: 10,
+            },
+            ClientRequest::GetStatus,
+            ClientRequest::GetConfig,
+            ClientRequest::GetContentIndexStatus,
+            ClientRequest::GetTree {
+                path: "C:\\".to_string(),
+                max_depth: 2,
+            },
+            ClientRequest::GetSources,
+            ClientRequest::GetPropertyIndexStatus,
+            ClientRequest::GetIndexJournal {
+                after_seq: 0,
+                limit: 100,
             },
         ] {
             assert_eq!(access_class(&req), AccessClass::Read, "{req:?}");
         }
-        assert_eq!(access_class(&query()), AccessClass::Read);
-        assert_eq!(access_class(&ClientRequest::GetConfig), AccessClass::Read);
-        assert_eq!(
-            access_class(&ClientRequest::Hello {
-                client_version: 1,
-                pid: 1
-            }),
-            AccessClass::Handshake
-        );
+
+        for req in [
+            ClientRequest::Rescan { volume_id: None },
+            ClientRequest::SetConfig {
+                config_toml: String::new(),
+            },
+            ClientRequest::ReloadConfig,
+            ClientRequest::CancelContentIndex,
+            ClientRequest::ClearContentIndex,
+            ClientRequest::AddFolderSource {
+                path: "D:\\Projects".to_string(),
+            },
+            ClientRequest::RemoveFolderSource {
+                path: "D:\\Projects".to_string(),
+            },
+            ClientRequest::RescanSource {
+                source_id: cairn_core::property_store::SourceId(1000),
+            },
+            ClientRequest::SetPropertyIndexEnabled { enabled: true },
+            ClientRequest::SetIndexJournalEnabled { enabled: true },
+        ] {
+            assert_eq!(access_class(&req), AccessClass::IndexMutation, "{req:?}");
+        }
     }
 
     #[test]
@@ -425,14 +474,31 @@ mod tests {
             ClientRequest::ReloadConfig,
             ClientRequest::ClearContentIndex,
             ClientRequest::Rescan { volume_id: Some(2) },
+            ClientRequest::AddFolderSource {
+                path: "D:\\Projects".to_string(),
+            },
+            ClientRequest::RemoveFolderSource {
+                path: "D:\\Projects".to_string(),
+            },
+            ClientRequest::RescanSource {
+                source_id: cairn_core::property_store::SourceId(1000),
+            },
+            ClientRequest::SetPropertyIndexEnabled { enabled: true },
+            ClientRequest::SetIndexJournalEnabled { enabled: true },
             ClientRequest::SetConfig {
                 config_toml: "content_index_enabled = true".to_string(),
             },
         ] {
             assert!(
                 authorize(&req, CallerAuthorization::StandardUser, false).is_ok(),
-                "{req:?} is a local-user index operation, not an administrative one"
+                "{req:?} is a local-user index operation when admin_only_query is off"
             );
+            let denied = authorize(&req, CallerAuthorization::StandardUser, true)
+                .expect_err("admin_only_query = true must deny standard users");
+            assert_eq!(denied.0, ERROR_CODE_ADMIN_ONLY_QUERY, "{req:?}");
+            let unauth = authorize(&req, CallerAuthorization::Unauthenticated, false)
+                .expect_err("unauthenticated callers must always be rejected");
+            assert_eq!(unauth.0, ERROR_CODE_UNAUTHORIZED, "{req:?}");
         }
     }
 
