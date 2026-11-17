@@ -83,6 +83,28 @@ fn minimal_png_bytes(width: u32, height: u32) -> Vec<u8> {
     out
 }
 
+fn wait_for_folder_scan(engine: &MultiVolumeEngine, minimum: u64) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(summary) = engine
+            .get_sources()
+            .into_iter()
+            .find(|source| source.kind == SourceKind::Folder)
+        {
+            if summary.indexed_count >= minimum
+                && !matches!(summary.status, VolumeState::Rebuilding)
+            {
+                return;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "folder source did not finish scanning"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 #[test]
 fn folder_source_scans_updates_incrementally_and_recovers_on_buffer_overflow() {
     let temp = tempdir().expect("tempdir");
@@ -122,7 +144,10 @@ fn folder_source_scans_updates_incrementally_and_recovers_on_buffer_overflow() {
     assert!(!names.contains(&"loop_target.txt"));
 
     // Incremental event applies directly without overflow.
-    let new_file = root.join("sub\\gamma.txt");
+    // Event paths come from the watcher rooted at the normalized source path, so build them the
+    // same way instead of relying on the temp path's original spelling.
+    let source_root = PathBuf::from(source.display_root());
+    let new_file = source_root.join("sub\\gamma.txt");
     fs::write(&new_file, "added incrementally").unwrap();
     let mut journal = IndexJournal::new(true);
     let overflowed = source.apply_folder_events(
@@ -139,7 +164,7 @@ fn folder_source_scans_updates_incrementally_and_recovers_on_buffer_overflow() {
     assert_eq!(journal.status().entry_count, 1);
 
     // Writing another file missed by buffered watcher triggers fallback rescan when > cap.
-    fs::write(root.join("delta.txt"), "missed during overflow").unwrap();
+    fs::write(source_root.join("delta.txt"), "missed during overflow").unwrap();
     let mut burst = Vec::with_capacity(FOLDER_CHANGE_BUFFER_CAP + 1);
     for idx in 0..=FOLDER_CHANGE_BUFFER_CAP {
         burst.push(FolderWatchEvent::Modified(
@@ -451,6 +476,7 @@ fn property_index_degrades_explicitly_when_off_and_handles_missing_worker_cleanl
 fn property_index_extracts_through_real_worker_and_recovers_from_corrupt_files() {
     let temp = tempdir().expect("tempdir");
     let media_dir = temp.path().join("media");
+    let service_dir = temp.path().join("service");
     fs::create_dir_all(&media_dir).unwrap();
     let good_png = media_dir.join("banner.png");
     let corrupt_png = media_dir.join("broken.png");
@@ -464,24 +490,34 @@ fn property_index_extracts_through_real_worker_and_recovers_from_corrupt_files()
         ..Default::default()
     };
     let engine = MultiVolumeEngine::with_paths(
-        &temp.path().join("index"),
-        &temp.path().join("content"),
-        &temp.path().join("service.toml"),
+        &service_dir.join("index"),
+        &service_dir.join("content"),
+        &service_dir.join("service.toml"),
         vec![],
         config,
     );
     engine.add_folder_source(&media_dir, false).unwrap();
+    wait_for_folder_scan(&engine, 2);
 
     let cancel = CancellationToken::new();
     // Enable properties and invoke real CairnWorker extraction across good + corrupt files.
     engine.set_property_index_enabled(true);
+    let tasks = engine.collect_property_tasks();
+    assert_eq!(
+        tasks.len(),
+        2,
+        "both PNG files must reach the property pipeline: {tasks:?}"
+    );
     engine
         .run_property_extraction_with_worker(&cairn_worker_exe(), Duration::from_secs(10))
         .expect("isolated extraction");
 
     let prop_status = engine.property_index_status();
     assert!(prop_status.enabled);
-    assert!(prop_status.indexed_records >= 1);
+    assert!(
+        prop_status.indexed_records >= 1,
+        "worker extraction produced no records: {prop_status:?}"
+    );
     assert!(engine.memory_footprint().property_store_bytes > 0);
 
     let enabled_outcome = engine.execute_search_multi(

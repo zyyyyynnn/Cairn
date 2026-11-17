@@ -333,7 +333,20 @@ impl CairnApp {
     }
 
     pub(crate) fn start_update_check(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.begin_update_check(window, cx) {
+        self.start_update_check_with_menu(window, cx, true);
+    }
+
+    fn start_update_check_from_toast(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.start_update_check_with_menu(window, cx, false);
+    }
+
+    fn start_update_check_with_menu(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        reopen_help: bool,
+    ) {
+        if !self.begin_update_check(window, cx, reopen_help) {
             return;
         }
 
@@ -345,10 +358,10 @@ impl CairnApp {
         });
         cx.spawn(async move |_this, cx| {
             let result = rx.await.unwrap_or(Err(UpdateError::Network));
-            let _ = cx.update_window(handle, |_, _window, cx| {
+            let _ = cx.update_window(handle, |_, window, cx| {
                 if let Some(view) = view.upgrade() {
                     view.update(cx, |this, cx| {
-                        this.finish_update_check(cx, result);
+                        this.finish_update_check(window, cx, result);
                     });
                 }
             });
@@ -356,29 +369,38 @@ impl CairnApp {
         .detach();
     }
 
-    /// Moves the shell into the checking state and reopens the Help menu after the click that
-    /// started it: the popup dismisses itself on activation, so the row that carries the spinner
-    /// has to be shown again. Returns `false` when a check is already in flight.
-    fn begin_update_check(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    /// Moves the shell into the checking state. A check started from the Help menu reopens it after
+    /// the click that started it: the popup dismisses itself on activation, so the row that carries
+    /// the spinner has to be shown again. A retry from a toast keeps the menu closed. Returns
+    /// `false` when a check is already in flight.
+    fn begin_update_check(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        reopen_help: bool,
+    ) -> bool {
         if self.is_checking_update {
             return false;
         }
         self.is_checking_update = true;
         cx.notify();
 
-        let menu_view = cx.entity();
-        window.defer(cx, move |window, cx| {
-            menu_view.update(cx, |this, cx| {
-                if this.is_checking_update {
-                    this.show_group(MenuGroup::Help, window, cx);
-                }
+        if reopen_help {
+            let menu_view = cx.entity();
+            window.defer(cx, move |window, cx| {
+                menu_view.update(cx, |this, cx| {
+                    if this.is_checking_update {
+                        this.show_group(MenuGroup::Help, window, cx);
+                    }
+                });
             });
-        });
+        }
         true
     }
 
     fn finish_update_check(
         &mut self,
+        window: &mut Window,
         cx: &mut Context<Self>,
         result: Result<Option<ReleaseInfo>, UpdateError>,
     ) {
@@ -389,6 +411,7 @@ impl CairnApp {
             .is_some_and(|menu| menu.group == MenuGroup::Help)
         {
             self.close_group();
+            self.query.search_focus.focus(window, cx);
         }
         cx.notify();
         match result {
@@ -397,7 +420,7 @@ impl CairnApp {
                 let body = self.i18n.get_text("update_incomplete_body");
                 let retry =
                     ToastAction::new(self.i18n.get_text("update_retry"), |this, window, cx| {
-                        this.start_update_check(window, cx);
+                        this.start_update_check_from_toast(window, cx);
                     });
                 self.show_error_toast_with_action(title, body, retry, cx);
             }
@@ -406,7 +429,7 @@ impl CairnApp {
                 let body = self.i18n.get_text("update_check_failed_body");
                 let retry =
                     ToastAction::new(self.i18n.get_text("update_retry"), |this, window, cx| {
-                        this.start_update_check(window, cx);
+                        this.start_update_check_from_toast(window, cx);
                     });
                 self.show_error_toast_with_action(title, body, retry, cx);
             }

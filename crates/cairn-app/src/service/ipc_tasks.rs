@@ -750,7 +750,7 @@ impl CairnApp {
                 if let Err(err) = res {
                     this.report_request_failure(
                         "toast_property_index_failed_title",
-                        "toast_property_index_failed_body",
+                        "toast_property_index_action_failed_body",
                         err,
                         cx,
                     );
@@ -883,7 +883,7 @@ impl CairnApp {
                 if let Err(err) = res {
                     this.report_request_failure(
                         "toast_index_journal_failed_title",
-                        "toast_index_journal_failed_body",
+                        "toast_index_journal_action_failed_body",
                         err,
                         cx,
                     );

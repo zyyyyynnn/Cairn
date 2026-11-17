@@ -309,36 +309,42 @@ fn render_journal_rows(
                 .min_h(rems(layout::ROW_HEIGHT))
                 .px(rems(layout::SPACE_8))
                 .py(rems(layout::TIGHT_LEAD))
-                .gap(rems(layout::SPACE_8))
+                .gap(rems(layout::SPACE_4))
                 .items_start()
                 .border_b(HAIRLINE)
                 .border_color(tokens.border)
                 .hover(|this| this.bg(tokens.row_hover))
                 .child(
-                    div()
-                        .w(time_col_w)
-                        .flex_shrink_0()
-                        .font_features(tabular_figures())
-                        .text_sm()
-                        .text_color(tokens.muted_foreground)
-                        .child(timestamp),
-                )
-                .child(
-                    div()
-                        .w(kind_col_w)
-                        .flex_shrink_0()
-                        .text_sm()
-                        .text_color(tokens.foreground)
-                        .child(kind_label),
+                    h_flex()
+                        .w_full()
+                        .gap(rems(layout::SPACE_8))
+                        .items_center()
+                        .child(
+                            div()
+                                .w(time_col_w)
+                                .flex_shrink_0()
+                                .font_features(tabular_figures())
+                                .text_sm()
+                                .text_color(tokens.muted_foreground)
+                                .child(timestamp),
+                        )
+                        .child(
+                            div()
+                                .w(kind_col_w)
+                                .flex_shrink_0()
+                                .text_sm()
+                                .text_color(tokens.foreground)
+                                .child(kind_label),
+                        ),
                 )
                 .child(
                     v_flex()
-                        .min_w_0()
-                        .flex_1()
+                        .w_full()
+                        .gap(rems(layout::SPACE_4))
                         .child(
                             div()
                                 .w_full()
-                                .truncate()
+                                .whitespace_normal()
                                 .text_sm()
                                 .text_color(tokens.foreground)
                                 .child(entry.path.clone()),
@@ -347,7 +353,7 @@ fn render_journal_rows(
                             this.child(
                                 div()
                                     .w_full()
-                                    .truncate()
+                                    .whitespace_normal()
                                     .text_sm()
                                     .text_color(tokens.muted_foreground)
                                     .child(old),

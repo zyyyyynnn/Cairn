@@ -475,6 +475,9 @@ fn collect_hierarchy_needs(
     }
 }
 
+/// Bounds a corrupt or cyclic parent chain; real directory depth stays far below this.
+const MAX_PARENT_CHAIN: usize = 256;
+
 fn compute_depths(records: &[FileRecord], root: &str) -> Vec<u16> {
     let base_depth = root
         .trim_start_matches('\\')
@@ -492,7 +495,7 @@ fn compute_depths(records: &[FileRecord], root: &str) -> Vec<u16> {
         let mut curr = idx as u32;
         let mut resolved = base_depth;
 
-        while (curr as usize) < records.len() && stack.len() < 256 {
+        while (curr as usize) < records.len() && stack.len() < MAX_PARENT_CHAIN {
             let cur_usize = curr as usize;
             if depths[cur_usize] != 0 {
                 resolved = depths[cur_usize].saturating_add(1);

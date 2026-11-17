@@ -791,21 +791,6 @@ impl VolumeIndex {
         }
     }
 
-    pub fn build_file_row<F, P>(
-        &self,
-        record_idx: u32,
-        folded_terms: &[Vec<u8>],
-        snippet_lookup: F,
-        property_lookup: P,
-    ) -> Option<FileRowData>
-    where
-        F: FnOnce(u64) -> Vec<String>,
-        P: FnOnce(u64, i64) -> Option<RecordPropertyData>,
-    {
-        self.table_view()
-            .build_file_row(record_idx, folded_terms, snippet_lookup, property_lookup)
-    }
-
     /// Ingests parsed extracted items (from MFT scan or test fixtures).
     pub fn ingest_items(&mut self, items: Vec<ExtractedItem>) {
         self.clear();

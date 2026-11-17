@@ -354,7 +354,7 @@ fn rows_for_all_files(
     };
     let mut rows = Vec::new();
     let current = view.visit_visible(volume, offset, limit, |idx| {
-        if let Some(row) = volume.build_file_row(
+        if let Some(row) = volume.table_view().build_file_row(
             idx,
             &[],
             |_| Vec::new(),
@@ -504,6 +504,28 @@ mod tests {
             client_pid: pid,
             user_sid: "S-1-5-21-test".to_string(),
         }
+    }
+
+    #[test]
+    fn a_session_is_invisible_to_another_owner() {
+        let sessions = SessionManager::new(1, DEFAULT_SESSION_TTL, SystemClock::new());
+        let session_id = create_items(&sessions, owner(1), Vec::new());
+        let volumes = HashMap::new();
+        let folders = HashMap::new();
+        let props = PropertySideTables::disabled();
+        let tables = SourceTables {
+            volumes: &volumes,
+            folders: &folders,
+            properties: &props,
+        };
+
+        assert_eq!(
+            sessions.get_rows_multi(&owner(2), session_id, 0, 10, &tables),
+            Err(RowsError::UnknownSession)
+        );
+        assert!(sessions
+            .get_rows_multi(&owner(1), session_id, 0, 10, &tables)
+            .is_ok());
     }
 
     fn create_items(

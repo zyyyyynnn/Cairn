@@ -840,27 +840,6 @@ impl FolderSource {
             generation: self.generation,
         }
     }
-
-    pub fn build_file_row<F, P>(
-        &self,
-        record_idx: u32,
-        folded_terms: &[Vec<u8>],
-        snippet_lookup: F,
-        property_lookup: P,
-    ) -> Option<cairn_protocol::message::FileRowData>
-    where
-        F: FnOnce(u64) -> Vec<String>,
-        P: FnOnce(u64, i64) -> Option<cairn_core::property_store::RecordPropertyData>,
-    {
-        self.table_view()
-            .build_file_row(record_idx, folded_terms, snippet_lookup, property_lookup)
-    }
-}
-
-fn log_safe(text: &str) -> String {
-    text.chars()
-        .map(|ch| if ch.is_control() { ' ' } else { ch })
-        .collect()
 }
 
 struct ScanGuard {
@@ -874,10 +853,8 @@ impl Drop for ScanGuard {
     }
 }
 
-/// Scans one folder source on a background thread and installs the result under a short write lock.
-///
-/// The caller begins the scan (buffering watcher events) before arming the watcher, so events that
-/// happen during the traversal are replayed onto the installed snapshot.
+/// Reserves the single in-flight scan slot for `source_id`; the caller owns releasing it through a
+/// guard or [`release_scan`].
 pub(super) fn reserve_scan(scanning: &Arc<Mutex<HashSet<SourceId>>>, source_id: SourceId) -> bool {
     scanning.lock().unwrap().insert(source_id)
 }
@@ -934,7 +911,7 @@ pub(super) fn spawn_reserved_scan(
                 Err(err) => {
                     tracing::warn!(
                         source = source_id.0,
-                        error = %log_safe(&err),
+                        error = %super::log_safe(&err),
                         "folder scan failed"
                     );
                     let mut folders = thread_sources.write().unwrap();
@@ -990,6 +967,11 @@ fn install_scanned_source(
             return false;
         };
         let (pending, overflow) = old.take_pending_events();
+        let live_excluded = old.excluded_paths.clone();
+        let exclusions_changed = scanned.excluded_paths != live_excluded;
+        if exclusions_changed {
+            scanned.set_excluded_paths(&live_excluded);
+        }
         scanned.generation = old.generation.wrapping_add(1);
         scanned.live_watch_enabled = old.live_watch_enabled;
         scanned.overflow_retry_used = old.overflow_retry_used;
@@ -1005,10 +987,10 @@ fn install_scanned_source(
         let Some(source) = folders.get_mut(&source_id) else {
             return false;
         };
-        let mut needs_rescan = false;
+        let mut needs_rescan = exclusions_changed;
         if !pending.is_empty() {
             let mut journal_lock = journal.lock().unwrap();
-            needs_rescan = source.apply_folder_events(&pending, Some(&mut journal_lock), now_unix);
+            needs_rescan |= source.apply_folder_events(&pending, Some(&mut journal_lock), now_unix);
         }
         let mut retry_overflow = false;
         if overflow {
@@ -1467,6 +1449,37 @@ mod tests {
                 .unwrap()
                 .overflow_retry_used
         );
+    }
+
+    /// A scan captures its exclusions before it starts. If the live source gained or lost a rule
+    /// while the scan ran, the installed snapshot must adopt the live rules and ask for a follow-up
+    /// scan so the records match them.
+    #[test]
+    fn installing_a_scan_adopts_exclusions_changed_while_it_ran() {
+        let dir = tempdir().unwrap();
+        let skipped = dir.path().join("skip.txt");
+        std::fs::write(&skipped, b"x").unwrap();
+        let id = SourceId(2100);
+        let mut old = FolderSource::new(id, dir.path()).unwrap();
+        old.set_excluded_paths(&[skipped.to_string_lossy().into_owned()]);
+        let scanned = FolderSource::new(id, dir.path()).unwrap();
+        let sources = Arc::new(RwLock::new(HashMap::from([(id, old)])));
+        let properties = Arc::new(RwLock::new(PropertySideTables::new(true)));
+        let journal = Arc::new(Mutex::new(IndexJournal::new(true)));
+
+        assert!(install_scanned_source(
+            &sources,
+            &properties,
+            &journal,
+            id,
+            scanned,
+            1
+        ));
+        let installed = sources.read().unwrap();
+        let source = installed.get(&id).unwrap();
+        assert!(source
+            .exclusion_rules
+            .excludes(&ExclusionPath::new(&skipped.to_string_lossy())));
     }
 
     #[test]

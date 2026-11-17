@@ -225,10 +225,12 @@ fn run_property_worker<RB: BufRead, W: Write>(
     out: &mut W,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(reader) = batch {
+        let mut malformed = 0u64;
         for_each_non_empty_line(reader, |line| {
             let task: PropertyExtractTask = match serde_json::from_str(line) {
                 Ok(task) => task,
                 Err(err) => {
+                    malformed += 1;
                     error!("Malformed property task: {err}");
                     return;
                 }
@@ -244,6 +246,9 @@ fn run_property_worker<RB: BufRead, W: Write>(
                 let _ = writeln!(out, "{encoded}");
             }
         })?;
+        if malformed > 0 {
+            return Err(format!("{malformed} malformed property task(s)").into());
+        }
         out.flush()?;
     }
     Ok(())
@@ -313,6 +318,15 @@ mod tests {
         assert_eq!(args.delete_batch, Some(PathBuf::from(r"C:\test\del.jsonl")));
         assert_eq!(args.max_bytes, 4096);
         assert!(args.clear);
+    }
+
+    #[test]
+    fn malformed_property_task_fails_the_worker() {
+        use std::io::Cursor;
+
+        let mut out = Vec::new();
+        assert!(run_property_worker(Some(Cursor::new(b"not json\n")), &mut out).is_err());
+        assert!(out.is_empty());
     }
 
     #[test]

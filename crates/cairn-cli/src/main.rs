@@ -669,7 +669,9 @@ fn execute_subcommand(
                     status.newest_seq
                 )?;
                 for entry in entries {
-                    if let Some(old_path) = entry.old_path {
+                    let path = sanitize_terminal(&entry.path);
+                    let old_path = entry.old_path.as_deref().map(sanitize_terminal);
+                    if let Some(old_path) = old_path {
                         writeln!(
                             buf,
                             "{:>8} {:<18} src={} frn={} {} <- {}",
@@ -677,7 +679,7 @@ fn execute_subcommand(
                             entry.kind.key(),
                             entry.source_id.0,
                             entry.frn,
-                            entry.path,
+                            path,
                             old_path
                         )?;
                     } else {
@@ -688,7 +690,7 @@ fn execute_subcommand(
                             entry.kind.key(),
                             entry.source_id.0,
                             entry.frn,
-                            entry.path
+                            path
                         )?;
                     }
                 }

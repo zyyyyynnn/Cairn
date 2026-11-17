@@ -471,6 +471,8 @@ pub static DEFAULT_GROUPS: &[MenuGroupSpec] = &[
                         GroupCommand::SortBy(SortColumn::Path),
                         GroupCommand::SortBy(SortColumn::Size),
                         GroupCommand::SortBy(SortColumn::DateModified),
+                        GroupCommand::SortBy(SortColumn::DateCreated),
+                        GroupCommand::SortBy(SortColumn::Extension),
                     ],
                     &[GroupCommand::ReverseOrder],
                 ],
@@ -977,10 +979,10 @@ mod tests {
         }
     }
 
-    /// Sorting by every column the table can order is a listed command, so the 查看 menu cannot drift
-    /// away from the table headings.
+    /// The base sort commands cover every QRY-05 column, so the 查看 menu cannot drift from the
+    /// required sort order.
     #[test]
-    fn every_sortable_column_is_listed_once() {
+    fn base_sort_columns_are_listed_once() {
         let listed: Vec<SortColumn> = all_commands()
             .into_iter()
             .filter_map(|command| match command {
@@ -994,7 +996,9 @@ mod tests {
                 SortColumn::Name,
                 SortColumn::Path,
                 SortColumn::Size,
-                SortColumn::DateModified
+                SortColumn::DateModified,
+                SortColumn::DateCreated,
+                SortColumn::Extension
             ]
         );
     }

@@ -21,22 +21,10 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 const PROPERTY_BATCH_SIZE: usize = 64;
 const DEFAULT_PROPERTY_WORKER_TIMEOUT: Duration = Duration::from_secs(15);
-
-fn current_unix_ts() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
-}
-
-fn log_safe(text: &str) -> String {
-    text.chars()
-        .map(|ch| if ch.is_control() { ' ' } else { ch })
-        .collect()
-}
 
 struct PropertyRunGuard<'a>(&'a AtomicBool);
 
@@ -286,7 +274,7 @@ impl MultiVolumeEngine {
             } else {
                 ContentIndexState::Ready
             };
-            status.last_updated_ts = current_unix_ts();
+            status.last_updated_ts = super::unix_now_secs();
         }
         if failed > 0 {
             tracing::warn!(
@@ -351,8 +339,8 @@ impl MultiVolumeEngine {
                 } else {
                     *failed += 1;
                     tracing::warn!(
-                        path = %log_safe(&chunk[0].path),
-                        reason = %log_safe(&reason),
+                        path = %super::log_safe(&chunk[0].path),
+                        reason = %super::log_safe(&reason),
                         "property extraction failed for file"
                     );
                     self.advance_property_progress(1, total);

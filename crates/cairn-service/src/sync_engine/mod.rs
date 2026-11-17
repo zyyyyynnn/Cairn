@@ -55,6 +55,12 @@ pub(crate) fn unix_now_secs() -> i64 {
         .as_secs() as i64
 }
 
+fn log_safe(text: &str) -> String {
+    text.chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect()
+}
+
 pub struct MultiVolumeEngine {
     // Lock order invariant: volumes -> folder_sources -> property_tables -> index_journal.
     volumes: RwLock<HashMap<char, VolumeIndex>>,

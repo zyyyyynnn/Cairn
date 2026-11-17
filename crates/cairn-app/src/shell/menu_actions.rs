@@ -182,8 +182,14 @@ fn menu_entries(
                 }
             };
             let has_submenu = submenu.is_some();
+            let loading = command == GroupCommand::CheckForUpdates && app.is_checking_update;
+            let label = if loading {
+                app.i18n.get_text("update_checking_title")
+            } else {
+                app.command_label(command)
+            };
             view::MenuEntry {
-                label: app.command_label(command).into(),
+                label: label.into(),
                 checked: !has_submenu && app.command_is_checked(command),
                 radio: !has_submenu && command.is_radio_choice(),
                 disabled: app.command_is_disabled(command),
@@ -193,7 +199,7 @@ fn menu_entries(
                 on_select: None,
                 hint: command.hint_action(),
                 submenu,
-                loading: command == GroupCommand::CheckForUpdates && app.is_checking_update,
+                loading,
                 separates: false,
             }
         })
@@ -812,7 +818,9 @@ impl CairnApp {
             ),
             GroupCommand::ClearContentSearch => !matches!(
                 self.service.content.value.state,
-                ContentIndexState::Ready | ContentIndexState::Error(_)
+                ContentIndexState::Ready
+                    | ContentIndexState::Backfilling { .. }
+                    | ContentIndexState::Error(_)
             ),
             GroupCommand::RestoreSelected
             | GroupCommand::RestoreAll
@@ -1479,6 +1487,10 @@ mod visibility_tests {
                             menu_entries(this, &view, &[GroupCommand::CheckForUpdates], window, cx);
                         assert!(entries[0].loading);
                         assert!(entries[0].disabled);
+                        assert_eq!(
+                            entries[0].label.as_ref(),
+                            this.i18n.get_text("update_checking_title")
+                        );
                     });
                     cx.quit();
                     app
