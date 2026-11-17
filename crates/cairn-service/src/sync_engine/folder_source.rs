@@ -22,7 +22,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, Metadata};
 use std::mem::size_of;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread::JoinHandle;
 
 /// Maximum change events absorbed incrementally before falling back to a full folder rescan.
@@ -39,36 +39,116 @@ pub enum FolderWatchEvent {
         new_path: PathBuf,
     },
     Overflow,
+    /// The OS watcher could not continue. The source falls back to snapshot semantics.
+    WatchFailed,
 }
 
-/// Normalizes a folder source root for configuration deduplication and display.
+/// Normalizes and validates a folder source root.
+///
+/// Only local drive paths are accepted: UNC shares, device paths, relative paths and reparse-point
+/// roots are refused. The returned path is canonical, so `..`, short names and mixed separators
+/// resolve to one identity.
 pub fn normalize_folder_root(path: &Path) -> Result<(PathBuf, String), String> {
     let raw = path.to_string_lossy().replace('/', "\\");
-    let stripped = raw
-        .strip_prefix(r"\\?\")
-        .unwrap_or(&raw)
-        .trim()
-        .trim_end_matches('\\');
-    if stripped.is_empty() {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
         return Err("folder source path cannot be empty".to_string());
     }
-    let normalized_display = if stripped.len() == 2 && stripped.ends_with(':') {
-        format!("{stripped}\\")
+    let stripped = trimmed.strip_prefix(r"\\?\").unwrap_or(trimmed);
+    if stripped.starts_with(r"\\") {
+        return Err("folder source must be a local drive path".to_string());
+    }
+    let bytes = stripped.as_bytes();
+    if bytes.len() < 2 || !bytes[0].is_ascii_alphabetic() || bytes[1] != b':' {
+        return Err("folder source must be an absolute drive path".to_string());
+    }
+    let drive = (bytes[0] as char).to_ascii_uppercase();
+    let mut candidate = format!("{drive}:{}", &stripped[2..]);
+    while candidate.ends_with('\\') && candidate.len() > 2 {
+        candidate.pop();
+    }
+    if candidate.len() == 2 {
+        candidate.push('\\');
+    }
+
+    let probe = Path::new(&candidate);
+    let root_meta = fs::symlink_metadata(probe)
+        .map_err(|err| format!("folder source {} is unreachable: {err}", probe.display()))?;
+    if !root_meta.is_dir() {
+        return Err(format!(
+            "folder source {} is not a directory",
+            probe.display()
+        ));
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if root_meta.file_attributes() & 0x400 != 0 {
+            return Err(format!(
+                "folder source {} is a reparse point",
+                probe.display()
+            ));
+        }
+        ensure_local_drive(drive)?;
+    }
+
+    let canonical = fs::canonicalize(probe)
+        .map_err(|err| format!("folder source {} is unreachable: {err}", probe.display()))?;
+    let canonical = canonical.to_string_lossy();
+    let canonical = canonical.strip_prefix(r"\\?\").unwrap_or(&canonical);
+    let mut display = canonical.trim_end_matches('\\').to_string();
+    if display.len() == 2 {
+        display.push('\\');
+    }
+    Ok((PathBuf::from(&display), display))
+}
+
+#[cfg(windows)]
+fn ensure_local_drive(drive: char) -> Result<(), String> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::GetDriveTypeW;
+
+    // GetDriveTypeW returns these documented values; they live outside the windows-rs
+    // FileSystem module surface used here.
+    const DRIVE_UNKNOWN: u32 = 0;
+    const DRIVE_NO_ROOT_DIR: u32 = 1;
+    const DRIVE_REMOTE: u32 = 4;
+
+    let root = [drive as u16, b':' as u16, b'\\' as u16, 0];
+    // SAFETY: `root` is a null-terminated "X:\" drive root.
+    let kind = unsafe { GetDriveTypeW(PCWSTR(root.as_ptr())) };
+    if kind == DRIVE_REMOTE || kind == DRIVE_UNKNOWN || kind == DRIVE_NO_ROOT_DIR {
+        return Err(format!("folder source drive {drive}: is not a local disk"));
+    }
+    Ok(())
+}
+
+/// Stable per-source record key derived from the lower-case relative path.
+///
+/// Folder sources have no NTFS file reference number. A path-derived key keeps a file's identity
+/// stable across rescans so side tables never attach an old file's properties to a new one.
+fn stable_record_key(rel_key: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in rel_key.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    if hash == 0 {
+        1
     } else {
-        stripped.to_string()
-    };
-    let canonical = match cairn_core::path_cache::drive_letter_prefix(&normalized_display) {
-        Some(drive) if normalized_display.len() == 3 && normalized_display.ends_with('\\') => {
-            format!("{drive}:\\")
+        hash
+    }
+}
+
+fn next_unique_key(rel_key: &str, lookup: &FrnLookup) -> u64 {
+    let mut key = stable_record_key(rel_key);
+    while lookup.get(key).is_some() {
+        key = key.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        if key == 0 {
+            key = 1;
         }
-        Some(drive) => {
-            let mut out = normalized_display;
-            out.replace_range(0..1, &drive.to_string());
-            out
-        }
-        None => normalized_display,
-    };
-    Ok((PathBuf::from(&canonical), canonical))
+    }
+    key
 }
 
 #[cfg(windows)]
@@ -133,8 +213,11 @@ pub struct FolderSource {
     path_to_idx: HashMap<String, u32>,
     excluded_paths: Vec<String>,
     live_watch_enabled: bool,
+    scan_pending: bool,
+    pending_events: Vec<FolderWatchEvent>,
+    pending_overflow: bool,
+    last_skipped: u64,
     generation: u64,
-    next_key: u64,
     live_count: u64,
     live_file_bytes: u64,
     has_tombstones: bool,
@@ -161,8 +244,11 @@ impl FolderSource {
             path_to_idx: HashMap::new(),
             excluded_paths: Vec::new(),
             live_watch_enabled: false,
+            scan_pending: false,
+            pending_events: Vec::new(),
+            pending_overflow: false,
+            last_skipped: 0,
             generation: 1,
-            next_key: 1,
             live_count: 0,
             live_file_bytes: 0,
             has_tombstones: false,
@@ -247,6 +333,32 @@ impl FolderSource {
 
     pub(crate) fn set_live_watch_enabled(&mut self, enabled: bool) {
         self.live_watch_enabled = enabled;
+        if enabled {
+            if self.status.state() == VolumeState::SnapshotMode {
+                self.status.mark_folder_live();
+            }
+        } else if self.status.state() == VolumeState::Synced {
+            self.status.set(VolumeState::SnapshotMode);
+        }
+    }
+
+    pub(super) fn begin_scan(&mut self) {
+        self.scan_pending = true;
+        self.pending_events.clear();
+        self.pending_overflow = false;
+        self.status.set(VolumeState::Rebuilding);
+    }
+
+    pub(super) fn take_pending_events(&mut self) -> (Vec<FolderWatchEvent>, bool) {
+        self.scan_pending = false;
+        (
+            std::mem::take(&mut self.pending_events),
+            std::mem::replace(&mut self.pending_overflow, false),
+        )
+    }
+
+    pub(super) fn last_skipped(&self) -> u64 {
+        self.last_skipped
     }
 
     pub fn set_excluded_paths(&mut self, excluded_paths: &[String]) {
@@ -297,15 +409,23 @@ impl FolderSource {
                 self.root_path.display()
             ));
         }
+        #[cfg(windows)]
+        if metadata_win32_attributes(&root_meta) & 0x400 != 0 {
+            self.status.set(VolumeState::Offline);
+            return Err(format!(
+                "folder source {} is a reparse point",
+                self.root_path.display()
+            ));
+        }
 
         self.status.set(VolumeState::Rebuilding);
         let mut records = Vec::new();
         let mut arena = NamePool::default();
         let mut frn_to_idx = FrnLookup::new();
         let mut path_to_idx = HashMap::new();
-        let mut next_key = 1u64;
         let mut live_count = 0u64;
         let mut live_file_bytes = 0u64;
+        let mut skipped = 0u64;
 
         let mut stack: Vec<(PathBuf, u32, String)> = vec![(
             self.root_path.clone(),
@@ -319,15 +439,21 @@ impl FolderSource {
                 continue;
             }
             let Ok(read_dir) = fs::read_dir(&dir_path) else {
+                skipped = skipped.saturating_add(1);
                 continue;
             };
-            for entry in read_dir.flatten() {
+            for entry in read_dir {
+                let Ok(entry) = entry else {
+                    skipped = skipped.saturating_add(1);
+                    continue;
+                };
                 let entry_path = entry.path();
                 let name = entry.file_name().to_string_lossy().into_owned();
                 if should_exclude_segment(&name, excluded_paths) {
                     continue;
                 }
                 let Ok(meta) = fs::symlink_metadata(&entry_path) else {
+                    skipped = skipped.saturating_add(1);
                     continue;
                 };
                 let (flags, is_dir, is_reparse, size, created_ts, modified_ts) =
@@ -342,8 +468,7 @@ impl FolderSource {
                 }
 
                 let idx = records.len() as u32;
-                let key = next_key;
-                next_key = next_key.saturating_add(1);
+                let key = next_unique_key(&rel_key, &frn_to_idx);
                 let (name_offset, name_len, ext_offset) = arena.insert(&name);
                 records.push(FileRecord {
                     frn: key,
@@ -384,12 +509,15 @@ impl FolderSource {
         self.path_to_idx = path_to_idx;
         self.path_cache.clear();
         self.presorted.clear_and_shrink();
-        self.next_key = next_key;
         self.live_count = live_count;
         self.live_file_bytes = live_file_bytes;
         self.has_tombstones = false;
         self.generation = self.generation.wrapping_add(1);
-        self.status.mark_folder_synced();
+        self.last_skipped = skipped;
+        self.status.mark_folder_scanned(self.live_watch_enabled);
+        if skipped > 0 {
+            self.status.set(VolumeState::SnapshotMode);
+        }
         Ok(self.records.len())
     }
 
@@ -481,34 +609,40 @@ impl FolderSource {
             metadata_record_fields(&meta);
 
         if let Some(&idx) = self.path_to_idx.get(&rel_key) {
-            let rec = &mut self.records[idx as usize];
+            let rec = &self.records[idx as usize];
             if !rec.is_tombstone() {
                 let was_dir = rec.is_dir();
                 let old_size = rec.size;
                 let parent_idx = rec.parent_idx;
                 let frn = rec.frn;
-                rec.flags = flags;
-                rec.created_ts = created_ts;
-                rec.modified_ts = modified_ts;
-                if !was_dir && !is_dir {
-                    rec.size = size;
-                    let delta = size as i128 - old_size as i128;
-                    if delta >= 0 {
-                        self.live_file_bytes = self.live_file_bytes.saturating_add(delta as u64);
-                    } else {
-                        self.live_file_bytes = self.live_file_bytes.saturating_sub((-delta) as u64);
+                if was_dir != is_dir {
+                    self.tombstone_subtree(&rel_key);
+                } else {
+                    let rec = &mut self.records[idx as usize];
+                    rec.flags = flags;
+                    rec.created_ts = created_ts;
+                    rec.modified_ts = modified_ts;
+                    if !was_dir {
+                        rec.size = size;
+                        let delta = size as i128 - old_size as i128;
+                        if delta >= 0 {
+                            self.live_file_bytes =
+                                self.live_file_bytes.saturating_add(delta as u64);
+                        } else {
+                            self.live_file_bytes =
+                                self.live_file_bytes.saturating_sub((-delta) as u64);
+                        }
+                        self.adjust_ancestors(parent_idx, delta);
                     }
-                    self.adjust_ancestors(parent_idx, delta);
+                    return Some((frn, JournalChangeKind::Modified));
                 }
-                return Some((frn, JournalChangeKind::Modified));
             }
         }
 
         let parent_idx = self.parent_idx_for_path(path)?;
         let (name_offset, name_len, ext_offset) = self.arena.insert(&name);
         let idx = self.records.len() as u32;
-        let key = self.next_key;
-        self.next_key = self.next_key.saturating_add(1);
+        let key = next_unique_key(&rel_key, &self.frn_to_idx);
         self.records.push(FileRecord {
             frn: key,
             parent_idx,
@@ -539,10 +673,29 @@ impl FolderSource {
         mut journal: Option<&mut IndexJournal>,
         now_unix: i64,
     ) -> bool {
+        if self.scan_pending {
+            if events.len() + self.pending_events.len() > FOLDER_CHANGE_BUFFER_CAP
+                || events.iter().any(|event| {
+                    matches!(
+                        event,
+                        FolderWatchEvent::Overflow | FolderWatchEvent::WatchFailed
+                    )
+                })
+            {
+                self.pending_overflow = true;
+                self.pending_events.clear();
+            } else {
+                self.pending_events.extend_from_slice(events);
+            }
+            return false;
+        }
         if events.len() > FOLDER_CHANGE_BUFFER_CAP
-            || events
-                .iter()
-                .any(|e| matches!(e, FolderWatchEvent::Overflow))
+            || events.iter().any(|e| {
+                matches!(
+                    e,
+                    FolderWatchEvent::Overflow | FolderWatchEvent::WatchFailed
+                )
+            })
         {
             if let Some(ref mut j) = journal {
                 j.push(
@@ -562,6 +715,7 @@ impl FolderSource {
         for event in events {
             match event {
                 FolderWatchEvent::Overflow => return true,
+                FolderWatchEvent::WatchFailed => return true,
                 FolderWatchEvent::Added(path) | FolderWatchEvent::Modified(path) => {
                     if let Some((frn, kind)) = self.upsert_live_path(path) {
                         table_changed = true;
@@ -650,11 +804,157 @@ impl FolderSource {
     ) -> Option<cairn_protocol::message::FileRowData>
     where
         F: FnOnce(u64) -> Vec<String>,
-        P: FnOnce(u64) -> Option<cairn_core::property_store::RecordPropertyData>,
+        P: FnOnce(u64, i64) -> Option<cairn_core::property_store::RecordPropertyData>,
     {
         self.table_view()
             .build_file_row(record_idx, folded_terms, snippet_lookup, property_lookup)
     }
+}
+
+fn log_safe(text: &str) -> String {
+    text.chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect()
+}
+
+struct ScanGuard {
+    scanning: Arc<Mutex<HashSet<SourceId>>>,
+    source_id: SourceId,
+}
+
+impl Drop for ScanGuard {
+    fn drop(&mut self) {
+        self.scanning.lock().unwrap().remove(&self.source_id);
+    }
+}
+
+/// Scans one folder source on a background thread and installs the result under a short write lock.
+///
+/// The caller begins the scan (buffering watcher events) before arming the watcher, so events that
+/// happen during the traversal are replayed onto the installed snapshot.
+pub(super) fn spawn_background_scan(
+    sources: Arc<RwLock<HashMap<SourceId, FolderSource>>>,
+    properties: Arc<RwLock<PropertySideTables>>,
+    scanning: Arc<Mutex<HashSet<SourceId>>>,
+    journal: Arc<Mutex<IndexJournal>>,
+    source_id: SourceId,
+    now_unix: i64,
+) -> bool {
+    {
+        let mut active = scanning.lock().unwrap();
+        if !active.insert(source_id) {
+            return false;
+        }
+    }
+    let prepared = {
+        let folders = sources.read().unwrap();
+        let Some(source) = folders.get(&source_id) else {
+            scanning.lock().unwrap().remove(&source_id);
+            return false;
+        };
+        (source.root_path.clone(), source.excluded_paths().to_vec())
+    };
+    let (root_path, excluded) = prepared;
+    let thread_sources = Arc::clone(&sources);
+    let thread_properties = Arc::clone(&properties);
+    let thread_scanning = Arc::clone(&scanning);
+    let thread_journal = Arc::clone(&journal);
+    let spawned = std::thread::Builder::new()
+        .name("cairn-folder-scan".to_string())
+        .spawn(move || {
+            let _scan_guard = ScanGuard {
+                scanning: thread_scanning,
+                source_id,
+            };
+            let scanned = FolderSource::new(source_id, &root_path).and_then(|mut source| {
+                source.rescan(&excluded)?;
+                Ok(source)
+            });
+            match scanned {
+                Ok(scanned) => install_scanned_source(
+                    thread_sources,
+                    thread_properties,
+                    thread_journal,
+                    source_id,
+                    scanned,
+                    now_unix,
+                ),
+                Err(err) => {
+                    tracing::warn!(
+                        source = source_id.0,
+                        error = %log_safe(&err),
+                        "folder scan failed"
+                    );
+                    let mut folders = thread_sources.write().unwrap();
+                    if let Some(source) = folders.get_mut(&source_id) {
+                        source.scan_pending = false;
+                        source.set_live_watch_enabled(false);
+                        source.status.set(VolumeState::Offline);
+                    }
+                }
+            }
+        });
+    if spawned.is_err() {
+        scanning.lock().unwrap().remove(&source_id);
+        return false;
+    }
+    true
+}
+
+fn install_scanned_source(
+    sources: Arc<RwLock<HashMap<SourceId, FolderSource>>>,
+    properties: Arc<RwLock<PropertySideTables>>,
+    journal: Arc<Mutex<IndexJournal>>,
+    source_id: SourceId,
+    mut scanned: FolderSource,
+    now_unix: i64,
+) {
+    let present_keys: HashSet<u64> = {
+        let mut folders = sources.write().unwrap();
+        let Some(old) = folders.get_mut(&source_id) else {
+            return;
+        };
+        let (pending, overflow) = old.take_pending_events();
+        scanned.generation = old.generation.wrapping_add(1);
+        scanned.live_watch_enabled = old.live_watch_enabled;
+        scanned.scan_pending = false;
+        let skipped = scanned.last_skipped();
+        scanned
+            .status
+            .mark_folder_scanned(scanned.live_watch_enabled);
+        if skipped > 0 {
+            scanned.status.set(VolumeState::SnapshotMode);
+        }
+        folders.insert(source_id, scanned);
+        let Some(source) = folders.get_mut(&source_id) else {
+            return;
+        };
+        let mut needs_rescan = false;
+        if !pending.is_empty() {
+            let mut journal_lock = journal.lock().unwrap();
+            needs_rescan = source.apply_folder_events(&pending, Some(&mut journal_lock), now_unix);
+        }
+        if overflow || needs_rescan || skipped > 0 {
+            source.status.set(VolumeState::SnapshotMode);
+        }
+        if skipped > 0 {
+            tracing::warn!(
+                source = source_id.0,
+                skipped,
+                "folder scan skipped unreadable entries; source is snapshot-only"
+            );
+        }
+        source
+            .records()
+            .iter()
+            .filter(|record| !record.is_tombstone())
+            .map(|record| record.frn)
+            .collect()
+    };
+    properties
+        .write()
+        .unwrap()
+        .retain_source_keys(source_id, &present_keys);
 }
 
 fn path_is_excluded(rel_lower: &str, excluded_paths: &[String]) -> bool {
@@ -814,6 +1114,7 @@ pub(crate) fn spawn_folder_watcher(
                     break;
                 }
                 if wait != WAIT_EVENT(WAIT_OBJECT_0.0 + 1) {
+                    on_events(vec![FolderWatchEvent::WatchFailed]);
                     break;
                 }
 
@@ -821,7 +1122,11 @@ pub(crate) fn spawn_folder_watcher(
                 // SAFETY: overlapped signaled completion on io_h.
                 let completed =
                     unsafe { GetOverlappedResult(dir_h, &overlapped, &mut bytes_returned, true) };
-                if completed.is_err() || bytes_returned == 0 {
+                if completed.is_err() {
+                    on_events(vec![FolderWatchEvent::WatchFailed]);
+                    break;
+                }
+                if bytes_returned == 0 {
                     on_events(vec![FolderWatchEvent::Overflow]);
                     continue;
                 }
@@ -948,7 +1253,21 @@ fn parse_notify_buffer(root: &Path, buf: &[u8]) -> Vec<FolderWatchEvent> {
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
     use windows::Win32::Storage::FileSystem::FILE_ACTION_ADDED;
+
+    #[test]
+    fn snapshot_until_live_watcher_is_enabled() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("file.txt"), b"x").unwrap();
+        let mut source = FolderSource::new(SourceId(2000), dir.path()).unwrap();
+        source.rescan(&[]).unwrap();
+        assert_eq!(source.to_summary().status, VolumeState::SnapshotMode);
+        source.set_live_watch_enabled(true);
+        assert_eq!(source.to_summary().status, VolumeState::Synced);
+        source.set_live_watch_enabled(false);
+        assert_eq!(source.to_summary().status, VolumeState::SnapshotMode);
+    }
 
     #[test]
     fn parse_notify_buffer_accepts_single_character_14_byte_record() {

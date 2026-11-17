@@ -2,7 +2,10 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Pure-Rust extended property parsers with Win32 Shell COM fallback (`IDX-12`).
+//! Pure-Rust extended property parsers (`IDX-12`).
+//!
+//! Properties come only from the in-repo parsers. The Windows Shell property system is not
+//! queried: its handlers are third-party code and would run inside the elevated worker.
 
 #![forbid(unsafe_code)]
 
@@ -18,21 +21,14 @@ const MAX_HEADER_READ_BYTES: usize = 256 * 1024;
 const MAX_XML_ENTRY_BYTES: u64 = 512 * 1024;
 
 /// Extracts extended properties (`length_ms`, `author`, `tags`, `dimensions`, `framerate_mfps`)
-/// from a file on disk, falling back to the Windows Shell property system when fields are missing.
+/// from a file on disk using the in-repo parsers.
 pub fn extract_file_properties(path: &Path) -> Option<RecordPropertyData> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
         .map(|s| s.to_ascii_lowercase())?;
 
-    let mut data = extract_pure_rust_from_path(&ext, path).unwrap_or_default();
-
-    #[cfg(windows)]
-    if should_query_shell_fallback(&ext, &data) {
-        if let Some(shell_data) = crate::win_properties::read_shell_properties(path) {
-            merge_missing(&mut data, shell_data);
-        }
-    }
+    let data = extract_pure_rust_from_path(&ext, path).unwrap_or_default();
 
     (!data.is_empty()).then_some(data)
 }
@@ -63,18 +59,18 @@ pub fn parse_properties_from_bytes(ext: &str, bytes: &[u8]) -> Option<RecordProp
 fn extract_pure_rust_from_path(ext: &str, path: &Path) -> Option<RecordPropertyData> {
     match ext {
         "docx" | "xlsx" | "pptx" | "odt" | "ods" | "odp" => {
-            let file = File::open(path).ok()?;
+            let file = open_no_follow(path)?;
             parse_zip_office(file)
         }
         "mp4" | "m4a" | "mov" | "m4v" | "3gp" => parse_mp4_file(path),
         "mp3" => {
-            let mut file = File::open(path).ok()?;
+            let mut file = open_no_follow(path)?;
             let file_len = file.metadata().ok()?.len();
             let header = read_capped(&mut file, MAX_HEADER_READ_BYTES)?;
             parse_mp3(&header, Some(file_len))
         }
         "pdf" => {
-            let mut file = File::open(path).ok()?;
+            let mut file = open_no_follow(path)?;
             let file_len = file.metadata().ok()?.len();
             if file_len as usize > MAX_CONTAINER_READ_BYTES {
                 return None;
@@ -83,7 +79,7 @@ fn extract_pure_rust_from_path(ext: &str, path: &Path) -> Option<RecordPropertyD
             parse_pdf(&bytes)
         }
         "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "wav" | "avi" | "flac" => {
-            let mut file = File::open(path).ok()?;
+            let mut file = open_no_follow(path)?;
             let bytes = read_capped(&mut file, MAX_HEADER_READ_BYTES)?;
             parse_properties_from_bytes(ext, &bytes)
         }
@@ -91,65 +87,37 @@ fn extract_pure_rust_from_path(ext: &str, path: &Path) -> Option<RecordPropertyD
     }
 }
 
+/// Opens a file without following a reparse point at the final component.
+///
+/// The index decides a path is a regular file, but a symlink or junction can replace it between
+/// indexing and extraction. Opening the reparse point itself and checking the opened handle
+/// attributes closes that TOCTOU gap.
+fn open_no_follow(path: &Path) -> Option<File> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+            .ok()?;
+        if file.metadata().ok()?.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return None;
+        }
+        Some(file)
+    }
+    #[cfg(not(windows))]
+    {
+        File::open(path).ok()
+    }
+}
+
 fn read_capped<R: Read>(reader: &mut R, max_bytes: usize) -> Option<Vec<u8>> {
     let mut buf = Vec::new();
     reader.take(max_bytes as u64).read_to_end(&mut buf).ok()?;
     Some(buf)
-}
-
-#[cfg(windows)]
-fn should_query_shell_fallback(ext: &str, current: &RecordPropertyData) -> bool {
-    matches!(
-        ext,
-        "mp3"
-            | "mp4"
-            | "mkv"
-            | "avi"
-            | "mov"
-            | "wmv"
-            | "wma"
-            | "m4a"
-            | "flac"
-            | "wav"
-            | "ogg"
-            | "webm"
-            | "png"
-            | "jpg"
-            | "jpeg"
-            | "gif"
-            | "bmp"
-            | "webp"
-            | "tif"
-            | "tiff"
-            | "heic"
-            | "docx"
-            | "xlsx"
-            | "pptx"
-            | "pdf"
-    ) && (current.length_ms.is_none()
-        || current.author.is_none()
-        || current.tags.is_none()
-        || current.dimensions.is_none()
-        || current.framerate_mfps.is_none())
-}
-
-#[cfg(windows)]
-fn merge_missing(dst: &mut RecordPropertyData, fallback: RecordPropertyData) {
-    if dst.length_ms.is_none() {
-        dst.length_ms = fallback.length_ms;
-    }
-    if dst.author.is_none() {
-        dst.author = fallback.author;
-    }
-    if dst.tags.is_none() {
-        dst.tags = fallback.tags;
-    }
-    if dst.dimensions.is_none() {
-        dst.dimensions = fallback.dimensions;
-    }
-    if dst.framerate_mfps.is_none() {
-        dst.framerate_mfps = fallback.framerate_mfps;
-    }
 }
 
 fn clean_opt_text(value: String) -> Option<String> {
@@ -578,7 +546,7 @@ fn parse_xing_frames(frame: &[u8]) -> Option<u32> {
 }
 
 fn parse_mp4_file(path: &Path) -> Option<RecordPropertyData> {
-    let mut file = File::open(path).ok()?;
+    let mut file = open_no_follow(path)?;
     let file_len = file.metadata().ok()?.len();
     let mut pos = 0u64;
     let mut header = [0u8; 16];

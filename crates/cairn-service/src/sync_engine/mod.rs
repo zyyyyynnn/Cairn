@@ -58,10 +58,12 @@ pub struct MultiVolumeEngine {
     volumes: RwLock<HashMap<char, VolumeIndex>>,
     folder_sources: Arc<RwLock<HashMap<SourceId, folder_source::FolderSource>>>,
     folder_watchers: Mutex<HashMap<SourceId, folder_source::FolderWatcherHandle>>,
+    folder_scanning: Arc<Mutex<HashSet<SourceId>>>,
     next_folder_source_id: AtomicU32,
-    property_tables: RwLock<PropertySideTables>,
+    property_tables: Arc<RwLock<PropertySideTables>>,
     property_status: RwLock<PropertyIndexStatus>,
     property_cancel: Arc<AtomicBool>,
+    property_running: AtomicBool,
     property_extract_lock: Mutex<()>,
     index_journal: Arc<Mutex<index_journal::IndexJournal>>,
     index_dir: PathBuf,
@@ -477,8 +479,9 @@ impl MultiVolumeEngine {
             volumes: RwLock::new(map),
             folder_sources: Arc::new(RwLock::new(HashMap::new())),
             folder_watchers: Mutex::new(HashMap::new()),
+            folder_scanning: Arc::new(Mutex::new(HashSet::new())),
             next_folder_source_id: AtomicU32::new(FOLDER_SOURCE_ID_BASE),
-            property_tables: RwLock::new(PropertySideTables::new(property_enabled)),
+            property_tables: Arc::new(RwLock::new(PropertySideTables::new(property_enabled))),
             property_status: RwLock::new(if property_enabled {
                 PropertyIndexStatus {
                     enabled: true,
@@ -492,6 +495,7 @@ impl MultiVolumeEngine {
                 PropertyIndexStatus::default()
             }),
             property_cancel: Arc::new(AtomicBool::new(!property_enabled)),
+            property_running: AtomicBool::new(false),
             property_extract_lock: Mutex::new(()),
             index_journal: Arc::new(Mutex::new(index_journal::IndexJournal::new(
                 journal_enabled,
@@ -709,11 +713,22 @@ impl MultiVolumeEngine {
         let mut desired: Vec<(PathBuf, String)> = Vec::new();
         let mut desired_keys: HashSet<String> = HashSet::new();
         for raw in configured_roots {
-            if let Ok((path, display)) = folder_source::normalize_folder_root(Path::new(raw)) {
-                let key = display.to_ascii_lowercase();
-                if desired_keys.insert(key) {
-                    desired.push((path, display));
-                }
+            let normalized = folder_source::normalize_folder_root(Path::new(raw));
+            let Ok((path, display_root)) = normalized else {
+                tracing::warn!(root = ?raw, "folder source ignored: invalid path");
+                continue;
+            };
+            if let Some(drive) = self.folder_source_volume_conflict(&path) {
+                tracing::warn!(
+                    root = %display_root,
+                    drive = %drive,
+                    "folder source ignored: path is inside an indexed volume"
+                );
+                continue;
+            }
+            let key = display_root.to_ascii_lowercase();
+            if desired_keys.insert(key) {
+                desired.push((path, display_root));
             }
         }
 
@@ -761,13 +776,8 @@ impl MultiVolumeEngine {
             let Ok(mut source) = folder_source::FolderSource::new(sid, &root_path) else {
                 continue;
             };
-            if let Err(err) = source.rescan(excluded_paths) {
-                tracing::warn!(
-                    "Initial scan for folder source {} failed: {}",
-                    root_path.display(),
-                    err
-                );
-            }
+            source.set_excluded_paths(excluded_paths);
+            source.begin_scan();
             let inserted = {
                 let mut folders = self.folder_sources.write().unwrap();
                 if folders
@@ -782,8 +792,64 @@ impl MultiVolumeEngine {
             };
             if inserted {
                 self.start_folder_watcher_for(sid, root_path);
+                folder_source::spawn_background_scan(
+                    self.folder_sources.clone(),
+                    self.property_tables.clone(),
+                    self.folder_scanning.clone(),
+                    self.index_journal.clone(),
+                    sid,
+                    unix_now_secs(),
+                );
             }
         }
+    }
+
+    /// A folder source inside an indexed NTFS volume duplicates records the volume already serves.
+    fn folder_source_volume_conflict(&self, root: &Path) -> Option<char> {
+        let display = root.to_string_lossy();
+        let drive = cairn_core::path_cache::drive_letter_prefix(&display)?.to_ascii_uppercase();
+        let excluded = self
+            .config
+            .read()
+            .unwrap()
+            .excluded_drives
+            .iter()
+            .any(|excluded| excluded.eq_ignore_ascii_case(&drive));
+        if excluded {
+            return None;
+        }
+        self.volumes
+            .read()
+            .unwrap()
+            .contains_key(&drive)
+            .then_some(drive)
+    }
+
+    fn start_folder_scan(&self, source_id: SourceId) -> bool {
+        let root = {
+            let mut folders = self.folder_sources.write().unwrap();
+            let Some(source) = folders.get_mut(&source_id) else {
+                return false;
+            };
+            source.begin_scan();
+            source.root_path.clone()
+        };
+        let has_watcher = self
+            .folder_watchers
+            .lock()
+            .unwrap()
+            .contains_key(&source_id);
+        if !has_watcher {
+            self.start_folder_watcher_for(source_id, root);
+        }
+        folder_source::spawn_background_scan(
+            self.folder_sources.clone(),
+            self.property_tables.clone(),
+            self.folder_scanning.clone(),
+            self.index_journal.clone(),
+            source_id,
+            unix_now_secs(),
+        )
     }
 
     fn start_folder_watcher_for(&self, source_id: SourceId, root_path: PathBuf) {
@@ -798,8 +864,24 @@ impl MultiVolumeEngine {
             #[cfg(windows)]
             {
                 let sources = Arc::clone(&self.folder_sources);
+                let properties = Arc::clone(&self.property_tables);
+                let scanning = Arc::clone(&self.folder_scanning);
                 let journal = Arc::clone(&self.index_journal);
                 folder_source::spawn_folder_watcher(root_path, move |events| {
+                    if events
+                        .iter()
+                        .any(|event| matches!(event, folder_source::FolderWatchEvent::WatchFailed))
+                    {
+                        let mut folders = sources.write().unwrap();
+                        if let Some(source) = folders.get_mut(&source_id) {
+                            source.set_live_watch_enabled(false);
+                        }
+                        tracing::warn!(
+                            source = source_id.0,
+                            "folder watcher stopped; source is now snapshot-only"
+                        );
+                        return;
+                    }
                     let needs_rescan = {
                         let mut folders = sources.write().unwrap();
                         let Some(source) = folders.get_mut(&source_id) else {
@@ -813,11 +895,20 @@ impl MultiVolumeEngine {
                         )
                     };
                     if needs_rescan {
-                        let mut folders = sources.write().unwrap();
-                        if let Some(source) = folders.get_mut(&source_id) {
-                            let excluded = source.excluded_paths().to_vec();
-                            let _ = source.rescan(&excluded);
+                        {
+                            let mut folders = sources.write().unwrap();
+                            if let Some(source) = folders.get_mut(&source_id) {
+                                source.begin_scan();
+                            }
                         }
+                        folder_source::spawn_background_scan(
+                            Arc::clone(&sources),
+                            Arc::clone(&properties),
+                            Arc::clone(&scanning),
+                            Arc::clone(&journal),
+                            source_id,
+                            unix_now_secs(),
+                        );
                     }
                 })
             }
@@ -828,6 +919,12 @@ impl MultiVolumeEngine {
             }
         };
         let active = handle_opt.is_some();
+        if !active {
+            tracing::warn!(
+                source = source_id.0,
+                "folder watcher could not start; source stays snapshot-only"
+            );
+        }
         {
             let mut folders = self.folder_sources.write().unwrap();
             if let Some(src) = folders.get_mut(&source_id) {
@@ -857,6 +954,12 @@ impl MultiVolumeEngine {
             return Err(format!(
                 "folder source {} is not a directory",
                 root_path.display()
+            ));
+        }
+        if let Some(drive) = self.folder_source_volume_conflict(&root_path) {
+            return Err(format!(
+                "folder source {} is inside indexed volume {drive}:",
+                display
             ));
         }
 
@@ -902,26 +1005,11 @@ impl MultiVolumeEngine {
         if let Some(drive) = source_id.drive_letter() {
             return self.rescan_volume(drive);
         }
-        let excluded_paths = self.config.read().unwrap().excluded_paths.clone();
-        let (result, watch_root) = {
-            let mut folders = self.folder_sources.write().unwrap();
-            let Some(source) = folders.get_mut(&source_id) else {
-                return Err(format!("source {} is not indexed", source_id.0));
-            };
-            let res = source.rescan(&excluded_paths);
-            (res, source.root_path.clone())
-        };
-        if result.is_ok() {
-            let has_watcher = self
-                .folder_watchers
-                .lock()
-                .unwrap()
-                .contains_key(&source_id);
-            if !has_watcher {
-                self.start_folder_watcher_for(source_id, watch_root);
-            }
+        if !self.folder_sources.read().unwrap().contains_key(&source_id) {
+            return Err(format!("source {} is not indexed", source_id.0));
         }
-        result
+        self.start_folder_scan(source_id);
+        Ok(0)
     }
 
     pub fn rescan_folder_sources(&self) -> usize {
@@ -933,7 +1021,7 @@ impl MultiVolumeEngine {
             .copied()
             .collect();
         ids.into_iter()
-            .filter(|&id| self.rescan_source(id).is_ok())
+            .filter(|&id| self.start_folder_scan(id))
             .count()
     }
 

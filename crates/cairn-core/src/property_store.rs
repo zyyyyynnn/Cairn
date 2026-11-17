@@ -10,7 +10,7 @@
 
 use crate::frn_index::hashmap_table_bytes;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::mem::size_of;
 
 const HAS_LENGTH: u8 = 1 << 0;
@@ -133,6 +133,12 @@ struct PackedPropertySlot {
     author_len: u16,
     tags_len: u16,
     presence: u8,
+    /// Record modification time (Unix seconds) captured when the properties were extracted.
+    modified_ts: u32,
+}
+
+fn stamp_u32(timestamp: i64) -> u32 {
+    timestamp.clamp(0, u32::MAX as i64) as u32
 }
 
 /// Sparse side-table storage for `length`, `author`, `tags`, `dimensions`, and `framerate`.
@@ -185,7 +191,13 @@ impl PropertySideTables {
     /// Inserts or updates extracted properties for `(source, record_key)`.
     ///
     /// Returns `false` if property indexing is disabled (allocating nothing) or if `data` is empty.
-    pub fn upsert(&mut self, source: SourceId, record_key: u64, data: &RecordPropertyData) -> bool {
+    pub fn upsert(
+        &mut self,
+        source: SourceId,
+        record_key: u64,
+        data: &RecordPropertyData,
+        modified_ts: i64,
+    ) -> bool {
         if !self.enabled {
             return false;
         }
@@ -194,7 +206,10 @@ impl PropertySideTables {
             return false;
         }
 
-        let mut slot = PackedPropertySlot::default();
+        let mut slot = PackedPropertySlot {
+            modified_ts: stamp_u32(modified_ts),
+            ..PackedPropertySlot::default()
+        };
         if let Some(ms) = data.length_ms {
             slot.presence |= HAS_LENGTH;
             slot.length_ms = ms;
@@ -261,13 +276,35 @@ impl PropertySideTables {
         }
     }
 
+    /// Drops entries for `source` whose record key is no longer present in the source.
+    pub fn retain_source_keys(&mut self, source: SourceId, present: &HashSet<u64>) {
+        let stale: Vec<u64> = self
+            .index
+            .keys()
+            .copied()
+            .filter(|&(sid, key)| sid == source.0 && !present.contains(&key))
+            .map(|(_, key)| key)
+            .collect();
+        for key in stale {
+            self.remove(source, key);
+        }
+    }
+
     #[inline]
-    pub fn get(&self, source: SourceId, record_key: u64) -> Option<RecordPropertyView<'_>> {
+    pub fn get(
+        &self,
+        source: SourceId,
+        record_key: u64,
+        modified_ts: i64,
+    ) -> Option<RecordPropertyView<'_>> {
         if !self.enabled {
             return None;
         }
         let &slot_idx = self.index.get(&(source.0, record_key))?;
         let slot = self.slots.get(slot_idx as usize)?;
+        if slot.modified_ts != stamp_u32(modified_ts) {
+            return None;
+        }
         Some(RecordPropertyView {
             length_ms: (slot.presence & HAS_LENGTH != 0).then_some(slot.length_ms),
             author: (slot.presence & HAS_AUTHOR != 0)
@@ -307,5 +344,16 @@ impl PropertySideTables {
         } else {
             ""
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PackedPropertySlot;
+    use std::mem::size_of;
+
+    #[test]
+    fn a_property_slot_stays_within_forty_bytes() {
+        assert_eq!(size_of::<PackedPropertySlot>(), 40);
     }
 }

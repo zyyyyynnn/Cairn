@@ -2,8 +2,8 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Integration tests for `cairn-core` Seams 3 & 4: query execution across `QRY-10`,
-//! `IDX-12` properties, folder sources, multi-key sorting, and `PropertySideTables`.
+//! Integration tests for `cairn-core` query execution across `QRY-10`, `IDX-12` properties,
+//! folder sources, multi-key sorting, and `PropertySideTables`.
 
 use cairn_core::engine::CancellationToken;
 use cairn_core::model::{FLAG_DIRECTORY, FLAG_HIDDEN, FLAG_READONLY, FLAG_SYSTEM, FLAG_TOMBSTONE};
@@ -127,24 +127,25 @@ fn property_side_tables_zero_bytes_when_disabled_and_tracks_sparse_updates() {
         dimensions: Some((1920, 1080)),
         framerate_mfps: Some(59_940),
     };
-    assert!(!store.upsert(SourceId(1), 10, &sample));
+    assert!(!store.upsert(SourceId(1), 10, &sample, 0));
     assert_eq!(store.allocated_bytes(), 0);
-    assert!(store.get(SourceId(1), 10).is_none());
+    assert!(store.get(SourceId(1), 10, 0).is_none());
 
     store.set_enabled(true);
-    assert!(store.upsert(SourceId(1), 10, &sample));
+    assert!(store.upsert(SourceId(1), 10, &sample, 0));
     assert!(store.upsert(
         SourceId(2),
         99,
         &RecordPropertyData {
             author: Some("Bob".to_string()),
             ..Default::default()
-        }
+        },
+        0
     ));
     assert!(store.allocated_bytes() > 0);
     assert_eq!(store.record_count(), 2);
 
-    let view = store.get(SourceId(1), 10).expect("present");
+    let view = store.get(SourceId(1), 10, 0).expect("present");
     assert_eq!(view.length_ms, Some(185_000));
     assert_eq!(view.author, Some("Alice"));
     assert_eq!(view.tags, Some("rust;search"));
@@ -152,9 +153,9 @@ fn property_side_tables_zero_bytes_when_disabled_and_tracks_sparse_updates() {
     assert_eq!(view.framerate_mfps, Some(59_940));
 
     store.clear_source(SourceId(1));
-    assert!(store.get(SourceId(1), 10).is_none());
+    assert!(store.get(SourceId(1), 10, 0).is_none());
     assert_eq!(
-        store.get(SourceId(2), 99).and_then(|v| v.author),
+        store.get(SourceId(2), 99, 0).and_then(|v| v.author),
         Some("Bob")
     );
 
@@ -334,6 +335,7 @@ fn property_queries_work_when_enabled_and_report_explicit_degradation_when_disab
             dimensions: Some((1280, 720)),
             framerate_mfps: Some(30_000),
         },
+        10,
     );
     props.upsert(
         SourceId(3),
@@ -345,6 +347,7 @@ fn property_queries_work_when_enabled_and_report_explicit_degradation_when_disab
             dimensions: Some((3840, 2160)),
             framerate_mfps: Some(60_000),
         },
+        20,
     );
     props.upsert(
         SourceId(3),
@@ -355,6 +358,7 @@ fn property_queries_work_when_enabled_and_report_explicit_degradation_when_disab
             tags: Some("ost;flac".to_string()),
             ..Default::default()
         },
+        30,
     );
     let _ = plain;
 

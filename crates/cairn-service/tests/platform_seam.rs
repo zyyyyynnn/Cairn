@@ -106,7 +106,7 @@ fn folder_source_scans_updates_incrementally_and_recovers_on_buffer_overflow() {
 
     let mut source = FolderSource::new(SourceId(1000), &root).expect("folder source");
     source.rescan(&[]).expect("rescan");
-    assert_eq!(source.to_summary().status, VolumeState::Synced);
+    assert_eq!(source.to_summary().status, VolumeState::SnapshotMode);
     assert!(
         source.live_count() >= 4,
         "expected root + sub + junction + 2 files"
@@ -188,9 +188,25 @@ fn engine_folder_source_watch_and_persistence_work_end_to_end() {
         .add_folder_source(&watch_root, false)
         .expect("add folder source");
     assert_eq!(added.kind, SourceKind::Folder);
-    assert_eq!(added.status, VolumeState::Synced);
+    let scan_deadline = Instant::now() + Duration::from_secs(5);
+    let summary = loop {
+        if let Some(summary) = engine
+            .get_sources()
+            .into_iter()
+            .find(|source| source.source_id == added.source_id)
+        {
+            if summary.status == VolumeState::Synced {
+                break summary;
+            }
+        }
+        assert!(
+            Instant::now() < scan_deadline,
+            "initial folder scan did not reach Synced"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
     assert!(
-        added.live_watch_enabled,
+        summary.live_watch_enabled,
         "folder watcher must be armed before creating live files"
     );
 

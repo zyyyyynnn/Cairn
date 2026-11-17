@@ -3,6 +3,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Static Mandarin Pinyin lookup table for Unicode CJK Unified Ideographs (`U+4E00..=U+9FFF`).
+//!
+//! Generated from the Windows `CompareStringEx('zh-CN')` ordering of GB2312 level-1 characters.
+//! It contains factual character-to-syllable mappings only, with no third-party code.
 
 pub const SYLLABLES: [&str; 399] = [
     "a", "ai", "an", "ang", "ao", "ba", "bai", "ban", "bang", "bao", "bei", "ben", "beng", "bi",

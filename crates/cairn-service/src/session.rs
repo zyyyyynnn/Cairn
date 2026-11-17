@@ -327,10 +327,10 @@ fn rows_for_all_files(
             idx,
             &[],
             |_| Vec::new(),
-            |frn| {
+            |frn, modified_ts| {
                 sources
                     .properties
-                    .get(view.source_id, frn)
+                    .get(view.source_id, frn, modified_ts)
                     .map(|v| v.to_owned())
             },
         ) {
@@ -391,10 +391,10 @@ fn rows_for_items(
                     .cloned()
                     .unwrap_or_default()
             },
-            |frn| {
+            |frn, modified_ts| {
                 sources
                     .properties
-                    .get(item.source_id, frn)
+                    .get(item.source_id, frn, modified_ts)
                     .map(|v| v.to_owned())
             },
         ) {
@@ -941,13 +941,13 @@ mod tests {
         let source_id = SourceId(1001);
         let mut source = FolderSource::new(source_id, &root).expect("folder source");
         source.rescan(&[]).expect("rescan folder source");
-        let (idx, frn) = source
+        let (idx, frn, modified_ts) = source
             .records()
             .iter()
             .enumerate()
             .find_map(|(i, rec)| {
                 let name = source.arena().get_name(rec.name_offset, rec.name_len);
-                (name == "report.mp4").then_some((i as u32, rec.frn))
+                (name == "report.mp4").then_some((i as u32, rec.frn, rec.modified_ts))
             })
             .expect("indexed report.mp4");
         let gen = source.generation();
@@ -960,7 +960,7 @@ mod tests {
             dimensions: Some((1920, 1080)),
             framerate_mfps: Some(60_000),
         };
-        assert!(props.upsert(source_id, frn, &expected_props));
+        assert!(props.upsert(source_id, frn, &expected_props, modified_ts));
 
         let mut snippets = HashMap::new();
         snippets.insert(

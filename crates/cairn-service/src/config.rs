@@ -60,7 +60,7 @@ fn default_true() -> bool {
 }
 
 fn default_folder_rescan_interval_secs() -> u64 {
-    300
+    86_400
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

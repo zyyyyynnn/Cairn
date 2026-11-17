@@ -84,8 +84,12 @@ impl FromStr for SortColumn {
             "name" => Ok(SortColumn::Name),
             "path" => Ok(SortColumn::Path),
             "size" => Ok(SortColumn::Size),
-            "modified" | "datemodified" => Ok(SortColumn::DateModified),
-            "created" | "datecreated" => Ok(SortColumn::DateCreated),
+            "modified" | "datemodified" | "date-modified" | "date_modified" => {
+                Ok(SortColumn::DateModified)
+            }
+            "created" | "datecreated" | "date-created" | "date_created" => {
+                Ok(SortColumn::DateCreated)
+            }
             "ext" | "extension" => Ok(SortColumn::Extension),
             "length" | "duration" => Ok(SortColumn::Length),
             "author" | "artist" => Ok(SortColumn::Author),
@@ -496,10 +500,10 @@ fn cmp_column_between(
         | SortColumn::Framerate => {
             let pa = ctx_a
                 .properties
-                .and_then(|p| p.get(ctx_a.source_id, ra.frn));
+                .and_then(|p| p.get(ctx_a.source_id, ra.frn, ra.modified_ts));
             let pb = ctx_b
                 .properties
-                .and_then(|p| p.get(ctx_b.source_id, rb.frn));
+                .and_then(|p| p.get(ctx_b.source_id, rb.frn, rb.modified_ts));
             match col {
                 SortColumn::Length => cmp_opt_property(
                     pa.and_then(|p| p.length_ms),
@@ -535,7 +539,12 @@ fn cmp_column_between(
                     dir,
                     |va, vb| va.cmp(&vb),
                 ),
-                _ => unreachable!(),
+                SortColumn::Name
+                | SortColumn::Path
+                | SortColumn::Size
+                | SortColumn::DateModified
+                | SortColumn::DateCreated
+                | SortColumn::Extension => unreachable!(),
             }
         }
     }
@@ -895,7 +904,11 @@ fn sort_single_column(
                     cmp_ascii_ignore_case(ea, eb)
                 },
             ),
-            _ => unreachable!(),
+            SortColumn::Length
+            | SortColumn::Author
+            | SortColumn::Tags
+            | SortColumn::Dimensions
+            | SortColumn::Framerate => unreachable!(),
         }
         return;
     }

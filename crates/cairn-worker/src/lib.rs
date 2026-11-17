@@ -6,5 +6,3 @@
 
 pub mod isolation;
 pub mod property_extract;
-#[cfg(windows)]
-mod win_properties;

@@ -14,6 +14,7 @@ const REQUIRED: &[&str] = &[
     "docs/product/ui.md",
     "docs/product/brand.md",
     "docs/engineering/architecture.md",
+    "docs/engineering/index-platform.md",
     "docs/engineering/quality.md",
     "docs/engineering/release.md",
     "docs/engineering/testing.md",

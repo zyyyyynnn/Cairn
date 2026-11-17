@@ -177,17 +177,18 @@ fn check_sources(
 
         for (idx, (line_no, code)) in scanned.code_lines.iter().enumerate() {
             let trimmed = code.trim();
-            if trimmed.contains(concat!("allow(clippy::", "too_many_arguments)"))
-                || trimmed.contains(concat!("allow(clippy::", "large_enum_variant)"))
+            if trimmed.contains(concat!("clippy::", "too_many_arguments"))
+                || trimmed.contains(concat!("clippy::", "large_enum_variant"))
             {
                 violations.push(format!(
                     "{rel}:{line_no}: forbidden clippy suppression `{trimmed}`"
                 ));
             }
-            if !trimmed.starts_with("#[ignore") {
+            if !(trimmed.starts_with("#[") && trimmed.contains("ignore")) {
                 continue;
             }
-            if !has_ignore_reason(trimmed) {
+            let raw_line = text.lines().nth(line_no.saturating_sub(1)).unwrap_or("");
+            if !has_ignore_reason(raw_line) {
                 violations.push(format!(
                     "{rel}:{line_no}: #[ignore] must include a non-empty reason (e.g. #[ignore = \"...\"])"
                 ));
@@ -229,10 +230,20 @@ fn check_sources(
 }
 
 fn has_ignore_reason(attr_line: &str) -> bool {
-    let Some((_, rhs)) = attr_line.split_once('=') else {
+    let Some(pos) = attr_line.find("ignore") else {
         return false;
     };
-    !rhs.trim().is_empty()
+    let rest = &attr_line[pos + "ignore".len()..];
+    let Some((_, rhs)) = rest.split_once('=') else {
+        return false;
+    };
+    let value = rhs
+        .trim()
+        .trim_end_matches([')', ']'])
+        .trim()
+        .trim_matches('"')
+        .trim();
+    !value.is_empty()
 }
 
 fn find_next_fn_name(lines: &[(usize, String)]) -> Option<String> {
@@ -874,6 +885,48 @@ mod tests {
         .expect("strings");
 
         check_hygiene(temp.path()).expect("valid workspace passes");
+    }
+
+    #[test]
+    fn empty_ignore_reason_is_rejected() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        seed_valid_workspace(temp.path());
+        fs::write(
+            temp.path().join("crates/demo/src/lib.rs"),
+            "#[test]\n#[ignore = \"\"]\nfn hardware_round_trip() {}\n",
+        )
+        .expect("demo lib");
+
+        let err = check_hygiene(temp.path()).expect_err("empty reason must fail");
+        assert!(err.contains("non-empty reason"), "{err}");
+    }
+
+    #[test]
+    fn cfg_attr_ignore_without_reason_is_rejected() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        seed_valid_workspace(temp.path());
+        fs::write(
+            temp.path().join("crates/demo/src/lib.rs"),
+            "#[test]\n#[cfg_attr(test, ignore)]\nfn hardware_round_trip() {}\n",
+        )
+        .expect("demo lib");
+
+        let err = check_hygiene(temp.path()).expect_err("unattributed ignore must fail");
+        assert!(err.contains("non-empty reason"), "{err}");
+    }
+
+    #[test]
+    fn expect_and_multiline_clippy_suppressions_are_rejected() {
+        for source in [
+            "#[expect(clippy::too_many_arguments)]\nfn helper(a: u8) {}\n",
+            "#[allow(\n    clippy::too_many_arguments\n)]\nfn helper(a: u8) {}\n",
+        ] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            seed_valid_workspace(temp.path());
+            fs::write(temp.path().join("crates/demo/src/lib.rs"), source).expect("demo lib");
+            let err = check_hygiene(temp.path()).expect_err("suppression must fail");
+            assert!(err.contains("forbidden clippy suppression"), "{err}");
+        }
     }
 
     #[test]

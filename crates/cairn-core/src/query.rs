@@ -313,7 +313,10 @@ fn eval_extra_term(
         || term.dimensions_filter.is_some()
         || term.framerate_filter.is_some()
     {
-        let Some(props) = source.properties.get(source.source_id, rec.frn) else {
+        let Some(props) = source
+            .properties
+            .get(source.source_id, rec.frn, rec.modified_ts)
+        else {
             return false;
         };
         if let Some(ref lf) = term.length_filter {

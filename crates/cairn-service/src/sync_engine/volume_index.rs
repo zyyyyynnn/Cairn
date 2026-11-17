@@ -166,7 +166,7 @@ impl<'a> SourceTableView<'a> {
     ) -> Option<FileRowData>
     where
         F: FnOnce(u64) -> Vec<String>,
-        P: FnOnce(u64) -> Option<RecordPropertyData>,
+        P: FnOnce(u64, i64) -> Option<RecordPropertyData>,
     {
         let rec = self.records.get(record_idx as usize)?;
         let name = self.arena.get_name(rec.name_offset, rec.name_len);
@@ -201,7 +201,7 @@ impl<'a> SourceTableView<'a> {
             name_highlights,
             path_highlights,
             snippets: snippet_lookup(rec.frn),
-            properties: property_lookup(rec.frn),
+            properties: property_lookup(rec.frn, rec.modified_ts),
         })
     }
 }
@@ -800,7 +800,7 @@ impl VolumeIndex {
     ) -> Option<FileRowData>
     where
         F: FnOnce(u64) -> Vec<String>,
-        P: FnOnce(u64) -> Option<RecordPropertyData>,
+        P: FnOnce(u64, i64) -> Option<RecordPropertyData>,
     {
         self.table_view()
             .build_file_row(record_idx, folded_terms, snippet_lookup, property_lookup)
