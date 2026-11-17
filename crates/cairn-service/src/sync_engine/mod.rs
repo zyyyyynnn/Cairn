@@ -22,6 +22,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::config::ServiceConfig;
 use crate::persistence;
 
+const MAX_FOLDER_SOURCES: usize = 64;
+
 mod config_apply;
 pub mod content_pipeline;
 pub mod folder_source;
@@ -731,6 +733,14 @@ impl MultiVolumeEngine {
                 desired.push((path, display_root));
             }
         }
+        if desired.len() > MAX_FOLDER_SOURCES {
+            tracing::warn!(
+                configured = desired.len(),
+                limit = MAX_FOLDER_SOURCES,
+                "folder source list truncated"
+            );
+            desired.truncate(MAX_FOLDER_SOURCES);
+        }
 
         let (removed_ids, present_keys) = {
             let mut folders = self.folder_sources.write().unwrap();
@@ -776,6 +786,9 @@ impl MultiVolumeEngine {
             let Ok(mut source) = folder_source::FolderSource::new(sid, &root_path) else {
                 continue;
             };
+            if !folder_source::reserve_scan(&self.folder_scanning, sid) {
+                continue;
+            }
             source.set_excluded_paths(excluded_paths);
             source.begin_scan();
             let inserted = {
@@ -790,17 +803,19 @@ impl MultiVolumeEngine {
                     true
                 }
             };
-            if inserted {
-                self.start_folder_watcher_for(sid, root_path);
-                folder_source::spawn_background_scan(
-                    self.folder_sources.clone(),
-                    self.property_tables.clone(),
-                    self.folder_scanning.clone(),
-                    self.index_journal.clone(),
-                    sid,
-                    unix_now_secs(),
-                );
+            if !inserted {
+                folder_source::release_scan(&self.folder_scanning, sid);
+                continue;
             }
+            self.start_folder_watcher_for(sid, root_path);
+            folder_source::spawn_reserved_scan(
+                self.folder_sources.clone(),
+                self.property_tables.clone(),
+                self.folder_scanning.clone(),
+                self.index_journal.clone(),
+                sid,
+                unix_now_secs(),
+            );
         }
     }
 
@@ -825,31 +840,39 @@ impl MultiVolumeEngine {
             .then_some(drive)
     }
 
-    fn start_folder_scan(&self, source_id: SourceId) -> bool {
+    fn start_folder_scan(&self, source_id: SourceId) -> Result<bool, String> {
+        if !folder_source::reserve_scan(&self.folder_scanning, source_id) {
+            return Ok(false);
+        }
         let root = {
             let mut folders = self.folder_sources.write().unwrap();
             let Some(source) = folders.get_mut(&source_id) else {
-                return false;
+                folder_source::release_scan(&self.folder_scanning, source_id);
+                return Err(format!("source {} is not indexed", source_id.0));
             };
             source.begin_scan();
             source.root_path.clone()
         };
-        let has_watcher = self
-            .folder_watchers
-            .lock()
-            .unwrap()
-            .contains_key(&source_id);
+        let has_watcher = {
+            let mut watchers = self.folder_watchers.lock().unwrap();
+            watchers.retain(|_, handle| !handle.is_finished());
+            watchers.contains_key(&source_id)
+        };
         if !has_watcher {
             self.start_folder_watcher_for(source_id, root);
         }
-        folder_source::spawn_background_scan(
+        if folder_source::spawn_reserved_scan(
             self.folder_sources.clone(),
             self.property_tables.clone(),
             self.folder_scanning.clone(),
             self.index_journal.clone(),
             source_id,
             unix_now_secs(),
-        )
+        ) {
+            Ok(true)
+        } else {
+            Err(format!("could not start a scan for source {}", source_id.0))
+        }
     }
 
     fn start_folder_watcher_for(&self, source_id: SourceId, root_path: PathBuf) {
@@ -894,14 +917,14 @@ impl MultiVolumeEngine {
                             unix_now_secs(),
                         )
                     };
-                    if needs_rescan {
+                    if needs_rescan && folder_source::reserve_scan(&scanning, source_id) {
                         {
                             let mut folders = sources.write().unwrap();
                             if let Some(source) = folders.get_mut(&source_id) {
                                 source.begin_scan();
                             }
                         }
-                        folder_source::spawn_background_scan(
+                        folder_source::spawn_reserved_scan(
                             Arc::clone(&sources),
                             Arc::clone(&properties),
                             Arc::clone(&scanning),
@@ -971,6 +994,12 @@ impl MultiVolumeEngine {
                     .unwrap_or(false)
             });
             if !already_listed {
+                if next.folder_sources.len() >= MAX_FOLDER_SOURCES {
+                    return Err(format!(
+                        "folder source limit is {MAX_FOLDER_SOURCES}; remove one before adding {}",
+                        display
+                    ));
+                }
                 next.folder_sources.push(display.clone());
             }
             Ok(next)
@@ -1008,8 +1037,7 @@ impl MultiVolumeEngine {
         if !self.folder_sources.read().unwrap().contains_key(&source_id) {
             return Err(format!("source {} is not indexed", source_id.0));
         }
-        self.start_folder_scan(source_id);
-        Ok(0)
+        self.start_folder_scan(source_id).map(|_| 0)
     }
 
     pub fn rescan_folder_sources(&self) -> usize {
@@ -1021,7 +1049,7 @@ impl MultiVolumeEngine {
             .copied()
             .collect();
         ids.into_iter()
-            .filter(|&id| self.start_folder_scan(id))
+            .filter(|&id| self.start_folder_scan(id).unwrap_or(false))
             .count()
     }
 

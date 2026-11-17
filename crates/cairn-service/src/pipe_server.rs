@@ -20,7 +20,8 @@ use cairn_protocol::codec::{encode_frame_into, peek_frame_header, try_decode_fra
 use cairn_protocol::message::{
     ClientRequest, Envelope, FileRowData, ResponsePayload, ERROR_CODE_HANDSHAKE_REQUIRED,
     ERROR_CODE_INVALID_REQUEST, ERROR_CODE_PROTOCOL_VERSION_MISMATCH, ERROR_CODE_QUERY_TOO_COMPLEX,
-    ERROR_CODE_SESSION_EXPIRED, MAX_TREE_DEPTH, PIPE_NAME, PRODUCT_VERSION, WIRE_GUARD,
+    ERROR_CODE_SESSION_EXPIRED, MAX_SORT_KEYS, MAX_TREE_DEPTH, PIPE_NAME, PRODUCT_VERSION,
+    WIRE_GUARD,
 };
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -436,6 +437,15 @@ fn process_request(
                     ),
                 };
             }
+            if sort_spec.keys.len() > MAX_SORT_KEYS {
+                return ResponsePayload::Error {
+                    code: ERROR_CODE_INVALID_REQUEST,
+                    message: format!(
+                        "query carries {} sort keys; the limit is {MAX_SORT_KEYS}",
+                        sort_spec.keys.len()
+                    ),
+                };
+            }
             struct QueryReply {
                 session_id: u64,
                 total_matches: usize,
@@ -461,7 +471,7 @@ fn process_request(
                     outcome.snippets,
                 );
                 let first_page = engine.with_sources_for_rows(|sources| {
-                    sessions.get_rows_multi(session_id, 0, first_page_limit, &sources)
+                    sessions.get_rows_multi(owner, session_id, 0, first_page_limit, &sources)
                 });
                 match first_page {
                     Ok(rows) => {
@@ -521,7 +531,7 @@ fn process_request(
             limit,
         } => {
             let rows = engine.with_sources_for_rows(|sources| {
-                sessions.get_rows_multi(session_id, offset, limit, &sources)
+                sessions.get_rows_multi(owner, session_id, offset, limit, &sources)
             });
             match rows {
                 Ok(rows) => ResponsePayload::RowsResult {

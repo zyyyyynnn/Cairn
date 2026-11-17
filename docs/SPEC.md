@@ -73,7 +73,7 @@
 - 对标基线：只使用 Everything 1.5 官方文档与 1.5 发布说明，不引用更早版本。
 - 索引源：先实现任意文件夹索引源并抽象 `IndexSource`；FAT/exFAT、ReFS、EFU 依次跟进；映射网络盘、远程索引、HTTP/ETP/FTP、Everything Server 仍为非目标。
 - 属性索引：3–5 个高频属性；开启后常驻内存目标 ≤160 字节/条，基础配置保持 ≤125 字节/条；Worker 抽取、超时隔离、默认关闭。
-- 索引日志：只读、由 USN 或索引源变更派生、容量有界，可查询；导出尚未实现；服务不提供写接口。
+- 索引日志：只读、由 USN 或索引源变更派生、容量有界，可查询与导出；服务不提供写接口。
 - 搜索与结果工作流：拼音、忽略标点/空白、变音符号、长度/属性/层级/去重/唯一等高频函数与多键排序；列显隐先行；Tabs/Sessions、预览/缩略图、多文件重命名、文件操作撤销列为后续。
 - 1.5 没有通用 Groups 视图；Cairn 不以分组为对标项。
 
@@ -173,7 +173,7 @@
 5. **全局热键**：`Ctrl+Alt+Space` 呼出/隐藏主窗口；组合键被占用时启动提示一次，托盘入口保持可用。
 6. **手动重扫与配置重载**（已实现）：协议、服务端 handler、鉴权、GUI“索引 > 重扫描”子菜单与侧边栏文件夹源右键重扫描、以及 CLI `rescan` / `rescan-source` / `reload-config` 子命令均已闭环。
 7. **离线 MFT 镜像**（部分达标）：`cairn-ntfs::mft_reader` 已支持从独立 `$MFT` 镜像或内存流离线解析记录并有集成测试（`mft_reader_seam`）；CLI 暂未提供独立离线镜像文件导入子命令。
-8. **Everything 1.5 索引平台对齐**（部分达标，P1）：任意文件夹索引源与 `IndexSource`（`IDX-11`）、5 个高频属性侧表与 `CairnWorker` 抽取（`IDX-12`）、有界只读索引日志与查看弹窗（`IDX-13`）、拼音/忽略标点空白/变音符号/长度与属性/层级与去重函数/多键排序（`QRY-10`）的语法与执行已打通服务、CLI 与界面；尚余差距：`pinyin:`、`nopunc:`、`nows:`、`diacritics:` 尚无图形开关，界面只提供区分大小写、全字匹配、匹配路径与正则 4 个匹配开关以及隐藏项/系统项排除开关，其余经 `QueryDefaults` 或查询语法生效；GUI 暂未提供图形化增删文件夹源弹窗（当前通过 `CairnCli add-folder/remove-folder` 或配置文件管理）；属性索引开启后的 400 万条规模 release 常驻内存（≤160 B/条）与全量查询延迟待发布前单独实测；索引日志导出尚未实现，CLI 仅提供查询与录制开关；设计见 [engineering/index-platform.md](engineering/index-platform.md)。
+8. **Everything 1.5 索引平台对齐**（部分达标，P1）：任意文件夹索引源与 `IndexSource`（`IDX-11`）、5 个高频属性侧表与 `CairnWorker` 抽取（`IDX-12`）、有界只读索引日志与查看弹窗（`IDX-13`）、拼音/忽略标点空白/变音符号/长度与属性/层级与去重函数/多键排序（`QRY-10`）的语法与执行已打通服务、CLI 与界面；尚余差距：`pinyin:`、`nopunc:`、`nows:`、`diacritics:` 尚无图形开关，界面只提供区分大小写、全字匹配、匹配路径与正则 4 个匹配开关以及隐藏项/系统项排除开关，其余经 `QueryDefaults` 或查询语法生效；GUI 暂未提供图形化增删文件夹源弹窗（当前通过 `CairnCli add-folder/remove-folder` 或配置文件管理）；属性索引开启后的 400 万条规模 release 常驻内存（≤160 B/条）与全量查询延迟待发布前单独实测；设计见 [engineering/index-platform.md](engineering/index-platform.md)。
 
 ---
 

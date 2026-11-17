@@ -729,9 +729,11 @@ impl FolderSource {
                                 now_unix,
                             );
                         }
-                    } else if path.exists() && self.relative_key(path).is_some() {
-                        // A nested directory was created before our table saw it; trigger a quick rescan.
-                        needs_rescan = true;
+                    } else if let Some((rel_key, _)) = self.relative_key(path) {
+                        if path.exists() && !path_is_excluded(&rel_key, &self.excluded_paths) {
+                            // A nested directory was created before our table saw it; trigger a quick rescan.
+                            needs_rescan = true;
+                        }
                     }
                 }
                 FolderWatchEvent::Removed(path) => {
@@ -780,7 +782,6 @@ impl FolderSource {
 
         if table_changed {
             self.path_cache.clear();
-            self.generation = self.generation.wrapping_add(1);
         }
         needs_rescan
     }
@@ -832,7 +833,19 @@ impl Drop for ScanGuard {
 ///
 /// The caller begins the scan (buffering watcher events) before arming the watcher, so events that
 /// happen during the traversal are replayed onto the installed snapshot.
-pub(super) fn spawn_background_scan(
+pub(super) fn reserve_scan(scanning: &Arc<Mutex<HashSet<SourceId>>>, source_id: SourceId) -> bool {
+    scanning.lock().unwrap().insert(source_id)
+}
+
+pub(super) fn release_scan(scanning: &Arc<Mutex<HashSet<SourceId>>>, source_id: SourceId) {
+    scanning.lock().unwrap().remove(&source_id);
+}
+
+/// Scans one folder source on a background thread and installs the result under a short write lock.
+///
+/// The caller reserves the scan slot and begins the scan (buffering watcher events) before arming
+/// the watcher, so events that happen during the traversal are replayed onto the installed snapshot.
+pub(super) fn spawn_reserved_scan(
     sources: Arc<RwLock<HashMap<SourceId, FolderSource>>>,
     properties: Arc<RwLock<PropertySideTables>>,
     scanning: Arc<Mutex<HashSet<SourceId>>>,
@@ -840,16 +853,10 @@ pub(super) fn spawn_background_scan(
     source_id: SourceId,
     now_unix: i64,
 ) -> bool {
-    {
-        let mut active = scanning.lock().unwrap();
-        if !active.insert(source_id) {
-            return false;
-        }
-    }
     let prepared = {
         let folders = sources.read().unwrap();
         let Some(source) = folders.get(&source_id) else {
-            scanning.lock().unwrap().remove(&source_id);
+            release_scan(&scanning, source_id);
             return false;
         };
         (source.root_path.clone(), source.excluded_paths().to_vec())
@@ -895,7 +902,12 @@ pub(super) fn spawn_background_scan(
             }
         });
     if spawned.is_err() {
-        scanning.lock().unwrap().remove(&source_id);
+        release_scan(&scanning, source_id);
+        let mut folders = sources.write().unwrap();
+        if let Some(source) = folders.get_mut(&source_id) {
+            source.scan_pending = false;
+            source.status.set(VolumeState::SnapshotMode);
+        }
         return false;
     }
     true
@@ -976,6 +988,14 @@ pub(crate) struct FolderWatcherHandle {
     #[cfg(windows)]
     stop_event: usize,
     join: Option<JoinHandle<()>>,
+}
+
+impl FolderWatcherHandle {
+    pub(crate) fn is_finished(&self) -> bool {
+        self.join
+            .as_ref()
+            .is_some_and(std::thread::JoinHandle::is_finished)
+    }
 }
 
 impl Drop for FolderWatcherHandle {

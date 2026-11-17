@@ -283,6 +283,26 @@ impl SessionManager {
     /// out-of-range index, so the page is refused instead.
     pub fn get_rows_multi(
         &self,
+        owner: &QueryOwner,
+        session_id: u64,
+        offset: usize,
+        limit: usize,
+        sources: &SourceTables<'_>,
+    ) -> Result<Vec<FileRowData>, RowsError> {
+        let lock = self.sessions.read().unwrap();
+        let session = lock.get(&session_id).ok_or(RowsError::UnknownSession)?;
+        if session.owner != *owner {
+            return Err(RowsError::UnknownSession);
+        }
+        session
+            .last_accessed_nanos
+            .store(self.clock.now_nanos(), Ordering::Relaxed);
+        page_session(session, offset, limit, sources)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn get_rows_multi_unchecked(
+        &self,
         session_id: u64,
         offset: usize,
         limit: usize,
@@ -293,11 +313,22 @@ impl SessionManager {
         session
             .last_accessed_nanos
             .store(self.clock.now_nanos(), Ordering::Relaxed);
+        page_session(session, offset, limit, sources)
+    }
+}
 
-        match &session.rows {
-            MatchSet::Items(items) => rows_for_items(session, items, offset, limit, sources),
-            MatchSet::AllFiles(view) => rows_for_all_files(view, offset, limit, sources),
-        }
+const MAX_ROWS_PAGE: usize = 10_000;
+
+fn page_session(
+    session: &QuerySession,
+    offset: usize,
+    limit: usize,
+    sources: &SourceTables<'_>,
+) -> Result<Vec<FileRowData>, RowsError> {
+    let limit = limit.min(MAX_ROWS_PAGE);
+    match &session.rows {
+        MatchSet::Items(items) => rows_for_items(session, items, offset, limit, sources),
+        MatchSet::AllFiles(view) => rows_for_all_files(view, offset, limit, sources),
     }
 }
 
@@ -381,6 +412,12 @@ fn rows_for_items(
                 source_id: item.source_id,
             });
         }
+        let Some(record) = source.records.get(item.record_idx as usize) else {
+            continue;
+        };
+        if record.is_tombstone() {
+            continue;
+        }
         if let Some(row) = source.build_file_row(
             item.record_idx,
             &session.pre_folded_terms,
@@ -450,7 +487,7 @@ mod tests {
     ) -> Result<Vec<FileRowData>, RowsError> {
         let folders = HashMap::new();
         let props = PropertySideTables::disabled();
-        sessions.get_rows_multi(
+        sessions.get_rows_multi_unchecked(
             session_id,
             offset,
             limit,
@@ -983,7 +1020,7 @@ mod tests {
         let volumes = HashMap::new();
         let mut folders = HashMap::from([(source_id, source)]);
         let rows = sessions
-            .get_rows_multi(
+            .get_rows_multi_unchecked(
                 session_id,
                 0,
                 10,
@@ -1002,7 +1039,7 @@ mod tests {
         // Rescanning advances folder generation -> stale error names the folder source id.
         folders.get_mut(&source_id).unwrap().rescan(&[]).unwrap();
         assert_eq!(
-            sessions.get_rows_multi(
+            sessions.get_rows_multi_unchecked(
                 session_id,
                 0,
                 10,

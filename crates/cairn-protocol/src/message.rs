@@ -81,6 +81,9 @@ pub const ERROR_CODE_INVALID_REQUEST: u32 = 417;
 /// never silently answered shallower than the layout it was built for.
 pub const MAX_TREE_DEPTH: usize = 3;
 
+/// Upper bound on multi-key sort clauses accepted from a client.
+pub const MAX_SORT_KEYS: usize = 8;
+
 /// Requests accepted from a pipe client.
 ///
 /// `pid` and `client_version` are self-reported hints only; the service derives the real caller
