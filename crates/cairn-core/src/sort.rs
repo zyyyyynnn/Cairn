@@ -1209,10 +1209,13 @@ mod tests {
                             arena.get_ext(rb.name_offset, rb.name_len, rb.ext_offset),
                         )
                         .then_with(|| natural_cmp(na, nb)),
-                        SortColumn::Path => cache
-                            .get_parent_path(&records, &arena, 'C', a)
-                            .cmp(&cache.get_parent_path(&records, &arena, 'C', b))
-                            .then_with(|| natural_cmp(na, nb)),
+                        SortColumn::Path => {
+                            let root = crate::path_cache::root_path_for_drive('C');
+                            cache
+                                .get_parent_path_with_root(&records, &arena, &root, a)
+                                .cmp(&cache.get_parent_path_with_root(&records, &arena, &root, b))
+                                .then_with(|| natural_cmp(na, nb))
+                        }
                         _ => unreachable!("loop covers non-property columns"),
                     };
                     let primary = if dir == SortDirection::Descending {

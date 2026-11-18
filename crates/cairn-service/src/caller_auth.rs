@@ -48,9 +48,6 @@ pub struct CallerIdentity {
     /// String form of the token user SID; for logs and diagnostics only.
     pub user_sid: String,
     pub authorization: CallerAuthorization,
-    /// `false` when the client connected with an impersonation level that hides group membership.
-    /// Such a caller can never be more than `StandardUser`.
-    pub groups_readable: bool,
 }
 
 impl CallerIdentity {
@@ -376,7 +373,6 @@ mod platform {
             client_pid,
             user_sid,
             authorization,
-            groups_readable,
         })
     }
 }

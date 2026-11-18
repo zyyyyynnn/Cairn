@@ -32,7 +32,6 @@ pub struct ServiceRuntime {
     pub engine: Arc<MultiVolumeEngine>,
     pub sessions: Arc<SessionManager>,
     pub pipe: PipeServer,
-    pub layout: ServiceDataLayout,
 }
 
 impl ServiceRuntime {
@@ -60,7 +59,6 @@ impl ServiceRuntime {
             engine,
             sessions,
             pipe,
-            layout,
         })
     }
 
@@ -75,7 +73,6 @@ impl ServiceRuntime {
             engine,
             pipe,
             sessions: _sessions,
-            layout: _layout,
         } = self;
 
         // Poll backlog volumes at 50ms so cold-start CatchingUp drains in seconds before returning
