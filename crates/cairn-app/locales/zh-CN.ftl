@@ -44,6 +44,10 @@ toggle_case_label = 区分大小写
 toggle_whole_word_label = 全字匹配
 toggle_match_path_label = 匹配路径
 toggle_regex_label = 正则表达式
+toggle_pinyin_label = 拼音匹配
+toggle_ignore_punctuation_label = 忽略标点
+toggle_ignore_whitespace_label = 忽略空白
+toggle_ignore_diacritics_label = 忽略变音符号
 toggle_exclude_hidden_label = 排除隐藏文件
 toggle_exclude_system_label = 排除系统文件
 

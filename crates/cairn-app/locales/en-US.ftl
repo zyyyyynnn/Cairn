@@ -48,6 +48,10 @@ toggle_case_label = Case sensitive
 toggle_whole_word_label = Whole word
 toggle_match_path_label = Match path
 toggle_regex_label = Regular expression
+toggle_pinyin_label = Pinyin matching
+toggle_ignore_punctuation_label = Ignore punctuation
+toggle_ignore_whitespace_label = Ignore whitespace
+toggle_ignore_diacritics_label = Ignore diacritics
 toggle_exclude_hidden_label = Exclude hidden files
 toggle_exclude_system_label = Exclude system files
 

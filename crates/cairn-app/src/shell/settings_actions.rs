@@ -140,7 +140,16 @@ impl CairnApp {
             ToggleFlag::Case => self.query.case_sensitive = !self.query.case_sensitive,
             ToggleFlag::WholeWord => self.query.whole_word = !self.query.whole_word,
             ToggleFlag::MatchPath => self.query.match_path = !self.query.match_path,
-            ToggleFlag::Regex => self.query.use_regex = !self.query.use_regex,
+            ToggleFlag::Regex => {
+                let enabling = !self.query.use_regex;
+                self.query.use_regex = enabling;
+                if enabling {
+                    self.query.pinyin = false;
+                    self.query.ignore_punctuation = false;
+                    self.query.ignore_whitespace = false;
+                    self.query.ignore_diacritics = false;
+                }
+            }
         }
         self.request_result_set(ResultSetChange::InPlace, cx);
         cx.notify();
@@ -152,6 +161,40 @@ impl CairnApp {
 
     pub(crate) fn toggle_exclude_system(&mut self, cx: &mut Context<Self>) {
         self.toggle_exclusion_filter(ExclusionFlag::System, cx);
+    }
+
+    pub(crate) fn toggle_pinyin(&mut self, cx: &mut Context<Self>) {
+        self.toggle_query_modifier(|this| &mut this.query.pinyin, cx);
+    }
+
+    pub(crate) fn toggle_ignore_punctuation(&mut self, cx: &mut Context<Self>) {
+        self.toggle_query_modifier(|this| &mut this.query.ignore_punctuation, cx);
+    }
+
+    pub(crate) fn toggle_ignore_whitespace(&mut self, cx: &mut Context<Self>) {
+        self.toggle_query_modifier(|this| &mut this.query.ignore_whitespace, cx);
+    }
+
+    pub(crate) fn toggle_ignore_diacritics(&mut self, cx: &mut Context<Self>) {
+        self.toggle_query_modifier(|this| &mut this.query.ignore_diacritics, cx);
+    }
+
+    fn toggle_query_modifier(
+        &mut self,
+        field: impl FnOnce(&mut Self) -> &mut bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.recycle_bin.is_open() {
+            return;
+        }
+        let value = field(self);
+        let enabling = !*value;
+        *value = enabling;
+        if enabling {
+            self.query.use_regex = false;
+        }
+        self.request_result_set(ResultSetChange::InPlace, cx);
+        cx.notify();
     }
 
     fn toggle_exclusion_filter(&mut self, flag: ExclusionFlag, cx: &mut Context<Self>) {

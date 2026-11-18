@@ -795,6 +795,10 @@ impl CairnApp {
             GroupCommand::ToggleWholeWord
             | GroupCommand::ToggleMatchPath
             | GroupCommand::ToggleRegex
+            | GroupCommand::TogglePinyin
+            | GroupCommand::ToggleIgnorePunctuation
+            | GroupCommand::ToggleIgnoreWhitespace
+            | GroupCommand::ToggleIgnoreDiacritics
             | GroupCommand::ToggleExcludeHidden
             | GroupCommand::ToggleExcludeSystem => self.recycle_bin.is_open(),
 
@@ -811,6 +815,10 @@ impl CairnApp {
             GroupCommand::ToggleRegex => self.query.use_regex,
             GroupCommand::ToggleExcludeHidden => self.settings.exclude_hidden,
             GroupCommand::ToggleExcludeSystem => self.settings.exclude_system,
+            GroupCommand::TogglePinyin => self.query.pinyin,
+            GroupCommand::ToggleIgnorePunctuation => self.query.ignore_punctuation,
+            GroupCommand::ToggleIgnoreWhitespace => self.query.ignore_whitespace,
+            GroupCommand::ToggleIgnoreDiacritics => self.query.ignore_diacritics,
             GroupCommand::SortBy(column) => self.results.table.primary_sort().0 == column,
             GroupCommand::ReverseOrder => !self.results.table.primary_sort().1,
             GroupCommand::ToggleColumn(col) => self.settings.columns.is_column_shown(col),
@@ -913,6 +921,10 @@ impl CairnApp {
             GroupCommand::SetLanguage(code) => self.set_language(code, cx),
             GroupCommand::ToggleExcludeHidden => self.toggle_exclude_hidden(cx),
             GroupCommand::ToggleExcludeSystem => self.toggle_exclude_system(cx),
+            GroupCommand::TogglePinyin => self.toggle_pinyin(cx),
+            GroupCommand::ToggleIgnorePunctuation => self.toggle_ignore_punctuation(cx),
+            GroupCommand::ToggleIgnoreWhitespace => self.toggle_ignore_whitespace(cx),
+            GroupCommand::ToggleIgnoreDiacritics => self.toggle_ignore_diacritics(cx),
             GroupCommand::ToggleAutostart => {
                 let enabled = !self.settings.autostart;
                 self.set_autostart(enabled, cx);

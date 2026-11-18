@@ -180,6 +180,10 @@ pub enum GroupCommand {
     ToggleWholeWord,
     ToggleMatchPath,
     ToggleRegex,
+    TogglePinyin,
+    ToggleIgnorePunctuation,
+    ToggleIgnoreWhitespace,
+    ToggleIgnoreDiacritics,
     ToggleExcludeHidden,
     ToggleExcludeSystem,
     SortBy(SortColumn),
@@ -279,6 +283,10 @@ impl GroupCommand {
             GroupCommand::ToggleWholeWord => "toggle_whole_word_label",
             GroupCommand::ToggleMatchPath => "toggle_match_path_label",
             GroupCommand::ToggleRegex => "toggle_regex_label",
+            GroupCommand::TogglePinyin => "toggle_pinyin_label",
+            GroupCommand::ToggleIgnorePunctuation => "toggle_ignore_punctuation_label",
+            GroupCommand::ToggleIgnoreWhitespace => "toggle_ignore_whitespace_label",
+            GroupCommand::ToggleIgnoreDiacritics => "toggle_ignore_diacritics_label",
             GroupCommand::ToggleExcludeHidden => "toggle_exclude_hidden_label",
             GroupCommand::ToggleExcludeSystem => "toggle_exclude_system_label",
             GroupCommand::SortBy(column) => column.label_key(),
@@ -537,6 +545,12 @@ pub static DEFAULT_GROUPS: &[MenuGroupSpec] = &[
                 GroupCommand::ToggleWholeWord,
                 GroupCommand::ToggleMatchPath,
                 GroupCommand::ToggleRegex,
+            ],
+            &[
+                GroupCommand::TogglePinyin,
+                GroupCommand::ToggleIgnorePunctuation,
+                GroupCommand::ToggleIgnoreWhitespace,
+                GroupCommand::ToggleIgnoreDiacritics,
             ],
             &[
                 GroupCommand::ToggleExcludeHidden,
@@ -838,6 +852,10 @@ mod tests {
                 | GroupCommand::Submenu(_, _)
                 | GroupCommand::SetLanguage(_)
                 | GroupCommand::ToggleAutostart
+                | GroupCommand::TogglePinyin
+                | GroupCommand::ToggleIgnorePunctuation
+                | GroupCommand::ToggleIgnoreWhitespace
+                | GroupCommand::ToggleIgnoreDiacritics
                 | GroupCommand::ToggleExcludeHidden
                 | GroupCommand::ToggleExcludeSystem
                 | GroupCommand::OpenIndexJournal
@@ -898,6 +916,10 @@ mod tests {
             GroupCommand::Submenu("menu_sort", &[]),
             GroupCommand::SetLanguage(crate::shell::settings::LANGUAGE_SYSTEM),
             GroupCommand::ToggleAutostart,
+            GroupCommand::TogglePinyin,
+            GroupCommand::ToggleIgnorePunctuation,
+            GroupCommand::ToggleIgnoreWhitespace,
+            GroupCommand::ToggleIgnoreDiacritics,
             GroupCommand::ToggleExcludeHidden,
             GroupCommand::ToggleExcludeSystem,
             GroupCommand::OpenIndexJournal,

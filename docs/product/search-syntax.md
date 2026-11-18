@@ -37,7 +37,7 @@
 | `ignore-whitespace:` | `nows:` | 检索时忽略所有空白字符 | P1 |
 | `pinyin:` | `py:` | 拼音及首字母缩写拼音匹配 | P1 |
 
-> 表中 P1 条目按目标层级规划；`pinyin:` 已实现，界面暂无对应图形开关。闭环状态以 [SPEC §3.10](../SPEC.md) 为准。
+> 表中 P1 条目按目标层级规划；`pinyin:`、`nopunc:`、`nows:`、`diacritics:` 均已实现并提供“搜索”菜单图形开关。闭环状态以 [SPEC §3.10](../SPEC.md) 为准。
 
 ### 1.4 过滤函数与日期区间完整语法
 
@@ -68,4 +68,4 @@
 ### 1.7 与 PCRE / Everything 语法差异
 - 正则表达式：采用 Rust `regex` 引擎保证线性时间复杂度，不支持环视断言与反向引用。
 - 搜索语言扩展（`QRY-10`）已实现：`pinyin:`/`py:`（含全拼/首字母）、`diacritics:`/`no-diacritics:`、`ignore-punctuation:`/`nopunc:`、`ignore-whitespace:`/`nows:`、`len:`、`attrib:`、`depth:`、`child:`/`childcount:`/`childfilecount:`/`childfoldercount:`/`empty:`、`dupe:`/`namedupe:`/`sizedupe:`/`namepartdupe:`/`unique:`、`sort:` 多键排序，以及 `IDX-12` 扩展属性函数（`length:`/`author:`/`tags:`/`dimensions:`/`width:`/`height:`/`framerate:`）。单条查询最多包含 8 个不同的 `child:` 模式与 8 个排序键；超出 `child:` 上限以错误码 416 拒绝，排序键超出部分由服务端截断。
-- 未实现边界：字符实体转义（如 `&sp:`）、正则捕获列与自定义宏，以及 `pinyin:`/`nopunc:`/`nows:`/`diacritics:` 的图形菜单开关（当前通过查询语法与协议默认值 `QueryDefaults` 控制）。
+- 未实现边界：字符实体转义（如 `&sp:`）、正则捕获列与自定义宏。
