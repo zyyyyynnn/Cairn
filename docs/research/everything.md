@@ -1,6 +1,6 @@
 # Everything（voidtools）深度调研：1.5 索引平台全档案
 
-> 研究对象：Everything 1.5 线，当前版本 1.5.0.1424b Beta。Cairn 的规范以 [SPEC.md](../SPEC.md) 与 [product/](../product/) 为准；横向竞品对比见 [cross-form.md](cross-form.md)。
+> 研究对象：Everything 1.5 线，当前版本 1.5.0.1424b Beta。Cairn 的规范以 [SPEC.md](../SPEC.md) 与 [product/](../product/) 为准。
 
 ---
 
@@ -10,7 +10,6 @@
 2. 数据获取层仍是 MFT 直读 + USN 增量；1.5 新增 FAT/FAT32/exFAT 索引（默认每日重扫）与虚拟文件夹索引，ReFS 有独立索引页（[t=9796](https://www.voidtools.com/forum/viewtopic.php?t=9796)、[Indexes](https://www.voidtools.com/support/everything/indexes/)）。
 3. folder size 索引以**每目录 8 字节**常驻内存并实时维护，是"目录尺寸进常驻索引"的唯一公开量化参照（[Options → Indexes](https://www.voidtools.com/support/everything/options/)）。
 4. 安全模型是"服务 + 签名对端校验 + 只供文件名"三件套；1.5 新增用户会话内提权索引进程作为免服务的备选路径（[Everything Service](https://www.voidtools.com/support/everything/everything_service/)）。
-5. 没有任何可视化：仍是纯结果列表，2026-08 的内置 Treemap 请求无开发者回应（[t=17866](https://www.voidtools.com/forum/viewtopic.php?t=17866)）。
 
 ## 1. 定位与发展方向
 
@@ -130,7 +129,7 @@
 
 对照 [SPEC.md](../SPEC.md) 现状：
 
-1. **DSV-01 / IDX-06（尺寸字段成本与口径）**：每目录 8 字节、每文件 8 字节、日期各 8 字节、fast sort 4–8 字节（[Options → Indexes](https://www.voidtools.com/support/everything/options/)）是"常驻索引维护目录尺寸"的公开成本锚点，可校准 Cairn 自底向上聚合（400 万 ≤ 100 ms）的内存预算。但注意口径差：Everything 聚合的是索引内条目逻辑尺寸且"excluded files 不计"、junction 报 0；Cairn 当时的 DSV-01 曾要求整盘物理占用与 Win32 卷信息误差 ≤ 2%，该可视化目标已删除，两者是不同承诺，不能混用口径。
+1. **DSV-01 / IDX-06（尺寸字段成本与口径）**：每目录 8 字节、每文件 8 字节、日期各 8 字节、fast sort 4–8 字节（[Options → Indexes](https://www.voidtools.com/support/everything/options/)）是"常驻索引维护目录尺寸"的公开成本锚点，可校准 Cairn 自底向上聚合（400 万 ≤ 100 ms）的内存预算。口径差：Everything 聚合的是索引内条目逻辑尺寸且"excluded files 不计"、junction 报 0；Cairn 的目录大小同样来自索引记录的逻辑尺寸，不等同于整盘物理占用，两者不能混用口径。
 2. **IDX-02（MFT 全量基准）**：void 确认 MFT 直读（[t=12371](https://www.voidtools.com/forum/viewtopic.php?t=12371)），FAQ 公开 25 万文件约 5 秒、100 万约 1 分钟（[FAQ](https://www.voidtools.com/faq/)）。按该斜率线性外推，400 万约 240 秒；Cairn 的 400 万 ≤ 15 s 目标显著低于该外推值，官方无 400 万级数字，REL-04 基准仍需自测。
 3. **IDX-03 / IDX-07（USN 细节与状态可见性）**：值得吸收的是工程细节——USN 记录结构版本匹配（"Everything uses version 3.3"，[t=12371](https://www.voidtools.com/forum/viewtopic.php?t=12371)）、日志容量 32768 KB 级建议（[Options](https://www.voidtools.com/support/everything/options/)）、缺口后整卷 MFT 重建（[t=12779](https://www.voidtools.com/forum/viewtopic.php?t=12779)）。差异点：Everything 的重建是静默的，没有"卷非同步"的用户可见状态；Cairn IDX-07 要求零静默过期与卷非同步状态机。
 4. **CNT-04（内容抽取隔离）**：`content_ifilter_separate_process` 单独进程开关（[t=9787](https://www.voidtools.com/forum/viewtopic.php?t=9787)）与 1381a 的 `IInitializeWithStream` 支持（[t=15171](https://www.voidtools.com/forum/viewtopic.php?t=15171)）印证 Cairn `CairnWorker.exe` 隔离方向；分层也可对照——Everything 内置文本 handler 优先、IFilter 回退（[t=15938](https://www.voidtools.com/forum/viewtopic.php?t=15938)）与 Cairn CNT-02/08 的"纯文本内置 + 富文档 trait"一致。资源取向相反：Everything 内容驻内存（1 GB 上限建议），Cairn Tantivy 落盘（CNT-07），不受 1 GB 常驻内存上限约束，但仍受单文件大小上限与磁盘预算约束。
@@ -153,4 +152,3 @@
 | 服务器面 | [HTTP Server](https://www.voidtools.com/support/everything/http/)、[ETP Server](https://www.voidtools.com/support/everything/etp/)、[ES CLI](https://www.voidtools.com/support/everything/command_line_interface/) |
 | 性能 | [FAQ](https://www.voidtools.com/faq/)、[t=12371](https://www.voidtools.com/forum/viewtopic.php?t=12371)、[Everything Service](https://www.voidtools.com/support/everything/everything_service/) |
 | 许可与生态 | [Enterprise](https://www.voidtools.com/en-us/enterprise)、[商用确认 t=7508](https://www.voidtools.com/forum/viewtopic.php?t=7508)、[voidtools/es](https://github.com/voidtools/es) |
-| 可视化空白 | [t=17866（2026-08，无官方回应）](https://www.voidtools.com/forum/viewtopic.php?t=17866) |

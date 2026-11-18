@@ -108,30 +108,6 @@ impl DirectoryPathCache {
         table + strings
     }
 
-    /// Reconstructs the full parent directory path for `record_idx` using a drive letter.
-    pub fn get_parent_path(
-        &self,
-        records: &[FileRecord],
-        arena: &NamePool,
-        drive_letter: char,
-        record_idx: u32,
-    ) -> Arc<str> {
-        let root = root_path_for_drive(drive_letter);
-        self.get_parent_path_with_root(records, arena, &root, record_idx)
-    }
-
-    /// Reconstructs the full parent directory path for `record_idx` under an arbitrary root path.
-    pub fn get_parent_path_for_root(
-        &self,
-        records: &[FileRecord],
-        arena: &NamePool,
-        root_prefix: &str,
-        record_idx: u32,
-    ) -> Arc<str> {
-        let root = normalize_root(root_prefix);
-        self.get_parent_path_with_root(records, arena, &root, record_idx)
-    }
-
     /// Reconstructs the parent directory path using a pre-normalized `Arc<str>` root ending in `\`.
     pub fn get_parent_path_with_root(
         &self,
@@ -361,7 +337,8 @@ mod tests {
         let full = cache.get_full_path(&records, &arena, 'C', 3);
         assert_eq!(full, "C:\\Windows\\System32\\cmd.exe");
 
-        let parent = cache.get_parent_path(&records, &arena, 'C', 3);
+        let root = root_path_for_drive('C');
+        let parent = cache.get_parent_path_with_root(&records, &arena, &root, 3);
         assert_eq!(&*parent, "C:\\Windows\\System32\\");
     }
 
@@ -390,7 +367,8 @@ mod tests {
         }
 
         // Accessing one new directory should trigger 25% eviction instead of 100% wipe
-        let _ = cache.get_parent_path(&records, &arena, 'C', 0);
+        let root = root_path_for_drive('C');
+        let _ = cache.get_parent_path_with_root(&records, &arena, &root, 0);
         let len = cache.cache.read().unwrap().len();
         // Started with 16384, evicted 4096, inserted 1 -> 12289
         assert!(len > (MAX_DIRECTORY_CACHE_ENTRIES * 7 / 10));

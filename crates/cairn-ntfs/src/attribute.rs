@@ -7,16 +7,12 @@
 use thiserror::Error;
 
 pub const ATTR_STANDARD_INFORMATION: u32 = 0x10;
-pub const ATTR_ATTRIBUTE_LIST: u32 = 0x20;
 pub const ATTR_FILE_NAME: u32 = 0x30;
 pub const ATTR_DATA: u32 = 0x80;
 pub const ATTR_BITMAP: u32 = 0xB0;
 pub const ATTR_REPARSE_POINT: u32 = 0xC0;
 
-pub const NAMESPACE_POSIX: u8 = 0x00;
-pub const NAMESPACE_WIN32: u8 = 0x01;
 pub const NAMESPACE_DOS: u8 = 0x02;
-pub const NAMESPACE_WIN32_AND_DOS: u8 = 0x03;
 
 #[derive(Error, Debug)]
 pub enum AttributeParseError {
@@ -31,7 +27,6 @@ pub struct ParsedFileName {
     pub created_ts: i64,
     pub modified_ts: i64,
     pub flags: u32,
-    pub namespace: u8,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -151,7 +146,6 @@ pub fn parse_attributes(
                                     created_ts: created,
                                     modified_ts: modified,
                                     flags,
-                                    namespace,
                                 });
                             }
                         }

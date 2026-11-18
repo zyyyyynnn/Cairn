@@ -5,9 +5,7 @@
 //! Volume access, sector reading, and MFT stream parsing.
 
 use crate::mft::ExtractedItem;
-use crate::mft_reader::{
-    locate_mft_clusters_from_reader, scan_mft_from_reader, BlockReader, MftScanOptions,
-};
+use crate::mft_reader::{scan_mft_from_reader, BlockReader, MftScanOptions};
 use thiserror::Error;
 
 #[cfg(windows)]
@@ -209,48 +207,6 @@ impl BlockReader for RawVolumeHandle {
     }
 }
 
-struct ClosureBlockReader<F>(F);
-
-impl<F> BlockReader for ClosureBlockReader<F>
-where
-    F: FnMut(u64, &mut [u8]) -> Result<usize, std::io::Error>,
-{
-    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize, std::io::Error> {
-        (self.0)(offset, buf)
-    }
-}
-
-/// Locates the NTFS $MFT cluster runs and boot sector using a generic block reader function.
-pub fn locate_mft_clusters_with_read_at<F>(
-    read_at: F,
-) -> Result<
-    (
-        crate::boot_sector::NtfsBootSector,
-        Vec<crate::runlist::DataRun>,
-    ),
-    VolumeError,
->
-where
-    F: FnMut(u64, &mut [u8]) -> Result<usize, std::io::Error>,
-{
-    let mut reader = ClosureBlockReader(read_at);
-    locate_mft_clusters_from_reader(&mut reader)
-}
-
-/// Locates the NTFS $MFT cluster runs and boot sector from Sector 0 and Record 0.
-#[cfg(windows)]
-pub fn locate_mft_clusters(
-    raw_vol: &RawVolumeHandle,
-) -> Result<
-    (
-        crate::boot_sector::NtfsBootSector,
-        Vec<crate::runlist::DataRun>,
-    ),
-    VolumeError,
-> {
-    locate_mft_clusters_with_read_at(|offset, buf| raw_vol.read_at(offset, buf))
-}
-
 /// Scans a live NTFS volume by reading raw MFT clusters via `RawVolumeHandle`.
 #[cfg(windows)]
 pub fn scan_live_volume_mft(
@@ -276,6 +232,18 @@ pub fn scan_live_volume_mft(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mft_reader::locate_mft_clusters_from_reader;
+
+    struct MockReader<F>(F);
+
+    impl<F> BlockReader for MockReader<F>
+    where
+        F: FnMut(u64, &mut [u8]) -> Result<usize, std::io::Error>,
+    {
+        fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize, std::io::Error> {
+            (self.0)(offset, buf)
+        }
+    }
 
     #[test]
     fn test_locate_mft_clusters_synthetic() {
@@ -347,7 +315,8 @@ mod tests {
             }
         };
 
-        let (bs, runs) = locate_mft_clusters_with_read_at(mock_read)
+        let mut reader = MockReader(mock_read);
+        let (bs, runs) = locate_mft_clusters_from_reader(&mut reader)
             .expect("locate_mft_clusters should succeed");
         assert_eq!(bs.bytes_per_sector, 512);
         assert_eq!(bs.bytes_per_cluster(), 4096);

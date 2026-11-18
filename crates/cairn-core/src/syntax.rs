@@ -116,58 +116,6 @@ impl QueryExpr {
         }
     }
 
-    /// Collects the patterns of every regex item, so the executor compiles each distinct
-    /// pattern once per query instead of once per record (SPEC QRY-03).
-    pub fn collect_regex_patterns(&self) -> Vec<&str> {
-        let mut out = Vec::new();
-        self.collect_regex_patterns_inner(&mut out);
-        out.sort();
-        out.dedup();
-        out
-    }
-
-    fn collect_regex_patterns_inner<'a>(&'a self, out: &mut Vec<&'a str>) {
-        match self {
-            QueryExpr::Term(t) => {
-                if t.is_regex && !t.text.is_empty() {
-                    out.push(&t.text);
-                }
-            }
-            QueryExpr::And(subs) | QueryExpr::Or(subs) => {
-                for s in subs {
-                    s.collect_regex_patterns_inner(out);
-                }
-            }
-            QueryExpr::Not(inner) => inner.collect_regex_patterns_inner(out),
-        }
-    }
-
-    /// Collects the texts of every search term, so the executor compiles each distinct
-    /// text pattern (lowercase, folded) once per query instead of per record.
-    pub fn collect_search_texts(&self) -> Vec<&str> {
-        let mut out = Vec::new();
-        self.collect_search_texts_inner(&mut out);
-        out.sort();
-        out.dedup();
-        out
-    }
-
-    fn collect_search_texts_inner<'a>(&'a self, out: &mut Vec<&'a str>) {
-        match self {
-            QueryExpr::Term(t) => {
-                if !t.text.is_empty() {
-                    out.push(&t.text);
-                }
-            }
-            QueryExpr::And(subs) | QueryExpr::Or(subs) => {
-                for s in subs {
-                    s.collect_search_texts_inner(out);
-                }
-            }
-            QueryExpr::Not(inner) => inner.collect_search_texts_inner(out),
-        }
-    }
-
     /// Number of content-term occurrences in the expression. Duplicates and negated terms count
     /// like any other occurrence: every occurrence adds per-record evaluation work, so the
     /// request limit applies to this count.

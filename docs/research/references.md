@@ -38,10 +38,3 @@
 - [Zed #64850：输入法候选窗与输入文本行发生物理重叠缺陷修复](https://github.com/zed-industries/zed/issues/64850)
 - [Zed #64389：UTF-16 代码单元与 UTF-8 字节偏移换算 Panic 修复](https://github.com/zed-industries/zed/issues/64389)
 
-### 1.5 磁盘空间分析与 Treemap 可视化一手权威文献
-- **SpaceSniffer（Uderzo Software）**：[官方支持与用户手册](http://www.uderzo.it/main_products/space_sniffer/)。层级嵌套矩形树图（Nested Treemap）、动态扫描流式分区、细节级别（Level of Detail, LoD）阈值与过滤语法体系标杆。
-- **WizTree（Antibody Software）**：[官方主站与 MFT 技术解析](https://diskanalyzer.com/)。直接流式解析 NTFS `$MFT` 裸卷记录，配合在内存中沿 `parent_idx` 自底向上（Bottom-up Rollup）极速聚合目录尺寸与即时 Treemap 视口投影。
-- **Treemap 算法经典论文**：
-  - Ben Shneiderman (1992). `Tree visualization with tree-maps: 2-d space-filling approach`. ACM Transactions on Graphics (TOG), 11(1), 92-99.
-  - Mark Bruls, Kees Huizing, & Jarke J. van Wijk (2000). `Squarified Treemaps`. In Joint Eurographics and IEEE TCVG Symposium on Visualization (pp. 33-42).
-  - Jarke J. van Wijk & Huub van de Wetering (1999). `Cushion Treemaps: Visualization of Hierarchical Information`. IEEE Symposium on Information Visualization (InfoVis).

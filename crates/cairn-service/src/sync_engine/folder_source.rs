@@ -258,7 +258,6 @@ pub struct FolderSource {
     last_skipped: u64,
     generation: u64,
     live_count: u64,
-    live_file_bytes: u64,
     has_tombstones: bool,
     volume_id_tag: u16,
 }
@@ -291,7 +290,6 @@ impl FolderSource {
             last_skipped: 0,
             generation: 1,
             live_count: 0,
-            live_file_bytes: 0,
             has_tombstones: false,
             volume_id_tag,
         })
@@ -324,14 +322,6 @@ impl FolderSource {
 
     pub fn live_count(&self) -> u64 {
         self.live_count
-    }
-
-    pub fn live_file_bytes(&self) -> u64 {
-        self.live_file_bytes
-    }
-
-    pub fn has_tombstones(&self) -> bool {
-        self.has_tombstones
     }
 
     pub(crate) fn live_watch_enabled(&self) -> bool {
@@ -470,7 +460,6 @@ impl FolderSource {
         let mut frn_to_idx = FrnLookup::new();
         let mut path_to_idx = HashMap::new();
         let mut live_count = 0u64;
-        let mut live_file_bytes = 0u64;
         let mut skipped = 0u64;
 
         let mut stack: Vec<(PathBuf, u32, String)> = vec![(
@@ -531,9 +520,7 @@ impl FolderSource {
                 frn_to_idx.push(key, idx);
                 path_to_idx.insert(rel_key.clone(), idx);
                 live_count = live_count.saturating_add(1);
-                if !is_dir {
-                    live_file_bytes = live_file_bytes.saturating_add(size);
-                } else if !is_reparse {
+                if is_dir && !is_reparse {
                     stack.push((entry_path, idx, rel_key));
                 }
             }
@@ -556,7 +543,6 @@ impl FolderSource {
         self.path_cache.clear();
         self.presorted.clear_and_shrink();
         self.live_count = live_count;
-        self.live_file_bytes = live_file_bytes;
         self.has_tombstones = false;
         self.generation = self.generation.wrapping_add(1);
         self.last_skipped = skipped;
@@ -637,7 +623,6 @@ impl FolderSource {
             }
             removed.push(rec.frn);
             if !rec.is_dir() {
-                self.live_file_bytes = self.live_file_bytes.saturating_sub(rec.size);
                 self.adjust_ancestors(rec.parent_idx, -(rec.size as i128));
             }
             self.records[idx as usize].mark_tombstone();
@@ -680,13 +665,6 @@ impl FolderSource {
                     if !was_dir {
                         rec.size = size;
                         let delta = size as i128 - old_size as i128;
-                        if delta >= 0 {
-                            self.live_file_bytes =
-                                self.live_file_bytes.saturating_add(delta as u64);
-                        } else {
-                            self.live_file_bytes =
-                                self.live_file_bytes.saturating_sub((-delta) as u64);
-                        }
                         self.adjust_ancestors(parent_idx, delta);
                     }
                     return Some((frn, JournalChangeKind::Modified));
@@ -714,7 +692,6 @@ impl FolderSource {
         self.path_to_idx.insert(rel_key, idx);
         self.live_count = self.live_count.saturating_add(1);
         if !is_dir {
-            self.live_file_bytes = self.live_file_bytes.saturating_add(size);
             self.adjust_ancestors(parent_idx, size as i128);
         }
         Some((key, JournalChangeKind::Created))

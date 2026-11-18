@@ -110,9 +110,7 @@ impl MftScanOptions {
 /// Accounting metrics emitted by [`scan_mft_from_reader`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MftScanStats {
-    pub total_records_in_runs: u64,
     pub bitmap_skipped_records: u64,
-    pub parsed_records: u64,
 }
 
 /// Extracted `$MFT` records together with scan statistics.
@@ -328,7 +326,8 @@ fn locate_volume_runs<R: BlockReader + ?Sized>(
 }
 
 /// Locates the NTFS `$MFT` boot geometry and data runs from a generic [`BlockReader`].
-pub fn locate_mft_clusters_from_reader<R: BlockReader + ?Sized>(
+#[cfg(test)]
+pub(crate) fn locate_mft_clusters_from_reader<R: BlockReader + ?Sized>(
     reader: &mut R,
 ) -> Result<(NtfsBootSector, Vec<DataRun>), VolumeError> {
     let mut boot_sector_buf = [0u8; 4096];
@@ -468,7 +467,6 @@ fn scan_contiguous_range<R: BlockReader + ?Sized>(
             .any(|r| should_parse_record(r, bitmap, options.skip_system_records));
 
         if !any_needed {
-            result.stats.total_records_in_runs += win_recs as u64;
             if let Some(bits) = bitmap {
                 let unallocated = (rec_cursor..win_end)
                     .filter(|&r| !bitmap_has_bit(bits, r))
@@ -484,7 +482,6 @@ fn scan_contiguous_range<R: BlockReader + ?Sized>(
         let to_read = win_recs * record_size;
         let read_bytes = read_at_exact_or_eof(reader, offset_cursor, &mut buffer[..to_read])?;
         let records_in_buf = read_bytes / record_size;
-        result.stats.total_records_in_runs += records_in_buf as u64;
 
         if records_in_buf == 0 {
             return Ok(true);
@@ -497,10 +494,6 @@ fn scan_contiguous_range<R: BlockReader + ?Sized>(
                 .count() as u64;
             result.stats.bitmap_skipped_records += unallocated;
         }
-        let parsed_here = (rec_cursor..actual_end)
-            .filter(|&r| should_parse_record(r, bitmap, options.skip_system_records))
-            .count() as u64;
-        result.stats.parsed_records += parsed_here;
 
         let parsed_items: Vec<ExtractedItem> = buffer[..records_in_buf * record_size]
             .par_chunks_exact_mut(record_size)
@@ -564,7 +557,6 @@ pub fn scan_mft_from_reader<R: BlockReader + ?Sized>(
                 }
 
                 let Some(lcn) = run.lcn else {
-                    result.stats.total_records_in_runs += run_records;
                     if let Some(bits) = bitmap {
                         result.stats.bitmap_skipped_records +=
                             (current_record_num..current_record_num + run_records)

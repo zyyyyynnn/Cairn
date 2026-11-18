@@ -17,7 +17,6 @@ use crate::shell::theme;
 /// Parsed CLI launch arguments passed to the main desktop window.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct LaunchPlan {
-    pub raw_args: Vec<String>,
     pub initial_query: Option<String>,
     pub sidebar_collapsed: bool,
     pub open_match: bool,
@@ -41,7 +40,6 @@ impl LaunchPlan {
         }
 
         Self {
-            raw_args,
             initial_query,
             sidebar_collapsed,
             open_match,

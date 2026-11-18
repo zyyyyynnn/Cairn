@@ -1128,17 +1128,6 @@ impl MultiVolumeEngine {
         self.index_journal.lock().unwrap().status()
     }
 
-    pub fn set_index_journal_enabled(&self, enabled: bool) -> IndexJournalStatus {
-        let _guard = self.config_apply_lock.lock().unwrap();
-        {
-            let mut cfg = self.config.write().unwrap();
-            cfg.index_journal_enabled = enabled;
-        }
-        let mut journal = self.index_journal.lock().unwrap();
-        journal.set_enabled(enabled);
-        journal.status()
-    }
-
     pub fn set_index_journal_enabled_persisted(
         &self,
         enabled: bool,

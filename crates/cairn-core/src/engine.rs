@@ -81,6 +81,7 @@ pub fn execute_query_ordered(
 }
 
 /// Evaluates `query` with `content:` terms resolved through `content_hit`.
+#[cfg(test)]
 pub fn execute_query_with_content(
     records: &[FileRecord],
     arena: &NamePool,

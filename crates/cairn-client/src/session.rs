@@ -232,13 +232,6 @@ impl ServiceSession {
         .await
     }
 
-    /// Drops every cached connection.
-    pub async fn disconnect(&self) {
-        *self.inner.primary.lock().await = None;
-        *self.inner.control.lock().await = None;
-        *self.inner.cancel.lock().await = None;
-    }
-
     async fn call_primary<T, F>(&self, op: F) -> Result<T, ClientError>
     where
         F: for<'a> FnMut(

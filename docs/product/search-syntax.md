@@ -37,7 +37,7 @@
 | `ignore-whitespace:` | `nows:` | 检索时忽略所有空白字符 | P1 |
 | `pinyin:` | `py:` | 拼音及首字母缩写拼音匹配 | P1 |
 
-> 表中 P1 条目按目标层级规划；`pinyin:`、`nopunc:`、`nows:`、`diacritics:` 均已实现并提供“搜索”菜单图形开关。闭环状态以 [SPEC §3.10](../SPEC.md) 为准。
+> 表中 P1 条目按目标层级规划；`pinyin:`、`nopunc:`、`nows:`、`diacritics:` 均已实现并提供“搜索”菜单图形开关。实现状态以 [SPEC §3.10](../SPEC.md) 为准。
 
 ### 1.4 过滤函数与日期区间完整语法
 

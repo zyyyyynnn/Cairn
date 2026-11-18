@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use tantivy::collector::{Collector, Count, SegmentCollector, TopDocs};
+use tantivy::collector::{Collector, SegmentCollector, TopDocs};
 use tantivy::fastfield::Column;
 use tantivy::query::{BooleanQuery, Occur, QueryParser, TermQuery};
 use tantivy::schema::IndexRecordOption;
@@ -20,10 +20,9 @@ use tantivy::{
 };
 use thiserror::Error;
 
-/// The scored result bound for content queries. Positive conjunctions answer within it; the
-/// merged disjunction and the slow boolean shapes use it only to decide whether a scored search
-/// is complete enough for snippets. The bound side of each completeness decision is not
-/// exercised by the test suite: it needs more matching documents than the bound.
+/// The snippet-row budget for content queries: the service requests snippets only for the first
+/// `CONTENT_RESULT_TOP_K` returned rows. Complete hit sets are collected separately through the
+/// FAST fields, so this budget never truncates a conjunction or a union.
 pub const CONTENT_RESULT_TOP_K: usize = 50_000;
 
 #[derive(Error, Debug)]
@@ -147,9 +146,9 @@ impl ContentSearcher {
         dir_size(&self.index_dir)
     }
 
-    /// Returns every `(volume_id, frn)` the query matches, without snippets or scores. Negation
-    /// and disjunction need the complete hit set; the scored top-k search is only for result rows.
-    /// The FAST fields carry both identifiers, so a full set costs no scoring and no body read.
+    /// Returns every `(volume_id, frn)` the query matches, without snippets or scores. Negation,
+    /// disjunction and conjunction filtering need the complete hit set; the FAST fields carry both
+    /// identifiers, so a full set costs no scoring and no body read.
     pub fn search_all_frns(&self, query_str: &str) -> Result<Vec<(u64, u64)>, ContentIndexError> {
         let query = self.parsed_query(query_str)?;
         self.collect_frns(query.as_ref())
@@ -277,39 +276,6 @@ impl ContentSearcher {
         let searcher = self.reader.searcher();
         let query = self.parsed_query(query_str)?;
         self.collect_hits(&searcher, query.as_ref(), query_str, limit)
-    }
-
-    /// Queries with one parsed term per clause, conjoined. Parsing each term on its own keeps a
-    /// term's boolean syntax from regrouping its siblings, which a joined string would allow.
-    pub fn search_terms(
-        &self,
-        terms: &[String],
-        limit: usize,
-    ) -> Result<Vec<ContentHit>, ContentIndexError> {
-        self.reader.reload()?;
-        let searcher = self.reader.searcher();
-        let query = self.conjunction_query(terms)?;
-        self.collect_hits(&searcher, &query, &terms.join(" "), limit)
-    }
-
-    /// Scored top-k over the disjunction of the terms, for the snippets of a merged search.
-    pub fn search_union(
-        &self,
-        terms: &[String],
-        limit: usize,
-    ) -> Result<Vec<ContentHit>, ContentIndexError> {
-        self.reader.reload()?;
-        let searcher = self.reader.searcher();
-        let query = self.union_query(terms)?;
-        self.collect_hits(&searcher, &query, &terms.join(" "), limit)
-    }
-
-    /// Number of documents the query matches, without scoring or stored reads.
-    pub fn count_hits(&self, query_str: &str) -> Result<usize, ContentIndexError> {
-        self.reader.reload()?;
-        let searcher = self.reader.searcher();
-        let query = self.parsed_query(query_str)?;
-        Ok(searcher.search(query.as_ref(), &Count)?)
     }
 
     fn conjunction_query(&self, terms: &[String]) -> Result<BooleanQuery, ContentIndexError> {
@@ -974,68 +940,6 @@ mod tests {
     }
 
     #[test]
-    fn search_union_snippets_anchor_at_a_hit_word() {
-        let temp = tempdir().unwrap();
-        let index = ContentIndex::open_or_create(temp.path()).expect("open failed");
-        let body = format!(
-            "{}alpha and later beta{}",
-            "filler ".repeat(40),
-            " tail".repeat(10)
-        );
-        index_committed(&index, 0, 1, 16, 1, "C:\\docs\\a.txt", &body).expect("index doc failed");
-
-        let terms = vec!["alpha".to_string(), "beta".to_string()];
-        let hits = index
-            .searcher
-            .search_union(&terms, 10)
-            .expect("scored union");
-        assert_eq!(hits.len(), 1);
-        assert!(
-            hits[0]
-                .snippets
-                .iter()
-                .any(|snippet| snippet.contains("alpha")),
-            "the snippet must show a hit word, got: {:?}",
-            hits[0].snippets
-        );
-    }
-
-    #[test]
-    fn search_union_answers_the_disjunction_with_snippets_and_applies_the_top_k_bound() {
-        let temp = tempdir().unwrap();
-        let index = ContentIndex::open_or_create(temp.path()).expect("open failed");
-        for (frn, body) in [
-            (1u64, "alpha"),
-            (2, "beta"),
-            (3, "alpha beta"),
-            (4, "gamma"),
-        ] {
-            index_committed(&index, 0, frn, 16, 1, &format!("C:\\docs\\{frn}.txt"), body)
-                .expect("index doc failed");
-        }
-
-        let terms = vec!["alpha".to_string(), "beta".to_string()];
-        let hits = index
-            .searcher
-            .search_union(&terms, 10)
-            .expect("scored union");
-        let mut frns: Vec<u64> = hits.iter().map(|hit| hit.frn).collect();
-        frns.sort_unstable();
-        assert_eq!(frns, vec![1, 2, 3]);
-        assert!(
-            hits.iter().all(|hit| !hit.snippets.is_empty()),
-            "every scored union hit carries at least one snippet"
-        );
-
-        // The top-k bound applies to the merged search as it does to a single term.
-        let top = index
-            .searcher
-            .search_union(&terms, 1)
-            .expect("bounded union");
-        assert_eq!(top.len(), 1);
-    }
-
-    #[test]
     fn search_terms_conjoins_parsed_terms_instead_of_joining_strings() {
         let temp = tempdir().unwrap();
         let index = ContentIndex::open_or_create(temp.path()).expect("open failed");
@@ -1045,8 +949,11 @@ mod tests {
         }
 
         let terms = vec!["alpha OR beta".to_string(), "gamma".to_string()];
-        let hits = index.searcher.search_terms(&terms, 10).expect("search");
-        let mut frns: Vec<u64> = hits.iter().map(|hit| hit.frn).collect();
+        let hits = index
+            .searcher
+            .search_terms_all_frns(&terms)
+            .expect("full conjunction");
+        let mut frns: Vec<u64> = hits.iter().map(|(_, frn)| *frn).collect();
         frns.sort_unstable();
         assert_eq!(
             frns,
@@ -1433,9 +1340,6 @@ mod tests {
         }
 
         let terms = vec!["alpha".to_string(), "beta".to_string()];
-        let top = index.searcher.search_terms(&terms, 1).expect("bounded");
-        assert_eq!(top.len(), 1);
-
         let mut all = index
             .searcher
             .search_terms_all_frns(&terms)
