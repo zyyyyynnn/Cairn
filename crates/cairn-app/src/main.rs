@@ -12,7 +12,6 @@ mod service;
 mod shell;
 mod startup;
 mod table;
-mod treemap;
 mod view;
 mod win32;
 

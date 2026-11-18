@@ -79,8 +79,6 @@ pub mod layout {
     pub const SEARCH_BAND_HEIGHT: f32 = ROW_HEIGHT + 2.0 * TIGHT_LEAD;
     pub const HEADER_HEIGHT: f32 = ROW_HEIGHT;
     pub const STATUS_HEIGHT: f32 = ROW_HEIGHT;
-    /// Matches `gpui-kit`'s `PopupMenu` physical row height across custom and component menus.
-    pub const MENU_ROW_HEIGHT: Pixels = gpui_kit::gpui::px(26.0);
     // Heading and result rows read the same widths so column dividers never drift.
     pub const NAME_MIN_COLUMN: f32 = 42.0 * STEP;
     pub const PATH_MIN_COLUMN: f32 = 28.0 * STEP;
@@ -207,8 +205,7 @@ pub fn element_id(prefix: &'static str, key: &str) -> String {
 }
 
 /// Everything behind the query box: the input state, painted text geometry,
-/// match toggles, the active filter and drive scope, and the session the
-/// current answer belongs to.
+/// match toggles, the active filter, and the session the current answer belongs to.
 pub struct QueryDomain {
     pub search_input: SearchInputState,
     /// Painted geometry of the query text, written by the text-area canvas each frame. Pointer and
@@ -223,9 +220,6 @@ pub struct QueryDomain {
     pub match_path: bool,
     pub use_regex: bool,
     pub active_filter: FilterCategory,
-    /// Drive letter the sidebar scopes the search to, when one is active. The service reads it as a
-    /// `X:` term, so the scope is part of the query the user can still edit by hand.
-    pub scope_drive: Option<char>,
     pub active_session_id: Option<u64>,
     /// The service's refusal of the current query, if it answered with one. Cleared when a new
     /// query starts and when a result set arrives, so the band never outlives its query.
@@ -278,10 +272,10 @@ pub struct ResultsDomain {
 pub struct ServiceDomain {
     pub(crate) connection: ServiceConnection,
     /// One status-refresh loop while a volume is building or catching up; it stops at the first
-    /// all-Synced answer so the index capsule can disappear.
+    /// all-Synced answer so the sidebar index status line can disappear.
     pub(crate) is_refreshing_status: bool,
     pub status: StatusBarModel,
-    /// Persistent named-pipe session reused across status, query, page, tree and config RPCs.
+    /// Persistent named-pipe session reused across status, query, page and config RPCs.
     pub session: cairn_client::ServiceSession,
     pub content: SubsystemState<ContentIndexStatus>,
     pub property: SubsystemState<PropertyIndexStatus>,
@@ -290,45 +284,11 @@ pub struct ServiceDomain {
     pub sources: Vec<SourceStatusSummary>,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum PathFieldMode {
-    #[default]
-    Closed,
-    Editing {
-        error: bool,
-    },
-}
-
-impl PathFieldMode {
-    pub(crate) fn is_editing(self) -> bool {
-        matches!(self, Self::Editing { .. })
-    }
-
-    pub(crate) fn has_error(self) -> bool {
-        matches!(self, Self::Editing { error: true })
-    }
-}
-
-/// The Treemap address field's retained state. The field is an ecosystem
-/// input; this wrapper owns the entity, the edit mode and the last rejection.
-pub(crate) struct TreemapPathField {
-    pub input: Entity<InputState>,
-    pub mode: PathFieldMode,
-    pub _subscription: Subscription,
-}
-
 pub(crate) struct OpenGroupMenu {
     pub group: MenuGroup,
     pub popup: Entity<PopupMenu>,
     pub _dismiss: Subscription,
     pub entered: bool,
-}
-
-pub(crate) struct TreemapPathMenu {
-    pub popup: Entity<PopupMenu>,
-    pub target: String,
-    pub trigger_focus: Option<FocusHandle>,
-    pub _dismiss: Subscription,
 }
 
 /// The in-place rename editor: the selected row swaps its name cell for this input while a draft
@@ -381,24 +341,15 @@ pub struct CairnApp {
     pub nav_history: Vec<NavState>,
     pub nav_history_index: usize,
     pub sidebar_scroll: ScrollHandle,
-    /// When `Some(drive)`, the main content area renders the disk visualization (Treemap).
-    pub drive_view: Option<char>,
-    pub treemap_state: Option<crate::treemap::state::TreemapViewState>,
-    pub(crate) treemap_path: TreemapPathField,
     /// The in-place rename editor for the single selected result row.
     pub(crate) rename: RenameEditor,
     /// The global summon hotkey; the guard unregisters the chord when it drops.
     #[cfg(windows)]
     pub(crate) _hotkey: Option<crate::shell::hotkey::GlobalHotkey>,
-    /// The path switch menu anchored to one breadcrumb segment.
-    pub(crate) treemap_path_menu: Option<TreemapPathMenu>,
-    pub(crate) treemap_dir_loader: crate::treemap::dir_menu::DirectoryMenuLoader,
     /// The Recycle Bin view. The bin is a location, not a search scope: the view owns its rows,
-    /// its selection and its error band together, so any query or drive switch releases the whole
-    /// location instead of leaving half of it behind.
+    /// its selection and its error band together, so any query releases the whole location
+    /// instead of leaving half of it behind.
     pub(crate) recycle_bin: crate::shell::recycle_bin::RecycleBinView,
-    /// The summary block whose members the table currently lists.
-    pub(crate) block_listing: Option<crate::shell::block_listing::BlockListing>,
     /// True while a delete-to-bin task is running outside the bin.
     pub(crate) delete_in_flight: bool,
     /// The app-owned transient status surface. One at a time; errors persist.
@@ -475,19 +426,6 @@ impl CairnApp {
         });
         let keyboard_modality = cairn_ui::focus::observe_keyboard(cx);
 
-        let treemap_path_placeholder = i18n.get_text("treemap_path_placeholder");
-        let treemap_path_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder(treemap_path_placeholder));
-        let treemap_path_subscription = cx.subscribe_in(
-            &treemap_path_input,
-            window,
-            |this, _, event: &InputEvent, window, cx| match event {
-                InputEvent::PressEnter { .. } => this.commit_treemap_path(window, cx),
-                InputEvent::Blur => this.cancel_treemap_path_edit(window, cx),
-                InputEvent::Change => this.treemap_path_changed(cx),
-                InputEvent::Focus => {}
-            },
-        );
         let rename_input =
             cx.new(|cx| InputState::new(window, cx).placeholder(i18n.get_text("rename_label")));
         let rename_subscription = cx.subscribe_in(
@@ -529,7 +467,6 @@ impl CairnApp {
                 match_path: false,
                 use_regex: false,
                 active_filter: FilterCategory::All,
-                scope_drive: None,
                 active_session_id: None,
                 rejection: None,
                 degraded: None,
@@ -567,19 +504,10 @@ impl CairnApp {
             sidebar_collapsed: false,
             nav_history: vec![NavState {
                 text: String::new(),
-                drive: None,
                 filter: FilterCategory::All,
-                visualization: None,
             }],
             nav_history_index: 0,
             sidebar_scroll: ScrollHandle::default(),
-            drive_view: None,
-            treemap_state: None,
-            treemap_path: TreemapPathField {
-                input: treemap_path_input,
-                mode: PathFieldMode::Closed,
-                _subscription: treemap_path_subscription,
-            },
             rename: RenameEditor {
                 input: rename_input,
                 draft: None,
@@ -588,10 +516,7 @@ impl CairnApp {
             },
             #[cfg(windows)]
             _hotkey: hotkey,
-            treemap_path_menu: None,
-            treemap_dir_loader: Default::default(),
             recycle_bin: crate::shell::recycle_bin::RecycleBinView::closed(),
-            block_listing: None,
             delete_in_flight: false,
             toast: None,
             toast_serial: 0,
@@ -685,24 +610,10 @@ impl CairnApp {
         .detach();
     }
 
-    /// Leaves the drive visualization. The next visible table content starts a
-    /// fresh panel entrance instead of reviving the hidden table in place.
-    pub(crate) fn leave_drive_view(&mut self) {
-        if self.drive_view.take().is_some() {
-            self.sync_visualization_dir();
-            self.clear_treemap_path_menu();
-            self.treemap_state = None;
-            self.begin_table_session();
-        }
-    }
-
     /// Starts the table entrance once a panel session actually has rows, so the
     /// fade begins with content rather than while the query is still in flight.
     pub(crate) fn note_table_content(&mut self, cx: &mut Context<Self>) {
-        if self.table_reveal.pending
-            && self.results.table.total_rows() > 0
-            && self.drive_view.is_none()
-        {
+        if self.table_reveal.pending && self.results.table.total_rows() > 0 {
             self.bump_table_reveal(cx);
         }
     }
@@ -710,7 +621,7 @@ impl CairnApp {
     /// Starts the same entrance for a new session whose answer is empty; the
     /// state band is content too, not a reason to leave the old frame static.
     pub(crate) fn note_table_empty(&mut self, cx: &mut Context<Self>) {
-        if self.table_reveal.pending && self.drive_view.is_none() {
+        if self.table_reveal.pending {
             self.bump_table_reveal(cx);
         }
     }
@@ -929,7 +840,6 @@ mod tests {
 
     use super::{join_row_path, CairnApp};
     use crate::search::ResultSetChange;
-    use crate::shell::block_listing::BlockListing;
     use cairn_protocol::message::FileRowData;
     use cairn_protocol::status::{VolumeState, VolumeStatusSummary};
     use gpui_kit::AppContext;
@@ -1080,24 +990,6 @@ mod tests {
             assert!(
                 this.table_reveal.pending,
                 "an empty table gets the replacement entrance"
-            );
-        });
-    }
-
-    /// A block listing owns its rows: a status refresh must filter them in
-    /// place instead of clearing them for an index request.
-    #[test]
-    fn a_refresh_keeps_a_block_listings_rows() {
-        with_app(|this, cx| {
-            let listing = BlockListing::new(r"C:\".to_string(), 1, vec![test_row("member.txt")]);
-            this.block_listing = Some(listing);
-            this.results.table.set_rows(vec![test_row("member.txt")], 1);
-
-            this.request_result_set(ResultSetChange::Replace, cx);
-            assert!(this.block_listing.is_some(), "the listing stays open");
-            assert!(
-                this.results.table.total_rows() >= 1,
-                "the listing's rows survive the refresh"
             );
         });
     }

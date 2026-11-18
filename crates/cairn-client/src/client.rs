@@ -278,21 +278,6 @@ impl CairnClient {
         Ok(envelope)
     }
 
-    /// Reads the directory tree below `path` from the service's volume index.
-    /// Uncovered paths arrive as typed tree errors; an empty list is an empty
-    /// directory.
-    pub async fn get_tree(
-        &mut self,
-        path: &str,
-        max_depth: usize,
-    ) -> Result<Envelope<ResponsePayload>, ClientError> {
-        self.send_request(&ClientRequest::GetTree {
-            path: path.to_string(),
-            max_depth,
-        })
-        .await
-    }
-
     /// Reads the content-index lifecycle, including backfill progress and the last error.
     pub async fn get_content_index_status(
         &mut self,

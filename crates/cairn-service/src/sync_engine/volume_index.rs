@@ -16,7 +16,7 @@ use cairn_core::path_cache::{root_path_for_drive, DirectoryPathCache};
 use cairn_core::property_store::{PropertySideTables, RecordPropertyData, SourceId};
 use cairn_core::query::SourceIndex;
 use cairn_core::sort::{PresortedIndices, SortColumn};
-use cairn_core::treemap::DirectorySizeIndex;
+use cairn_core::DirectorySizeIndex;
 use cairn_ntfs::mft::ExtractedItem;
 use cairn_ntfs::usn::{file_record_flags, UsnChange};
 use cairn_ntfs::volume_identity::VolumeIdentity;

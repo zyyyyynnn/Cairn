@@ -65,23 +65,15 @@ fn reconcile_empty_bin(
 
 impl CairnApp {
     /// Opens the Recycle Bin view: the shell reports the bin's contents and
-    /// the table renders them. Any query or drive switch leaves the view.
+    /// the table renders them. Any query leaves the view.
     pub fn open_recycle_bin(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        // Leaving the visualization releases its partial tree; the bin is a
-        // location, so no hidden Treemap state remains behind it. Its first
-        // listing fades in instead of replacing the table text in place.
-        // `leave_drive_view` opens the session for the view it just emptied.
-        self.leave_drive_view();
+        // The bin is a location, so its first listing fades in instead of
+        // replacing the table text in place.
         self.discard_rename(cx);
-        // A block listing's filter is a location-local search, not the query
-        // this entry describes; taking it before the update keeps that text.
-        let leaving_listing = self.block_listing.take().is_some();
         self.close_group();
         // Keep the query the person left behind in the current history entry
         // before the bin replaces the search box with a location.
-        if !leaving_listing {
-            self.update_current_nav_state_text();
-        }
+        self.update_current_nav_state_text();
         // Invalidate any in-flight query: its answer belongs to the table and
         // must not replace the listing that is about to be shown.
         self.take_table_for_local_rows();
@@ -92,7 +84,6 @@ impl CairnApp {
         if !self.query.search_input.text.is_empty() {
             self.query.search_input.clear();
         }
-        self.query.scope_drive = None;
         self.query.active_filter = FilterCategory::All;
         self.results.rows_scroll.set_offset(Point::default());
         self.results.table.scroll_top = 0.0;
@@ -102,10 +93,10 @@ impl CairnApp {
         cx.notify();
     }
 
-    /// The Delete command: moves a table/Treemap selection to the Recycle Bin
-    /// through the native file pipeline. Inside the bin the same key means a
-    /// permanent delete, confirmed by the same project dialog before the shell
-    /// runs without its own prompt.
+    /// The Delete command: moves a table selection to the Recycle Bin through
+    /// the native file pipeline. Inside the bin the same key means a permanent
+    /// delete, confirmed by the same project dialog before the shell runs
+    /// without its own prompt.
     pub fn delete_selected(
         &mut self,
         _: &DeleteSelected,
@@ -116,17 +107,7 @@ impl CairnApp {
             self.open_bin_delete_confirmation(items, window, cx);
             return;
         }
-        let paths = if self.drive_view.is_some() {
-            self.treemap_state
-                .as_ref()
-                .and_then(|state| state.selected_real_path())
-                .map(str::to_string)
-                .into_iter()
-                .collect()
-        } else {
-            self.collect_selected_paths()
-        };
-        self.open_delete_confirmation(paths, window, cx);
+        self.open_delete_confirmation(self.collect_selected_paths(), window, cx);
     }
 
     /// Asks before permanently deleting Recycle Bin items. The copy names the
@@ -473,8 +454,7 @@ impl CairnApp {
     }
 
     /// Deletes the given paths to the Recycle Bin and reflects the result in
-    /// whichever surface issued it. Shared by the Delete command and the
-    /// Treemap context menu.
+    /// the result table. Shared by the Delete command and the row actions.
     pub fn delete_paths(&mut self, paths: Vec<String>, cx: &mut Context<Self>) {
         if paths.is_empty() || self.delete_in_flight {
             return;
@@ -497,30 +477,18 @@ impl CairnApp {
         cx.notify();
         let (tx, rx) = tokio::sync::oneshot::channel();
         std::thread::spawn(move || {
-            struct PendingItem {
-                path: String,
-                name: String,
-            }
-
             let delete_result = delete_to_recycle_bin(&task_paths, owner);
-            // Single pass over the filesystem to determine which paths still exist
-            // and which were successfully deleted, avoiding redundant I/O calls.
-            let (remaining_items, deleted_items): (Vec<PendingItem>, Vec<PendingItem>) = task_paths
+            // Single pass over the filesystem to determine which paths still exist, so a shell
+            // batch that reports success while an item was skipped is reported as a failure.
+            let remaining_names: Vec<String> = task_paths
                 .into_iter()
                 .zip(task_names)
-                .map(|(path, name)| PendingItem { path, name })
-                .partition(|item| std::path::Path::new(&item.path).exists());
-
-            let deleted_paths: Vec<String> =
-                deleted_items.into_iter().map(|item| item.path).collect();
-            let remaining_names: Vec<String> =
-                remaining_items.into_iter().map(|item| item.name).collect();
+                .filter(|(path, _)| std::path::Path::new(path).exists())
+                .map(|(_, name)| name)
+                .collect();
 
             let outcome = match delete_result {
                 Ok(()) => {
-                    // A shell batch can report success while an item was skipped (for example a
-                    // locked file that the progress UI ignored). Reconcile the original paths so
-                    // the table/Treemap is not updated for an item that still exists.
                     if remaining_names.is_empty() {
                         Ok(())
                     } else {
@@ -532,13 +500,13 @@ impl CairnApp {
                 }
                 Err(failure) => Err(failure),
             };
-            let _ = tx.send((outcome, deleted_paths));
+            let _ = tx.send(outcome);
         });
         cx.spawn(async move |this, cx| {
             let received = rx.await;
             let _ = this.update(cx, |this, cx| {
                 this.delete_in_flight = false;
-                if let Ok((outcome, deleted_paths)) = received {
+                if let Ok(outcome) = received {
                     if let Err(failure) = &outcome {
                         if !failure.is_cancelled() {
                             this.notify_bin_operation_error(
@@ -550,17 +518,7 @@ impl CairnApp {
                             );
                         }
                     }
-                    if this.drive_view.is_some() {
-                        if let Some(ref mut st) = this.treemap_state {
-                            for path in &deleted_paths {
-                                st.remove_item(path);
-                            }
-                        }
-                    } else if this.block_listing.is_some() {
-                        this.remove_block_listing_paths(&deleted_paths, cx);
-                    } else {
-                        this.request_result_set(ResultSetChange::Replace, cx);
-                    }
+                    this.request_result_set(ResultSetChange::Replace, cx);
                 }
                 cx.notify();
             });
@@ -573,7 +531,6 @@ impl CairnApp {
 mod bin_command_tests {
     use super::{reconcile_bin_items, reconcile_empty_bin};
     use crate::app::CairnApp;
-    use crate::shell::block_listing::BlockListing;
     use crate::shell::os::{BinOperationError, RecycleBinItem};
     use core::prelude::rust_2021::test;
     use gpui_kit::gpui::AppContext as _;
@@ -619,7 +576,7 @@ mod bin_command_tests {
     }
 
     #[test]
-    fn entering_the_bin_keeps_the_query_behind_a_block_listing() {
+    fn entering_the_bin_keeps_the_query_it_replaces() {
         gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
             gpui_kit::init(cx);
             let _ = gpui_kit::open_window(
@@ -634,15 +591,9 @@ mod bin_command_tests {
 
                     app.update(cx, |this, cx| {
                         this.query.search_input.set_text("kept query");
-                        this.record_nav_state();
-                        let entry = this.nav_history_index;
-                        this.block_listing =
-                            Some(BlockListing::new(r"C:\Windows".to_string(), 2, Vec::new()));
-                        this.query.search_input.set_text("amd64");
                         this.query.coordinator.set_cancelled(true);
                         this.open_recycle_bin(window, cx);
-                        assert!(this.block_listing.is_none());
-                        assert_eq!(this.nav_history[entry].text, "kept query");
+                        assert_eq!(this.nav_history[this.nav_history_index].text, "kept query");
                         assert!(this.query.search_input.text.is_empty());
                         assert!(
                             !this.query.is_cancelled(),

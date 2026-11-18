@@ -4,8 +4,8 @@
 
 //! How a size is written for a person to read.
 //!
-//! The same file is shown by the table, the status bar, the treemap and the command line, so
-//! the wording of a size is one decision rather than one per surface.
+//! The same file is shown by the table, the status bar and the command line, so the wording of a
+//! size is one decision rather than one per surface.
 
 /// Formats a raw byte count into a human-readable string with units (B, KB, MB, GB, TB).
 pub fn format_size_bytes(bytes: u64) -> String {

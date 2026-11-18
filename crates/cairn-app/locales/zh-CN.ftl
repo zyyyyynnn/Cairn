@@ -10,10 +10,14 @@ app_title = Cairn
 
 # 侧边导航：目的地是名词，不带"管理/面板"这类外壳词。
 sidebar_locations = 位置
-sidebar_drives = 驱动器
-sidebar_no_drives = 尚未发现驱动器
 sidebar_recycle_bin = 回收站
 drive_label = 驱动器 { $drive }
+volume_state_catching_up = 正在同步
+volume_state_rebuilding = 正在重建索引
+volume_state_snapshot_mode = 快照模式
+volume_state_offline = 离线
+sidebar_index_state = 索引状态：{ $volume } { $state }
+sidebar_index_state_more = 索引状态：{ $volume } { $state }，另有 { $count } 个卷
 
 # 顶栏菜单：与品牌同行的七个顶层菜单。
 menu_file = 文件
@@ -23,7 +27,6 @@ menu_search = 搜索
 menu_index = 索引
 menu_tools = 工具
 menu_help = 帮助
-
 
 result_list_label = 搜索结果列表
 table_header_label = 结果表列标题
@@ -76,14 +79,6 @@ selection_limit_message = 已选择前 { $count_text } 项。请缩小查询范�
 reveal_limit_title = 未打开全部文件夹
 reveal_limit_message = 选中项分布在 { $count } 个文件夹，超过一次最多打开 { $limit } 个文件夹的限制。请缩小选择范围后重试。
 status_objects_summary = { $count_text } 个项目 { $size }
-
-volume_capsule = { $drive }：{ $state }
-volume_state_synced = 已同步
-volume_state_catching_up = 同步中 { $percent }%
-volume_state_catching_up_pending = 同步中
-volume_state_rebuilding = 正在重建索引
-volume_state_offline = 离线
-volume_state_snapshot_mode = 快照模式
 
 # 搜索框占位符
 search_placeholder = 搜索文件或文件夹…
@@ -200,7 +195,6 @@ index_clear_cancel = 取消
 sidebar_toggle = 折叠或展开侧边栏
 nav_back = 后退
 nav_forward = 前进
-nav_up = 上一级
 window_minimize = 最小化
 window_maximize = 最大化
 window_restore = 还原
@@ -252,29 +246,6 @@ row_not_loaded = 尚未加载的结果
 tray_show = 显示 Cairn
 tray_exit = 退出
 
-view_in_table = 在表格中查看
-treemap_retry = 重试
-treemap_canvas_label = 磁盘容量图
-treemap_path_placeholder = C:\Users
-treemap_path_label = 路径
-treemap_path_clear = 清除路径
-treemap_path_menu_for = 显示“{ $label }”下的文件夹
-treemap_path_menu_row = 转到 “{ $label }”
-treemap_path_menu_empty = 没有可切换的子文件夹
-treemap_path_menu_truncated = 仅列出前 { $count } 个文件夹
-treemap_crumb_label = 转到 { $label }（{ $path }）
-treemap_path_invalid_title = 路径格式无法识别
-treemap_path_invalid_hint = 输入驱动器绝对路径，或相对当前文件夹的路径。
-treemap_unavailable_service = 无法连接后台服务
-treemap_unavailable_too_large = 该目录的直接子项过多，无法一次载入；打开子文件夹或上一级
-treemap_unavailable_not_directory = 该路径是文件，不是文件夹；打开文件夹或上一级
-treemap_unavailable_not_indexed = 此路径不在索引中；检查路径，或稍后重试
-treemap_empty_directory = 此文件夹为空
-treemap_aggregate = 其余 { $count_text } 项
-treemap_status_selected = { $name }，{ $path }，{ $size }（{ $percent }%），{ $date }
-treemap_status_summary = { $count_text } 个项目 { $size }
-treemap_zoom_reset = 重置图表缩放
-treemap_zoom_reset_tooltip = 重置图表缩放（当前 { $percent }%）
 menu_index_journal_open = 索引日志…
 menu_rescan = 重扫描
 menu_rescan_all = 重扫描全部位置
@@ -296,10 +267,6 @@ menu_content_search_updated = 最近更新：{ $time }
 menu_content_search_usage_unknown = 占用：未知
 menu_content_search_never_updated = 最近更新：尚无记录
 empty_content_scope_line = 没有匹配的文件或文件夹；内容搜索会跳过系统与开发工具文件夹
-treemap_block_empty_title = 该汇总块已没有剩余项目；后退可刷新所在目录
-treemap_block_no_matches_title = 没有匹配的项目；清空搜索以查看整个汇总块
-treemap_block_filter_placeholder = 在 { $dir } 的其余 { $count_text } 项中搜索
-treemap_block_scope = { $dir } 的其余 { $count_text } 项
 menu_property_index_menu = 扩展属性
 menu_property_index = 索引扩展属性
 menu_property_index_status = 属性索引状态
@@ -334,13 +301,11 @@ journal_kind_renamed = 重命名
 journal_kind_deleted = 删除
 journal_kind_attribute_changed = 属性变更
 journal_kind_overflow_rescan = 溢出重扫描
-ctx_rescan_source = 重新扫描此位置
 toast_rescan_started_title = 已启动索引扫描
 toast_rescan_started_body = 后台服务正在重新扫描全部索引位置。
 toast_rescan_source_started_body = 后台服务正在重新扫描 { $source }。
 toast_rescan_failed_title = 无法启动索引扫描
 toast_rescan_failed_body = 无法启动索引扫描。请稍后重试。
-toast_rescan_source_missing_body = 未找到该位置的索引源。请稍后重试。
 toast_property_index_failed_title = 无法更新属性索引
 toast_property_index_action_failed_body = 无法更新扩展属性索引。请稍后重试。
 toast_index_journal_failed_title = 无法更新变更日志

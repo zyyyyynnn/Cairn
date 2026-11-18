@@ -25,8 +25,8 @@ struct SessionInner {
 /// Persistent IPC session over Named Pipes.
 ///
 /// Reuses a handshaken primary connection for queries and pages, a separate control
-/// connection for status, tree and configuration requests, and a third for `Cancel`, so a long
-/// query never stalls a Treemap or settings request and cancellation never stalls behind either.
+/// connection for status and configuration requests, and a third for `Cancel`, so a long
+/// query never stalls a settings request and cancellation never stalls behind either.
 #[derive(Clone, Debug)]
 pub struct ServiceSession {
     inner: Arc<SessionInner>,
@@ -105,19 +105,6 @@ impl ServiceSession {
     ) -> Result<Envelope<ResponsePayload>, ClientError> {
         self.call_primary(|client| Box::pin(client.get_rows(session_id, offset, limit)))
             .await
-    }
-
-    pub async fn get_tree(
-        &self,
-        path: &str,
-        max_depth: usize,
-    ) -> Result<Envelope<ResponsePayload>, ClientError> {
-        let path = path.to_string();
-        self.call_control(|client| {
-            let path = path.clone();
-            Box::pin(async move { client.get_tree(&path, max_depth).await })
-        })
-        .await
     }
 
     pub async fn get_content_index_status(&self) -> Result<Envelope<ResponsePayload>, ClientError> {

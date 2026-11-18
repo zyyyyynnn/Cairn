@@ -34,14 +34,12 @@ pub mod post_scan;
 pub mod property_pipeline;
 mod search;
 mod startup_scan;
-mod treemap_build;
 mod volume_index;
 mod volume_status;
 
 pub use journal_reconciliation::*;
 pub use post_scan::*;
 pub use search::{AllFilesView, MatchSet, SearchOutcome, SearchResultItem};
-pub use treemap_build::TreeUnavailable;
 pub(crate) use volume_index::SourceTableView;
 pub use volume_index::{CompactPolicy, CompactionReport, RefreshedRecordMetadata, VolumeIndex};
 

@@ -173,8 +173,8 @@ pub fn split_name_highlights<'a>(
 }
 
 /// Whether anything at all narrows the result set.
-pub fn narrows_the_result_set(text: &str, drive: Option<char>, filter_macro: Option<&str>) -> bool {
-    !text.trim().is_empty() || drive.is_some() || filter_macro.is_some()
+pub fn narrows_the_result_set(text: &str, filter_macro: Option<&str>) -> bool {
+    !text.trim().is_empty() || filter_macro.is_some()
 }
 
 /// Whether the typed text carries a `content:` term. The service's own parser decides, so quoted
@@ -243,13 +243,12 @@ fn rows_page_ready(
 }
 
 impl CairnApp {
-    /// `true` when there is something the service can answer: typed text, or a drive the sidebar
-    /// scoped. A bare flag with no query is not a search, and running one would show an empty table
-    /// under a query box the user can see is empty.
+    /// `true` when there is something the service can answer: typed text or a
+    /// file-type filter. A bare flag with no query is not a search, and running
+    /// one would show an empty table under a query box the user can see is empty.
     pub fn has_query(&self) -> bool {
         narrows_the_result_set(
             &self.query.search_input.text,
-            self.query.scope_drive,
             self.query.active_filter.query_macro(),
         )
     }
@@ -277,10 +276,6 @@ impl CairnApp {
         // listing, never from the service, so even a stopped service can show it.
         if self.recycle_bin.is_open() {
             self.fill_recycle_bin_page(row_height, cx);
-            return;
-        }
-        if self.block_listing.is_some() {
-            self.fill_block_listing_page(row_height, cx);
             return;
         }
         if !rows_page_ready(
@@ -316,13 +311,6 @@ impl CairnApp {
     /// post-frame ensure, so every scroll source — pointer drag, wheel, keyboard, first page — is
     /// covered without fetching from `render` itself.
     pub fn needs_visible_rows_page(&self, visible: Range<usize>) -> bool {
-        if self.block_listing.is_some() {
-            return self
-                .results
-                .table
-                .page_request(visible, layout::RESULT_PAGE_SIZE)
-                .is_some();
-        }
         if self.recycle_bin.is_open() {
             return self.needs_recycle_bin_page(visible);
         }
@@ -348,10 +336,6 @@ impl CairnApp {
             self.filter_recycle_bin(cx);
             return;
         }
-        if self.block_listing.is_some() {
-            self.filter_block_listing(cx);
-            return;
-        }
         let command = self.build_search_command(true);
         let mut transport = QueuedTransport::default();
         let plan =
@@ -371,7 +355,7 @@ impl CairnApp {
     }
 
     fn flush_debounced_search(&mut self, token: u64, cx: &mut Context<Self>) {
-        if self.recycle_bin.is_open() || self.block_listing.is_some() {
+        if self.recycle_bin.is_open() {
             return;
         }
         let mut transport = QueuedTransport::default();
@@ -397,9 +381,9 @@ impl CairnApp {
             ResultSetChange::Probe => ResultSetChange::Background,
             other => other,
         };
-        // A block listing and the recycle bin own their rows; an index request
-        // must neither clear them nor take the index-loading shortcut.
-        let local_surface = self.recycle_bin.is_open() || self.block_listing.is_some();
+        // The recycle bin owns its rows; an index request must neither clear
+        // them nor take the index-loading shortcut.
+        let local_surface = self.recycle_bin.is_open();
         // The all-files view can only be final once the index has settled. Querying a growing
         // index would publish a partial total that climbs in steps as batches land, and each query
         // is a full index scan; the status poll asks for the one result set of the completed index
@@ -441,9 +425,9 @@ impl CairnApp {
         true
     }
 
-    /// Hands the table to rows that do not come from the index (a block listing
-    /// or the recycle bin): an index answer still in flight is cancelled and the
-    /// active session released, so it cannot splice into the new rows.
+    /// Hands the table to rows that do not come from the index (the recycle
+    /// bin): an index answer still in flight is cancelled and the active session
+    /// released, so it cannot splice into the new rows.
     pub(crate) fn take_table_for_local_rows(&mut self) {
         self.supersede_index_query();
         self.query.coordinator.set_cancelled(false);
@@ -510,19 +494,13 @@ impl CairnApp {
     /// shows on screen. Used by the local scan's status refresh: a refresh that cleared the table
     /// would flicker once the query takes longer than the poll interval, which is how a
     /// progressive index turns into a loading animation that never ends. Skipped while a query is
-    /// already in flight; that answer is newer than the request would be. A hidden table (Treemap
-    /// or Recycle Bin) is never refreshed in the background.
+    /// already in flight; that answer is newer than the request would be. A hidden table (the
+    /// Recycle Bin) is never refreshed in the background.
     pub fn refresh_results(&mut self, cx: &mut Context<Self>) {
-        // A block listing owns the table rows; a status refresh must not
-        // replace them with a filtered first page.
-        if self.block_listing.is_some() {
-            return;
-        }
         // A cancelled query is a stop, not a pause: only explicit input asks
         // for a new one.
         if !self.query.coordinator.can_background_refresh()
             || self.recycle_bin.is_open()
-            || self.drive_view.is_some()
             || self.query.rejection.is_some()
         {
             return;
@@ -549,9 +527,6 @@ impl CairnApp {
         if let Some(mac) = self.query.active_filter.query_macro() {
             query = format!("{mac} {query}");
         }
-        if let Some(drive) = self.query.scope_drive {
-            query = format!("{}: {query}", drive.to_ascii_uppercase());
-        }
         SearchCommand {
             query,
             defaults: query_defaults,
@@ -568,10 +543,6 @@ impl CairnApp {
         // stable for every text path.
         if self.recycle_bin.is_open() {
             self.filter_recycle_bin(cx);
-            return;
-        }
-        if self.block_listing.is_some() {
-            self.filter_block_listing(cx);
             return;
         }
         let command = self.build_search_command(change != ResultSetChange::Background);
@@ -881,17 +852,16 @@ mod tests {
     #[test]
     fn a_type_filter_counts_as_a_query_without_any_text() {
         assert!(
-            narrows_the_result_set("", None, Some("exe:")),
+            narrows_the_result_set("", Some("exe:")),
             "可执行文件 with an empty box is still a constraint"
         );
-        assert!(narrows_the_result_set("report", None, None));
-        assert!(narrows_the_result_set("", Some('c'), None));
+        assert!(narrows_the_result_set("report", None));
         assert!(
-            !narrows_the_result_set("", None, None),
-            "no text, no scope, no filter and no category is the idle state"
+            !narrows_the_result_set("", None),
+            "no text and no filter is the idle state"
         );
         assert!(
-            !narrows_the_result_set("   ", None, None),
+            !narrows_the_result_set("   ", None),
             "whitespace alone is not a query"
         );
     }

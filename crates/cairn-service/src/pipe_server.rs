@@ -20,8 +20,7 @@ use cairn_protocol::codec::{encode_frame_into, peek_frame_header, try_decode_fra
 use cairn_protocol::message::{
     ClientRequest, Envelope, FileRowData, ResponsePayload, ERROR_CODE_HANDSHAKE_REQUIRED,
     ERROR_CODE_INVALID_REQUEST, ERROR_CODE_PROTOCOL_VERSION_MISMATCH, ERROR_CODE_QUERY_TOO_COMPLEX,
-    ERROR_CODE_SESSION_EXPIRED, MAX_SORT_KEYS, MAX_TREE_DEPTH, PIPE_NAME, PRODUCT_VERSION,
-    WIRE_GUARD,
+    ERROR_CODE_SESSION_EXPIRED, MAX_SORT_KEYS, PIPE_NAME, PRODUCT_VERSION, WIRE_GUARD,
 };
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -32,18 +31,10 @@ use tracing::{error, info, warn};
 const WRITE_BUF_SHRINK_THRESHOLD_BYTES: usize = 256 * 1024;
 const WRITE_BUF_RETAIN_BYTES: usize = 64 * 1024;
 
-/// Releases oversized response buffer capacity after large `GetTree` or `GetRows` frames.
+/// Releases oversized response buffer capacity after large `GetRows` frames.
 fn shrink_oversized_write_buf(buf: &mut Vec<u8>) {
     if buf.is_empty() && buf.capacity() > WRITE_BUF_SHRINK_THRESHOLD_BYTES {
         buf.shrink_to(WRITE_BUF_RETAIN_BYTES);
-    }
-}
-
-/// The wire form of a tree failure: the code chooses the client's copy.
-fn tree_error_payload(reason: crate::sync_engine::TreeUnavailable) -> ResponsePayload {
-    ResponsePayload::Error {
-        code: reason.code(),
-        message: reason.message().to_string(),
     }
 }
 
@@ -295,10 +286,7 @@ async fn handle_client(
                         if matches!(req, ClientRequest::Hello { .. }) {
                             hello_done = true;
                         }
-                        let _heavy_permit = if matches!(
-                            req,
-                            ClientRequest::Query { .. } | ClientRequest::GetTree { .. }
-                        ) {
+                        let _heavy_permit = if matches!(req, ClientRequest::Query { .. }) {
                             Some(heavy_tasks.clone().acquire_owned().await.map_err(|_| {
                                 std::io::Error::other("heavy request limiter closed")
                             })?)
@@ -649,12 +637,6 @@ fn process_request(
         ClientRequest::GetContentIndexStatus => ResponsePayload::ContentIndexStatus {
             status: engine.content_index_status(),
         },
-        ClientRequest::GetTree { path, max_depth } => {
-            match engine.treemap_tree(&path, tree_depth(max_depth)) {
-                Ok(entries) => ResponsePayload::TreeResult { path, entries },
-                Err(reason) => tree_error_payload(reason),
-            }
-        }
         ClientRequest::CancelContentIndex => ResponsePayload::CancelContentIndexAck {
             success: engine.disable_content_index().is_ok(),
         },
@@ -742,39 +724,8 @@ fn process_request(
     }
 }
 
-/// Clamps a client's requested tree depth to the frame budget.
-fn tree_depth(requested: usize) -> usize {
-    requested.min(MAX_TREE_DEPTH)
-}
-
 #[cfg(test)]
 mod tests {
-
-    #[test]
-    fn tree_failures_carry_distinct_protocol_codes() {
-        use crate::sync_engine::TreeUnavailable;
-        for (reason, expected) in [
-            (
-                TreeUnavailable::NotIndexed,
-                cairn_protocol::message::ERROR_CODE_TREE_NOT_INDEXED,
-            ),
-            (
-                TreeUnavailable::NotDirectory,
-                cairn_protocol::message::ERROR_CODE_TREE_NOT_DIRECTORY,
-            ),
-            (
-                TreeUnavailable::TooLarge,
-                cairn_protocol::message::ERROR_CODE_TREE_TOO_LARGE,
-            ),
-        ] {
-            match tree_error_payload(reason) {
-                cairn_protocol::message::ResponsePayload::Error { code, .. } => {
-                    assert_eq!(code, expected)
-                }
-                other => panic!("a tree failure became {other:?}"),
-            }
-        }
-    }
     use super::*;
     use crate::config::ServiceConfig;
     use cairn_core::sort::SortColumn;
@@ -822,13 +773,6 @@ mod tests {
             ResponsePayload::Error { code, message } => (code, message),
             other => panic!("expected a denial, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn a_tree_request_cannot_outgrow_the_frame_budget() {
-        assert_eq!(tree_depth(0), 0);
-        assert_eq!(tree_depth(2), 2);
-        assert_eq!(tree_depth(6), MAX_TREE_DEPTH);
     }
 
     #[test]

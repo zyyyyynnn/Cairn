@@ -6,7 +6,7 @@
       <img src="docs/cairn-header-dark.png" alt="Cairn" height="44">
     </picture>
   </h1>
-  <p><strong>面向 Windows 10/11 的高性能本地文件搜索与磁盘空间可视化工作台</strong></p>
+  <p><strong>面向 Windows 10/11 的高性能本地文件搜索与索引工作台</strong></p>
   <p>
     <a href="LICENSE"><img alt="Apache-2.0 许可证" height="24" src="https://img.shields.io/github/license/zyyyyynnn/Cairn?style=for-the-badge&amp;label=LICENSE&amp;labelColor=3F444A&amp;color=6B6E75"></a>
     <img src="https://img.shields.io/badge/-Rust-786B65?style=for-the-badge&amp;logo=rust&amp;logoColor=white&amp;labelColor=3F444A" height="24" alt="Rust" title="Rust">
@@ -16,13 +16,9 @@
   </p>
 </div>
 
-<p align="center">
-  <img src="docs/cairn-poster.png" alt="Cairn 界面概览" width="100%">
-</p>
-
 ## 项目概览
 
-Cairn 将本地文件检索与磁盘空间占用分析收敛于同一桌面工作台。底层直接解析 NTFS `$MFT` 主文件表并订阅 USN 变更日志，在低内存占用下完成冷启动加载、目录体量聚合与实时增量同步。
+Cairn 将本地文件检索与多来源索引收敛于同一桌面工作台。底层直接解析 NTFS `$MFT` 主文件表并订阅 USN 变更日志，在低内存占用下完成冷启动加载、目录大小聚合与实时增量同步。
 
 桌面端基于 GPUI Kit 构建硬件加速界面，通过异步 Windows 命名管道与后台索引服务 `CairnService` 通信解耦；可选全文检索由独立子进程 `CairnWorker.exe` 承担文档提取与 Tantivy 索引写入。
 
@@ -31,7 +27,7 @@ Cairn 将本地文件检索与磁盘空间占用分析收敛于同一桌面工�
 - **NTFS 实时索引**：直接读取 `$MFT` 记录与非常驻 Runlist，结合 USN Journal 增量回放、缓存校验与离线卷重连恢复。
 - **结构化查询引擎**：支持布尔逻辑、通配符、正则表达式、大小/时间范围、类型过滤与多卷并行施瓦茨变换排序。
 - **进程隔离全文检索**：内置 CJK 双字与拉丁混合分词器，支持纯文本、代码、PDF 与 DOCX 内容提取。
-- **Treemap 磁盘空间分析**：基于 Squarified 算法构建交互式矩形树图，支持连续缩放平移、下钻导航与选中淡化。
+- **索引平台**：任意文件夹索引源、可选扩展属性索引与有界只读索引日志，均由后台服务统一管理；`CairnCli` 提供来源管理、重扫、属性索引与日志查询。
 - **原生 Shell 与回收站集成**：提供虚拟滚动结果表、中英双语切换、Windows 回收站枚举还原与系统原生属性对话框联动。
 - **安全与权限边界**：命名管道拒绝远程客户端，按调用方访问令牌实施鉴权，配置文件与索引存储强制绑定系统级安全描述符。
 
@@ -39,7 +35,7 @@ Cairn 将本地文件检索与磁盘空间占用分析收敛于同一桌面工�
 
 | 层级 | 技术 | 职责 |
 | --- | --- | --- |
-| 桌面界面 | Rust、GPUI Kit、Fluent | GPU 渲染界面、固定行高虚拟滚动、Treemap 画布与中英双语本地化 |
+| 桌面界面 | Rust、GPUI Kit、Fluent | GPU 渲染界面、固定行高虚拟滚动与中英双语本地化 |
 | 进程通信 | Tokio Named Pipe、Postcard、CRC32 | 定长帧编解码、超时与背压控制、会话分页缓存与增量状态同步 |
 | 文件系统 | Win32 Storage / IO API、`cairn-ntfs` | `$MFT` 扇区流式解析、USN 变更日志轮询与目录大小聚合 |
 | 全文索引 | Tantivy 0.27、lopdf、quick-xml、zip | CJK 双字分词、多格式文本提取、倒排索引构建与匹配摘要生成 |
@@ -94,14 +90,14 @@ cargo run -p xtask -- check
 
 ```text
 crates/
-  cairn-core/      查询语法 AST、过滤评估、自然排序与 Treemap 布局算法
+  cairn-core/      查询语法 AST、过滤评估、自然排序与目录大小聚合
   cairn-protocol/  Named Pipe 帧协议、Postcard 载荷与状态数据结构
   cairn-ntfs/      NTFS 引导扇区、$MFT 记录、Runlist 与 USN 日志解析
   cairn-content/   Tantivy 全文索引、CJK 分词器与文档内容提取器
   cairn-client/    异步 Named Pipe 客户端、版本握手与错误分类
   cairn-service/   CairnService 系统服务、多卷同步引擎、会话缓存与调用方鉴权
   cairn-worker/    全文索引提取与合并隔离子进程
-  cairn-app/       GPUI Kit 桌面客户端、虚拟表格、Treemap 与 Shell 集成
+  cairn-app/       GPUI Kit 桌面客户端、虚拟表格与 Shell 集成
   cairn-cli/       命令行检索与 CSV / JSON 导出工具
   cairn-ui/        共享品牌、主题令牌与组件主题适配
   cairn-setup/     GPUI 安装/卸载前端与 MSI 载荷
@@ -118,14 +114,13 @@ docs/              产品规格、工程架构与外部调研文档
 | [产品规格](docs/SPEC.md) | 产品范围、需求 ID、性能预算与验收标准 |
 | [界面与交互](docs/product/ui.md) | 窗口布局、设计令牌、键盘导航与无障碍规范 |
 | [查询语法](docs/product/search-syntax.md) | 布尔表达式、宏、属性过滤与全文检索语法 |
-| [Treemap 视图](docs/product/treemap.md) | 磁盘空间聚合、Squarified 布局与缩放平移交互 |
 | [品牌资产](docs/product/brand.md) | 图标母版、光栅尺寸阶梯与使用位置 |
 | [系统架构](docs/engineering/architecture.md) | Crate 边界、进程拓扑与模块职责 |
 | [索引与同步](docs/engineering/indexing.md) | `$MFT` 扫描、USN 对齐、缓存持久化与内容索引流水线 |
 | [索引平台设计](docs/engineering/index-platform.md) | 文件夹索引源、属性索引与只读索引日志的范围、接口与风险 |
 | [前端与 GPUI](docs/engineering/frontend.md) | 布局、焦点、IME 与窗口行为 |
 | [IPC 与安全](docs/engineering/ipc-security.md) | 协议帧限制、管道 ACL、调用方令牌鉴权与配置保护 |
-| [性能](docs/engineering/performance.md) | 性能目标、内存与 Treemap 预算 |
+| [性能](docs/engineering/performance.md) | 性能目标、内存预算与查询延迟 |
 | [质量](docs/engineering/quality.md) | 测试分层与 CI 质量门禁 |
 | [打包与发布](docs/engineering/release.md) | GPUI Setup、WiX MSI、校验清单与发布门禁 |
 | [研究与竞品](docs/research/README.md) | 外部产品调研与证据索引 |

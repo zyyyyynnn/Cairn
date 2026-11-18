@@ -4,9 +4,8 @@
 
 use super::*;
 use crate::persistence;
-use crate::sync_engine::treemap_build::budgeted_tree_depth;
 use crate::sync_engine::volume_index::BitSet;
-use crate::sync_engine::{MultiVolumeEngine, TreeUnavailable, VolumeIndex};
+use crate::sync_engine::{MultiVolumeEngine, VolumeIndex};
 use cairn_core::engine::CancellationToken;
 use cairn_core::model::FileRecord;
 use cairn_core::sort::SortColumn;
@@ -58,86 +57,6 @@ fn directory_sizes_follow_file_resizes_and_deletes() {
     assert_eq!(vol.records()[record_index(&vol, 1) as usize].size, 0);
     vol.apply_usn_changes([UsnChange::Deleted { frn: 4 }]);
     assert_eq!(vol.records()[record_index(&vol, 1) as usize].size, 0);
-}
-
-/// One oversized subtree shallows its own depth instead of failing the request, because the
-/// children it does get still carry exact totals.
-#[test]
-fn an_oversized_subtree_shallows_its_depth_before_failing() {
-    // Depth 2 wants 500 entries, depth 1 wants 40, and the budget is 100.
-    assert_eq!(
-        budgeted_tree_depth(|depth| if depth == 2 { 500 } else { 40 }, 2, 100),
-        Some((1, 40))
-    );
-
-    // A subtree that fits is never shallowed.
-    assert_eq!(budgeted_tree_depth(|_| 40, 2, 100), Some((2, 40)));
-
-    // Even the immediate children over the budget leaves no answer to give.
-    assert_eq!(budgeted_tree_depth(|_| 500, 2, 100), None);
-
-    // A caller who asked for one level is never served a deeper tree.
-    assert_eq!(budgeted_tree_depth(|_| 10, 1, 100), Some((1, 10)));
-}
-
-/// The budget decides the depth and the built tree must then fit it. A directory whose
-/// two-level subtree overflows one response is served one level shallower, with the exact
-/// totals on the capped leaves, instead of failing the request.
-#[test]
-fn a_tree_over_the_entry_budget_is_served_one_level_shallower() {
-    let temp_dir = tempfile::tempdir().expect("tempdir");
-    let engine = MultiVolumeEngine::with_index_dir_and_drives(temp_dir.path(), vec![]);
-
-    // Two children, one of them holding one entry more than a whole response may carry:
-    // depth 2 counts 1 + 2 + 100_000, depth 1 counts 3.
-    let deep = MultiVolumeEngine::MAX_TREE_ENTRIES;
-    let mut items = vec![
-        index_item(1, 0, "C:", true),
-        index_item(2, 1, "Huge", true),
-        index_item(3, 2, "Big", true),
-        index_item(4, 2, "Small", true),
-    ];
-    for offset in 0..deep {
-        items.push(index_item(
-            5 + offset as u64,
-            3,
-            &format!("f{offset}"),
-            false,
-        ));
-    }
-    let mut vol = VolumeIndex::new('C');
-    vol.ingest_items(items);
-    engine.add_volume(vol);
-
-    let entries = engine
-        .treemap_tree("C:\\Huge", 2)
-        .expect("one level fits the budget");
-    assert_eq!(
-        entries.iter().map(|entry| entry.depth).max(),
-        Some(1),
-        "the response must stop at the depth the budget paid for"
-    );
-    assert_eq!(
-        entries.len(),
-        3,
-        "the root and its two children, and nothing from the level that overflowed"
-    );
-    let big = entries
-        .iter()
-        .find(|entry| entry.name == "Big")
-        .expect("the capped directory is still listed");
-    assert_eq!(
-        big.descendant_items, deep,
-        "a capped node carries the exact total the summary block stands for"
-    );
-
-    assert!(
-        matches!(
-            engine.treemap_tree("C:\\Huge\\Big", 2),
-            Err(TreeUnavailable::TooLarge)
-        ),
-        "a directory whose immediate children overflow has no shallower answer"
-    );
 }
 
 #[test]

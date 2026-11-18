@@ -52,9 +52,6 @@ impl CairnApp {
             // The bin is an in-memory listing, so its order is applied here instead
             // of asking the service for a new page sorted by the same column.
             self.sort_recycle_bin(cx);
-        } else if self.block_listing.is_some() {
-            // A summary block listing is in memory too: sort it locally.
-            self.sort_block_listing(cx);
         } else {
             self.request_result_set(ResultSetChange::InPlace, cx);
         }
@@ -74,7 +71,7 @@ impl CairnApp {
     /// Shows or hides one table column in index queries. Locked columns remain visible, and hiding
     /// a sorted column prunes it from `sort_spec` so the active order stays inspectable.
     pub(crate) fn toggle_table_column(&mut self, col: TableColumn, cx: &mut Context<Self>) {
-        if col.is_locked() || self.recycle_bin.is_open() || self.block_listing.is_some() {
+        if col.is_locked() || self.recycle_bin.is_open() {
             return;
         }
         let shown = !self.settings.columns.is_column_shown(col);
@@ -134,10 +131,9 @@ impl CairnApp {
     }
 
     fn toggle_flag(&mut self, flag: ToggleFlag, cx: &mut Context<Self>) {
-        // Both in-place filters honor only case sensitivity; the other flags
-        // have no effect on their rows.
-        if (self.recycle_bin.is_open() || self.block_listing.is_some()) && flag != ToggleFlag::Case
-        {
+        // The bin filter honors only case sensitivity; the other flags
+        // have no effect on its rows.
+        if self.recycle_bin.is_open() && flag != ToggleFlag::Case {
             return;
         }
         match flag {
@@ -159,7 +155,7 @@ impl CairnApp {
     }
 
     fn toggle_exclusion_filter(&mut self, flag: ExclusionFlag, cx: &mut Context<Self>) {
-        if self.recycle_bin.is_open() || self.block_listing.is_some() {
+        if self.recycle_bin.is_open() {
             return;
         }
         match flag {
@@ -207,26 +203,17 @@ impl CairnApp {
     }
 
     pub fn set_filter(&mut self, category: FilterCategory, cx: &mut Context<Self>) {
-        if self.query.active_filter == category
-            && self.drive_view.is_none()
-            && !self.recycle_bin.is_open()
-            && self.block_listing.is_none()
-        {
+        if self.query.active_filter == category && !self.recycle_bin.is_open() {
             // Re-selecting the active location refreshes it, matching the
-            // recycle-bin and drive entries.
+            // recycle-bin entry.
             self.request_result_set(ResultSetChange::Refresh, cx);
             cx.notify();
             return;
         }
-        // Leaving the visualization releases its partial tree instead of keeping
-        // it alive behind the table, and starts a fresh table entrance.
-        // `leave_drive_view` opens the session for the view it just emptied.
-        self.leave_drive_view();
-        // The bin's and a block listing's filters are location-local searches,
-        // not queries: the category's index search and history entry must not
-        // inherit the text, and the bin's entry already holds the query that
-        // preceded it.
-        let leaving_filter = self.recycle_bin.is_open() || self.block_listing.take().is_some();
+        // The bin's filter is a location-local search, not a query: the
+        // category's index search and history entry must not inherit the text,
+        // and the bin's entry already holds the query that preceded it.
+        let leaving_filter = self.recycle_bin.is_open();
         if leaving_filter {
             self.query.search_input.clear();
         } else {
@@ -327,97 +314,7 @@ enum ExclusionFlag {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shell::block_listing::BlockListing;
     use core::prelude::rust_2021::test;
-
-    fn block_listing() -> BlockListing {
-        BlockListing::new(r"C:\Windows".to_string(), 2, Vec::new())
-    }
-
-    #[test]
-    fn leaving_a_block_listing_for_a_category_does_not_carry_its_filter() {
-        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
-            gpui_kit::init(cx);
-            let _ = gpui_kit::open_window(
-                gpui_kit::gpui::WindowOptions {
-                    show: false,
-                    focus: false,
-                    ..gpui_kit::gpui::WindowOptions::default()
-                },
-                cx,
-                |window, cx| {
-                    let app = cx.new(|cx| CairnApp::new(window, cx));
-
-                    app.update(cx, |this, cx| {
-                        this.query.search_input.set_text("kept query");
-                        this.record_nav_state();
-                        let previous = this.nav_history_index;
-                        this.block_listing = Some(block_listing());
-                        this.query.search_input.set_text("amd64");
-                        this.set_filter(FilterCategory::Document, cx);
-                        assert!(this.block_listing.is_none());
-                        assert!(this.query.search_input.text.is_empty());
-                        assert_eq!(this.nav_history[previous].text, "kept query");
-                        assert_eq!(this.nav_history[this.nav_history_index].text, "");
-                    });
-
-                    cx.quit();
-                    app
-                },
-            );
-        });
-    }
-
-    #[test]
-    fn search_flags_stay_fixed_while_a_block_listing_is_open() {
-        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
-            gpui_kit::init(cx);
-            let _ = gpui_kit::open_window(
-                gpui_kit::gpui::WindowOptions {
-                    show: false,
-                    focus: false,
-                    ..gpui_kit::gpui::WindowOptions::default()
-                },
-                cx,
-                |window, cx| {
-                    let app = cx.new(|cx| CairnApp::new(window, cx));
-
-                    app.update(cx, |this, cx| {
-                        this.block_listing = Some(block_listing());
-                        let flags = (
-                            this.query.whole_word,
-                            this.query.match_path,
-                            this.query.use_regex,
-                        );
-                        this.toggle_flag(ToggleFlag::WholeWord, cx);
-                        this.toggle_flag(ToggleFlag::MatchPath, cx);
-                        this.toggle_flag(ToggleFlag::Regex, cx);
-                        assert_eq!(
-                            (
-                                this.query.whole_word,
-                                this.query.match_path,
-                                this.query.use_regex,
-                            ),
-                            flags
-                        );
-                        let case_sensitive = this.query.case_sensitive;
-                        this.toggle_flag(ToggleFlag::Case, cx);
-                        assert_ne!(this.query.case_sensitive, case_sensitive);
-
-                        let hidden = this.settings.exclude_hidden;
-                        let system = this.settings.exclude_system;
-                        this.toggle_exclude_hidden(cx);
-                        this.toggle_exclude_system(cx);
-                        assert_eq!(this.settings.exclude_hidden, hidden);
-                        assert_eq!(this.settings.exclude_system, system);
-                    });
-
-                    cx.quit();
-                    app
-                },
-            );
-        });
-    }
 
     #[test]
     fn ui_zoom_and_sidebar_actions_update_state_and_theme() {
@@ -507,10 +404,6 @@ mod tests {
                         this.toggle_table_column(TableColumn::Optional(OptionalColumn::Length), cx);
                         assert!(!this.settings.columns.show_length);
                         assert_eq!(this.settings.columns.sort_spec, "size-asc");
-
-                        this.block_listing = Some(block_listing());
-                        this.toggle_table_column(TableColumn::Optional(OptionalColumn::Author), cx);
-                        assert!(!this.settings.columns.show_author);
                     });
 
                     cx.quit();

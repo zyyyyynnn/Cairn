@@ -34,7 +34,6 @@ impl CairnApp {
             recycle_bin_open: self.recycle_bin.is_open(),
             recycle_bin_loading: self.recycle_bin.is_loading(),
             recycle_bin_error: self.recycle_bin.error().is_some(),
-            block_listing_open: self.block_listing.is_some(),
             query_in_flight: self.query.is_searching(),
             index_catching_up: self.service.status.is_any_loading(),
             service_connected: self.service.connection.is_connected(),

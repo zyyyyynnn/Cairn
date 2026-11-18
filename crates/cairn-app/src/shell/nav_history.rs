@@ -16,85 +16,30 @@ pub const MAX_NAV_HISTORY: usize = 50;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NavState {
     pub text: String,
-    pub drive: Option<char>,
     pub filter: FilterCategory,
-    /// The disk visualization on screen, with the directory its canvas showed. `None` is the
-    /// results table, so one history walks across both views.
-    pub visualization: Option<(char, String)>,
 }
 
 impl CairnApp {
     pub fn can_go_back(&self) -> bool {
         // The bin is one location step; Back leaves it for the query that was
         // active before it, even when that query is the first history entry.
-        if self.recycle_bin.is_open() {
-            return true;
-        }
-        // A block listing leaves for the Treemap that owns the block.
-        if self.block_listing.is_some() {
-            return true;
-        }
-        // Inside the visualization, Back walks the drill path first and only then leaves the view:
-        // the view is one history step, not a dead end at its own root.
-        if self.drive_view.is_some() {
-            return self.drill_back_is_available() || self.nav_history_index > 0;
-        }
-        self.nav_history_index > 0
-    }
-
-    /// The Treemap can rise to its parent directory; the table and bin have no
-    /// path hierarchy for this command.
-    pub fn can_go_up(&self) -> bool {
-        self.drive_view.is_some()
-            && self
-                .treemap_state
-                .as_ref()
-                .is_some_and(|state| state.can_go_up())
+        self.recycle_bin.is_open() || self.nav_history_index > 0
     }
 
     pub fn can_go_forward(&self) -> bool {
         // A location step has no forward meaning until it is left. Keeping the
         // toolbar Forward disabled prevents an action that would advance the
-        // query history while the bin or a block listing stays on screen.
-        if self.recycle_bin.is_open() || self.block_listing.is_some() {
+        // query history while the bin stays on screen.
+        if self.recycle_bin.is_open() {
             return false;
         }
-        if self.drive_view.is_some() {
-            return self.drill_forward_is_available()
-                || self.nav_history_index + 1 < self.nav_history.len();
-        }
         self.nav_history_index + 1 < self.nav_history.len()
-    }
-
-    fn drill_back_is_available(&self) -> bool {
-        self.treemap_state
-            .as_ref()
-            .is_some_and(|state| state.can_go_back())
-    }
-
-    fn drill_forward_is_available(&self) -> bool {
-        self.treemap_state
-            .as_ref()
-            .is_some_and(|state| state.can_go_forward())
-    }
-
-    /// The disk visualization a history entry should reopen: the drive and the directory the
-    /// canvas holds right now.
-    fn current_visualization(&self) -> Option<(char, String)> {
-        let drive = self.drive_view?;
-        let dir = self
-            .treemap_state
-            .as_ref()
-            .map(|state| state.current_dir().to_string())?;
-        Some((drive, dir))
     }
 
     pub fn record_nav_state(&mut self) {
         let current = NavState {
             text: self.query.search_input.text.trim().to_string(),
-            drive: self.query.scope_drive,
             filter: self.query.active_filter,
-            visualization: self.current_visualization(),
         };
         if let Some(last) = self.nav_history.get(self.nav_history_index) {
             if last == &current {
@@ -114,28 +59,11 @@ impl CairnApp {
         self.nav_history_index = self.nav_history.len() - 1;
     }
 
-    /// Records where the canvas stands in the entry that describes it, so Back returns to the
-    /// directory the person was looking at rather than the one the view opened on.
-    pub(crate) fn sync_visualization_dir(&mut self) {
-        let Some(dir) = self
-            .treemap_state
-            .as_ref()
-            .map(|state| state.current_dir().to_string())
-        else {
-            return;
-        };
-        if let Some(state) = self.nav_history.get_mut(self.nav_history_index) {
-            if let Some((_, recorded)) = &mut state.visualization {
-                *recorded = dir;
-            }
-        }
-    }
-
     pub fn update_current_nav_state_text(&mut self) {
-        // While the bin or a block listing is open the search box filters that
-        // location in place, not the query this entry describes; writing it
-        // back would erase the text the person left before entering.
-        if self.recycle_bin.is_open() || self.block_listing.is_some() {
+        // While the bin is open the search box filters that location in place,
+        // not the query this entry describes; writing it back would erase the
+        // text the person left before entering.
+        if self.recycle_bin.is_open() {
             return;
         }
         if let Some(state) = self.nav_history.get_mut(self.nav_history_index) {
@@ -149,120 +77,46 @@ impl CairnApp {
     pub(crate) fn return_from_recycle_bin(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.recycle_bin.leave();
         let index = self.nav_history_index;
-        self.restore_nav_state(index, window, cx);
+        self.restore_nav_state(index, cx);
         // The bin owned the results focus; after leaving it the query box is
         // the next logical target, so the person can type immediately.
         self.query.search_focus.focus(window, cx);
     }
 
     pub fn go_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // A summary block listing is not a query state: Back rebuilds the
-        // Treemap at the directory that owns the block, keeping the entry's own
-        // query text and filter.
-        if let Some(dir) = self
-            .block_listing
-            .as_ref()
-            .map(|listing| listing.directory().to_string())
-        {
-            let index = self.nav_history_index;
-            self.restore_nav_state_at(index, Some(&dir), window, cx);
-            return;
-        }
         if self.recycle_bin.is_open() {
             self.return_from_recycle_bin(window, cx);
-            return;
-        }
-        if self.drive_view.is_some() {
-            if self.drill_back_is_available() {
-                self.treemap_drill_back(window, cx);
-                return;
-            }
-            // The drill path is spent, so Back leaves the visualization for the step before it
-            // rather than reporting a dead end at the view's own root.
-            if self.nav_history_index > 0 {
-                self.sync_visualization_dir();
-                self.update_current_nav_state_text();
-                self.nav_history_index -= 1;
-                self.restore_nav_state(self.nav_history_index, window, cx);
-            }
             return;
         }
         if self.can_go_back() {
             self.update_current_nav_state_text();
             self.nav_history_index -= 1;
-            self.restore_nav_state(self.nav_history_index, window, cx);
+            self.restore_nav_state(self.nav_history_index, cx);
         }
     }
 
-    /// Rises to the parent directory of the Treemap. A table or bin view has
-    /// no parent path, so the command does nothing there.
-    pub fn go_up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.drive_view.is_some() {
-            self.treemap_drill_up(window, cx);
-        }
-    }
-
-    pub fn go_forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.recycle_bin.is_open() || self.block_listing.is_some() {
-            // Forward is disabled in the bin and a block listing; the guard
-            // keeps a stale key or programmatic dispatch from advancing history
-            // behind the location.
-            return;
-        }
-        if self.drive_view.is_some() {
-            if self.drill_forward_is_available() {
-                self.treemap_drill_forward(window, cx);
-                return;
-            }
-            if self.nav_history_index + 1 < self.nav_history.len() {
-                self.sync_visualization_dir();
-                self.update_current_nav_state_text();
-                self.nav_history_index += 1;
-                self.restore_nav_state(self.nav_history_index, window, cx);
-            }
+    pub fn go_forward(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        // Forward is disabled in the bin; the guard keeps a stale key or
+        // programmatic dispatch from advancing history behind the location.
+        if self.recycle_bin.is_open() {
             return;
         }
         if self.can_go_forward() {
             self.update_current_nav_state_text();
             self.nav_history_index += 1;
-            self.restore_nav_state(self.nav_history_index, window, cx);
+            self.restore_nav_state(self.nav_history_index, cx);
         }
     }
 
-    fn restore_nav_state(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        self.restore_nav_state_at(index, None, window, cx);
-    }
-
-    /// Restores one entry; `visualization_dir` reopens a visualization entry at
-    /// another directory while its query text, scope and filter still come from
-    /// the entry.
-    fn restore_nav_state_at(
-        &mut self,
-        index: usize,
-        visualization_dir: Option<&str>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    /// Restores one entry's query text and filter and asks the service for its
+    /// result set.
+    fn restore_nav_state(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(state) = self.nav_history.get(index).cloned() else {
             return;
         };
-        let is_visualization = state.visualization.is_some();
-        match state.visualization {
-            Some((drive, recorded)) => {
-                let dir = visualization_dir.unwrap_or(recorded.as_str());
-                self.open_drive_at(drive, dir, window, cx);
-            }
-            None => self.leave_drive_view(),
-        }
         self.query.search_input.set_text(&state.text);
-        self.query.scope_drive = state.drive;
         self.query.active_filter = state.filter;
-        // A visualization entry owns the surface, so its table query is restored without running a
-        // search whose rows nobody can see.
-        if !is_visualization {
-            self.clear_block_listing();
-            self.request_result_set(ResultSetChange::Replace, cx);
-        }
+        self.request_result_set(ResultSetChange::Replace, cx);
         cx.notify();
     }
 }
@@ -351,203 +205,6 @@ mod tests {
                         assert_eq!(this.nav_history_index, 2);
                         assert!(this.can_go_back());
                         assert!(!this.can_go_forward());
-                    });
-
-                    cx.quit();
-                    app
-                },
-            );
-        });
-    }
-
-    #[test]
-    fn nav_history_preserves_browsing_dir_when_leaving_drive_view() {
-        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
-            gpui_kit::init(cx);
-            let _ = gpui_kit::open_window(
-                gpui_kit::gpui::WindowOptions {
-                    show: false,
-                    focus: false,
-                    ..gpui_kit::gpui::WindowOptions::default()
-                },
-                cx,
-                |window, cx| {
-                    let app = cx.new(|cx| CairnApp::new(window, cx));
-
-                    app.update(cx, |this, cx| {
-                        assert_eq!(this.nav_history_index, 0);
-                        assert!(this.drive_view.is_none());
-
-                        this.open_drive_visualization('C', window, cx);
-                        assert_eq!(this.nav_history_index, 1);
-                        assert_eq!(this.drive_view, Some('C'));
-
-                        this.open_drive_at('C', r"C:\Windows", window, cx);
-
-                        this.go_back(window, cx);
-                        assert_eq!(this.nav_history_index, 0);
-                        assert!(this.drive_view.is_none());
-
-                        let recorded_dir = this.nav_history[1]
-                            .visualization
-                            .as_ref()
-                            .map(|(_, dir)| dir.as_str());
-                        assert_eq!(
-                            recorded_dir,
-                            Some(r"C:\Windows"),
-                            "drive history entry must preserve browsing path when leaving drive view"
-                        );
-
-                        this.go_forward(window, cx);
-                        assert_eq!(this.nav_history_index, 1);
-                        assert_eq!(this.drive_view, Some('C'));
-                        assert_eq!(
-                            this.treemap_state.as_ref().map(|s| s.current_dir()),
-                            Some(r"C:\Windows")
-                        );
-
-                        this.open_drive_visualization('D', window, cx);
-                        assert_eq!(this.drive_view, Some('D'));
-                        this.open_drive_at('D', r"D:\Games", window, cx);
-
-                        this.go_back(window, cx);
-                        assert_eq!(this.drive_view, Some('C'));
-                        assert_eq!(
-                            this.treemap_state.as_ref().map(|s| s.current_dir()),
-                            Some(r"C:\Windows")
-                        );
-
-                        this.go_forward(window, cx);
-                        assert_eq!(this.drive_view, Some('D'));
-                        assert_eq!(
-                            this.treemap_state.as_ref().map(|s| s.current_dir()),
-                            Some(r"D:\Games")
-                        );
-                    });
-
-                    cx.quit();
-                    app
-                },
-            );
-        });
-    }
-
-    #[test]
-    fn a_block_listing_disables_forward_until_it_is_left() {
-        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
-            gpui_kit::init(cx);
-            let _ = gpui_kit::open_window(
-                gpui_kit::gpui::WindowOptions {
-                    show: false,
-                    focus: false,
-                    ..gpui_kit::gpui::WindowOptions::default()
-                },
-                cx,
-                |window, cx| {
-                    let app = cx.new(|cx| CairnApp::new(window, cx));
-
-                    app.update(cx, |this, cx| {
-                        this.query.active_filter = FilterCategory::Document;
-                        this.record_nav_state();
-                        this.query.active_filter = FilterCategory::Picture;
-                        this.record_nav_state();
-                        this.go_back(window, cx);
-                        assert!(this.can_go_forward());
-                        let index = this.nav_history_index;
-
-                        this.block_listing = Some(crate::shell::block_listing::BlockListing::new(
-                            r"C:\Windows".to_string(),
-                            2,
-                            Vec::new(),
-                        ));
-                        assert!(!this.can_go_forward());
-                        this.go_forward(window, cx);
-                        assert_eq!(this.nav_history_index, index);
-                    });
-
-                    cx.quit();
-                    app
-                },
-            );
-        });
-    }
-
-    #[test]
-    fn a_block_listing_filter_stays_out_of_the_query_history() {
-        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
-            gpui_kit::init(cx);
-            let _ = gpui_kit::open_window(
-                gpui_kit::gpui::WindowOptions {
-                    show: false,
-                    focus: false,
-                    ..gpui_kit::gpui::WindowOptions::default()
-                },
-                cx,
-                |window, cx| {
-                    let app = cx.new(|cx| CairnApp::new(window, cx));
-
-                    app.update(cx, |this, _cx| {
-                        this.query.search_input.set_text("before the block");
-                        this.record_nav_state();
-                        this.block_listing = Some(crate::shell::block_listing::BlockListing::new(
-                            r"C:\Windows".to_string(),
-                            2,
-                            Vec::new(),
-                        ));
-                        this.query.search_input.set_text("amd64");
-                        this.update_current_nav_state_text();
-                        assert_eq!(
-                            this.nav_history[this.nav_history_index].text,
-                            "before the block"
-                        );
-                    });
-
-                    cx.quit();
-                    app
-                },
-            );
-        });
-    }
-
-    #[test]
-    fn back_from_a_block_listing_restores_the_entry_query_text() {
-        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
-            gpui_kit::init(cx);
-            let _ = gpui_kit::open_window(
-                gpui_kit::gpui::WindowOptions {
-                    show: false,
-                    focus: false,
-                    ..gpui_kit::gpui::WindowOptions::default()
-                },
-                cx,
-                |window, cx| {
-                    let app = cx.new(|cx| CairnApp::new(window, cx));
-
-                    app.update(cx, |this, cx| {
-                        this.query.search_input.set_text("before the block");
-                        this.query.active_filter = FilterCategory::Document;
-                        this.open_drive_visualization('C', window, cx);
-                        // The hand-off empties the box and resets the scope and
-                        // filter for the listing, and the block can live below
-                        // the canvas root.
-                        this.query.search_input.set_text("amd64");
-                        this.query.scope_drive = None;
-                        this.query.active_filter = FilterCategory::All;
-                        this.block_listing = Some(crate::shell::block_listing::BlockListing::new(
-                            r"C:\Windows\System32".to_string(),
-                            2,
-                            Vec::new(),
-                        ));
-                        this.go_back(window, cx);
-                        assert!(this.block_listing.is_none());
-                        assert_eq!(this.drive_view, Some('C'));
-                        assert_eq!(
-                            this.treemap_state.as_ref().map(|s| s.current_dir()),
-                            Some(r"C:\Windows\System32")
-                        );
-                        assert_eq!(this.query.search_input.text, "before the block");
-                        assert_eq!(this.query.active_filter, FilterCategory::Document);
-                        assert_eq!(this.query.scope_drive, Some('C'));
                     });
 
                     cx.quit();

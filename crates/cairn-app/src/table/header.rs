@@ -87,7 +87,7 @@ impl CairnApp {
         if col.is_locked() {
             return true;
         }
-        if self.recycle_bin.is_open() || self.block_listing.is_some() {
+        if self.recycle_bin.is_open() {
             return matches!(
                 col,
                 TableColumn::Name
@@ -313,7 +313,7 @@ impl CairnApp {
             Some(boundary) => cell.child(self.render_column_resize_handle(boundary, tokens, cx)),
             None => cell,
         };
-        if self.recycle_bin.is_open() || self.block_listing.is_some() {
+        if self.recycle_bin.is_open() {
             return cell.into_any_element();
         }
         let app = cx.entity();

@@ -2,9 +2,9 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! The one file-kind icon map shared by result rows and Treemap tiles.
+//! The one file-kind icon map shared by result rows.
 
-use cairn_core::treemap::FileKind;
+use cairn_core::FileKind;
 use gpui_kit::assets::IconName;
 
 /// The glyph for a file kind. The installed icon catalog carries every name, so

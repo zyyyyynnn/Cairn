@@ -185,7 +185,7 @@ MIT，随 PowerToys 免费开源（[GitHub](https://github.com/microsoft/PowerTo
 
 1. **快慢两段渐进呈现**（对照 QRY-01、QRY-06、CNT-06）：先 `CONTAINS` 快查上屏、`LIKE` 全量后到，配合 IPlugin/IDelayedExecutionPlugin 的 100ms 分级，是"首屏不等全量"的成熟范式；Cairn 的文件名查询是单引擎快路径；`content:` 的 `!` / `|` 组合走逐记录布尔慢路径，单查询至多 16 个内容词，纯析取为一次联合检索。正则与内容查询可采用"先出可用结果、全量后到"的交互模式；GUI 已能停止当前查询并丢弃迟到的回答，CNT-06 回填未就绪反馈可沿用同一停止语义。
 2. **输入平滑与习惯加权**（对照 QRY-05）：Input smoothing 与 Selected item weight（选中结果更快上升）+ `!!` 历史插件，与 Listary "smart order according to your habits" 互相印证"按使用习惯调权"是启动器类公认需求；可作 Cairn QRY-05 预排序索引之上的 P2 排序演进候选。
-3. **v2 重写的结构信号**（对照 SPEC §1.1、§2.3）：微软把启动器迁往新 UI 栈（Windows App SDK、Native AOT）并另立 Command Palette，旧 Run 仅维护——小窗启动器的 UI 栈迁移成本高。Cairn 走"完整窗口 + 高密度表格 + Treemap"（UI-01、DSV-07）与三者小窗形态结构性不同，无需跟进小窗，UI-08 热键唤起保留即可。
+3. **v2 重写的结构信号**（对照 SPEC §1.1、§2.3）：微软把启动器迁往新 UI 栈（Windows App SDK、Native AOT）并另立 Command Palette，旧 Run 仅维护——小窗启动器的 UI 栈迁移成本高。Cairn 当时走"完整窗口 + 高密度表格 + Treemap"（UI-01、DSV-07；Treemap 已删除），与三者小窗形态结构性不同，无需跟进小窗，UI-08 热键唤起保留即可。
 
 ---
 
