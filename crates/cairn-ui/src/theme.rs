@@ -88,6 +88,7 @@ pub fn contrast_ratio(foreground: Hsla, background: Hsla) -> f32 {
 /// state, independent of which direction it moves. A WCAG ratio compares two inks and calls a
 /// 1.089:1 hover acceptable; on a fill that lights a whole row, menu item or control, L\* is the
 /// scale the change is actually perceived on.
+#[cfg(test)]
 pub fn lightness_step(left: Hsla, right: Hsla) -> f32 {
     fn l_star(y: f32) -> f32 {
         if y > 0.008856 {
@@ -102,6 +103,7 @@ pub fn lightness_step(left: Hsla, right: Hsla) -> f32 {
 /// The color's position in OKLCH: perceived lightness in `0.0..=1.0`, chroma, and hue angle in
 /// degrees. A data plane chooses its hues on this scale, because equal numbers here are equal
 /// perceived steps in a way sRGB and HSL numbers are not.
+#[cfg(test)]
 pub fn oklch(color: Hsla) -> (f32, f32, f32) {
     let rgb = color.to_rgb();
     let (r, g, b) = (into_linear(rgb.r), into_linear(rgb.g), into_linear(rgb.b));
@@ -123,6 +125,7 @@ pub fn oklch(color: Hsla) -> (f32, f32, f32) {
 
 /// The CIE 76 difference between two rendered colors: the scale on which two surfaces placed side
 /// by side read as one color or as two. Around 2 is invisible at a glance, around 10 is obvious.
+#[cfg(test)]
 pub fn perceptual_distance(left: Hsla, right: Hsla) -> f32 {
     fn coordinates(color: Hsla) -> (f32, f32, f32) {
         let rgb = color.to_rgb();
@@ -155,6 +158,7 @@ pub const NEUTRAL_RAMP: [Hsla; 16] = gray::ALL;
 
 /// Whether an achromatic color is one of the ramp's steps. A data plane may add hues of its own; no
 /// neutral in the product may land between two steps.
+#[cfg(test)]
 pub fn is_neutral_ramp_step(color: Hsla) -> bool {
     let rgb = color.to_rgb();
     let near = |other: Hsla| {

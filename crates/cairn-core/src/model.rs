@@ -131,21 +131,6 @@ impl FileRecord {
     }
 
     #[inline(always)]
-    pub fn is_archive(&self) -> bool {
-        (self.flags & FLAG_ARCHIVE) != 0
-    }
-
-    #[inline(always)]
-    pub fn is_compressed(&self) -> bool {
-        (self.flags & FLAG_COMPRESSED) != 0
-    }
-
-    #[inline(always)]
-    pub fn is_sparse(&self) -> bool {
-        (self.flags & FLAG_SPARSE) != 0
-    }
-
-    #[inline(always)]
     pub fn is_reparse_point(&self) -> bool {
         (self.flags & FLAG_REPARSE_POINT) != 0
     }

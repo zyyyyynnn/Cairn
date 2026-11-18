@@ -120,18 +120,6 @@ impl DirectoryPathCache {
         self.get_parent_path_with_root(records, arena, &root, record_idx)
     }
 
-    /// Reconstructs the full parent directory path for `record_idx` under an arbitrary root path.
-    pub fn get_parent_path_for_root(
-        &self,
-        records: &[FileRecord],
-        arena: &NamePool,
-        root_prefix: &str,
-        record_idx: u32,
-    ) -> Arc<str> {
-        let root = normalize_root(root_prefix);
-        self.get_parent_path_with_root(records, arena, &root, record_idx)
-    }
-
     /// Reconstructs the parent directory path using a pre-normalized `Arc<str>` root ending in `\`.
     pub fn get_parent_path_with_root(
         &self,

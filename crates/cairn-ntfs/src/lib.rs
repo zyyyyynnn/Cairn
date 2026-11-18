@@ -26,7 +26,7 @@ pub use mft_reader::{
 };
 pub use runlist::{parse_runlist, DataRun};
 pub use usn::{parse_usn_records, ReadUsnJournalDataV0, UsnChange, UsnJournalData};
-pub use volume::{enumerate_fixed_drives, scan_live_volume_mft, VolumeError};
 #[cfg(windows)]
-pub use volume::{locate_mft_clusters, RawVolumeHandle};
+pub use volume::RawVolumeHandle;
+pub use volume::{enumerate_fixed_drives, scan_live_volume_mft, VolumeError};
 pub use volume_identity::{enumerate_volumes, parse_volume_path_names, VolumeIdentity};

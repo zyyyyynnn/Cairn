@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use tantivy::collector::{Collector, Count, SegmentCollector, TopDocs};
+use tantivy::collector::{Collector, SegmentCollector, TopDocs};
 use tantivy::fastfield::Column;
 use tantivy::query::{BooleanQuery, Occur, QueryParser, TermQuery};
 use tantivy::schema::IndexRecordOption;
@@ -302,14 +302,6 @@ impl ContentSearcher {
         let searcher = self.reader.searcher();
         let query = self.union_query(terms)?;
         self.collect_hits(&searcher, &query, &terms.join(" "), limit)
-    }
-
-    /// Number of documents the query matches, without scoring or stored reads.
-    pub fn count_hits(&self, query_str: &str) -> Result<usize, ContentIndexError> {
-        self.reader.reload()?;
-        let searcher = self.reader.searcher();
-        let query = self.parsed_query(query_str)?;
-        Ok(searcher.search(query.as_ref(), &Count)?)
     }
 
     fn conjunction_query(&self, terms: &[String]) -> Result<BooleanQuery, ContentIndexError> {

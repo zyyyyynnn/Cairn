@@ -330,10 +330,6 @@ impl FolderSource {
         self.live_file_bytes
     }
 
-    pub fn has_tombstones(&self) -> bool {
-        self.has_tombstones
-    }
-
     pub(crate) fn live_watch_enabled(&self) -> bool {
         self.live_watch_enabled
     }
