@@ -407,6 +407,7 @@ impl CairnApp {
         self.update_current_nav_state_text();
         self.query.search_input.clear();
         self.query.active_filter = FilterCategory::All;
+        self.query.source_scope = None;
         self.record_nav_state();
         self.request_result_set(ResultSetChange::Replace, cx);
         self.query.search_focus.focus(window, cx);
@@ -919,6 +920,10 @@ impl CairnApp {
             GroupCommand::OpenIndexJournal => {
                 self.close_group();
                 self.open_index_journal_dialog(window, cx);
+            }
+            GroupCommand::ManageFolderSources => {
+                self.close_group();
+                self.open_folder_sources_dialog(window, cx);
             }
             GroupCommand::RescanAll => {
                 self.close_group();

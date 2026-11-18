@@ -203,7 +203,11 @@ impl CairnApp {
     }
 
     pub fn set_filter(&mut self, category: FilterCategory, cx: &mut Context<Self>) {
-        if self.query.active_filter == category && !self.recycle_bin.is_open() {
+        // A file-type row, 所有文件 included, is a location: choosing it releases a folder-source
+        // scope. Re-selecting the same category while scoped is therefore a place change, not a
+        // refresh.
+        let had_scope = self.query.source_scope.take().is_some();
+        if self.query.active_filter == category && !self.recycle_bin.is_open() && !had_scope {
             // Re-selecting the active location refreshes it, matching the
             // recycle-bin entry.
             self.request_result_set(ResultSetChange::Refresh, cx);

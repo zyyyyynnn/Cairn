@@ -404,6 +404,7 @@ mod tests {
             defaults: Default::default(),
             sort_spec: cairn_core::sort::SortSpec::default(),
             first_page_limit: 50,
+            source_scope: None,
         }
     }
 

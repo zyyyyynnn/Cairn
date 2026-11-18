@@ -85,6 +85,8 @@ impl CairnApp {
             self.query.search_input.clear();
         }
         self.query.active_filter = FilterCategory::All;
+        // The bin is a location of its own, so no index source scopes its listing.
+        self.query.source_scope = None;
         self.results.rows_scroll.set_offset(Point::default());
         self.results.table.scroll_top = 0.0;
         // `begin_recycle_bin_load` opens the view and resets every part of the bin's state, so

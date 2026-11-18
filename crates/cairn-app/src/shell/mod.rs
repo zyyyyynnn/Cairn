@@ -14,6 +14,7 @@ pub(crate) mod command_groups;
 pub(crate) mod commands;
 pub(crate) mod dialogs;
 pub(crate) mod file_icon;
+pub(crate) mod folder_sources;
 #[cfg(windows)]
 pub(crate) mod hotkey;
 pub(crate) mod i18n;

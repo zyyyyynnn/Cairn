@@ -82,6 +82,7 @@ impl ServiceSession {
         defaults: QueryDefaults,
         sort_spec: &SortSpec,
         first_page_limit: usize,
+        source_scope: Option<SourceId>,
     ) -> Result<Envelope<ResponsePayload>, ClientError> {
         let raw_query = raw_query.to_string();
         let sort_spec = sort_spec.clone();
@@ -90,7 +91,14 @@ impl ServiceSession {
             let sort_spec = sort_spec.clone();
             Box::pin(async move {
                 client
-                    .query(query_id, &raw_query, defaults, &sort_spec, first_page_limit)
+                    .query(
+                        query_id,
+                        &raw_query,
+                        defaults,
+                        &sort_spec,
+                        first_page_limit,
+                        source_scope,
+                    )
                     .await
             })
         })

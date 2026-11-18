@@ -7,6 +7,7 @@
 use crate::app::CairnApp;
 use crate::search::filters::FilterCategory;
 use crate::search::ResultSetChange;
+use cairn_protocol::status::SourceKind;
 use gpui_kit::gpui::{Context, Window};
 
 /// Maximum number of navigation history states preserved in memory.
@@ -17,6 +18,7 @@ pub const MAX_NAV_HISTORY: usize = 50;
 pub struct NavState {
     pub text: String,
     pub filter: FilterCategory,
+    pub source_scope: Option<cairn_protocol::message::SourceId>,
 }
 
 impl CairnApp {
@@ -40,6 +42,7 @@ impl CairnApp {
         let current = NavState {
             text: self.query.search_input.text.trim().to_string(),
             filter: self.query.active_filter,
+            source_scope: self.query.source_scope,
         };
         if let Some(last) = self.nav_history.get(self.nav_history_index) {
             if last == &current {
@@ -116,6 +119,12 @@ impl CairnApp {
         };
         self.query.search_input.set_text(&state.text);
         self.query.active_filter = state.filter;
+        self.query.source_scope = state.source_scope.filter(|scope| {
+            self.service
+                .sources
+                .iter()
+                .any(|source| source.source_id == *scope && source.kind == SourceKind::Folder)
+        });
         self.request_result_set(ResultSetChange::Replace, cx);
         cx.notify();
     }

@@ -191,6 +191,7 @@ mod tests {
             defaults,
             sort_spec: sort_spec.clone(),
             first_page_limit: 50,
+            source_scope: Some(cairn_core::property_store::SourceId(1_000)),
         };
 
         let frame = encode_frame(&req).expect("encode failed");
@@ -206,12 +207,18 @@ mod tests {
                 defaults: received,
                 sort_spec: decoded_sort,
                 first_page_limit,
+                source_scope,
             } => {
                 assert_eq!(query_id, 7);
                 assert_eq!(raw_query, "报告 季度");
                 assert_eq!(received, defaults, "toggles must survive the frame");
                 assert_eq!(decoded_sort, sort_spec);
                 assert_eq!(first_page_limit, 50);
+                assert_eq!(
+                    source_scope,
+                    Some(cairn_core::property_store::SourceId(1_000)),
+                    "the source scope must survive the frame"
+                );
             }
             other => panic!("Unexpected decoded request: {other:?}"),
         }
@@ -226,6 +233,7 @@ mod tests {
             defaults: flipped,
             sort_spec,
             first_page_limit: 50,
+            source_scope: None,
         };
         assert_ne!(
             encode_frame(&req).expect("encode"),
@@ -421,14 +429,11 @@ mod tests {
     }
 }
 
-/// Pins the bytes a query request puts on the wire.
-///
-/// The postcard payload is positional: adding, removing, reordering or retyping a field changes
 /// Pins the serialized `ClientRequest::Query` bytes and `0.2.1` wire guard header.
 #[cfg(test)]
 mod wire_layout {
-    use super::encode_frame;
-    use crate::message::{ClientRequest, SortColumn, SortDirection, SortSpec};
+    use super::{encode_frame, HEADER_SIZE};
+    use crate::message::{ClientRequest, SortColumn, SortDirection, SortSpec, SourceId};
     use std::str::FromStr;
 
     #[test]
@@ -439,11 +444,12 @@ mod wire_layout {
             defaults: crate::message::QueryDefaults::default(),
             sort_spec: SortSpec::single(SortColumn::Size, SortDirection::Ascending),
             first_page_limit: 50,
+            source_scope: None,
         };
         assert_eq!(
             encode_frame(&req).expect("encode"),
             vec![
-                24, 0, 0, 0, // payload length
+                25, 0, 0, 0, // payload length
                 0x81, 0, // wire guard (product version: 0.2.1)
                 1, // Query variant
                 7, // query_id
@@ -453,7 +459,44 @@ mod wire_layout {
                 1, 4, b's', b'i', b'z', b'e',
                 0,  // sort_spec: 1 key, column="size", Ascending(0)
                 50, // first_page_limit
+                0,  // source_scope: None
             ]
+        );
+    }
+
+    /// The scope travels as a postcard `Option`: a present id appends the variant tag and the
+    /// varint the protocol already publishes for `SourceId` elsewhere.
+    #[test]
+    fn a_scoped_query_appends_the_source_id_to_the_pinned_payload() {
+        let req = ClientRequest::Query {
+            query_id: 7,
+            raw_query: "rs".to_string(),
+            defaults: crate::message::QueryDefaults::default(),
+            sort_spec: SortSpec::single(SortColumn::Size, SortDirection::Ascending),
+            first_page_limit: 50,
+            source_scope: Some(SourceId(1_000)),
+        };
+        let scoped = encode_frame(&req).expect("encode");
+        let unscoped = encode_frame(&ClientRequest::Query {
+            query_id: 7,
+            raw_query: "rs".to_string(),
+            defaults: crate::message::QueryDefaults::default(),
+            sort_spec: SortSpec::single(SortColumn::Size, SortDirection::Ascending),
+            first_page_limit: 50,
+            source_scope: None,
+        })
+        .expect("encode");
+        let scoped_payload = &scoped[HEADER_SIZE..];
+        let unscoped_payload = &unscoped[HEADER_SIZE..];
+        assert_eq!(scoped_payload.len(), unscoped_payload.len() + 2);
+        assert_eq!(
+            &scoped_payload[..unscoped_payload.len() - 1],
+            &unscoped_payload[..unscoped_payload.len() - 1]
+        );
+        assert_eq!(
+            &scoped_payload[unscoped_payload.len() - 1..],
+            &[1, 0xE8, 0x07],
+            "Some(SourceId(1000)) replaces the None tag with the id"
         );
     }
 

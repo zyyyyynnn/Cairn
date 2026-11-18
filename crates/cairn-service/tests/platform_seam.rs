@@ -105,6 +105,88 @@ fn wait_for_folder_scan(engine: &MultiVolumeEngine, minimum: u64) {
     }
 }
 
+fn wait_for_folder_scans(engine: &MultiVolumeEngine, minimum: usize) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let folders: Vec<_> = engine
+            .get_sources()
+            .into_iter()
+            .filter(|source| source.kind == SourceKind::Folder)
+            .collect();
+        if folders.len() >= minimum
+            && folders.iter().all(|source| {
+                source.indexed_count > 0 && !matches!(source.status, VolumeState::Rebuilding)
+            })
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "folder sources did not finish scanning"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn a_folder_source_scope_limits_and_lists_only_that_source() {
+    use cairn_service::sync_engine::MatchSet;
+
+    let temp = tempdir().expect("tempdir");
+    let left = temp.path().join("left");
+    let right = temp.path().join("right");
+    let service = temp.path().join("service");
+    fs::create_dir_all(&left).unwrap();
+    fs::create_dir_all(&right).unwrap();
+    fs::write(left.join("report-left.txt"), "left").unwrap();
+    fs::write(right.join("report-right.txt"), "right").unwrap();
+    let engine = MultiVolumeEngine::with_paths(
+        &service.join("index"),
+        &service.join("content"),
+        &service.join("service.toml"),
+        vec![],
+        ServiceConfig::default(),
+    );
+    let left_id = engine.add_folder_source(&left, false).unwrap().source_id;
+    engine.add_folder_source(&right, false).unwrap();
+    wait_for_folder_scans(&engine, 2);
+
+    let cancel = CancellationToken::new();
+    let scoped = engine.execute_search_multi_scoped(
+        "report",
+        &QueryDefaults::default(),
+        &SortSpec::default(),
+        &cancel,
+        Some(left_id),
+    );
+    assert_eq!(scoped.total, 1);
+    let MatchSet::Items(items) = &scoped.rows else {
+        panic!("a text query materializes its matches");
+    };
+    assert_eq!(items[0].source_id, left_id);
+
+    let scoped_all = engine.execute_search_multi_scoped(
+        "",
+        &QueryDefaults::default(),
+        &SortSpec::default(),
+        &cancel,
+        Some(left_id),
+    );
+    assert_eq!(
+        scoped_all.total, 1,
+        "an empty query lists only the scoped source"
+    );
+
+    let unscoped = engine.execute_search_multi_scoped(
+        "report",
+        &QueryDefaults::default(),
+        &SortSpec::default(),
+        &cancel,
+        None,
+    );
+    assert_eq!(unscoped.total, 2, "an unscoped query still spans sources");
+}
+
 #[test]
 fn folder_source_scans_updates_incrementally_and_recovers_on_buffer_overflow() {
     let temp = tempdir().expect("tempdir");
