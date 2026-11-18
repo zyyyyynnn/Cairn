@@ -220,6 +220,9 @@ pub struct QueryDomain {
     pub match_path: bool,
     pub use_regex: bool,
     pub active_filter: FilterCategory,
+    /// The indexed source the current query is restricted to, or `None` when the query spans
+    /// every indexed source. The sidebar's folder-source rows set and clear it.
+    pub source_scope: Option<cairn_protocol::message::SourceId>,
     pub active_session_id: Option<u64>,
     /// The service's refusal of the current query, if it answered with one. Cleared when a new
     /// query starts and when a result set arrives, so the band never outlives its query.
@@ -282,6 +285,12 @@ pub struct ServiceDomain {
     pub journal: SubsystemState<IndexJournalStatus>,
     pub journal_entries: SubsystemState<Vec<IndexJournalEntry>>,
     pub sources: Vec<SourceStatusSummary>,
+    /// One add/remove request at a time: the manager dialog disables its actions until the
+    /// service answers, so a double press cannot register the same path twice.
+    pub(crate) folder_source_action_pending: bool,
+    /// One `GetSources` read at a time; the follow-up poll only starts once the previous answer
+    /// has landed.
+    pub(crate) is_refreshing_sources: bool,
 }
 
 pub(crate) struct OpenGroupMenu {
@@ -467,6 +476,7 @@ impl CairnApp {
                 match_path: false,
                 use_regex: false,
                 active_filter: FilterCategory::All,
+                source_scope: None,
                 active_session_id: None,
                 rejection: None,
                 degraded: None,
@@ -493,6 +503,8 @@ impl CairnApp {
                 journal: SubsystemState::default(),
                 journal_entries: SubsystemState::default(),
                 sources: Vec::new(),
+                folder_source_action_pending: false,
+                is_refreshing_sources: false,
             },
             root_focus,
             zoom_level: settings.zoom_level,
@@ -505,6 +517,7 @@ impl CairnApp {
             nav_history: vec![NavState {
                 text: String::new(),
                 filter: FilterCategory::All,
+                source_scope: None,
             }],
             nav_history_index: 0,
             sidebar_scroll: ScrollHandle::default(),
@@ -840,10 +853,11 @@ mod tests {
 
     use super::{join_row_path, CairnApp};
     use crate::search::ResultSetChange;
-    use cairn_protocol::message::FileRowData;
-    use cairn_protocol::status::{VolumeState, VolumeStatusSummary};
+    use cairn_protocol::message::{FileRowData, SourceId};
+    use cairn_protocol::status::{
+        SourceKind, SourceStatusSummary, VolumeState, VolumeStatusSummary,
+    };
     use gpui_kit::AppContext;
-
     pub(crate) fn test_row(name: &str) -> FileRowData {
         FileRowData {
             frn: 1,
@@ -887,6 +901,94 @@ mod tests {
     fn row_paths_join_without_doubling_the_separator() {
         assert_eq!(join_row_path("C:\\dir", "a.rs"), "C:\\dir\\a.rs");
         assert_eq!(join_row_path("C:\\dir\\", "a.rs"), "C:\\dir\\a.rs");
+    }
+
+    fn folder_source(id: u32, kind: SourceKind) -> SourceStatusSummary {
+        SourceStatusSummary {
+            source_id: SourceId(id),
+            kind,
+            root_path: r"D:\Work".to_string(),
+            volume_guid: String::new(),
+            status: VolumeState::Synced,
+            indexed_count: 10,
+            live_watch_enabled: true,
+        }
+    }
+
+    /// A folder-source row scopes the current query; pressing the same row again releases it, and
+    /// an NTFS source never owns the scope. The text and category stay untouched.
+    #[test]
+    fn a_folder_source_row_sets_and_clears_the_query_scope() {
+        use crate::search::filters::FilterCategory;
+
+        with_app(|this, cx| {
+            this.service.sources = vec![
+                folder_source(2, SourceKind::NtfsVolume),
+                folder_source(1000, SourceKind::Folder),
+            ];
+            this.query.search_input.set_text("report");
+            this.query.active_filter = FilterCategory::Document;
+
+            this.select_folder_source(SourceId(1000), cx);
+            assert_eq!(this.query.source_scope, Some(SourceId(1000)));
+            assert_eq!(this.query.search_input.text, "report");
+            assert_eq!(this.query.active_filter, FilterCategory::Document);
+            assert!(
+                this.query.is_searching(),
+                "the place change re-asks the query"
+            );
+            assert_eq!(
+                this.results.table.total_rows(),
+                0,
+                "the previous source's rows leave at once"
+            );
+
+            this.select_folder_source(SourceId(1000), cx);
+            assert!(
+                this.query.source_scope.is_none(),
+                "a second press releases the scope"
+            );
+            assert!(this.query.is_searching());
+
+            this.select_folder_source(SourceId(2), cx);
+            assert!(
+                this.query.source_scope.is_none(),
+                "an NTFS volume is not a folder-source scope"
+            );
+        });
+    }
+
+    /// A file-type row is a location and releases the scope, even when that category was already
+    /// active.
+    #[test]
+    fn a_file_type_row_releases_the_query_scope() {
+        use crate::search::filters::FilterCategory;
+
+        with_app(|this, cx| {
+            this.service.sources = vec![folder_source(1000, SourceKind::Folder)];
+            this.select_folder_source(SourceId(1000), cx);
+            assert!(this.query.source_scope.is_some());
+
+            this.set_filter(FilterCategory::All, cx);
+            assert!(this.query.source_scope.is_none());
+            assert_eq!(this.query.active_filter, FilterCategory::All);
+        });
+    }
+
+    /// A source removed by the service can no longer own the query: the next snapshot releases
+    /// the scope and asks for the unscoped result set.
+    #[test]
+    fn a_removed_source_releases_its_query_scope() {
+        with_app(|this, cx| {
+            this.service.sources = vec![folder_source(1000, SourceKind::Folder)];
+            this.select_folder_source(SourceId(1000), cx);
+            assert!(this.query.source_scope.is_some());
+
+            this.apply_sources_snapshot(Vec::new(), cx);
+
+            assert!(this.query.source_scope.is_none());
+            assert!(this.query.is_searching());
+        });
     }
 
     /// A location switch replaces the old result set at once and opens a fresh

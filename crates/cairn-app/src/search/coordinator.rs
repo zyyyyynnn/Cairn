@@ -7,7 +7,7 @@
 
 use std::time::{Duration, Instant};
 
-use cairn_protocol::message::{QueryDefaults, SortSpec};
+use cairn_protocol::message::{QueryDefaults, SortSpec, SourceId};
 
 /// Default cooldown / coalesce window for rapid typing bursts.
 pub(crate) const SEARCH_COALESCE_WINDOW: Duration = Duration::from_millis(50);
@@ -35,6 +35,8 @@ pub(crate) struct SearchCommand {
     pub sort_spec: SortSpec,
     pub page_size: usize,
     pub reset_scroll_on_apply: bool,
+    /// The indexed source the query is restricted to, or `None` for every active source.
+    pub source_scope: Option<SourceId>,
 }
 
 /// Output transport seam used by [`SearchCoordinator`] to send `Cancel` and `Query` requests.
@@ -274,6 +276,7 @@ mod tests {
             sort_spec: SortSpec::default(),
             page_size: 100,
             reset_scroll_on_apply: reset_scroll,
+            source_scope: None,
         }
     }
 

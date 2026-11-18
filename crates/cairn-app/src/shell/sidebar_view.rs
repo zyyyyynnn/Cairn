@@ -8,6 +8,7 @@ use crate::app::{element_id, layout, CairnApp};
 use crate::search::filters::FilterCategory;
 use crate::shell::accessibility::{self, ControlElement};
 use crate::shell::commands::OpenSelected;
+use crate::shell::folder_sources::{folder_source_summaries, source_state_label};
 use crate::shell::theme::{self, ShellTokens};
 use cairn_protocol::status::VolumeState;
 use fluent_bundle::FluentArgs;
@@ -164,6 +165,20 @@ fn sidebar_row(
     tokens: &ShellTokens,
     icon_metrics: SidebarIconMetrics,
 ) -> Div {
+    sidebar_row_with_trailing(icon, label, None, is_active, tokens, icon_metrics)
+}
+
+/// A sidebar row whose label can be followed by one compact state word. The label keeps the
+/// remaining width and truncates; the trailing word stays whole, so a long root path never hides
+/// the state it is in.
+fn sidebar_row_with_trailing(
+    icon: IconName,
+    label: impl Into<SharedString>,
+    trailing: Option<SharedString>,
+    is_active: bool,
+    tokens: &ShellTokens,
+    icon_metrics: SidebarIconMetrics,
+) -> Div {
     h_flex()
         .w_full()
         .min_h(rems(layout::ROW_HEIGHT))
@@ -191,6 +206,22 @@ fn sidebar_row(
                 .whitespace_nowrap()
                 .child(label.into()),
         )
+        .when_some(trailing, |this, trailing| {
+            this.child(
+                div()
+                    .relative()
+                    .top(icon_metrics.label_offset)
+                    .flex_shrink_0()
+                    .whitespace_nowrap()
+                    .text_size(rems(theme::SMALL_TEXT_SIZE))
+                    .text_color(if is_active {
+                        tokens.sidebar_accent_foreground
+                    } else {
+                        tokens.muted_foreground
+                    })
+                    .child(trailing),
+            )
+        })
 }
 
 /// A group caption: 位置 heads the location rows. The box fills the search-band height, which puts the
@@ -377,6 +408,95 @@ impl CairnApp {
             cx,
         );
 
+        // 文件夹源 is the only source section left after the drive rows retired. It exists only
+        // while a folder source is registered; its rows scope the current query, and the manager
+        // entry at the end owns add/rescan/remove.
+        let folder_sources: Vec<_> = folder_source_summaries(&self.service.sources).collect();
+        let folder_section = if folder_sources.is_empty() {
+            None
+        } else {
+            let heading = accessibility::control("sidebar-folder-sources");
+            let heading_title = self.cached_control_name(heading);
+            let rows: Vec<AnyElement> = folder_sources
+                .into_iter()
+                .map(|source| {
+                    let source_id = source.source_id;
+                    let is_active = self.query.source_scope == Some(source_id);
+                    let control = accessibility::control("sidebar-folder-source");
+                    let mut args = FluentArgs::new();
+                    args.set("path", source.root_path.as_str());
+                    args.set("state", source_state_label(&self.i18n, source.status));
+                    let name = self
+                        .i18n
+                        .get_text_with_args("folder_source_row_label", &args);
+                    let focus = window
+                        .use_keyed_state(
+                            element_id("sidebar-folder-source-focus", &source_id.0.to_string()),
+                            cx,
+                            |_, cx| cx.focus_handle().tab_stop(true),
+                        )
+                        .read(cx)
+                        .clone();
+                    let is_focused = focus.contains_focused(window, cx)
+                        && cairn_ui::focus::keyboard_navigation(cx);
+                    let row = sidebar_row_with_trailing(
+                        IconName::Folder,
+                        source.root_path.clone(),
+                        Some(source_state_label(&self.i18n, source.status).into()),
+                        is_active,
+                        tokens,
+                        icon_metrics,
+                    );
+                    keyboard_row(
+                        accessibility::element_at(control, source_id.0 as usize)
+                            .aria_label(name)
+                            .aria_selected(is_active),
+                        focus,
+                        is_focused,
+                        tokens,
+                        row,
+                        move |this, _window, cx| this.select_folder_source(source_id, cx),
+                        cx,
+                    )
+                })
+                .collect();
+
+            let manage_control = accessibility::control("sidebar-manage-folder-sources");
+            let manage_name = self.cached_control_name(manage_control);
+            let manage_focus = window
+                .use_keyed_state("sidebar-manage-folder-sources-focus", cx, |_, cx| {
+                    cx.focus_handle().tab_stop(true)
+                })
+                .read(cx)
+                .clone();
+            let manage_is_focused = manage_focus.contains_focused(window, cx)
+                && cairn_ui::focus::keyboard_navigation(cx);
+            let manage_row = keyboard_row(
+                accessibility::element(manage_control).aria_label(manage_name.clone()),
+                manage_focus,
+                manage_is_focused,
+                tokens,
+                sidebar_row(
+                    IconName::FolderCog,
+                    manage_name,
+                    false,
+                    tokens,
+                    icon_metrics,
+                ),
+                |this, window, cx| this.open_folder_sources_dialog(window, cx),
+                cx,
+            );
+
+            Some(
+                v_flex()
+                    .w_full()
+                    .gap_y(rems(layout::SPACE_4))
+                    .child(sidebar_caption(heading, heading_title, window, tokens))
+                    .children(rows)
+                    .child(manage_row),
+            )
+        };
+
         // The drive rows are gone, but a non-synced or offline volume still has to be visible.
         // One compact warning line carries the worst state and how many other volumes are behind.
         let unsynced: Vec<_> = self
@@ -463,6 +583,7 @@ impl CairnApp {
                     .child(sidebar_caption(locations, locations_title, window, tokens))
                     .children(quick_access)
                     .child(recycle_entry)
+                    .when_some(folder_section, |this, section| this.child(section))
                     .when_some(index_state, |this, status| this.child(status)),
             );
 

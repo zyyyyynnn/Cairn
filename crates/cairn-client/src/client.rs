@@ -224,7 +224,8 @@ impl CairnClient {
     /// Sends a query request and retrieves the first page of results.
     ///
     /// `defaults` carries the UI match toggles and the hidden/system filter as query-wide
-    /// defaults; they are not part of `raw_query`.
+    /// defaults; they are not part of `raw_query`. `source_scope` restricts the search to one
+    /// indexed source; `None` searches every indexed source.
     pub async fn query(
         &mut self,
         query_id: u64,
@@ -232,6 +233,7 @@ impl CairnClient {
         defaults: QueryDefaults,
         sort_spec: &SortSpec,
         first_page_limit: usize,
+        source_scope: Option<SourceId>,
     ) -> Result<Envelope<ResponsePayload>, ClientError> {
         self.send_request(&ClientRequest::Query {
             query_id,
@@ -239,6 +241,7 @@ impl CairnClient {
             defaults,
             sort_spec: sort_spec.clone(),
             first_page_limit,
+            source_scope,
         })
         .await
     }
@@ -654,8 +657,12 @@ mod tests {
         };
         let raw = "报告 季度";
         let expected_sort = requested_sort.clone();
-        let task =
-            tokio::spawn(async move { client.query(4, raw, defaults, &expected_sort, 10).await });
+        let expected_scope = Some(SourceId(1_000));
+        let task = tokio::spawn(async move {
+            client
+                .query(4, raw, defaults, &expected_sort, 10, expected_scope)
+                .await
+        });
 
         server.connect().await.expect("stub connect");
         let mut buf = [0u8; 4096];
@@ -670,6 +677,7 @@ mod tests {
                 defaults: received,
                 sort_spec,
                 first_page_limit,
+                source_scope,
                 ..
             } => {
                 assert_eq!(raw_query, raw, "the text must reach the service as typed");
@@ -680,6 +688,7 @@ mod tests {
                 assert_eq!(received, defaults);
                 assert_eq!(sort_spec, requested_sort);
                 assert_eq!(first_page_limit, 10);
+                assert_eq!(source_scope, expected_scope);
             }
             other => panic!("Expected a Query request, got {other:?}"),
         }

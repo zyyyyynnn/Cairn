@@ -515,6 +515,20 @@ impl MultiVolumeEngine {
         sort_spec: &SortSpec,
         cancel: &CancellationToken,
     ) -> SearchOutcome {
+        self.execute_search_multi_scoped(raw_query, defaults, sort_spec, cancel, None)
+    }
+
+    /// Evaluates a query inside `source_scope` when one is given, or across every active source
+    /// otherwise. A source-scoped query never uses a volume's whole-all-files presorted view:
+    /// the view answers a whole-volume result, not a subset of the index.
+    pub fn execute_search_multi_scoped(
+        &self,
+        raw_query: &str,
+        defaults: &QueryDefaults,
+        sort_spec: &SortSpec,
+        cancel: &CancellationToken,
+        source_scope: Option<SourceId>,
+    ) -> SearchOutcome {
         let query_expr = parse_query_with(raw_query, defaults);
         let highlight_terms = query_expr.collect_highlight_terms();
         let mut applied_sort = query_expr
@@ -526,7 +540,8 @@ impl MultiVolumeEngine {
         let content_queries = query_expr.extract_content_queries();
 
         let drive_scope = query_expr.drive_scope();
-        let all_files_shape = query_expr.is_empty() || drive_scope.is_some();
+        let all_files_shape =
+            source_scope.is_none() && (query_expr.is_empty() || drive_scope.is_some());
         let view_drive = if all_files_shape && content_queries.is_empty() {
             self.all_files_view_drive(drive_scope, &applied_sort)
         } else {
@@ -580,9 +595,16 @@ impl MultiVolumeEngine {
             let active_vols: Vec<&VolumeIndex> = volumes
                 .values()
                 .filter(|vol| vol.is_active(&excluded_drives))
+                .filter(|vol| {
+                    source_scope
+                        .is_none_or(|scope| SourceId::for_drive(vol.drive_letter) == Some(scope))
+                })
                 .collect();
-            let active_folders: Vec<&FolderSource> =
-                folders.values().filter(|f| f.is_active()).collect();
+            let active_folders: Vec<&FolderSource> = folders
+                .values()
+                .filter(|f| f.is_active())
+                .filter(|f| source_scope.is_none_or(|scope| f.source_id == scope))
+                .collect();
 
             if let Some(drive) = view_drive {
                 let folder_conflict = active_folders.iter().any(|f| folder_is_on_drive(f, drive));

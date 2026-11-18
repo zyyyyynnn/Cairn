@@ -412,10 +412,24 @@ fn process_request(
             defaults,
             sort_spec,
             first_page_limit,
+            source_scope,
         } => {
             // Request validation, not evaluation: the engine stays a pure evaluator, and a query
             // above the content-term limit is refused before any hit set is built. The check
-            // precedes begin_query, which cancels every other in-flight query.
+            // precedes begin_query, which cancels every other in-flight query. A scope that does
+            // not name an active source is refused for the same reason: the caller asked for a
+            // place the index cannot answer.
+            if let Some(source_id) = source_scope {
+                if !engine.is_known_source(source_id) {
+                    return ResponsePayload::Error {
+                        code: ERROR_CODE_INVALID_REQUEST,
+                        message: format!(
+                            "query source_scope {} is not an active indexed source",
+                            source_id.0
+                        ),
+                    };
+                }
+            }
             let parsed = parse_query_with(&raw_query, &defaults);
             let content_terms = parsed.content_term_count();
             if content_terms > MAX_CONTENT_TERMS {
@@ -449,8 +463,13 @@ fn process_request(
             let mut answered: Option<QueryReply> = None;
             let mut fallback: Option<QueryReply> = None;
             for attempt in 0..2 {
-                let outcome =
-                    engine.execute_search_multi(&raw_query, &defaults, &sort_spec, &query_cancel);
+                let outcome = engine.execute_search_multi_scoped(
+                    &raw_query,
+                    &defaults,
+                    &sort_spec,
+                    &query_cancel,
+                    source_scope,
+                );
                 let total_matches = outcome.total;
                 let total_bytes = outcome.total_bytes;
                 let applied_sort = outcome.applied_sort;
@@ -911,6 +930,7 @@ mod tests {
                 defaults: Default::default(),
                 sort_spec: SortSpec::default(),
                 first_page_limit: 10,
+                source_scope: None,
             },
             ClientRequest::GetRows {
                 session_id: 1,
@@ -1059,6 +1079,7 @@ mod tests {
                 defaults: Default::default(),
                 sort_spec: SortSpec::default(),
                 first_page_limit: 10,
+                source_scope: None,
             },
             CallerAuthorization::Administrator,
         ) {
@@ -1140,6 +1161,7 @@ mod tests {
             defaults: Default::default(),
             sort_spec: SortSpec::default(),
             first_page_limit: 10,
+            source_scope: None,
         }
     }
 
@@ -1193,6 +1215,7 @@ mod tests {
             defaults: Default::default(),
             sort_spec: SortSpec::default(),
             first_page_limit: 10,
+            source_scope: None,
         }
     }
 
@@ -1221,6 +1244,21 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn a_query_for_an_inactive_source_scope_is_rejected() {
+        use cairn_protocol::message::SourceId;
+        use cairn_protocol::message::ERROR_CODE_INVALID_REQUEST;
+
+        let harness = Harness::new(ServiceConfig::default());
+        let mut request = content_query_request(0);
+        if let ClientRequest::Query { source_scope, .. } = &mut request {
+            *source_scope = Some(SourceId(9_999));
+        }
+        let (code, message) = denial(harness.handle(request, CallerAuthorization::Administrator));
+        assert_eq!(code, ERROR_CODE_INVALID_REQUEST);
+        assert!(message.contains("source_scope"), "{message}");
     }
 
     #[test]
@@ -1357,6 +1395,7 @@ mod tests {
                     defaults: Default::default(),
                     sort_spec: SortSpec::default(),
                     first_page_limit: 10,
+                    source_scope: None,
                 },
             )
             .await;
@@ -1494,6 +1533,7 @@ mod tests {
                     cairn_core::sort::SortDirection::Descending,
                 ),
                 first_page_limit: 10,
+                source_scope: None,
             },
             CallerAuthorization::StandardUser,
         ) {

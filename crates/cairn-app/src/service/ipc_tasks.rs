@@ -13,7 +13,9 @@ use crate::service::config_submission::{
 use crate::service::service_issue::{should_try_silent_start, ServiceIssue};
 use cairn_client::client::ClientError;
 use cairn_protocol::message::{Envelope, ResponsePayload, SourceId};
-use cairn_protocol::status::{ContentIndexState, VolumeStatusSummary};
+use cairn_protocol::status::{
+    ContentIndexState, SourceKind, SourceStatusSummary, VolumeState, VolumeStatusSummary,
+};
 use gpui_kit::gpui::{AsyncApp, Context};
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -872,18 +874,202 @@ impl CairnApp {
     }
 
     pub fn refresh_sources(&mut self, cx: &mut Context<Self>) {
+        if self.service.is_refreshing_sources {
+            return;
+        }
+        self.service.is_refreshing_sources = true;
         self.spawn_service_task(
             cx,
             |session| async move { session.get_sources().await },
             |this, result, cx| {
+                this.service.is_refreshing_sources = false;
                 if let Some(Ok(envelope)) = result {
                     if let ResponsePayload::SourcesResult { sources } = envelope.payload {
-                        this.service.sources = sources;
-                        cx.notify();
+                        this.apply_sources_snapshot(sources, cx);
                     }
                 }
             },
         );
+    }
+
+    /// Registers a path as a folder source. The service answers with the complete source list,
+    /// which replaces the local snapshot without a second read.
+    pub(crate) fn add_folder_source(&mut self, path: String, cx: &mut Context<Self>) {
+        if path.trim().is_empty() || self.service.folder_source_action_pending {
+            return;
+        }
+        self.service.folder_source_action_pending = true;
+        self.repaint_shell_and_overlays(cx);
+        self.spawn_service_task(
+            cx,
+            move |session| async move { session.add_folder_source(&path).await },
+            |this, result, cx| {
+                this.service.folder_source_action_pending = false;
+                match result {
+                    Some(Ok(envelope)) => match envelope.payload {
+                        ResponsePayload::SourcesResult { sources } => {
+                            this.apply_sources_snapshot(sources, cx);
+                        }
+                        ResponsePayload::Error { code, message } => this.report_request_failure(
+                            "toast_folder_source_add_failed_title",
+                            "toast_folder_source_add_failed_body",
+                            format!("{code}: {message}"),
+                            cx,
+                        ),
+                        _ => this.report_request_failure(
+                            "toast_folder_source_add_failed_title",
+                            "toast_folder_source_add_failed_body",
+                            "unexpected add folder source response",
+                            cx,
+                        ),
+                    },
+                    Some(Err(err)) => this.report_request_failure(
+                        "toast_folder_source_add_failed_title",
+                        "toast_folder_source_add_failed_body",
+                        err,
+                        cx,
+                    ),
+                    None => this.report_request_failure(
+                        "toast_folder_source_add_failed_title",
+                        "toast_folder_source_add_failed_body",
+                        "add folder source task stopped",
+                        cx,
+                    ),
+                }
+                this.repaint_shell_and_overlays(cx);
+            },
+        );
+    }
+
+    /// Unregisters one folder source. Removing the source the query is scoped to releases that
+    /// scope and re-asks the current query across every source.
+    pub(crate) fn remove_folder_source(
+        &mut self,
+        _source_id: SourceId,
+        path: String,
+        cx: &mut Context<Self>,
+    ) {
+        if self.service.folder_source_action_pending {
+            return;
+        }
+        self.service.folder_source_action_pending = true;
+        self.repaint_shell_and_overlays(cx);
+        self.spawn_service_task(
+            cx,
+            move |session| async move { session.remove_folder_source(&path).await },
+            move |this, result, cx| {
+                this.service.folder_source_action_pending = false;
+                match result {
+                    Some(Ok(envelope)) => match envelope.payload {
+                        ResponsePayload::SourcesResult { sources } => {
+                            this.apply_sources_snapshot(sources, cx);
+                        }
+                        ResponsePayload::Error { code, message } => this.report_request_failure(
+                            "toast_folder_source_remove_failed_title",
+                            "toast_folder_source_remove_failed_body",
+                            format!("{code}: {message}"),
+                            cx,
+                        ),
+                        _ => this.report_request_failure(
+                            "toast_folder_source_remove_failed_title",
+                            "toast_folder_source_remove_failed_body",
+                            "unexpected remove folder source response",
+                            cx,
+                        ),
+                    },
+                    Some(Err(err)) => this.report_request_failure(
+                        "toast_folder_source_remove_failed_title",
+                        "toast_folder_source_remove_failed_body",
+                        err,
+                        cx,
+                    ),
+                    None => this.report_request_failure(
+                        "toast_folder_source_remove_failed_title",
+                        "toast_folder_source_remove_failed_body",
+                        "remove folder source task stopped",
+                        cx,
+                    ),
+                }
+                this.repaint_shell_and_overlays(cx);
+            },
+        );
+    }
+
+    /// Installs a sources snapshot, releases a scope whose source no longer exists, refreshes a
+    /// query that can now see a newly active source, and keeps polling while a source builds.
+    pub(crate) fn apply_sources_snapshot(
+        &mut self,
+        sources: Vec<SourceStatusSummary>,
+        cx: &mut Context<Self>,
+    ) {
+        let previous = std::mem::take(&mut self.service.sources);
+        let folder_ids = |list: &[SourceStatusSummary]| {
+            list.iter()
+                .filter(|source| source.kind == SourceKind::Folder)
+                .map(|source| source.source_id)
+                .collect::<std::collections::HashSet<_>>()
+        };
+        let previous_ids = folder_ids(&previous);
+        let current_ids = folder_ids(&sources);
+        let folder_set_changed = previous_ids != current_ids;
+        let folder_is_active = |source: &SourceStatusSummary| {
+            source.kind == SourceKind::Folder
+                && (source.status.is_synced() || source.indexed_count > 0)
+        };
+        let any_folder_became_active = sources.iter().any(|source| {
+            folder_is_active(source)
+                && !previous
+                    .iter()
+                    .any(|old| old.source_id == source.source_id && folder_is_active(old))
+        });
+        let scope_finished_scan = self.query.source_scope.is_some_and(|scope| {
+            let was_loading = previous.iter().any(|source| {
+                source.source_id == scope
+                    && matches!(
+                        source.status,
+                        VolumeState::CatchingUp(_) | VolumeState::Rebuilding
+                    )
+            });
+            let is_loading = sources.iter().any(|source| {
+                source.source_id == scope
+                    && matches!(
+                        source.status,
+                        VolumeState::CatchingUp(_) | VolumeState::Rebuilding
+                    )
+            });
+            was_loading && !is_loading
+        });
+        self.service.sources = sources;
+
+        let scope_is_live = self.query.source_scope.is_none_or(|scope| {
+            self.service
+                .sources
+                .iter()
+                .any(|source| source.source_id == scope && source.kind == SourceKind::Folder)
+        });
+        if !scope_is_live || folder_set_changed || any_folder_became_active || scope_finished_scan {
+            if !scope_is_live {
+                self.query.source_scope = None;
+            }
+            if !self.recycle_bin.is_open() {
+                self.request_result_set(ResultSetChange::Replace, cx);
+            }
+        }
+        self.start_source_status_follow_up(cx);
+        cx.notify();
+    }
+
+    fn start_source_status_follow_up(&mut self, cx: &mut Context<Self>) {
+        let still_loading = self.service.sources.iter().any(|source| {
+            source.kind == SourceKind::Folder
+                && matches!(
+                    source.status,
+                    VolumeState::CatchingUp(_) | VolumeState::Rebuilding
+                )
+        });
+        if still_loading {
+            self.schedule_delayed_refresh(cx, Self::refresh_sources);
+        }
     }
 
     pub fn rescan_all(&mut self, cx: &mut Context<Self>) {
@@ -904,6 +1090,7 @@ impl CairnApp {
                             let body = this.i18n.get_text("toast_rescan_started_body");
                             this.show_info_toast(title, body, cx);
                             this.start_status_refresh(cx);
+                            this.refresh_sources(cx);
                             None
                         }
                         ResponsePayload::Error { code, message } => {

@@ -81,13 +81,15 @@ pub enum ClientRequest {
     },
     /// The query text plus the UI match toggles as structured defaults. The toggles are not
     /// spliced into `raw_query`: they are query-wide, so `parse_query_with` applies them to
-    /// every search item and an item that writes its own modifier still wins.
+    /// every search item and an item that writes its own modifier still wins. `source_scope`
+    /// restricts the evaluation to one indexed source; `None` searches every indexed source.
     Query {
         query_id: u64,
         raw_query: String,
         defaults: QueryDefaults,
         sort_spec: SortSpec,
         first_page_limit: usize,
+        source_scope: Option<SourceId>,
     },
     Cancel {
         query_id: u64,
@@ -455,6 +457,7 @@ mod tests {
                     defaults: QueryDefaults::default(),
                     sort_spec: SortSpec::single(SortColumn::Name, SortDirection::Ascending),
                     first_page_limit: 0,
+                    source_scope: None,
                 },
             ),
             ("cancel", ClientRequest::Cancel { query_id: 1 }),

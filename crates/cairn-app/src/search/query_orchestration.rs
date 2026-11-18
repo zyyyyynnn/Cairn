@@ -243,14 +243,15 @@ fn rows_page_ready(
 }
 
 impl CairnApp {
-    /// `true` when there is something the service can answer: typed text or a
-    /// file-type filter. A bare flag with no query is not a search, and running
-    /// one would show an empty table under a query box the user can see is empty.
+    /// `true` when there is something the service can answer: typed text, a
+    /// file-type filter, or a folder-source scope. An empty box with a scope still
+    /// names a place the service can list.
     pub fn has_query(&self) -> bool {
-        narrows_the_result_set(
-            &self.query.search_input.text,
-            self.query.active_filter.query_macro(),
-        )
+        self.query.source_scope.is_some()
+            || narrows_the_result_set(
+                &self.query.search_input.text,
+                self.query.active_filter.query_macro(),
+            )
     }
 
     /// `true` when the typed query asks for a full-text term.
@@ -533,6 +534,7 @@ impl CairnApp {
             sort_spec: self.results.table.sort_spec.clone(),
             page_size: layout::RESULT_PAGE_SIZE,
             reset_scroll_on_apply,
+            source_scope: self.query.source_scope,
         }
     }
 
@@ -586,7 +588,14 @@ impl CairnApp {
             get_tokio_runtime().spawn(async move {
                 let started = std::time::Instant::now();
                 let res = session
-                    .query(qid, &cmd.query, cmd.defaults, &cmd.sort_spec, cmd.page_size)
+                    .query(
+                        qid,
+                        &cmd.query,
+                        cmd.defaults,
+                        &cmd.sort_spec,
+                        cmd.page_size,
+                        cmd.source_scope,
+                    )
                     .await;
                 crate::shell::perf::mark(&format!(
                     "query ipc {:.3}ms",
@@ -673,6 +682,16 @@ impl CairnApp {
                     .set_objects_summary(total_matches, total_bytes);
             }
             cairn_protocol::message::ResponsePayload::Error { code, .. } => {
+                if code == cairn_protocol::message::ERROR_CODE_INVALID_REQUEST
+                    && self.query.source_scope.is_some()
+                {
+                    self.query.source_scope = None;
+                    self.query.rejection = None;
+                    self.query.degraded = None;
+                    self.refresh_sources(cx);
+                    self.request_result_set(ResultSetChange::Replace, cx);
+                    return;
+                }
                 self.query.rejection = QueryRejection::from_error_code(code);
                 self.query.degraded = None;
                 self.results.snippet_preview = None;
@@ -1043,6 +1062,50 @@ mod tests {
                         let cmd = this.build_search_command(true);
                         assert!(!cmd.defaults.exclude_hidden);
                         assert!(!cmd.defaults.exclude_system);
+                    });
+
+                    cx.quit();
+                    app
+                },
+            );
+        });
+    }
+
+    /// An empty query with a scope still names a place the service can list: the command carries
+    /// the scope without inventing text.
+    #[test]
+    fn build_search_command_forwards_an_empty_query_scope() {
+        use cairn_protocol::message::SourceId;
+        use cairn_protocol::status::{SourceKind, SourceStatusSummary, VolumeState};
+        use gpui_kit::gpui::AppContext as _;
+
+        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
+            gpui_kit::init(cx);
+            let _ = gpui_kit::open_window(
+                gpui_kit::gpui::WindowOptions {
+                    show: false,
+                    focus: false,
+                    ..gpui_kit::gpui::WindowOptions::default()
+                },
+                cx,
+                |window, cx| {
+                    let app = cx.new(|cx| CairnApp::new(window, cx));
+
+                    app.update(cx, |this, _cx| {
+                        this.service.sources = vec![SourceStatusSummary {
+                            source_id: SourceId(1000),
+                            kind: SourceKind::Folder,
+                            root_path: r"D:\Work".to_string(),
+                            volume_guid: String::new(),
+                            status: VolumeState::Synced,
+                            indexed_count: 1,
+                            live_watch_enabled: true,
+                        }];
+                        this.query.source_scope = Some(SourceId(1000));
+
+                        let command = this.build_search_command(true);
+                        assert_eq!(command.query, "");
+                        assert_eq!(command.source_scope, Some(SourceId(1000)));
                     });
 
                     cx.quit();

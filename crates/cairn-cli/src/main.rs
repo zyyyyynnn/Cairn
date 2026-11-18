@@ -243,7 +243,14 @@ impl CliTransport for PipeCliTransport {
         first_page_limit: usize,
     ) -> Result<Envelope<ResponsePayload>, TransportError> {
         self.call_pipe(|rt, c| {
-            rt.block_on(c.query(query_id, raw_query, defaults, sort_spec, first_page_limit))
+            rt.block_on(c.query(
+                query_id,
+                raw_query,
+                defaults,
+                sort_spec,
+                first_page_limit,
+                None,
+            ))
         })
     }
 

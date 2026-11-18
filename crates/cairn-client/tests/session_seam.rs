@@ -22,7 +22,14 @@ use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 use tokio::sync::{oneshot, Mutex};
 
 /// The fields a `Query` carries, captured to compare a request with its replay.
-type SentQuery = (u64, String, QueryDefaults, SortSpec, usize);
+type SentQuery = (
+    u64,
+    String,
+    QueryDefaults,
+    SortSpec,
+    usize,
+    Option<SourceId>,
+);
 
 fn unique_pipe_name(tag: &str) -> String {
     static NEXT: AtomicUsize = AtomicUsize::new(1);
@@ -167,6 +174,7 @@ async fn session_reuses_one_connection_per_slot_across_rpcs() {
             QueryDefaults::default(),
             &SortSpec::default(),
             50,
+            None,
         )
         .await
         .expect("query");
@@ -328,6 +336,7 @@ async fn a_retried_query_carries_the_same_request() {
                     defaults,
                     sort_spec,
                     first_page_limit,
+                    source_scope,
                 } => {
                     if !cached_query_answered {
                         cached_query_answered = true;
@@ -352,6 +361,7 @@ async fn a_retried_query_carries_the_same_request() {
                         defaults,
                         sort_spec,
                         first_page_limit,
+                        source_scope,
                     ));
                     // Close before answering: the cached connection dies under the request.
                     break;
@@ -375,6 +385,7 @@ async fn a_retried_query_carries_the_same_request() {
                     defaults,
                     sort_spec,
                     first_page_limit,
+                    source_scope,
                 } => {
                     queries_srv.lock().await.push((
                         query_id,
@@ -382,6 +393,7 @@ async fn a_retried_query_carries_the_same_request() {
                         defaults,
                         sort_spec.clone(),
                         first_page_limit,
+                        source_scope,
                     ));
                     ResponsePayload::QueryResult {
                         query_id,
@@ -407,6 +419,7 @@ async fn a_retried_query_carries_the_same_request() {
             QueryDefaults::default(),
             &SortSpec::default(),
             10,
+            None,
         )
         .await
         .expect("the first query caches the primary connection");
@@ -420,8 +433,16 @@ async fn a_retried_query_carries_the_same_request() {
             SortKey::new(SortColumn::Name, SortDirection::Ascending),
         ],
     };
+    let requested_scope = Some(SourceId(1_000));
     let query = session
-        .query(9, "notes", QueryDefaults::default(), &requested_sort, 25)
+        .query(
+            9,
+            "notes",
+            QueryDefaults::default(),
+            &requested_sort,
+            25,
+            requested_scope,
+        )
         .await
         .expect("the retried query answers on the new connection");
     assert!(matches!(
@@ -446,6 +467,7 @@ async fn a_retried_query_carries_the_same_request() {
             QueryDefaults::default(),
             requested_sort,
             25,
+            requested_scope,
         ),
         "the replay carries the request the caller sent"
     );
@@ -550,6 +572,7 @@ async fn cancel_uses_independent_connection_while_query_is_in_flight() {
                 QueryDefaults::default(),
                 &SortSpec::default(),
                 200,
+                None,
             )
             .await
     });

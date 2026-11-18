@@ -193,6 +193,8 @@ pub enum GroupCommand {
     ToggleAutostart,
     /// Opens the read-only Index Journal viewer dialog.
     OpenIndexJournal,
+    /// Opens the folder-source manager even when no source exists yet.
+    ManageFolderSources,
     /// Dynamic rescan submenu listing all locations plus individual indexed sources.
     RescanMenu,
     /// Triggers a full rescan across all indexed sources.
@@ -288,6 +290,7 @@ impl GroupCommand {
             GroupCommand::SetLanguage(code) => language_label_key(code),
             GroupCommand::ToggleAutostart => "settings_autostart",
             GroupCommand::OpenIndexJournal => "menu_index_journal_open",
+            GroupCommand::ManageFolderSources => "menu_folder_sources",
             GroupCommand::RescanMenu => "menu_rescan",
             GroupCommand::RescanAll => "menu_rescan_all",
             GroupCommand::ContentIndexMenu => "menu_content_index",
@@ -544,7 +547,10 @@ pub static DEFAULT_GROUPS: &[MenuGroupSpec] = &[
     MenuGroupSpec {
         group: MenuGroup::Index,
         sections: &[
-            &[GroupCommand::OpenIndexJournal],
+            &[
+                GroupCommand::OpenIndexJournal,
+                GroupCommand::ManageFolderSources,
+            ],
             &[GroupCommand::RescanMenu],
             &[
                 GroupCommand::ContentIndexMenu,
@@ -697,6 +703,7 @@ mod tests {
             index_commands,
             vec![
                 GroupCommand::OpenIndexJournal,
+                GroupCommand::ManageFolderSources,
                 GroupCommand::RescanMenu,
                 GroupCommand::ContentIndexMenu,
                 GroupCommand::PropertyIndexMenu,
@@ -834,6 +841,7 @@ mod tests {
                 | GroupCommand::ToggleExcludeHidden
                 | GroupCommand::ToggleExcludeSystem
                 | GroupCommand::OpenIndexJournal
+                | GroupCommand::ManageFolderSources
                 | GroupCommand::RescanMenu
                 | GroupCommand::RescanAll
                 | GroupCommand::ContentIndexMenu
@@ -893,6 +901,7 @@ mod tests {
             GroupCommand::ToggleExcludeHidden,
             GroupCommand::ToggleExcludeSystem,
             GroupCommand::OpenIndexJournal,
+            GroupCommand::ManageFolderSources,
             GroupCommand::RescanMenu,
             GroupCommand::RescanAll,
             GroupCommand::ContentIndexMenu,

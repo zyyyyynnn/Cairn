@@ -1102,6 +1102,21 @@ impl MultiVolumeEngine {
         summaries
     }
 
+    /// Whether `source_id` names an indexed source a query may address. A folder source that is
+    /// still scanning is known but has no rows yet; the query answers empty and the shell refreshes
+    /// when the scan completes. Only an unknown or excluded source is refused.
+    pub fn is_known_source(&self, source_id: SourceId) -> bool {
+        if let Some(drive) = source_id.drive_letter() {
+            let excluded_drives = self.config.read().unwrap().excluded_drives.clone();
+            return self.volumes.read().unwrap().get(&drive).is_some_and(|_| {
+                !excluded_drives
+                    .iter()
+                    .any(|d| d.eq_ignore_ascii_case(&drive))
+            });
+        }
+        self.folder_sources.read().unwrap().contains_key(&source_id)
+    }
+
     pub fn get_index_journal(&self, after_seq: u64, limit: usize) -> Vec<IndexJournalEntry> {
         self.index_journal.lock().unwrap().query(after_seq, limit)
     }
