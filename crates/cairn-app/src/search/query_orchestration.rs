@@ -515,6 +515,10 @@ impl CairnApp {
             whole_words: self.query.whole_word,
             match_path: self.query.match_path,
             is_regex: self.query.use_regex,
+            pinyin: self.query.pinyin,
+            ignore_punctuation: self.query.ignore_punctuation,
+            ignore_whitespace: self.query.ignore_whitespace,
+            ignore_diacritics: self.query.ignore_diacritics,
             exclude_hidden: self.settings.exclude_hidden,
             exclude_system: self.settings.exclude_system,
             ..cairn_protocol::message::QueryDefaults::default()

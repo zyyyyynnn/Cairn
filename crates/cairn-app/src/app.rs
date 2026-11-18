@@ -219,6 +219,10 @@ pub struct QueryDomain {
     pub whole_word: bool,
     pub match_path: bool,
     pub use_regex: bool,
+    pub pinyin: bool,
+    pub ignore_punctuation: bool,
+    pub ignore_whitespace: bool,
+    pub ignore_diacritics: bool,
     pub active_filter: FilterCategory,
     /// The indexed source the current query is restricted to, or `None` when the query spans
     /// every indexed source. The sidebar's folder-source rows set and clear it.
@@ -475,6 +479,10 @@ impl CairnApp {
                 whole_word: false,
                 match_path: false,
                 use_regex: false,
+                pinyin: false,
+                ignore_punctuation: false,
+                ignore_whitespace: false,
+                ignore_diacritics: false,
                 active_filter: FilterCategory::All,
                 source_scope: None,
                 active_session_id: None,

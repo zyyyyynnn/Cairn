@@ -164,7 +164,7 @@ pub fn push_normalized_char(ch: char, opts: TextMatchOptions, out: &mut String) 
     if opts.ignore_whitespace && mapped.is_whitespace() {
         return false;
     }
-    if opts.ignore_punctuation && is_punctuation_char(mapped) {
+    if opts.ignore_punctuation && is_punctuation_char(mapped) && !matches!(mapped, '*' | '?') {
         return false;
     }
     if opts.case_sensitive {
@@ -189,6 +189,18 @@ pub fn normalize_for_match(input: &str, opts: TextMatchOptions) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn glob_metacharacters_survive_punctuation_folding() {
+        let opts = TextMatchOptions {
+            case_sensitive: false,
+            ignore_punctuation: true,
+            ignore_whitespace: false,
+            ignore_diacritics: false,
+        };
+        assert_eq!(normalize_for_match("*.txt", opts), "*txt");
+        assert_eq!(normalize_for_match("foo?", opts), "foo?");
+    }
 
     #[test]
     fn diacritics_and_punctuation_folding() {

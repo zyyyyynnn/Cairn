@@ -77,6 +77,9 @@ enum CliCommand {
         /// Disable index journal recording
         #[arg(long)]
         disable: bool,
+        /// Write the journal window after `after_seq` to a JSON file (all pages)
+        #[arg(long, value_name = "PATH", conflicts_with_all = ["enable", "disable", "json"])]
+        export: Option<PathBuf>,
     },
 }
 
@@ -617,6 +620,7 @@ fn execute_subcommand(
             limit,
             enable,
             disable,
+            export,
         } => {
             if enable || disable {
                 let env = match expect_control_payload(
@@ -642,6 +646,65 @@ fn execute_subcommand(
                         status.resident_bytes,
                         status.oldest_seq,
                         status.newest_seq
+                    ),
+                    err,
+                );
+            }
+            if let Some(path) = export {
+                let page_size = 10_000usize;
+                let mut cursor = after_seq;
+                let mut all_entries = Vec::new();
+                let status = loop {
+                    let env = match expect_control_payload(
+                        transport.get_index_journal(cursor, page_size),
+                        "Error reading index journal",
+                        err,
+                    ) {
+                        Ok(env) => env,
+                        Err(code) => return code,
+                    };
+                    let ResponsePayload::IndexJournalResult {
+                        status: page_status,
+                        entries,
+                    } = env.payload
+                    else {
+                        return unexpected_response(err);
+                    };
+                    let fetched = entries.len();
+                    let last_seq = entries.last().map(|entry| entry.seq);
+                    all_entries.extend(entries);
+                    if fetched < page_size || last_seq.is_none_or(|last_seq| last_seq <= cursor) {
+                        break page_status;
+                    }
+                    cursor = last_seq.unwrap_or(cursor);
+                };
+                let document = serde_json::json!({ "status": status, "entries": all_entries });
+                let encoded = match serde_json::to_vec_pretty(&document) {
+                    Ok(encoded) => encoded,
+                    Err(error) => {
+                        let _ = writeln!(
+                            err,
+                            "Failed to encode journal export: {}",
+                            sanitize_terminal(&error.to_string())
+                        );
+                        return ExitCode::from(1);
+                    }
+                };
+                if let Err(error) = std::fs::write(&path, encoded) {
+                    let _ = writeln!(
+                        err,
+                        "Failed to write journal export {}: {}",
+                        sanitize_terminal(&path.display().to_string()),
+                        sanitize_terminal(&error.to_string())
+                    );
+                    return ExitCode::from(1);
+                }
+                return write_io_result(
+                    writeln!(
+                        out,
+                        "Exported {} journal entries to {}.",
+                        all_entries.len(),
+                        sanitize_terminal(&path.display().to_string())
                     ),
                     err,
                 );
@@ -1226,6 +1289,7 @@ mod tests {
                 limit: 25,
                 enable: false,
                 disable: false,
+                export: None,
             })
         ));
     }
@@ -1791,6 +1855,27 @@ mod tests {
         assert!(String::from_utf8(out)
             .unwrap()
             .contains(r"D:\Work\notes.md"));
+
+        let export_dir = tempfile::tempdir().unwrap();
+        let export_path = export_dir.path().join("journal.json");
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = execute_cli(
+            CliArgs::try_parse_from([
+                "CairnCli",
+                "journal",
+                "--export",
+                export_path.to_str().unwrap(),
+            ])
+            .unwrap(),
+            &journal_transport,
+            &mut out,
+            &mut err,
+        );
+        assert_eq!(code, ExitCode::SUCCESS);
+        let exported: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&export_path).unwrap()).unwrap();
+        assert_eq!(exported["entries"][0]["path"], r"D:\Work\notes.md");
 
         let prop_transport = StubTransport {
             control_response: Some(Envelope {
