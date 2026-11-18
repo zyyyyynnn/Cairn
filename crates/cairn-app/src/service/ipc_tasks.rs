@@ -13,31 +13,10 @@ use crate::service::config_submission::{
 use crate::service::service_issue::{should_try_silent_start, ServiceIssue};
 use cairn_client::client::ClientError;
 use cairn_protocol::message::{Envelope, ResponsePayload, SourceId};
-use cairn_protocol::status::{
-    ContentIndexState, SourceKind, SourceStatusSummary, VolumeStatusSummary,
-};
+use cairn_protocol::status::{ContentIndexState, VolumeStatusSummary};
 use gpui_kit::gpui::{AsyncApp, Context};
 use std::sync::OnceLock;
 use std::time::Duration;
-
-pub(crate) fn source_id_for_drive(
-    sources: &[SourceStatusSummary],
-    drive: char,
-) -> Option<SourceId> {
-    let drive_upper = drive.to_ascii_uppercase();
-    sources
-        .iter()
-        .find(|source| {
-            source.kind == SourceKind::NtfsVolume
-                && source
-                    .root_path
-                    .chars()
-                    .next()
-                    .is_some_and(|ch| ch.to_ascii_uppercase() == drive_upper)
-        })
-        .map(|source| source.source_id)
-        .or_else(|| SourceId::for_drive(drive_upper))
-}
 
 #[derive(Clone, Copy)]
 enum ContentAction {
@@ -45,7 +24,7 @@ enum ContentAction {
     Clear,
 }
 
-/// Volume status is sampled every 100ms so the sidebar and loading state stay fresh. Result rows
+/// Volume status is sampled every 100ms so the loading state stays fresh. Result rows
 /// are not: a query is a full index scan, so a growing index is queried once when it settles, not
 /// on every batch.
 const STATUS_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -308,8 +287,7 @@ impl CairnApp {
                                 );
                                 this.service.status.update_volumes(envelope.volumes);
                                 let now_loading = this.service.status.is_any_loading();
-                                let table_visible =
-                                    !this.recycle_bin.is_open() && this.drive_view.is_none();
+                                let table_visible = !this.recycle_bin.is_open();
                                 if visible_change {
                                     cx.notify();
                                 }
@@ -952,23 +930,6 @@ impl CairnApp {
         );
     }
 
-    pub fn rescan_drive(&mut self, drive: char, cx: &mut Context<Self>) {
-        let drive_upper = drive.to_ascii_uppercase();
-        let Some(source_id) = source_id_for_drive(&self.service.sources, drive_upper) else {
-            self.report_request_failure(
-                "toast_rescan_failed_title",
-                "toast_rescan_source_missing_body",
-                format!("no source registered for {drive_upper}:\\"),
-                cx,
-            );
-            return;
-        };
-        let mut args = fluent_bundle::FluentArgs::new();
-        args.set("drive", drive_upper.to_string());
-        let label = self.i18n.get_text_with_args("drive_label", &args);
-        self.rescan_source(source_id, label, cx);
-    }
-
     pub fn rescan_source(&mut self, source_id: SourceId, label: String, cx: &mut Context<Self>) {
         if self.service.connection.is_control_pending() {
             return;
@@ -1108,39 +1069,6 @@ mod tests {
             status_refresh_decision(false, false, false),
             StatusRefreshDecision::Stop,
             "a hidden table has nothing to refresh when loading ends"
-        );
-    }
-
-    #[test]
-    fn source_id_resolves_drive_from_sources_or_drive_fallback() {
-        use cairn_protocol::message::SourceId;
-        use cairn_protocol::status::{SourceKind, SourceStatusSummary, VolumeState};
-
-        let custom_c = SourceId(99);
-        let sources = vec![
-            SourceStatusSummary {
-                source_id: SourceId(200),
-                kind: SourceKind::Folder,
-                root_path: r"C:\Projects".to_string(),
-                volume_guid: String::new(),
-                status: VolumeState::Synced,
-                indexed_count: 10,
-                live_watch_enabled: true,
-            },
-            SourceStatusSummary {
-                source_id: custom_c,
-                kind: SourceKind::NtfsVolume,
-                root_path: r"C:\".to_string(),
-                volume_guid: "guid-c".to_string(),
-                status: VolumeState::Synced,
-                indexed_count: 100,
-                live_watch_enabled: true,
-            },
-        ];
-        assert_eq!(super::source_id_for_drive(&sources, 'c'), Some(custom_c));
-        assert_eq!(
-            super::source_id_for_drive(&sources, 'd'),
-            SourceId::for_drive('D')
         );
     }
 }

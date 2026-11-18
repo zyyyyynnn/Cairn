@@ -6,10 +6,8 @@
 
 use crate::app::{layout, CairnApp};
 use crate::shell::accessibility::{self, ControlElement};
-use crate::shell::status_bar::format_count;
 use crate::shell::theme::{self, ShellTokens};
 use crate::view::announce_shortcut;
-use fluent_bundle::FluentArgs;
 use gpui_kit::assets::IconName as AssetIconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{h_flex, Icon, IconName, Sizable as _};
@@ -291,18 +289,7 @@ impl CairnApp {
     /// Normal queries match names and paths; body search is the explicit `content:` term, so the
     /// placeholder does not promise content results for text that never asked for them.
     pub(crate) fn placeholder_text(&self) -> SharedString {
-        if let Some(listing) = self.block_listing.as_ref() {
-            // The path scope lives in the box; the status bar stays the plain
-            // count/size summary of whatever the rows currently are.
-            let mut args = FluentArgs::new();
-            args.set("dir", listing.directory().to_string());
-            args.set("count", listing.count() as i64);
-            args.set("count_text", format_count(listing.count()));
-            SharedString::from(
-                self.i18n
-                    .get_text_with_args("treemap_block_filter_placeholder", &args),
-            )
-        } else if self.recycle_bin.is_open() {
+        if self.recycle_bin.is_open() {
             self.cached_text("recycle_bin_filter_placeholder")
         } else {
             self.cached_text("search_placeholder")

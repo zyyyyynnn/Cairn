@@ -5,7 +5,7 @@
 //! One tooltip entrance for every trigger.
 //!
 //! gpui-kit component tooltips animate through the managed overlay. A GPUI-native
-//! `.tooltip()` builder, the form the result table, path band and Treemap use, shows its
+//! `.tooltip()` builder, the form the result table and its heading use, shows its
 //! view without one; this wrapper gives those views the same 150 ms, 4 px entrance.
 
 use gpui_kit::component::animation::{ease_out_cubic, EffectTransition};

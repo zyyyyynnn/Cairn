@@ -2,19 +2,16 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! The bottom status band: the number of objects the current query matched,
-//! or selected node information in drive visualization mode.
+//! The bottom status band: the number of objects the current query matched.
 
 use crate::app::{layout, CairnApp};
 use crate::search::ResultSetChange;
 use crate::shell::accessibility::{self, ControlElement};
 use crate::shell::status_bar::format_count;
 use crate::shell::theme::{self, ShellTokens};
-use cairn_core::format_size_bytes;
 use cairn_protocol::message::QueryDegradedReason;
 use fluent_bundle::FluentArgs;
 use gpui_kit::assets::IconName;
-use gpui_kit::base::Disableable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::status_bar::StatusBar;
 use gpui_kit::component::{h_flex, Icon, Sizable as _};
@@ -23,7 +20,7 @@ use gpui_kit::gpui::*;
 /// The band marks a loading state only while the current view has nothing to show.
 ///
 /// A volume that is still catching up does not blank a table that already has rows: that
-/// progress belongs to the sidebar's drive row, and the band keeps showing the result summary.
+/// progress belongs to the index state, and the band keeps showing the result summary.
 fn status_waiting(
     awaiting_results: bool,
     index_loading: bool,
@@ -41,7 +38,6 @@ impl CairnApp {
         cx: &mut Context<Self>,
     ) -> ControlElement {
         let bar = accessibility::control("status-bar");
-        let mut zoom_percent = None;
         let mut summary: Option<AnyElement> = None;
         let mut summary_aria: Option<String> = None;
         let mut summary_loading = false;
@@ -82,140 +78,12 @@ impl CairnApp {
                     .child(count_text)
                     .into_any_element(),
             );
-        } else if let Some(listing) = self.block_listing.as_ref() {
-            let count_text = {
-                let mut args = FluentArgs::new();
-                args.set("count", listing.total() as i64);
-                args.set("count_text", format_count(listing.total()));
-                if listing.total_bytes() == 0 {
-                    self.i18n.get_text_with_args("status_objects_count", &args)
-                } else {
-                    args.set("size", format_size_bytes(listing.total_bytes()));
-                    self.i18n
-                        .get_text_with_args("status_objects_summary", &args)
-                }
-            };
-            // The visible line stays the plain count; assistive technology also
-            // gets the owning directory and the block the rows came from.
-            let mut scope_args = FluentArgs::new();
-            scope_args.set("dir", listing.directory().to_string());
-            scope_args.set("count", listing.count() as i64);
-            scope_args.set("count_text", format_count(listing.count()));
-            let scope = self
-                .i18n
-                .get_text_with_args("treemap_block_scope", &scope_args);
-            summary_aria = Some(format!("{scope} {count_text}"));
-            summary = Some(
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .font_features(theme::tabular_figures())
-                    .child(count_text)
-                    .into_any_element(),
-            );
-        } else if self.drive_view.is_some() {
-            view_name = "treemap";
-            if let Some(ref st) = self.treemap_state {
-                if st.is_scanning() {
-                    // No counts or bytes are published until the scan has a complete tree.
-                    summary_loading = true;
-                    icon_loading = true;
-                } else if st.is_unavailable() {
-                    // The canvas state band owns the sentence and its recovery.
-                    // The status line stays empty instead of repeating it.
-                } else {
-                    zoom_percent = st.zoom_percent();
-                    let mut args = FluentArgs::new();
-                    args.set("count", st.total_items() as i64);
-                    args.set("count_text", format_count(st.total_items()));
-                    args.set("size", format_size_bytes(st.total_size()));
-                    let totals_text = self
-                        .i18n
-                        .get_text_with_args("treemap_status_summary", &args);
-                    summary_aria = Some(totals_text.clone());
-                    summary = if let Some(node) = st.selected_node() {
-                        let is_aggregate = node.is_aggregate();
-                        let name = if is_aggregate {
-                            let mut args = FluentArgs::new();
-                            args.set("count", node.aggregate_count as i64);
-                            args.set("count_text", format_count(node.aggregate_count));
-                            self.i18n.get_text_with_args("treemap_aggregate", &args)
-                        } else {
-                            node.item.name.clone()
-                        };
-                        let size = format_size_bytes(node.item.size);
-                        if is_aggregate {
-                            // A summary has no concrete path; naming one would
-                            // point at an invented location.
-                            summary_aria = Some(format!("{name} {size}"));
-                        } else {
-                            let mut args = FluentArgs::new();
-                            args.set("name", name.clone());
-                            args.set("path", node.path.clone());
-                            args.set("size", size.clone());
-                            let pct = if st.total_size() > 0 {
-                                (node.item.size as f64 / st.total_size() as f64) * 100.0
-                            } else {
-                                0.0
-                            };
-                            args.set("percent", format!("{:.1}", pct));
-                            args.set(
-                                "date",
-                                crate::table::presentation::format_timestamp_cached(
-                                    node.item.modified_ts,
-                                )
-                                .to_string(),
-                            );
-                            // The full path/date stay available to assistive technology;
-                            // the visible bar only carries the two values the tile shows.
-                            summary_aria = Some(
-                                self.i18n
-                                    .get_text_with_args("treemap_status_selected", &args),
-                            );
-                        }
-                        Some(
-                            h_flex()
-                                .min_w_0()
-                                .items_center()
-                                .gap(rems(layout::SPACE_4))
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .truncate()
-                                        .text_sm()
-                                        .font_features(theme::tabular_figures())
-                                        .child(name),
-                                )
-                                .child(
-                                    div()
-                                        .flex_shrink_0()
-                                        .text_sm()
-                                        .font_features(theme::tabular_figures())
-                                        .child(size),
-                                )
-                                .into_any_element(),
-                        )
-                    } else {
-                        Some(
-                            div()
-                                .min_w_0()
-                                .truncate()
-                                .font_features(theme::tabular_figures())
-                                .child(totals_text)
-                                .into_any_element(),
-                        )
-                    };
-                }
-            } else {
-                summary_loading = true;
-                icon_loading = true;
-            }
         } else {
             let index_loading = self.service.status.is_any_loading();
             let awaiting_results = self.results.table.total_rows() == 0;
             // The band marks only a wait that blocks what the view can show. Once rows are on
-            // screen the table is usable while a volume catches up; that volume state belongs to
-            // the sidebar's drive row, not here.
+            // screen the table is usable while a volume catches up; that volume state is not a
+            // result-band wait.
             summary_loading = status_waiting(
                 awaiting_results,
                 index_loading,
@@ -242,7 +110,7 @@ impl CairnApp {
         }
 
         // A selection replaces the total summary with the count the next bulk action will
-        // actually receive. Treemap selection is reported by its own node summary.
+        // actually receive.
         if !summary_loading && !self.results.table.selected_indices.is_empty() {
             let selected = self.results.table.selected_indices.len();
             let mut args = FluentArgs::new();
@@ -272,19 +140,12 @@ impl CairnApp {
         } else {
             "status_refresh"
         });
-        let refresh_unavailable = self.drive_view.is_some()
-            && self
-                .treemap_state
-                .as_ref()
-                .and_then(|state| state.unavailable_reason())
-                .is_some_and(|reason| !reason.retryable());
         let refresh = Button::new("status-refresh")
             .ghost()
             .xsmall()
             .icon(IconName::RefreshCw)
             .loading_icon(IconName::LoaderCircle)
             .loading(icon_loading)
-            .disabled(refresh_unavailable)
             .tooltip(refresh_label.clone())
             .accessibility_label(refresh_label)
             .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
@@ -300,9 +161,7 @@ impl CairnApp {
             .child(refresh);
 
         let mut right: Option<AnyElement> = None;
-        let in_index_table = !self.recycle_bin.is_open()
-            && self.block_listing.is_none()
-            && self.drive_view.is_none();
+        let in_index_table = !self.recycle_bin.is_open();
         if in_index_table && !summary_loading {
             if let Some(degraded) = &self.query.degraded {
                 let notice = match degraded {
@@ -358,37 +217,6 @@ impl CairnApp {
         if let Some(summary) = summary {
             left = left.child(div().min_w_0().flex_1().truncate().child(summary));
         }
-        if let Some(percent) = zoom_percent {
-            let reset = accessibility::control("treemap-zoom-reset");
-            let reset_name = self.cached_control_name(reset);
-            let mut args = FluentArgs::new();
-            args.set("percent", percent);
-            let reset_tooltip = self
-                .i18n
-                .get_text_with_args("treemap_zoom_reset_tooltip", &args);
-            left = left.child(
-                div()
-                    .flex_shrink_0()
-                    .font_features(theme::tabular_figures())
-                    .on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, _, cx| {
-                        cx.stop_propagation()
-                    })
-                    .child(
-                        Button::new("treemap-zoom-reset")
-                            .ghost()
-                            .small()
-                            .font_weight(FontWeight::MEDIUM)
-                            .min_h(rems(layout::SPACE_24))
-                            .label(format!("{percent}%"))
-                            .tooltip(reset_tooltip)
-                            .accessibility_label(reset_name)
-                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                this.reset_treemap_zoom(window, cx);
-                            })),
-                    ),
-            );
-        }
-
         let mut status_bar = StatusBar::new()
             .h(rems(layout::STATUS_HEIGHT))
             .flex_shrink_0()
@@ -419,16 +247,6 @@ impl CairnApp {
         if self.recycle_bin.is_open() {
             self.begin_recycle_bin_load(cx);
             cx.notify();
-            return;
-        }
-        if self.drive_view.is_some() {
-            if let Some(path) = self
-                .treemap_state
-                .as_ref()
-                .map(|state| state.current_dir().to_string())
-            {
-                self.start_treemap_scan(std::path::PathBuf::from(path), cx);
-            }
             return;
         }
         if !self.service.connection.is_connected() {

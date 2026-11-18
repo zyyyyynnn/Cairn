@@ -3,10 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Status model: the result count the bottom band renders once its query has settled, plus the
-//! volume state the sidebar renders beside each drive (UI-01, IDX-07).
-//!
-//! Volume state arrives as a machine-readable [`VolumeState`] from the protocol. This module turns it
-//! into user-facing text through Fluent only; no surface renders a protocol key as a label (NFR-11).
+//! volume states that decide when the index is still loading (UI-01, IDX-07).
 
 use crate::shell::i18n::I18nManager;
 use cairn_core::format_size_bytes;
@@ -22,12 +19,6 @@ pub struct StatusBarModel {
     objects_bytes: u64,
     summary_known: bool,
     pub volumes: Vec<VolumeStatusSummary>,
-}
-
-/// Fluent message id for a volume state, derived from the protocol's stable `state_key()` so a new
-/// state cannot silently render as untranslated text.
-pub fn volume_state_message_key(state: &VolumeState) -> String {
-    format!("volume_state_{}", state.state_key())
 }
 
 impl StatusBarModel {
@@ -76,7 +67,7 @@ impl StatusBarModel {
     }
 
     /// `true` while at least one volume is still building or catching up. This is a loading state,
-    /// not a warning: the status bar annotates catching up volumes.
+    /// not a warning.
     pub fn is_any_loading(&self) -> bool {
         self.volumes.iter().any(|volume| {
             matches!(
@@ -97,21 +88,6 @@ impl StatusBarModel {
             args.set("size", format_size_bytes(self.objects_bytes));
             i18n.get_text_with_args("status_objects_summary", &args)
         }
-    }
-
-    /// Single index-state capsule: the drive letter is data, the state is localized copy.
-    pub fn volume_capsule_text(&self, i18n: &I18nManager, volume: &VolumeStatusSummary) -> String {
-        let state_text = match volume.status.progress_percent() {
-            // The service's per-batch percentage is not a reliable cumulative progress figure, so
-            // the capsule names the state instead of publishing a number that can look frozen.
-            Some(_) => i18n.get_text("volume_state_catching_up_pending"),
-            None => i18n.get_text(&volume_state_message_key(&volume.status)),
-        };
-
-        let mut args = FluentArgs::new();
-        args.set("drive", volume.drive_letter.to_string());
-        args.set("state", state_text);
-        i18n.get_text_with_args("volume_capsule", &args)
     }
 }
 
@@ -150,100 +126,11 @@ mod tests {
     }
 
     #[test]
-    fn every_protocol_state_resolves_to_text_in_both_locales() {
-        let i18n = I18nManager::default();
-        let states = [
-            VolumeState::Synced,
-            VolumeState::CatchingUp(42),
-            VolumeState::Rebuilding,
-            VolumeState::Offline,
-            VolumeState::SnapshotMode,
-        ];
-
-        for state in states {
-            let key = volume_state_message_key(&state);
-            assert!(
-                i18n.has_key(&key),
-                "{key} missing from the locale bundles for {state:?}"
-            );
-            let text = StatusBarModel::default().volume_capsule_text(&i18n, &volume(state));
-            assert!(
-                !text.contains(state.state_key()),
-                "{state:?} rendered the raw protocol key: {text}"
-            );
-            assert!(
-                text.contains('C'),
-                "{state:?} capsule lost the drive letter: {text}"
-            );
-        }
-    }
-
-    #[test]
-    fn treemap_counts_use_the_locale_plural_rule() {
-        fn plain(text: String) -> String {
-            text.replace(['\u{2068}', '\u{2069}'], "")
-        }
-
-        let en = I18nManager::new("en-US");
-        let zh = I18nManager::new("zh-CN");
-        let mut args = FluentArgs::new();
-        args.set("count", 1i64);
-        args.set("count_text", "1");
-        args.set("size", "1 KB");
-        assert_eq!(
-            plain(en.get_text_with_args("treemap_aggregate", &args)),
-            "1 more"
-        );
-        assert_eq!(
-            plain(en.get_text_with_args("treemap_status_summary", &args)),
-            "1 item 1 KB"
-        );
-        assert_eq!(
-            plain(zh.get_text_with_args("treemap_aggregate", &args)),
-            "其余 1 项"
-        );
-        args.set("count", 2i64);
-        args.set("count_text", "2");
-        assert_eq!(
-            plain(en.get_text_with_args("treemap_aggregate", &args)),
-            "2 more"
-        );
-        assert_eq!(
-            plain(zh.get_text_with_args("treemap_aggregate", &args)),
-            "其余 2 项"
-        );
-    }
-
-    #[test]
     fn million_scale_counts_are_grouped() {
         assert_eq!(format_count(0), "0");
         assert_eq!(format_count(999), "999");
         assert_eq!(format_count(1000), "1,000");
         assert_eq!(format_count(1_437_236), "1,437,236");
-    }
-
-    #[test]
-    fn catching_up_names_the_state_without_a_frozen_percentage() {
-        let i18n = I18nManager::default();
-        let text = StatusBarModel::default()
-            .volume_capsule_text(&i18n, &volume(VolumeState::CatchingUp(42)));
-        assert!(
-            text.contains("同步中") || text.contains("Synchronizing"),
-            "the capsule must name the state: {text}"
-        );
-        assert!(
-            !text.contains("42"),
-            "a per-batch percentage is not a cumulative claim and must not be published"
-        );
-    }
-
-    #[test]
-    fn the_capsule_text_differs_between_states() {
-        let i18n = I18nManager::default();
-        let model = StatusBarModel::default();
-        let synced = model.volume_capsule_text(&i18n, &volume(VolumeState::Synced));
-        let offline = model.volume_capsule_text(&i18n, &volume(VolumeState::Offline));
-        assert_ne!(synced, offline, "states must not read as the same label");
     }
 
     #[test]

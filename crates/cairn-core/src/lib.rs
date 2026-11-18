@@ -10,7 +10,9 @@
 //! Strictly forbids unsafe code and avoids any platform-specific Windows API dependencies.
 
 pub mod arena;
+pub mod dir_size;
 pub mod engine;
+pub mod file_kind;
 pub mod filter;
 pub mod format;
 pub mod frn_index;
@@ -25,10 +27,11 @@ pub mod sort;
 pub mod syntax;
 pub mod text_match;
 pub mod time;
-pub mod treemap;
 
 pub use arena::NamePool;
+pub use dir_size::DirectorySizeIndex;
 pub use engine::{execute_query, execute_query_ordered, glob_match, CancellationToken};
+pub use file_kind::FileKind;
 pub use filter::{
     AttribFilter, DateFilter, DateOp, DimensionsFilter, DupeMode, SizeFilter, SizeOp,
 };

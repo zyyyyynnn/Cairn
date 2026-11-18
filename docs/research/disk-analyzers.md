@@ -1,6 +1,6 @@
 # 磁盘空间可视化工具单品调研：SpaceSniffer、WinDirStat 2.x、WizTree、TreeSize Free、RidNacs
 
-> 本文是五个磁盘空间可视化工具的逐品档案，覆盖定位、发布状态、数据获取层、可视化与交互、性能公开口径、许可与对 Cairn 的借鉴点。研究索引见 [README.md](README.md)，交叉形态空白见 [cross-form.md](cross-form.md)；Cairn 的规范以 [SPEC.md](../SPEC.md) 与 [product/treemap.md](../product/treemap.md) 为准。版本号、日期与数字逐条附一手来源链接；查不到的一律标注"未找到公开数据"。
+> 本文是五个磁盘空间可视化工具的逐品档案，覆盖定位、发布状态、数据获取层、可视化与交互、性能公开口径、许可与对 Cairn 的借鉴点。研究索引见 [README.md](README.md)，交叉形态空白见 [cross-form.md](cross-form.md)；Cairn 的规范以 [SPEC.md](../SPEC.md) 为准，`product/treemap.md` 已删除，本文仅作历史档案。版本号、日期与数字逐条附一手来源链接；查不到的一律标注"未找到公开数据"。
 
 ---
 
@@ -49,7 +49,7 @@
 
 1. **过滤语法的 `|` 取反与 `;` 组合**：把 `size:`/`ext:`/`dm:` 映射为 Treemap 覆盖层（P2 演进候选）时，"`|` 前缀排除 + 分号串联"是与 Cairn 逻辑组合语义（QRY-02 的 `!`/与）最易对齐的轻量参照；被过滤元素淡出不重排，与 Treemap 选中态淡化机制同型（[官网首页](http://www.uderzo.it/main_products/space_sniffer/index.html)）。
 2. **"multiple views, single scan"**：一次扫描、多过滤视图的视图模型可作为 Treemap 过滤之后的演进参照，但需评估与 DSV-07 双态隔离的冲突（[features 页](http://www.uderzo.it/main_products/space_sniffer/features.html)）。
-3. **闪烁提示变更元素**：以极低成本表达"这里刚变了"，不重排、不重建布局；treemap.md §3.3 现行口径是"区块没有动效"，该做法仅作为未来活树方案的候选参考。
+3. **闪烁提示变更元素**：以极低成本表达"这里刚变了"，不重排、不重建布局；treemap.md §3.3 当时的口径是"区块没有动效"（该产品规范已删除，本文仅作历史档案），该做法仅作为未来活树方案的候选参考。
 
 ---
 

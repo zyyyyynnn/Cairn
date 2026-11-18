@@ -85,7 +85,6 @@ fn access_class(req: &ClientRequest) -> AccessClass {
         | ClientRequest::GetStatus
         | ClientRequest::GetConfig
         | ClientRequest::GetContentIndexStatus
-        | ClientRequest::GetTree { .. }
         | ClientRequest::GetSources
         | ClientRequest::GetPropertyIndexStatus
         | ClientRequest::GetIndexJournal { .. } => AccessClass::Read,
@@ -430,10 +429,6 @@ mod tests {
             ClientRequest::GetStatus,
             ClientRequest::GetConfig,
             ClientRequest::GetContentIndexStatus,
-            ClientRequest::GetTree {
-                path: "C:\\".to_string(),
-                max_depth: 2,
-            },
             ClientRequest::GetSources,
             ClientRequest::GetPropertyIndexStatus,
             ClientRequest::GetIndexJournal {

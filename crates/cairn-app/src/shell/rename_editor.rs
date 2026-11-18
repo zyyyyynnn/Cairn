@@ -165,9 +165,6 @@ impl CairnApp {
                         if !this.recycle_bin.is_open() {
                             this.results.table.rename_row(&old_path, &new_name);
                         }
-                        if let Some(listing) = this.block_listing.as_mut() {
-                            listing.rename_path(&old_path, &new_name);
-                        }
                         this.dismiss_rename_error_toast(cx);
                         // Escape during the write may have closed the editor; only a still-open
                         // one returns the keyboard to the table.

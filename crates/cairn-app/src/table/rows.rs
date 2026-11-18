@@ -13,7 +13,7 @@ use crate::table::header::ColumnLane as _;
 use crate::table::model::{OptionalColumn, TableColumn};
 use crate::table::presentation::{format_optional_cell, format_timestamp_cached};
 use cairn_core::format_size_bytes;
-use cairn_core::treemap::FileKind;
+use cairn_core::FileKind;
 use cairn_protocol::message::FileRowData;
 use gpui_kit::assets::IconName as AssetIconName;
 use gpui_kit::component::input::Input;

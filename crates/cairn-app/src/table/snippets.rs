@@ -162,7 +162,7 @@ impl CairnApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.recycle_bin.is_open() || self.block_listing.is_some() || self.drive_view.is_some() {
+        if self.recycle_bin.is_open() {
             self.results.snippet_preview = None;
             return;
         }

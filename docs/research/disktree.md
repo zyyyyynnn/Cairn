@@ -1,6 +1,6 @@
 # disktree 参考研究：Treemap 配色、布局与视觉交互
 
-> 研究对象：GitHub [`tobi/disktree`](https://github.com/tobi/disktree)，固定版本 `v0.11.0`，commit [`6c8d4ce6211bf135ff4e42890faebff1040e1846`](https://github.com/tobi/disktree/commit/6c8d4ce6211bf135ff4e42890faebff1040e1846)（MIT License）。Cairn 当前 Treemap 规范以 [product/treemap.md](../product/treemap.md) 与 [SPEC.md](../SPEC.md) 为准。
+> 研究对象：GitHub [`tobi/disktree`](https://github.com/tobi/disktree)，固定版本 `v0.11.0`，commit [`6c8d4ce6211bf135ff4e42890faebff1040e1846`](https://github.com/tobi/disktree/commit/6c8d4ce6211bf135ff4e42890faebff1040e1846)（MIT License）。Cairn 的 Treemap 产品规范已删除，本文仅作历史档案；当前产品定义以 [SPEC.md](../SPEC.md) 为准。
 
 ---
 

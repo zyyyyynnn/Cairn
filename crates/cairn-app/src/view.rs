@@ -24,8 +24,7 @@ use crate::shell::command_groups::{menu_groups, GroupCommand, MenuGroup};
 use crate::shell::commands::{self, ToggleSidebar, WINDOW_CONTEXT, WINDOW_CONTROL_CONTEXT};
 use crate::shell::theme::{self, ShellTokens};
 use crate::shell::window_resize::{WindowResizeTracker, SETTLE_POLL};
-use gpui_kit::assets::IconName as AssetIconName;
-use gpui_kit::base::motion::{transition_with_status, MotionStatus, Transition};
+use gpui_kit::base::motion::{transition_with_status, Transition};
 use gpui_kit::base::Disableable;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
@@ -253,26 +252,7 @@ pub(crate) fn announce_shortcut(element: ControlElement, control: &KeyControl) -
     element.aria_keyshortcuts(shortcuts.join(", "))
 }
 
-/// The Treemap address field's clear control.
-///
-/// It belongs to the shell's control registry, so its element, role and name
-/// come from there; the Treemap view supplies only the click.
-pub(crate) fn treemap_path_clear_button(
-    i18n: &crate::shell::i18n::I18nManager,
-    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
-    let control = accessibility::control("treemap-path-clear");
-    Button::new(control.element)
-        .ghost()
-        .small()
-        .min_w(rems(layout::SPACE_24))
-        .min_h(rems(layout::SPACE_24))
-        .icon(AssetIconName::X)
-        .accessibility_label(accessibility::name(control, i18n))
-        .on_click(on_click)
-}
-
-/// The one rounded content panel used by the result table and the Treemap:
+/// The one rounded content panel used by the result table:
 /// the 4px frame gap, the panel surface and the corner crescent overlay.
 ///
 /// `cover` is painted over the panel's content but under the crescents, so a
@@ -378,16 +358,6 @@ struct TableBand {
     results_hold_focus: bool,
 }
 
-/// The sidebar's sampled width for this frame. The content column uses it as
-/// the canvas origin, so both regions share one motion value.
-struct SidebarBand {
-    width: f32,
-    /// The width the sidebar holds once its motion stops. The Treemap sizes labels by this rather
-    /// than by the animated width, so a collapse reveals titles without reshuffling the layout.
-    settled_width: f32,
-    animating: bool,
-}
-
 impl Render for CairnApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _perf = crate::shell::perf::scope("render");
@@ -461,10 +431,7 @@ impl Render for CairnApp {
             });
         }
 
-        // One transition value drives the sidebar and the content column, so
-        // the treemap canvas width is always the width the layout actually left
-        // for it. The first frame adopts the target; a toggle reverses from the
-        // currently sampled width.
+        // One transition value drives the sidebar as it collapses or expands.
         let target_sidebar_width = if self.sidebar_collapsed {
             0.0
         } else {
@@ -476,10 +443,6 @@ impl Render for CairnApp {
             Transition::new(crate::shell::motion::SIDEBAR).ease(ease_out_quint()),
             window,
             cx,
-        );
-        let sidebar_animating = matches!(
-            sidebar_motion.status,
-            MotionStatus::Running | MotionStatus::Delayed
         );
 
         let title_bar = self.render_title_bar(view.clone(), window, &tokens, cx);
@@ -495,11 +458,6 @@ impl Render for CairnApp {
                 visible,
                 row_height,
                 results_hold_focus,
-            },
-            SidebarBand {
-                width: sidebar_motion.value,
-                settled_width: target_sidebar_width,
-                animating: sidebar_animating,
             },
             window,
             cx,
@@ -547,9 +505,6 @@ impl Render for CairnApp {
                     this.go_forward(window, cx)
                 }),
             )
-            .on_action(
-                cx.listener(|this, _: &commands::NavigateUp, window, cx| this.go_up(window, cx)),
-            )
             .on_action(cx.listener(Self::delete_selected))
             .on_action(cx.listener(Self::rename_selected))
             .on_action(cx.listener(Self::restore_selected))
@@ -559,17 +514,10 @@ impl Render for CairnApp {
             .on_action(cx.listener(Self::reset_zoom))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                    // A press anywhere outside a Treemap tile reaches this root
-                    // handler (tiles stop propagation) and drops the Treemap
-                    // selection. The canvas background does the same for its own
-                    // presses; this covers the title bar, search band, sidebar
-                    // gaps, status bar and other chrome.
-                    let had_selection = this
-                        .treemap_state
-                        .as_mut()
-                        .is_some_and(|state| state.clear_selection());
-                    if cairn_ui::focus::keyboard_navigation(cx) || had_selection {
+                cx.listener(|_, _: &MouseDownEvent, _, cx| {
+                    // A press on the window's chrome returns the input modality to
+                    // the pointer.
+                    if cairn_ui::focus::keyboard_navigation(cx) {
                         cairn_ui::focus::set_keyboard_navigation(false, cx);
                         cx.notify();
                     }
@@ -825,10 +773,8 @@ impl CairnApp {
         let toggle_view = view.clone();
         let back_view = view.clone();
         let forward_view = view.clone();
-        let up_view = view.clone();
         let can_back = self.can_go_back();
         let can_forward = self.can_go_forward();
-        let can_up = self.can_go_up();
         let is_collapsed = self.sidebar_collapsed;
         let is_maximized = window.is_maximized();
         let minimize_focus = window
@@ -939,22 +885,6 @@ impl CairnApp {
                                     .on_click(move |_, window, cx| {
                                         forward_view
                                             .update(cx, |this, cx| this.go_forward(window, cx));
-                                    }),
-                            )
-                            .child(
-                                Button::new("nav-up")
-                                    .ghost()
-                                    .small()
-                                    .icon(
-                                        Icon::new(IconName::ArrowUp)
-                                            .size(rems(theme::UI_ICON_SIZE)),
-                                    )
-                                    .disabled(!can_up)
-                                    .accessibility_label(
-                                        self.cached_control_name(accessibility::control("nav-up")),
-                                    )
-                                    .on_click(move |_, window, cx| {
-                                        up_view.update(cx, |this, cx| this.go_up(window, cx));
                                     }),
                             )
                             .child(
@@ -1102,8 +1032,8 @@ impl CairnApp {
         .detach();
     }
 
-    /// The plate a live resize puts over the content panel, so the reflowing table or
-    /// Treemap stays one stable surface while the window is being dragged. It dissolves
+    /// The plate a live resize puts over the content panel, so the reflowing table
+    /// stays one stable surface while the window is being dragged. It dissolves
     /// over `motion::MASK_DISSOLVE` once the geometry has settled and the layout reflowed.
     fn render_window_resize_cover(
         &self,
@@ -1152,61 +1082,39 @@ impl CairnApp {
         tokens: &ShellTokens,
         band: QueryBand,
         table_band: TableBand,
-        sidebar: SidebarBand,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let resize_cover = self.render_window_resize_cover(tokens, cx);
-        let column = if self.drive_view.is_some() {
-            let path_band = self.render_treemap_path_band(tokens, band.view.clone(), window, cx);
-            let body = self.render_treemap_body(
-                tokens,
-                sidebar.width,
-                sidebar.settled_width,
-                sidebar.animating,
-                window,
-                cx,
-            );
-            let body_surface = content_panel(tokens, body, resize_cover);
-            v_flex()
-                .flex_1()
-                .min_w_0()
-                .min_h_0()
-                .bg(tokens.chrome)
-                .child(path_band)
-                .child(body_surface)
-        } else {
-            let QueryBand {
-                is_query_focused,
-                search_focus,
-                view,
-            } = band;
-            let query = self.render_search_band(
-                tokens,
-                is_query_focused,
-                search_focus,
-                view.clone(),
-                window,
-                cx,
-            );
-            let results = self.render_results(
-                tokens,
-                table_band.visible,
-                table_band.row_height,
-                table_band.results_hold_focus,
-                window,
-                cx,
-            );
-
-            let results_surface = content_panel(tokens, results, resize_cover);
-            v_flex()
-                .flex_1()
-                .min_w_0()
-                .min_h_0()
-                .bg(tokens.chrome)
-                .child(query)
-                .child(results_surface)
-        };
+        let QueryBand {
+            is_query_focused,
+            search_focus,
+            view,
+        } = band;
+        let query = self.render_search_band(
+            tokens,
+            is_query_focused,
+            search_focus,
+            view.clone(),
+            window,
+            cx,
+        );
+        let results = self.render_results(
+            tokens,
+            table_band.visible,
+            table_band.row_height,
+            table_band.results_hold_focus,
+            window,
+            cx,
+        );
+        let results_surface = content_panel(tokens, results, resize_cover);
+        let column = v_flex()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .bg(tokens.chrome)
+            .child(query)
+            .child(results_surface);
 
         // Wrapping this column alters its GlobalElementId path, which forces nested rows to flicker.
         column.into_any_element()

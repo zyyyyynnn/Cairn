@@ -7,14 +7,14 @@
 | 层 | 适用对象 | 位置 | 例子 |
 | --- | --- | --- | --- |
 | 纯逻辑 | 无系统调用、输入输出都是值 | `src` 内 `#[cfg(test)] mod tests` | 预算计算、排序比较、过滤器解析、错误码映射 |
-| 公开入口 | crate 的公开函数与协调器 Seam，用内存或伪造端口夹具调用 | `src` 内或 `crates/*/tests/` | `MultiVolumeEngine::treemap_tree`、`StartupCoordinator`、`SearchCoordinator`、`RowPresentationCache`、`FrnLookup` |
+| 公开入口 | crate 的公开函数与协调器 Seam，用内存或伪造端口夹具调用 | `src` 内或 `crates/*/tests/` | `DirectorySizeIndex::build`、`StartupCoordinator`、`SearchCoordinator`、`RowPresentationCache`、`FrnLookup` |
 | 协议与管道往返 | 真实帧编解码、真实命名管道上的请求与响应 | `crates/*/tests/` | 请求到响应的完整往返、版本拒绝、超长帧、超时与取消 |
 | 性能与内存账本门禁 | 10 万条多级目录合成语料上的索引字节预算与查询延迟回归 | `xtask bench-query --check` | `IndexMemoryFootprint` 空闲与单列排序态 `<= 125 B/record`、查询 P95 回归上限 250ms；SM-1 的 400 万条目标由发布前 release 实测 |
 | 权限与真机 | 裸盘读取、服务安装、UAC、MSI | 仅受控手工或 `--ignored` 层 | 实机索引、服务生命周期、同意对话框 |
 
 一个行为只在一层测一次，放在最接近用户的那一层；下层不重复上层已经断言过的结果。
 
-`cairn-app` 的公开入口在 `src` 内以 `CairnApp` 上下文覆盖：汇总块清单的进入、后退与退出（`open_block_listing` / `go_back` / `escape_query`），就地重命名的打开、替换与取消（`rename_selected` / `cancel_rename`），停止查询后的状态与 id（`cancel_in_flight_query`），以及取消后的状态刷新不再发起查询（`refresh_results`）；启动去重、搜索防抖取消与每帧渲染缓存通过对应 Seam（`StartupCoordinator`、`SearchCoordinator`、`RowPresentationCache`）以无 OS 真弹窗方式验证。
+`cairn-app` 的公开入口在 `src` 内以 `CairnApp` 上下文覆盖：就地重命名的打开、替换与取消（`rename_selected` / `cancel_rename`），查询历史后退（`go_back`），停止查询后的状态与 id（`cancel_in_flight_query`），以及取消后的状态刷新不再发起查询（`refresh_results`）；启动去重、搜索防抖取消与每帧渲染缓存通过对应 Seam（`StartupCoordinator`、`SearchCoordinator`、`RowPresentationCache`）以无 OS 真弹窗方式验证。
 
 ## 价值判定
 

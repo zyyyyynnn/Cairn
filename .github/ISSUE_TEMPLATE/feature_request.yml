@@ -38,7 +38,6 @@ body:
       description: 该特性建议主要涉及的系统层面。
       options:
         - "App / UI (界面与交互体验)"
-        - "Treemap (磁盘空间树图可视化)"
         - "Recycle Bin (回收站文件管理)"
         - "Core / Indexing (搜索算法与索引性能)"
         - "Service / Daemon (后台守护与同步服务)"

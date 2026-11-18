@@ -2,18 +2,17 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Locations and drives sidebar view.
+//! Locations and organization sidebar view.
 
 use crate::app::{element_id, layout, CairnApp};
 use crate::search::filters::FilterCategory;
 use crate::shell::accessibility::{self, ControlElement};
 use crate::shell::commands::OpenSelected;
 use crate::shell::theme::{self, ShellTokens};
-use cairn_protocol::status::SourceKind;
+use cairn_protocol::status::VolumeState;
 use fluent_bundle::FluentArgs;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::StyledExt;
-use gpui_kit::component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_kit::component::{h_flex, v_flex, Icon};
 use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::{AssetSource as _, *};
@@ -194,8 +193,7 @@ fn sidebar_row(
         )
 }
 
-/// A group caption: 位置 and 驱动器 share one box, so each label has the same leading above and
-/// below and the groups cannot drift apart. The box fills the search-band height, which puts the
+/// A group caption: 位置 heads the location rows. The box fills the search-band height, which puts the
 /// optical centre on the query box's centreline and the first row on the table heading.
 fn sidebar_caption(
     control: &'static accessibility::KeyControl,
@@ -304,19 +302,14 @@ impl CairnApp {
         }
 
         let locations = accessibility::control("sidebar-locations");
-        let drives = accessibility::control("sidebar-drives");
         let locations_title = self.cached_control_name(locations);
-        let drives_title = self.cached_control_name(drives);
         let icon_metrics = sidebar_icon_metrics(window);
 
         let quick_access: Vec<AnyElement> = FilterCategory::menu_order()
             .iter()
             .map(|category| {
                 let category = *category;
-                let is_active = self.query.active_filter == category
-                    && self.drive_view.is_none()
-                    && !self.recycle_bin.is_open()
-                    && self.block_listing.is_none();
+                let is_active = self.query.active_filter == category && !self.recycle_bin.is_open();
                 let control =
                     accessibility::control_at(&element_id("sidebar-location", category.key()));
                 let name = self.cached_control_name(control);
@@ -354,7 +347,7 @@ impl CairnApp {
 
         // 回收站 is a location, not a search category: it lists what the shell
         // has binned and restores from there, so it closes the 位置 section.
-        let bin_active = self.recycle_bin.is_open() && self.drive_view.is_none();
+        let bin_active = self.recycle_bin.is_open();
         let bin_control = accessibility::control("sidebar-recycle-bin");
         let bin_name = self.cached_control_name(bin_control);
         let bin_focus = window
@@ -384,176 +377,63 @@ impl CairnApp {
             cx,
         );
 
-        let mut drive_rows: Vec<AnyElement> = self
+        // The drive rows are gone, but a non-synced or offline volume still has to be visible.
+        // One compact warning line carries the worst state and how many other volumes are behind.
+        let unsynced: Vec<_> = self
             .service
             .status
             .volumes
             .iter()
-            .enumerate()
-            .map(|(ix, volume)| {
-                let drive = volume.drive_letter.to_ascii_uppercase();
-                let is_active = self.drive_view == Some(drive);
-                let mut args = FluentArgs::new();
-                args.set("drive", drive.to_string());
-                let label = self.i18n.get_text_with_args("drive_label", &args);
-                let state = self.service.status.volume_capsule_text(&self.i18n, volume);
-                let accessible = format!("{label} {state}");
-                let control = accessibility::control("sidebar-drive");
-                let focus = window
-                    .use_keyed_state(
-                        element_id("sidebar-drive-focus", &drive.to_string()),
-                        cx,
-                        |_, cx| cx.focus_handle().tab_stop(true),
-                    )
-                    .read(cx)
-                    .clone();
-                let is_focused =
-                    focus.contains_focused(window, cx) && cairn_ui::focus::keyboard_navigation(cx);
-                let item = sidebar_row(IconName::HardDrive, label, is_active, tokens, icon_metrics);
-
-                let row = keyboard_row(
-                    accessibility::element_at(control, ix)
-                        .aria_label(accessible)
-                        .aria_selected(is_active),
-                    focus,
-                    is_focused,
-                    tokens,
-                    item,
-                    move |this, window, cx| this.open_drive_visualization(drive, window, cx),
-                    cx,
-                );
-                let app = cx.entity();
-                let rescan_label = self.cached_text("ctx_rescan_source");
-                let disabled = !self.service.connection.is_connected()
-                    || self.service.connection.is_control_pending();
-                attach_rescan_menu(
-                    div()
-                        .id(element_id("sidebar-drive-menu", &drive.to_string()))
-                        .w_full()
-                        .child(row),
-                    rescan_label,
-                    disabled,
-                    move || {
-                        let app = app.clone();
-                        move |_, _, cx| {
-                            app.update(cx, |this, cx| this.rescan_drive(drive, cx));
-                        }
-                    },
-                )
-            })
+            .filter(|volume| volume.status != VolumeState::Synced)
             .collect();
-
-        for folder in self
-            .service
-            .sources
+        let index_state = unsynced
             .iter()
-            .filter(|source| source.kind == SourceKind::Folder)
-        {
-            let source_id = folder.source_id;
-            let root_path = folder.root_path.clone();
-            let focus = window
-                .use_keyed_state(
-                    element_id("sidebar-source-focus", &source_id.0.to_string()),
-                    cx,
-                    |_, cx| cx.focus_handle().tab_stop(true),
-                )
-                .read(cx)
-                .clone();
-            let is_focused =
-                focus.contains_focused(window, cx) && cairn_ui::focus::keyboard_navigation(cx);
-            let item = sidebar_row(
-                IconName::Folder,
-                root_path.clone(),
-                false,
-                tokens,
-                icon_metrics,
-            );
-            let drive = root_path
-                .chars()
-                .next()
-                .filter(|ch| ch.is_ascii_alphabetic())
-                .map(|ch| ch.to_ascii_uppercase())
-                .unwrap_or('C');
-            let open_path = root_path.clone();
-            let rescan_path = root_path;
-            let app = cx.entity();
-            let rescan_label = self.cached_text("ctx_rescan_source");
-            let disabled = !self.service.connection.is_connected()
-                || self.service.connection.is_control_pending();
-            let click_focus = focus.clone();
-            let row = div()
-                .id(element_id("sidebar-source", &source_id.0.to_string()))
-                .relative()
-                .w_full()
-                .flex_shrink_0()
-                .rounded(tokens.radius)
-                .cursor_pointer()
-                .hover(|this| {
-                    this.bg(tokens.row_hover)
-                        .text_color(tokens.sidebar_accent_foreground)
-                })
-                .track_focus(&focus)
-                .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                    if matches!(event, ClickEvent::Mouse(_)) {
-                        cairn_ui::focus::set_keyboard_navigation(false, cx);
-                        click_focus.focus(window, cx);
-                    }
-                    this.sync_visualization_dir();
-                    this.update_current_nav_state_text();
-                    this.open_drive_at(drive, &open_path, window, cx);
-                    this.record_nav_state();
-                }))
-                .child(item)
-                .when(is_focused, |this| {
-                    this.child(
+            .min_by_key(|volume| match volume.status {
+                VolumeState::Offline => 0,
+                VolumeState::Rebuilding => 1,
+                VolumeState::CatchingUp(_) => 2,
+                VolumeState::SnapshotMode => 3,
+                VolumeState::Synced => 4,
+            })
+            .map(|volume| {
+                let mut args = FluentArgs::new();
+                args.set("volume", format!("{}:", volume.drive_letter));
+                args.set(
+                    "state",
+                    self.i18n
+                        .get_text(&format!("volume_state_{}", volume.status.state_key())),
+                );
+                let text = if unsynced.len() > 1 {
+                    args.set("count", (unsynced.len() - 1) as i64);
+                    self.i18n
+                        .get_text_with_args("sidebar_index_state_more", &args)
+                } else {
+                    self.i18n.get_text_with_args("sidebar_index_state", &args)
+                };
+                h_flex()
+                    .id("sidebar-index-state")
+                    .role(Role::Status)
+                    .aria_label(text.clone())
+                    .w_full()
+                    .min_h(rems(layout::ROW_HEIGHT))
+                    .px(rems(layout::INNER_SPACING))
+                    .py(rems(layout::TIGHT_LEAD))
+                    .gap_x(rems(layout::INNER_SPACING))
+                    .items_center()
+                    .text_sm()
+                    .text_color(tokens.warning_ink)
+                    .child(sidebar_icon(IconName::TriangleAlert, icon_metrics))
+                    .child(
                         div()
-                            .absolute()
-                            .inset_0()
-                            .rounded(tokens.radius)
-                            .border_1()
-                            .border_color(tokens.ring),
+                            .min_w_0()
+                            .flex_1()
+                            .truncate()
+                            .relative()
+                            .top(icon_metrics.label_offset)
+                            .child(text),
                     )
-                });
-            drive_rows.push(attach_rescan_menu(row, rescan_label, disabled, move || {
-                let app = app.clone();
-                let label = rescan_path.clone();
-                move |_, _, cx| {
-                    app.update(cx, |this, cx| {
-                        this.rescan_source(source_id, label.clone(), cx);
-                    });
-                }
-            }));
-        }
-
-        // While the connection probe or the first query is still running, an empty drive list is
-        // not a fact about the machine. Saying "no drives found" there reports a failure that has
-        // not happened; status reports whether the index is being read.
-        let awaiting_index = drive_rows.is_empty()
-            && (self.service.connection.is_probing() || self.query.is_searching());
-        let drive_elements = if awaiting_index {
-            Vec::new()
-        } else if drive_rows.is_empty() {
-            let message = self.cached_text("sidebar_no_drives");
-            vec![h_flex()
-                .w_full()
-                .min_h(rems(layout::ROW_HEIGHT))
-                .px(rems(layout::INNER_SPACING))
-                .py(rems(layout::TIGHT_LEAD))
-                .gap_x(rems(layout::INNER_SPACING))
-                .items_center()
-                .text_sm()
-                .text_color(tokens.muted_foreground)
-                .child(sidebar_icon(IconName::HardDrive, icon_metrics))
-                .child(
-                    div()
-                        .relative()
-                        .top(icon_metrics.label_offset)
-                        .child(message),
-                )
-                .into_any_element()]
-        } else {
-            drive_rows
-        };
+                    .into_any_element()
+            });
 
         // The content keeps its full width while the outer surface clips it, so
         // labels and rows never reflow during a collapse or an expand.
@@ -583,8 +463,7 @@ impl CairnApp {
                     .child(sidebar_caption(locations, locations_title, window, tokens))
                     .children(quick_access)
                     .child(recycle_entry)
-                    .child(sidebar_caption(drives, drives_title, window, tokens))
-                    .children(drive_elements),
+                    .when_some(index_state, |this, status| this.child(status)),
             );
 
         div()
@@ -609,29 +488,6 @@ impl CairnApp {
     }
 }
 
-fn attach_rescan_menu<E, F>(
-    element: E,
-    rescan_label: SharedString,
-    disabled: bool,
-    make_handler: impl Fn() -> F + 'static,
-) -> AnyElement
-where
-    E: ContextMenuExt + IntoElement + 'static,
-    F: Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-{
-    element
-        .context_menu(move |menu, _, _| {
-            let item = PopupMenuItem::new(rescan_label.clone()).disabled(disabled);
-            let item = if disabled {
-                item
-            } else {
-                item.on_click(make_handler())
-            };
-            menu.item(item)
-        })
-        .into_any_element()
-}
-
 /// The icon a file-type row shows. It repeats the words beside it rather than replacing them.
 ///
 /// `main.rs` installs the complete icon catalog, so each kind can use its own shape instead of
@@ -652,7 +508,42 @@ fn category_icon(category: FilterCategory) -> IconName {
 #[cfg(test)]
 mod tests {
     use super::sidebar_icon_svg;
+    use crate::shell::i18n::I18nManager;
+    use cairn_protocol::status::VolumeState;
     use gpui_kit::assets::IconName;
+
+    #[test]
+    fn every_non_synced_volume_state_has_a_sidebar_label() {
+        for locale in ["zh-CN", "en-US"] {
+            let i18n = I18nManager::new(locale);
+            for state in [
+                VolumeState::CatchingUp(0),
+                VolumeState::Rebuilding,
+                VolumeState::Offline,
+                VolumeState::SnapshotMode,
+            ] {
+                let key = format!("volume_state_{}", state.state_key());
+                assert!(i18n.has_key(&key), "{locale} is missing {key}");
+            }
+            for key in ["sidebar_index_state", "sidebar_index_state_more"] {
+                assert!(i18n.has_key(key), "{locale} is missing {key}");
+            }
+            let mut args = fluent_bundle::FluentArgs::new();
+            args.set("volume", "C:");
+            args.set("state", "syncing");
+            args.set("count", 1i64);
+            let one = i18n.get_text_with_args("sidebar_index_state_more", &args);
+            args.set("count", 2i64);
+            let many = i18n.get_text_with_args("sidebar_index_state_more", &args);
+            if locale == "en-US" {
+                assert!(one.contains("one more volume"), "{locale}: {one}");
+                assert!(many.contains("more volumes"), "{locale}: {many}");
+            } else {
+                assert!(one.contains("另有"), "{locale}: {one}");
+                assert!(many.contains("另有"), "{locale}: {many}");
+            }
+        }
+    }
 
     #[test]
     fn sidebar_variant_keeps_the_light_stroke() {

@@ -81,9 +81,6 @@ impl CairnApp {
     }
 
     fn apply_query_paste(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.drive_view.is_some() {
-            return false;
-        }
         let Some(text) = crate::shell::os::get_clipboard_text() else {
             return false;
         };
@@ -100,7 +97,7 @@ impl CairnApp {
     }
 
     fn apply_query_undo(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.drive_view.is_some() || !self.query.search_input.undo() {
+        if !self.query.search_input.undo() {
             return false;
         }
         self.schedule_text_search(cx);
@@ -109,7 +106,7 @@ impl CairnApp {
     }
 
     fn apply_query_redo(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.drive_view.is_some() || !self.query.search_input.redo() {
+        if !self.query.search_input.redo() {
             return false;
         }
         self.schedule_text_search(cx);
@@ -118,9 +115,6 @@ impl CairnApp {
     }
 
     fn apply_query_cut(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.drive_view.is_some() {
-            return false;
-        }
         let Some(text) = self.selected_query_text() else {
             return false;
         };

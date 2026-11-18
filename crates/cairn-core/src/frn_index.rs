@@ -208,8 +208,8 @@ impl IndexMemoryFootprint {
             + self.scratch_bytes
     }
 
-    /// Transient on-demand allocations such as treemap directory size buffers, reported separately
-    /// from the resident footprint.
+    /// Transient on-demand allocations such as directory size buffers, reported separately from
+    /// the resident footprint.
     pub fn transient_bytes(&self) -> usize {
         self.directory_sizes_bytes
     }

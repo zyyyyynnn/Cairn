@@ -10,10 +10,18 @@
 app_title = Cairn
 
 sidebar_locations = Locations
-sidebar_drives = Drives
-sidebar_no_drives = No drives found yet
 sidebar_recycle_bin = Recycle Bin
 drive_label = Drive { $drive }
+volume_state_catching_up = syncing
+volume_state_rebuilding = rebuilding
+volume_state_snapshot_mode = snapshot mode
+volume_state_offline = offline
+sidebar_index_state = Index status: { $volume } { $state }
+sidebar_index_state_more =
+    { $count ->
+        [one] Index status: { $volume } { $state }, plus one more volume
+       *[other] Index status: { $volume } { $state }, plus { $count } more volumes
+    }
 
 # The title-bar menu bar: seven top-level menus on the same row as the brand.
 menu_file = File
@@ -23,7 +31,6 @@ menu_search = Search
 menu_index = Index
 menu_tools = Tools
 menu_help = Help
-
 
 result_list_label = Search results
 table_header_label = Result table column headings
@@ -77,14 +84,6 @@ status_objects_count = { $count ->
     [one] { $count_text } item
    *[other] { $count_text } items
 }
-
-volume_capsule = { $drive }: { $state }
-volume_state_synced = Up to date
-volume_state_catching_up = Synchronizing { $percent }%
-volume_state_catching_up_pending = Synchronizing
-volume_state_rebuilding = Rebuilding index
-volume_state_offline = Offline
-volume_state_snapshot_mode = Snapshot mode
 
 # Search placeholders
 search_placeholder = Search files or folders…
@@ -204,7 +203,6 @@ index_clear_cancel = Cancel
 sidebar_toggle = Toggle sidebar
 nav_back = Back
 nav_forward = Forward
-nav_up = Up one level
 window_minimize = Minimize
 window_maximize = Maximize
 window_restore = Restore
@@ -260,32 +258,6 @@ row_not_loaded = Result not loaded yet
 tray_show = Show Cairn
 tray_exit = Exit
 
-view_in_table = View in table
-treemap_retry = Retry
-treemap_canvas_label = Disk usage chart
-treemap_path_placeholder = C:\Users
-treemap_path_label = Path
-treemap_path_clear = Clear path
-treemap_path_menu_for = Show folders under { $label }
-treemap_path_menu_row = Go to "{ $label }"
-treemap_path_menu_empty = No subfolders to switch to
-treemap_path_menu_truncated = Only the first { $count } folders are listed
-treemap_crumb_label = Go to { $label } ({ $path })
-treemap_path_invalid_title = Path format not recognized
-treemap_path_invalid_hint = Enter a drive path such as C:\Users, or a path relative to this folder.
-treemap_unavailable_service = Could not reach the background service
-treemap_unavailable_too_large = This folder has too many direct children to load at once; open a subfolder or go up one level
-treemap_unavailable_not_directory = That path is a file; open a folder or go up one level
-treemap_unavailable_not_indexed = This path is not in the index; check the path or retry later
-treemap_empty_directory = This folder is empty
-treemap_aggregate = { $count_text } more
-treemap_status_selected = { $name }, { $path }, { $size } ({ $percent }%), { $date }
-treemap_status_summary = { $count ->
-    [one] { $count_text } item { $size }
-   *[other] { $count_text } items { $size }
-}
-treemap_zoom_reset = Reset chart zoom
-treemap_zoom_reset_tooltip = Reset chart zoom (currently { $percent }%)
 menu_index_journal_open = Index journal…
 menu_rescan = Rescan
 menu_rescan_all = Rescan all locations
@@ -307,18 +279,6 @@ menu_content_search_updated = Last updated: { $time }
 menu_content_search_usage_unknown = Size: unknown
 menu_content_search_never_updated = Last updated: never
 empty_content_scope_line = No files or folders match; content search skips system and developer-tool folders
-treemap_block_empty_title = The block has no items left; go back to refresh the folder
-treemap_block_no_matches_title = No items match; clear the search to see the whole block
-treemap_block_filter_placeholder =
-    { $count ->
-        [one] Search { $count } item in { $dir }
-       *[other] Search { $count_text } items in { $dir }
-    }
-treemap_block_scope =
-    { $count ->
-        [one] { $count } item in { $dir }
-       *[other] { $count_text } items in { $dir }
-    }
 menu_property_index_menu = Extended properties
 menu_property_index = Index file properties
 menu_property_index_status = Property index status
@@ -353,13 +313,11 @@ journal_kind_renamed = Renamed
 journal_kind_deleted = Deleted
 journal_kind_attribute_changed = Attribute
 journal_kind_overflow_rescan = Rescan
-ctx_rescan_source = Rescan this source
 toast_rescan_started_title = Index rescan started
 toast_rescan_started_body = The background service is rescanning all indexed sources.
 toast_rescan_source_started_body = The background service is rescanning { $source }.
 toast_rescan_failed_title = Could not start index rescan
 toast_rescan_failed_body = Could not start the index rescan. Try again shortly.
-toast_rescan_source_missing_body = No indexed source matches that location. Try again shortly.
 toast_property_index_failed_title = Could not update property index
 toast_property_index_action_failed_body = Could not update the property index. Try again shortly.
 toast_index_journal_failed_title = Could not update index journal

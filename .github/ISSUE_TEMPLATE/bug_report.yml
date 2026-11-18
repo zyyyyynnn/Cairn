@@ -50,7 +50,6 @@ body:
       description: 请选择问题发生的组件范围（若不确定可选择其他）。
       options:
         - "App / UI (界面交互与虚拟列表)"
-        - "Treemap (磁盘空间树图可视化)"
         - "Recycle Bin (回收站文件管理)"
         - "Core / Indexing (NTFS MFT 扫描与 USN 同步)"
         - "Service / IPC (后台守护服务与管道通信)"
@@ -63,8 +62,8 @@ body:
     id: environment
     attributes:
       label: 运行环境 / Environment
-      description: 操作系统版本、Cairn 版本、驱动器文件系统及执行权限。
-      placeholder: "Windows 11 23H2 (x64) / Cairn v0.1.0 / NTFS 驱动器 (C:, D:) / 普通用户权限"
+      description: 操作系统版本、Cairn 版本、卷文件系统及执行权限。
+      placeholder: "Windows 11 23H2 (x64) / Cairn v0.2.1 / NTFS 卷 (C:, D:) / 普通用户权限"
     validations:
       required: true
   - type: textarea

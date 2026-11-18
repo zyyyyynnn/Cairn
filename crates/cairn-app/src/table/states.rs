@@ -100,32 +100,6 @@ impl CairnApp {
             return render_state_band(tokens, control, message, icon, None);
         }
 
-        if self.block_listing.is_some() {
-            let block_empty = self
-                .block_listing
-                .as_ref()
-                .is_some_and(|listing| listing.count() == 0);
-            let (message_key, icon) = if block_empty {
-                (
-                    "treemap_block_empty_title",
-                    Icon::new(AssetIconName::Folder)
-                        .size_8()
-                        .text_color(tokens.muted_foreground)
-                        .into_any_element(),
-                )
-            } else {
-                (
-                    "treemap_block_no_matches_title",
-                    Icon::new(AssetIconName::Search)
-                        .size_8()
-                        .text_color(tokens.muted_foreground)
-                        .into_any_element(),
-                )
-            };
-            let message = self.i18n.get_text(message_key);
-            return render_state_band(tokens, control, message, icon, None);
-        }
-
         if let Some(rejection) = self.query.rejection {
             let mut args = FluentArgs::new();
             args.set("limit", cairn_core::syntax::MAX_CONTENT_TERMS as i64);

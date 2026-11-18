@@ -105,15 +105,6 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         named_by: "",
         requirement: "UI-01",
     },
-    KeyControl {
-        key: "nav-up",
-        element: "nav-up",
-        indexed: false,
-        role: Role::Button,
-        messages: &["nav_up"],
-        named_by: "",
-        requirement: "UI-01",
-    },
     // Platform caption buttons. They are drawn as squares on the title bar, but they are commands
     // in every other respect: keyboard-reachable, named, and reported as buttons.
     KeyControl {
@@ -154,26 +145,6 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         messages: &["sidebar_locations"],
         named_by: "",
         requirement: "UI-01",
-    },
-    KeyControl {
-        key: "sidebar-drives",
-        element: "sidebar-drives",
-        indexed: false,
-        role: Role::Heading,
-        messages: &["sidebar_drives"],
-        named_by: "",
-        requirement: "UI-01, IDX-01",
-    },
-    // A drive row is named by its drive letter and its index state, so no fixed Fluent message can
-    // hold its name; the view assembles it from the same labels the row shows.
-    KeyControl {
-        key: "sidebar-drive",
-        element: "sidebar-drive",
-        indexed: true,
-        role: Role::TreeItem,
-        messages: EMPTY,
-        named_by: "drive_label",
-        requirement: "UI-01, IDX-01",
     },
     KeyControl {
         key: "sidebar-location-all",
@@ -273,42 +244,6 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         messages: &["query_clear"],
         named_by: "",
         requirement: "UI-01, UI-03",
-    },
-    KeyControl {
-        key: "treemap-path-clear",
-        element: "treemap-path-clear",
-        indexed: false,
-        role: Role::Button,
-        messages: &["treemap_path_clear"],
-        named_by: "",
-        requirement: "DSV-04",
-    },
-    KeyControl {
-        key: "treemap-path-menu",
-        element: "treemap-path-menu",
-        indexed: true,
-        role: Role::Button,
-        messages: EMPTY,
-        named_by: "treemap_path_menu_for",
-        requirement: "DSV-04",
-    },
-    KeyControl {
-        key: "treemap-path-menu-row",
-        element: "treemap-path-menu-row",
-        indexed: true,
-        role: Role::MenuItem,
-        messages: EMPTY,
-        named_by: "path_menu_option",
-        requirement: "DSV-04",
-    },
-    KeyControl {
-        key: "treemap-path-menu-note",
-        element: "treemap-path-menu-note",
-        indexed: true,
-        role: Role::Status,
-        messages: EMPTY,
-        named_by: "path_menu_note",
-        requirement: "DSV-04",
     },
     KeyControl {
         key: "toolbar-menu-file",
@@ -587,73 +522,6 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         named_by: "",
         requirement: "CNT-01, UI-01",
     },
-    // The canvas is one named region; pointer and keyboard navigation both act inside it.
-    KeyControl {
-        key: "treemap-canvas",
-        element: "treemap-canvas-container",
-        indexed: false,
-        role: Role::Group,
-        messages: &["treemap_canvas_label"],
-        named_by: "",
-        requirement: "DSV-04, UI-03",
-    },
-    // The Treemap canvas shows the same centred state band as the table: one
-    // sentence for an empty folder or an unavailable tree. The breadcrumb
-    // ancestors are one repeated button family, named by their path segment.
-    KeyControl {
-        key: "treemap-state",
-        element: "treemap-state",
-        indexed: false,
-        role: Role::Status,
-        messages: &[
-            "treemap_empty_directory",
-            "treemap_unavailable_not_indexed",
-            "treemap_unavailable_not_directory",
-            "treemap_unavailable_too_large",
-            "treemap_unavailable_service",
-        ],
-        named_by: "",
-        requirement: "DSV-04",
-    },
-    KeyControl {
-        key: "treemap-crumb",
-        element: "treemap-crumb",
-        indexed: true,
-        role: Role::Button,
-        messages: EMPTY,
-        named_by: "path_segments",
-        requirement: "DSV-04",
-    },
-    // The "remaining N items" entry appears once in the canvas-root path band
-    // and once in each directory header that owns a folded tail; both are
-    // buttons named by the aggregate message and the folded size.
-    KeyControl {
-        key: "treemap-tail",
-        element: "treemap-tail",
-        indexed: true,
-        role: Role::Button,
-        messages: EMPTY,
-        named_by: "treemap_aggregate",
-        requirement: "DSV-04",
-    },
-    KeyControl {
-        key: "treemap-path",
-        element: "treemap-path",
-        indexed: false,
-        role: Role::TextInput,
-        messages: &["treemap_path_label"],
-        named_by: "",
-        requirement: "DSV-04",
-    },
-    KeyControl {
-        key: "treemap-retry",
-        element: "treemap-retry",
-        indexed: false,
-        role: Role::Button,
-        messages: &["treemap_retry"],
-        named_by: "",
-        requirement: "DSV-04",
-    },
     // Each service failure is its own entry: the same element has to name the condition it reports,
     // and that one sentence carries the recovery direction (SVC-03, SVC-04).
     KeyControl {
@@ -724,15 +592,6 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         messages: &["service_start_button"],
         named_by: "",
         requirement: "SVC-03, SVC-04, UI-03",
-    },
-    KeyControl {
-        key: "treemap-zoom-reset",
-        element: "treemap-zoom-reset",
-        indexed: false,
-        role: Role::Button,
-        messages: &["treemap_zoom_reset"],
-        named_by: "",
-        requirement: "DSV-04",
     },
     KeyControl {
         key: "status-bar",
@@ -842,17 +701,6 @@ pub fn element(control: &KeyControl) -> ControlElement {
 /// control, so it has no registry row; keeping its role here still leaves one place that decides it.
 pub(crate) fn heading(element: Stateful<Div>, label: impl Into<SharedString>) -> Stateful<Div> {
     element.role(Role::Heading).aria_level(1).aria_label(label)
-}
-
-/// [`element_at`] for a repeated family whose member is named by a model key
-/// (a path segment, a setting id) rather than by a row index. The key is part
-/// of the element identity, so a changed path cannot inherit another member's
-/// focus or hover state.
-pub fn element_at_key(control: &KeyControl, key: &str) -> ControlElement {
-    div()
-        .id(format!("{}:{key}", control.element))
-        .role(control.role)
-        .test_support()
 }
 
 /// The accessible name for a component-owned control (an Input, a picker) whose
@@ -1305,7 +1153,6 @@ mod tests {
         );
         for entry in KEY_CONTROLS.iter().filter(|entry| entry.indexed) {
             let _ = element_at(entry, 0);
-            let _ = element_at_key(entry, "sample");
         }
     }
 

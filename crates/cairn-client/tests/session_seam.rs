@@ -113,10 +113,6 @@ async fn session_reuses_one_connection_per_slot_across_rpcs() {
                             applied_sort: sort_spec,
                             degraded: None,
                         },
-                        ClientRequest::GetTree { path, .. } => ResponsePayload::TreeResult {
-                            path,
-                            entries: Vec::new(),
-                        },
                         ClientRequest::GetSources => ResponsePayload::SourcesResult {
                             sources: vec![SourceStatusSummary {
                                 source_id: SourceId(2),
@@ -175,7 +171,6 @@ async fn session_reuses_one_connection_per_slot_across_rpcs() {
         .await
         .expect("query");
     session.get_rows(77, 50, 50).await.expect("get_rows");
-    session.get_tree(r"C:\", 3).await.expect("get_tree");
     session.get_sources().await.expect("get_sources");
     session.rescan(None).await.expect("rescan");
     session

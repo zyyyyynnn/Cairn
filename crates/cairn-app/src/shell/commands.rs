@@ -25,10 +25,6 @@ pub const WINDOW_CONTEXT: &str = "Cairn";
 /// keyboard (SPEC UI-03; Design Guides *Interaction states*: "Match familiar desktop shortcuts" and
 /// the Accessibility checklist's "every action is reachable and operable by keyboard").
 pub const RESULTS_CONTEXT: &str = "CairnResults";
-/// Key context carried by the Treemap canvas while it holds focus.
-pub const TREEMAP_CONTEXT: &str = "CairnTreemap";
-/// The Treemap address field owns Enter and Escape while it is editing.
-pub const TREEMAP_PATH_CONTEXT: &str = "CairnTreemapPath";
 
 /// Key context carried by the platform caption buttons. Enter and Space are consumed here so the
 /// focused caption activates itself through its own click handler instead of also running the
@@ -119,12 +115,6 @@ actions!(
         NavigateBack,
         /// Navigate forward in search/filter history (Alt+Right).
         NavigateForward,
-        /// Rise to the parent directory of the Treemap (Alt+Up).
-        NavigateUp,
-        /// Open the directory typed in the Treemap path field (Enter).
-        CommitTreemapPath,
-        /// Leave the Treemap path field without navigating (Escape).
-        CancelTreemapPath,
         /// Collapse or expand the locations sidebar (Ctrl+\).
         ToggleSidebar,
         /// Step the shell UI scale up one preset (Ctrl+=, Ctrl++).
@@ -133,12 +123,6 @@ actions!(
         ZoomOut,
         /// Reset the shell UI scale to standard (Ctrl+0).
         ResetZoom,
-        /// Zoom into the focused Treemap canvas (Ctrl+=, Ctrl++).
-        TreemapZoomIn,
-        /// Zoom out of the focused Treemap canvas (Ctrl+-, Ctrl+_).
-        TreemapZoomOut,
-        /// Reset the focused Treemap canvas zoom (Ctrl+0).
-        TreemapResetZoom,
     ]
 );
 
@@ -218,21 +202,12 @@ pub fn key_bindings() -> Vec<KeyBindingEntry> {
         // Desktop back/forward navigation shortcuts
         bind("alt-left", NavigateBack, WINDOW_CONTEXT),
         bind("alt-right", NavigateForward, WINDOW_CONTEXT),
-        bind("alt-up", NavigateUp, WINDOW_CONTEXT),
         bind("ctrl-\\", ToggleSidebar, WINDOW_CONTEXT),
         bind("ctrl-=", ZoomIn, WINDOW_CONTEXT),
         bind("ctrl-+", ZoomIn, WINDOW_CONTEXT),
         bind("ctrl--", ZoomOut, WINDOW_CONTEXT),
         bind("ctrl-_", ZoomOut, WINDOW_CONTEXT),
         bind("ctrl-0", ResetZoom, WINDOW_CONTEXT),
-        bind("ctrl-=", TreemapZoomIn, TREEMAP_CONTEXT),
-        bind("ctrl-+", TreemapZoomIn, TREEMAP_CONTEXT),
-        bind("ctrl--", TreemapZoomOut, TREEMAP_CONTEXT),
-        bind("ctrl-_", TreemapZoomOut, TREEMAP_CONTEXT),
-        bind("ctrl-0", TreemapResetZoom, TREEMAP_CONTEXT),
-        bind("enter", CommitTreemapPath, TREEMAP_PATH_CONTEXT),
-        bind("tab", CommitTreemapPath, TREEMAP_PATH_CONTEXT),
-        bind("escape", CancelTreemapPath, TREEMAP_PATH_CONTEXT),
         // The four keys the result table answers with, and only while it holds focus. Tab moves it there
         // from the query box (`gpui-base`'s `Root` owns Tab/Shift+Tab and walks the window's tab stops),
         // and the same four keys keep moving the caret while the query box holds focus.
@@ -355,7 +330,7 @@ mod keymap_table {
     }
 
     #[test]
-    fn sidebar_toggle_and_ui_zoom_are_bound_and_treemap_overrides_zoom_keys() {
+    fn sidebar_toggle_and_ui_zoom_are_bound() {
         let bindings = key_bindings();
         assert!(bindings.iter().any(|entry| {
             entry.shortcut == "ctrl-\\"
@@ -367,42 +342,15 @@ mod keymap_table {
                 && entry.context == WINDOW_CONTEXT
                 && entry.action == ToggleWholeWord::name_for_type()
         }));
-        for (key, ui_action, treemap_action) in [
-            (
-                "ctrl-=",
-                ZoomIn::name_for_type(),
-                TreemapZoomIn::name_for_type(),
-            ),
-            (
-                "ctrl-+",
-                ZoomIn::name_for_type(),
-                TreemapZoomIn::name_for_type(),
-            ),
-            (
-                "ctrl--",
-                ZoomOut::name_for_type(),
-                TreemapZoomOut::name_for_type(),
-            ),
-            (
-                "ctrl-_",
-                ZoomOut::name_for_type(),
-                TreemapZoomOut::name_for_type(),
-            ),
-            (
-                "ctrl-0",
-                ResetZoom::name_for_type(),
-                TreemapResetZoom::name_for_type(),
-            ),
+        for (key, action) in [
+            ("ctrl-=", ZoomIn::name_for_type()),
+            ("ctrl-+", ZoomIn::name_for_type()),
+            ("ctrl--", ZoomOut::name_for_type()),
+            ("ctrl-_", ZoomOut::name_for_type()),
+            ("ctrl-0", ResetZoom::name_for_type()),
         ] {
             assert!(bindings.iter().any(|entry| {
-                entry.shortcut == key
-                    && entry.context == WINDOW_CONTEXT
-                    && entry.action == ui_action
-            }));
-            assert!(bindings.iter().any(|entry| {
-                entry.shortcut == key
-                    && entry.context == TREEMAP_CONTEXT
-                    && entry.action == treemap_action
+                entry.shortcut == key && entry.context == WINDOW_CONTEXT && entry.action == action
             }));
         }
     }

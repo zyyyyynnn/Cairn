@@ -60,26 +60,11 @@ pub const ERROR_CODE_ADMIN_ONLY_QUERY: u32 = 401;
 pub const ERROR_CODE_HANDSHAKE_REQUIRED: u32 = 400;
 /// The requested query session does not exist or has expired (e.g. invalidation, reload, or compaction).
 pub const ERROR_CODE_SESSION_EXPIRED: u32 = 410;
-/// The Treemap path is not covered by the service's live volume index.
-pub const ERROR_CODE_TREE_NOT_INDEXED: u32 = 413;
-/// The Treemap path resolves to a file, not a directory.
-pub const ERROR_CODE_TREE_NOT_DIRECTORY: u32 = 414;
-/// The directory tree exceeds the one-response entry or payload budget.
-pub const ERROR_CODE_TREE_TOO_LARGE: u32 = 415;
 /// The query carries more content terms than one evaluation may resolve
 /// (`cairn_core::syntax::MAX_CONTENT_TERMS`); the request is refused before evaluation.
 pub const ERROR_CODE_QUERY_TOO_COMPLEX: u32 = 416;
 /// The request parameters are invalid or refer to an unknown source.
 pub const ERROR_CODE_INVALID_REQUEST: u32 = 417;
-
-/// The deepest tree one response may carry: three levels stay inside the entry and frame budgets
-/// on a full drive (about 42k entries on a 1.8M-record index). A subtree that still overflows is
-/// answered one level shallower with exact totals on the capped nodes, and deeper levels are
-/// requested per directory as the reader drills in.
-///
-/// The service clamps every `GetTree` to it and the client asks for exactly it, so a request is
-/// never silently answered shallower than the layout it was built for.
-pub const MAX_TREE_DEPTH: usize = 3;
 
 /// Upper bound on multi-key sort clauses accepted from a client.
 pub const MAX_SORT_KEYS: usize = 8;
@@ -126,13 +111,6 @@ pub enum ClientRequest {
     GetContentIndexStatus,
     CancelContentIndex,
     ClearContentIndex,
-    /// The directory tree below `path` (drive root when it names a drive),
-    /// aggregated and sorted, from the service's volume index. Uncovered paths
-    /// are reported through the tree error codes.
-    GetTree {
-        path: String,
-        max_depth: usize,
-    },
     /// Returns every indexed source (NTFS volumes and folder sources).
     GetSources,
     /// Registers and starts indexing a folder source.
@@ -229,13 +207,9 @@ pub enum ResponsePayload {
     ClearContentIndexAck {
         success: bool,
     },
-    TreeResult {
-        path: String,
-        /// Pre-order entries, parent before children; `depth` 0 is the root.
-        /// Uncovered paths are reported through `Error` codes; an empty list
-        /// describes an empty directory.
-        entries: Vec<TreeEntryData>,
-    },
+    /// A retired directory-tree response. The empty payload keeps `Error` at its published
+    /// slot so a peer of another protocol version can still read the rejection.
+    RetiredTree,
     Error {
         code: u32,
         message: String,
@@ -259,21 +233,6 @@ pub enum ResponsePayload {
     IndexJournalStatus {
         status: IndexJournalStatus,
     },
-}
-
-/// One node of a [`ResponsePayload::TreeResult`]. A depth-capped leaf (a
-/// directory at the requested depth) still carries its exact recursive size
-/// and item count; nodes with children carry sizes already aggregated.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct TreeEntryData {
-    pub name: String,
-    pub size: u64,
-    pub is_dir: bool,
-    pub modified_ts: i64,
-    pub descendant_items: usize,
-    /// Nesting level below the requested root: the root itself is 0, its
-    /// children 1, and so on.
-    pub depth: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -316,7 +275,7 @@ mod tests {
         ("content_index_status", 8),
         ("cancel_content_index_ack", 9),
         ("clear_content_index_ack", 10),
-        ("tree_result", 11),
+        ("retired_tree", 11),
         ("error", 12),
         ("cancel_ack", 13),
         ("sources_result", 14),
@@ -329,7 +288,7 @@ mod tests {
     /// The slot each published request occupies on the wire. A request is only decoded by a peer
     /// of the same protocol version, so the rule is the same: a renamed request keeps its slot and
     /// a new one is appended.
-    const PUBLISHED_REQUEST_SLOTS: [(&str, u8); 21] = [
+    const PUBLISHED_REQUEST_SLOTS: [(&str, u8); 20] = [
         ("hello", 0),
         ("query", 1),
         ("cancel", 2),
@@ -342,16 +301,25 @@ mod tests {
         ("get_content_index_status", 9),
         ("cancel_content_index", 10),
         ("clear_content_index", 11),
-        ("get_tree", 12),
-        ("get_sources", 13),
-        ("add_folder_source", 14),
-        ("remove_folder_source", 15),
-        ("rescan_source", 16),
-        ("get_property_index_status", 17),
-        ("set_property_index_enabled", 18),
-        ("get_index_journal", 19),
-        ("set_index_journal_enabled", 20),
+        ("get_sources", 12),
+        ("add_folder_source", 13),
+        ("remove_folder_source", 14),
+        ("rescan_source", 15),
+        ("get_property_index_status", 16),
+        ("set_property_index_enabled", 17),
+        ("get_index_journal", 18),
+        ("set_index_journal_enabled", 19),
     ];
+
+    #[test]
+    fn the_version_rejection_stays_at_its_published_wire_slot() {
+        let encoded = postcard::to_allocvec(&ResponsePayload::Error {
+            code: ERROR_CODE_PROTOCOL_VERSION_MISMATCH,
+            message: "update both sides".to_string(),
+        })
+        .expect("encode rejection");
+        assert_eq!(encoded[0], 12, "Error must stay at response slot 12");
+    }
 
     /// One payload per published slot, in the published order.
     fn published_responses() -> Vec<(&'static str, ResponsePayload)> {
@@ -425,13 +393,7 @@ mod tests {
                 "clear_content_index_ack",
                 ResponsePayload::ClearContentIndexAck { success: true },
             ),
-            (
-                "tree_result",
-                ResponsePayload::TreeResult {
-                    path: String::new(),
-                    entries: Vec::new(),
-                },
-            ),
+            ("retired_tree", ResponsePayload::RetiredTree),
             (
                 "error",
                 ResponsePayload::Error {
@@ -520,13 +482,6 @@ mod tests {
             ),
             ("cancel_content_index", ClientRequest::CancelContentIndex),
             ("clear_content_index", ClientRequest::ClearContentIndex),
-            (
-                "get_tree",
-                ClientRequest::GetTree {
-                    path: String::new(),
-                    max_depth: 0,
-                },
-            ),
             ("get_sources", ClientRequest::GetSources),
             (
                 "add_folder_source",

@@ -1,6 +1,6 @@
 # 竞品研究索引
 
-Cairn 的外部产品研究按“索引与分类单品”组织：本文件汇总全景索引与核心结论，各单品研究独立成文。Cairn 产品需求与工程实现基准以 [SPEC.md](../SPEC.md) 及 [product/](../product/)、[engineering/](../engineering/) 相关规范为准。
+Cairn 的外部产品研究按“索引与分类单品”组织：本文件汇总全景索引与核心结论，各单品研究独立成文。Cairn 产品需求与工程实现基准以 [SPEC.md](../SPEC.md) 及 [product/](../product/)、[engineering/](../engineering/) 相关规范为准。文中涉及的 Treemap 产品规范已删除，相关调研仅作历史档案。
 
 ## 文档地图
 

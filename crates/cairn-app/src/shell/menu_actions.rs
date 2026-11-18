@@ -279,9 +279,6 @@ impl CairnApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.drive_view.is_some() {
-            return;
-        }
         let extend = window.modifiers().shift;
         self.move_selection(false, extend, layout::row_height(window), cx);
         self.focus_table_after_arrow(window, cx);
@@ -293,9 +290,6 @@ impl CairnApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.drive_view.is_some() {
-            return;
-        }
         let extend = window.modifiers().shift;
         self.move_selection(true, extend, layout::row_height(window), cx);
         self.focus_table_after_arrow(window, cx);
@@ -369,12 +363,6 @@ impl CairnApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // The Treemap replaces the query band with the path field, which is its
-        // address bar; the same desktop shortcut reaches it.
-        if self.drive_view.is_some() {
-            self.begin_treemap_path_edit(window, cx);
-            return;
-        }
         self.dismiss_result_selection_on_chrome_press(cx);
         self.close_group();
         self.query.search_input.select_all();
@@ -408,25 +396,16 @@ impl CairnApp {
         }
     }
 
-    /// Clears the query text and the scope or filter attached to it, then returns focus to the
-    /// search box. Both the clear affordance and Escape land here, so focus never stays on the
-    /// clear button as it unmounts.
+    /// Clears the query text and the filter attached to it, then returns focus to the search box.
+    /// Both the clear affordance and Escape land here, so focus never stays on the clear button as
+    /// it unmounts.
     pub(crate) fn clear_query_and_scope(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.recycle_bin.is_open() {
             self.clear_bin_filter(window, cx);
             return;
         }
-        if self.block_listing.is_some() {
-            // The box filters the listing in place; clearing it keeps the
-            // location, the same way the Recycle Bin's clear works.
-            self.query.search_input.clear();
-            self.filter_block_listing(cx);
-            self.query.search_focus.focus(window, cx);
-            return;
-        }
         self.update_current_nav_state_text();
         self.query.search_input.clear();
-        self.query.scope_drive = None;
         self.query.active_filter = FilterCategory::All;
         self.record_nav_state();
         self.request_result_set(ResultSetChange::Replace, cx);
@@ -439,10 +418,6 @@ impl CairnApp {
             self.cancel_rename(window, cx);
             return;
         }
-        if self.treemap_path.mode.is_editing() {
-            self.cancel_treemap_path_edit(window, cx);
-            return;
-        }
         if self.open_group_menu.take().is_some() {
             self.query.search_focus.focus(window, cx);
             cx.notify();
@@ -453,20 +428,6 @@ impl CairnApp {
             return;
         }
         if self.dismiss_snippet_preview(window, cx) {
-            return;
-        }
-        // Keep the drive-scoped query untouched while browsing Treemap so a second Escape
-        // does not clear a hidden search or hide the window.
-        if self.drive_view.is_some() {
-            if let Some(ref mut st) = self.treemap_state {
-                if st.is_panning() {
-                    st.end_pan();
-                    cx.notify();
-                    return;
-                }
-                st.clear_selection();
-            }
-            cx.notify();
             return;
         }
         if self.recycle_bin.is_open() {
@@ -485,10 +446,6 @@ impl CairnApp {
             self.clear_query_and_scope(window, cx);
             return;
         }
-        if self.block_listing.is_some() {
-            self.go_back(window, cx);
-            return;
-        }
         crate::app::hide_main_window();
     }
 
@@ -499,10 +456,6 @@ impl CairnApp {
             .is_some_and(|menu| menu.group == group)
         {
             return;
-        }
-        // Opening a window-level menu leaves Treemap selection behind.
-        if let Some(state) = self.treemap_state.as_mut() {
-            state.clear_selection();
         }
         self.build_group_menu(group, window, cx);
         cx.notify();
@@ -828,10 +781,10 @@ impl CairnApp {
             | GroupCommand::EmptyRecycleBin => !self.recycle_bin.is_open(),
             GroupCommand::RenameSelected => self.recycle_bin.is_open(),
             GroupCommand::Submenu("menu_columns", _) | GroupCommand::ToggleColumn(_) => {
-                self.recycle_bin.is_open() || self.block_listing.is_some()
+                self.recycle_bin.is_open()
             }
             GroupCommand::SortBy(crate::table::model::SortColumn::DateCreated) => {
-                self.recycle_bin.is_open() || self.block_listing.is_some()
+                self.recycle_bin.is_open()
             }
             GroupCommand::RevealLocation | GroupCommand::ShowProperties => {
                 self.recycle_bin.is_open()
@@ -842,9 +795,7 @@ impl CairnApp {
             | GroupCommand::ToggleMatchPath
             | GroupCommand::ToggleRegex
             | GroupCommand::ToggleExcludeHidden
-            | GroupCommand::ToggleExcludeSystem => {
-                self.recycle_bin.is_open() || self.block_listing.is_some()
-            }
+            | GroupCommand::ToggleExcludeSystem => self.recycle_bin.is_open(),
 
             _ => false,
         }
@@ -920,13 +871,9 @@ impl CairnApp {
         }
     }
 
-    /// Clearing a search needs something the person can see narrowing the view. The Treemap hides
-    /// the query band and gives Escape to its selection, so the Edit row would act on hidden state.
-    /// A bin filter, a block listing filter and the main query are the visible cases.
+    /// Clearing a search needs something the person can see narrowing the view.
+    /// A bin filter and the main query are the visible cases.
     fn can_clear_query(&self) -> bool {
-        if self.drive_view.is_some() {
-            return false;
-        }
         if self.recycle_bin.is_open() {
             return !self.query.search_input.text.trim().is_empty();
         }
@@ -1048,18 +995,6 @@ impl CairnApp {
     }
 
     pub fn select_all(&mut self, _: &SelectAll, window: &mut Window, cx: &mut Context<Self>) {
-        let path_input_focused = self.treemap_path.mode.is_editing()
-            && self
-                .treemap_path
-                .input
-                .read(cx)
-                .focus_handle(cx)
-                .is_focused(window);
-        if path_input_focused {
-            let input = self.treemap_path.input.clone();
-            input.update(cx, |input, cx| input.select_all(window, cx));
-            return;
-        }
         // A row click keeps the search box focused so typing continues there.
         // An existing row selection is the signal that the result list, not the
         // query text, is the surface Ctrl+A should act on.
@@ -1070,7 +1005,7 @@ impl CairnApp {
             cx.notify();
             return;
         }
-        if self.drive_view.is_some() || self.results.table.total_rows() == 0 {
+        if self.results.table.total_rows() == 0 {
             return;
         }
 
@@ -1114,11 +1049,6 @@ impl CairnApp {
             cx.notify();
             return;
         }
-        if self.drive_view.is_some() {
-            self.treemap_open_selected(window, cx);
-            cx.notify();
-            return;
-        }
         if let Some(path) = self.target_full_path() {
             let _ = open_file(&path);
         }
@@ -1132,18 +1062,6 @@ impl CairnApp {
         cx: &mut Context<Self>,
     ) {
         if self.recycle_bin.is_open() {
-            return;
-        }
-        if self.drive_view.is_some() {
-            let path = self
-                .treemap_state
-                .as_ref()
-                .and_then(|state| state.selected_real_path())
-                .map(str::to_string);
-            if let Some(path) = path {
-                let _ = open_folder_and_select(&path);
-            }
-            cx.notify();
             return;
         }
         let paths = self.collect_selected_paths();
@@ -1183,33 +1101,22 @@ impl CairnApp {
         self.results.table.is_loaded(ix).then_some(ix)
     }
 
-    /// The one row an in-place rename may edit. The bin and the Treemap are locations with their
-    /// own surfaces, and a row outside the fetched window has no name to load into the editor.
+    /// The one row an in-place rename may edit. The bin is a location with its
+    /// own surface, and a row outside the fetched window has no name to load into the editor.
     pub fn rename_target_ix(&self) -> Option<usize> {
-        if self.recycle_bin.is_open() || self.drive_view.is_some() {
+        if self.recycle_bin.is_open() {
             return None;
         }
         self.results.table.sole_selected_row()
     }
 
     pub fn target_full_path(&self) -> Option<String> {
-        if self.drive_view.is_some() {
-            if let Some(ref st) = self.treemap_state {
-                if st.selected_node().is_some() {
-                    return st.selected_real_path().map(str::to_string);
-                }
-                return Some(st.current_dir().to_string());
-            }
-        }
         let ix = self.target_row_ix()?;
         let row = self.results.table.row(ix)?;
         Some(join_row_path(&row.path, &row.name))
     }
 
     pub fn collect_selected_paths(&self) -> Vec<String> {
-        if self.drive_view.is_some() {
-            return self.target_full_path().into_iter().collect();
-        }
         self.selection_indices()
             .iter()
             .filter_map(|ix| self.results.table.row(*ix))
@@ -1218,16 +1125,6 @@ impl CairnApp {
     }
 
     pub fn collect_selected_names(&self) -> Vec<String> {
-        if self.drive_view.is_some() {
-            if let Some(ref st) = self.treemap_state {
-                if st.selected_real_path().is_some() {
-                    if let Some(node) = st.selected_node() {
-                        return vec![node.item.name.clone()];
-                    }
-                }
-            }
-            return Vec::new();
-        }
         self.selection_indices()
             .iter()
             .filter_map(|ix| self.results.table.row(*ix))
@@ -1256,18 +1153,6 @@ impl CairnApp {
         // the item Explorer shows; the bin hides this command rather than
         // presenting a misleading name and location.
         if self.recycle_bin.is_open() {
-            return;
-        }
-        if self.drive_view.is_some() {
-            let path = self
-                .treemap_state
-                .as_ref()
-                .and_then(|state| state.selected_real_path())
-                .map(str::to_string);
-            if let Some(path) = path {
-                let _ = show_properties_dialog(&path);
-            }
-            cx.notify();
             return;
         }
         if let Some(path) = self.target_full_path() {
@@ -1468,7 +1353,6 @@ mod confirmation_tests {
 #[cfg(test)]
 mod visibility_tests {
     use super::*;
-    use crate::shell::block_listing::BlockListing;
     use core::prelude::rust_2021::test;
 
     #[test]
@@ -1581,53 +1465,6 @@ mod visibility_tests {
                             this.i18n.get_text("update_checking_title")
                         );
                     });
-                    cx.quit();
-                    app
-                },
-            );
-        });
-    }
-
-    #[test]
-    fn escape_returns_from_a_block_listing_to_its_folder() {
-        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
-            gpui_kit::init(cx);
-            let _ = gpui_kit::open_window(
-                gpui_kit::gpui::WindowOptions {
-                    show: false,
-                    focus: false,
-                    ..gpui_kit::gpui::WindowOptions::default()
-                },
-                cx,
-                |window, cx| {
-                    let app = cx.new(|cx| CairnApp::new(window, cx));
-
-                    app.update(cx, |this, cx| {
-                        // A startup notice (an unavailable hotkey, an update result) may own
-                        // the first Escape; it is not part of this behavior.
-                        this.dismiss_toast(cx);
-                        this.open_drive_visualization('C', window, cx);
-                        // The hand-off leaves the canvas for the listing, which
-                        // owns neither a drive scope nor a file-type filter.
-                        this.leave_drive_view();
-                        this.block_listing =
-                            Some(BlockListing::new(r"C:\Windows".to_string(), 2, Vec::new()));
-                        this.query.scope_drive = None;
-                        this.query.active_filter = FilterCategory::All;
-
-                        // The first Escape clears the in-place filter and keeps
-                        // the location.
-                        this.query.search_input.set_text("amd64");
-                        this.escape_query(&EscapeQuery, window, cx);
-                        assert!(this.block_listing.is_some());
-                        assert!(this.query.search_input.text.is_empty());
-
-                        // With nothing left to clear it returns to the folder.
-                        this.escape_query(&EscapeQuery, window, cx);
-                        assert!(this.block_listing.is_none());
-                        assert_eq!(this.drive_view, Some('C'));
-                    });
-
                     cx.quit();
                     app
                 },
@@ -1772,58 +1609,6 @@ mod visibility_tests {
                         assert!(this.command_is_disabled(GroupCommand::RescanMenu));
                         assert!(this.command_is_disabled(GroupCommand::RescanAll));
                         assert!(!this.command_is_disabled(GroupCommand::OpenIndexJournal));
-                    });
-
-                    cx.quit();
-                    app
-                },
-            );
-        });
-    }
-
-    #[test]
-    fn search_flag_rows_hide_while_a_block_listing_is_open() {
-        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
-            gpui_kit::init(cx);
-            let _ = gpui_kit::open_window(
-                gpui_kit::gpui::WindowOptions {
-                    show: false,
-                    focus: false,
-                    ..gpui_kit::gpui::WindowOptions::default()
-                },
-                cx,
-                |window, cx| {
-                    let app = cx.new(|cx| CairnApp::new(window, cx));
-
-                    app.update(cx, |this, _cx| {
-                        assert!(!this.command_is_hidden(GroupCommand::ToggleWholeWord));
-                        this.block_listing =
-                            Some(BlockListing::new(r"C:\Windows".to_string(), 2, Vec::new()));
-                        for command in [
-                            GroupCommand::ToggleWholeWord,
-                            GroupCommand::ToggleMatchPath,
-                            GroupCommand::ToggleRegex,
-                            GroupCommand::ToggleExcludeHidden,
-                            GroupCommand::ToggleExcludeSystem,
-                        ] {
-                            assert!(this.command_is_hidden(command));
-                        }
-                        for col in crate::table::model::TableColumn::ALL {
-                            assert!(this.command_is_hidden(GroupCommand::ToggleColumn(col)));
-                        }
-                        assert!(this.command_is_hidden(GroupCommand::SortBy(
-                            crate::table::model::SortColumn::DateCreated
-                        )));
-                        assert!(!this.command_is_hidden(GroupCommand::SortBy(
-                            crate::table::model::SortColumn::Extension
-                        )));
-                        assert!(!this.command_is_disabled(GroupCommand::ToggleColumn(
-                            crate::table::model::TableColumn::Path
-                        )));
-                        assert!(this.command_is_disabled(GroupCommand::ToggleColumn(
-                            crate::table::model::TableColumn::Name
-                        )));
-                        assert!(!this.command_is_hidden(GroupCommand::ToggleCase));
                     });
 
                     cx.quit();
