@@ -8,6 +8,7 @@
 //! Win32 `ReadDirectoryChangesW` watcher that falls back cleanly to a full rescan on overflow.
 
 use super::index_journal::IndexJournal;
+use super::property_pipeline::PropertyRefreshHandles;
 use super::volume_status::VolumeStatus;
 use crate::exclusion::{ExclusionPath, ExclusionRules};
 use crate::filetime::system_time_to_filetime;
@@ -42,6 +43,13 @@ pub enum FolderWatchEvent {
     Overflow,
     /// The OS watcher could not continue. The source falls back to snapshot semantics.
     WatchFailed,
+}
+
+/// Result of applying one watcher batch: whether the source needs a full rescan, and which record
+/// keys changed so the property pipeline can refresh exactly those records.
+pub struct FolderApplyOutcome {
+    pub needs_rescan: bool,
+    pub changed_records: Vec<u64>,
 }
 
 /// Normalizes the path syntax without touching the filesystem. Used to keep an offline source in
@@ -605,7 +613,7 @@ impl FolderSource {
         }
     }
 
-    fn tombstone_subtree(&mut self, rel_key: &str) -> Option<u64> {
+    fn tombstone_subtree(&mut self, rel_key: &str, removed: &mut Vec<u64>) -> Option<u64> {
         let prefix = format!("{rel_key}\\");
         let mut targets: Vec<(String, u32)> = self
             .path_to_idx
@@ -627,6 +635,7 @@ impl FolderSource {
             if primary_frn.is_none() || key == rel_key {
                 primary_frn = Some(rec.frn);
             }
+            removed.push(rec.frn);
             if !rec.is_dir() {
                 self.live_file_bytes = self.live_file_bytes.saturating_sub(rec.size);
                 self.adjust_ancestors(rec.parent_idx, -(rec.size as i128));
@@ -638,7 +647,11 @@ impl FolderSource {
         primary_frn
     }
 
-    fn upsert_live_path(&mut self, path: &Path) -> Option<(u64, JournalChangeKind)> {
+    fn upsert_live_path(
+        &mut self,
+        path: &Path,
+        removed: &mut Vec<u64>,
+    ) -> Option<(u64, JournalChangeKind)> {
         let (rel_key, name) = self.relative_key(path)?;
         if self
             .exclusion_rules
@@ -658,7 +671,7 @@ impl FolderSource {
                 let parent_idx = rec.parent_idx;
                 let frn = rec.frn;
                 if was_dir != is_dir {
-                    self.tombstone_subtree(&rel_key);
+                    self.tombstone_subtree(&rel_key, removed);
                 } else {
                     let rec = &mut self.records[idx as usize];
                     rec.flags = flags;
@@ -707,14 +720,14 @@ impl FolderSource {
         Some((key, JournalChangeKind::Created))
     }
 
-    /// Applies a bounded batch of change events. Returns `true` when buffer overflow or structural
-    /// ambiguity requires a full subtree rescan.
+    /// Applies a bounded batch of change events. Returns the rescan requirement and the record keys
+    /// touched by the batch so callers can refresh derived indexes for exactly those records.
     pub fn apply_folder_events(
         &mut self,
         events: &[FolderWatchEvent],
         mut journal: Option<&mut IndexJournal>,
         now_unix: i64,
-    ) -> bool {
+    ) -> FolderApplyOutcome {
         if self.scan_pending {
             if events.len() + self.pending_events.len() > FOLDER_CHANGE_BUFFER_CAP
                 || events.iter().any(|event| {
@@ -729,7 +742,10 @@ impl FolderSource {
             } else {
                 self.pending_events.extend_from_slice(events);
             }
-            return false;
+            return FolderApplyOutcome {
+                needs_rescan: false,
+                changed_records: Vec::new(),
+            };
         }
         if events.len() > FOLDER_CHANGE_BUFFER_CAP
             || events.iter().any(|e| {
@@ -749,18 +765,27 @@ impl FolderSource {
                     now_unix,
                 );
             }
-            return true;
+            return FolderApplyOutcome {
+                needs_rescan: true,
+                changed_records: Vec::new(),
+            };
         }
         let mut needs_rescan = false;
         let mut table_changed = false;
+        let mut changed_records = Vec::new();
 
         for event in events {
             match event {
-                FolderWatchEvent::Overflow => return true,
-                FolderWatchEvent::WatchFailed => return true,
+                FolderWatchEvent::Overflow | FolderWatchEvent::WatchFailed => {
+                    return FolderApplyOutcome {
+                        needs_rescan: true,
+                        changed_records,
+                    };
+                }
                 FolderWatchEvent::Added(path) | FolderWatchEvent::Modified(path) => {
-                    if let Some((frn, kind)) = self.upsert_live_path(path) {
+                    if let Some((frn, kind)) = self.upsert_live_path(path, &mut changed_records) {
                         table_changed = true;
+                        changed_records.push(frn);
                         if let Some(ref mut j) = journal {
                             j.push(
                                 self.source_id,
@@ -783,7 +808,9 @@ impl FolderSource {
                 }
                 FolderWatchEvent::Removed(path) => {
                     if let Some((rel_key, _)) = self.relative_key(path) {
-                        let frn = self.tombstone_subtree(&rel_key).unwrap_or(0);
+                        let frn = self
+                            .tombstone_subtree(&rel_key, &mut changed_records)
+                            .unwrap_or(0);
                         table_changed = true;
                         if let Some(ref mut j) = journal {
                             j.push(
@@ -805,10 +832,20 @@ impl FolderSource {
                                 needs_rescan = true;
                             }
                         }
-                        moved_frn = self.tombstone_subtree(&old_key).unwrap_or(0);
+                        moved_frn = self
+                            .tombstone_subtree(&old_key, &mut changed_records)
+                            .unwrap_or(0);
                     }
-                    if let Some((frn, _)) = self.upsert_live_path(new_path) {
+                    if let Some((frn, _)) = self.upsert_live_path(new_path, &mut changed_records) {
                         moved_frn = frn;
+                        changed_records.push(frn);
+                        if self
+                            .frn_to_idx
+                            .first(frn)
+                            .is_some_and(|idx| self.records[idx as usize].is_dir())
+                        {
+                            needs_rescan = true;
+                        }
                     }
                     table_changed = true;
                     if let Some(ref mut j) = journal {
@@ -828,7 +865,10 @@ impl FolderSource {
         if table_changed {
             self.path_cache.clear();
         }
-        needs_rescan
+        FolderApplyOutcome {
+            needs_rescan,
+            changed_records,
+        }
     }
 
     pub(crate) fn table_view(&self) -> super::SourceTableView<'_> {
@@ -863,99 +903,100 @@ pub(super) fn release_scan(scanning: &Arc<Mutex<HashSet<SourceId>>>, source_id: 
     scanning.lock().unwrap().remove(&source_id);
 }
 
-/// Scans one folder source on a background thread and installs the result under a short write lock.
-///
-/// The caller reserves the scan slot and begins the scan (buffering watcher events) before arming
-/// the watcher, so events that happen during the traversal are replayed onto the installed snapshot.
-pub(super) fn spawn_reserved_scan(
-    sources: Arc<RwLock<HashMap<SourceId, FolderSource>>>,
-    properties: Arc<RwLock<PropertySideTables>>,
-    scanning: Arc<Mutex<HashSet<SourceId>>>,
-    journal: Arc<Mutex<IndexJournal>>,
-    source_id: SourceId,
-    now_unix: i64,
-) -> bool {
-    let prepared = {
-        let folders = sources.read().unwrap();
-        let Some(source) = folders.get(&source_id) else {
-            release_scan(&scanning, source_id);
+/// Shared engine handles needed to scan, reinstall, and notify property refresh for a folder source.
+#[derive(Clone)]
+pub(super) struct FolderScanContext {
+    pub sources: Arc<RwLock<HashMap<SourceId, FolderSource>>>,
+    pub property_handles: PropertyRefreshHandles,
+    pub scanning: Arc<Mutex<HashSet<SourceId>>>,
+    pub journal: Arc<Mutex<IndexJournal>>,
+}
+
+impl FolderScanContext {
+    pub(super) fn reserve_and_spawn_scan(&self, source_id: SourceId, now_unix: i64) -> bool {
+        if !reserve_scan(&self.scanning, source_id) {
             return false;
-        };
-        (source.root_path.clone(), source.excluded_paths().to_vec())
-    };
-    let (root_path, excluded) = prepared;
-    let thread_sources = Arc::clone(&sources);
-    let thread_properties = Arc::clone(&properties);
-    let thread_scanning = Arc::clone(&scanning);
-    let thread_journal = Arc::clone(&journal);
-    let spawned = std::thread::Builder::new()
-        .name("cairn-folder-scan".to_string())
-        .spawn(move || {
-            let scan_guard = ScanGuard {
-                scanning: Arc::clone(&thread_scanning),
-                source_id,
-            };
-            let scanned = FolderSource::new(source_id, &root_path).and_then(|mut source| {
-                source.rescan(&excluded)?;
-                Ok(source)
-            });
-            let needs_rescan = match scanned {
-                Ok(scanned) => install_scanned_source(
-                    &thread_sources,
-                    &thread_properties,
-                    &thread_journal,
-                    source_id,
-                    scanned,
-                    now_unix,
-                ),
-                Err(err) => {
-                    tracing::warn!(
-                        source = source_id.0,
-                        error = %super::log_safe(&err),
-                        "folder scan failed"
-                    );
-                    let mut folders = thread_sources.write().unwrap();
-                    if let Some(source) = folders.get_mut(&source_id) {
-                        source.scan_pending = false;
-                        source.set_live_watch_enabled(false);
-                        source.status.set(VolumeState::Offline);
-                    }
-                    false
-                }
-            };
-            drop(scan_guard);
-            if needs_rescan && reserve_scan(&thread_scanning, source_id) {
-                {
-                    let mut folders = thread_sources.write().unwrap();
-                    if let Some(source) = folders.get_mut(&source_id) {
-                        source.begin_scan();
-                    }
-                }
-                spawn_reserved_scan(
-                    thread_sources,
-                    thread_properties,
-                    thread_scanning,
-                    thread_journal,
-                    source_id,
-                    now_unix,
-                );
-            }
-        });
-    if spawned.is_err() {
-        release_scan(&scanning, source_id);
-        let mut folders = sources.write().unwrap();
-        if let Some(source) = folders.get_mut(&source_id) {
-            source.scan_pending = false;
-            source.status.set(VolumeState::SnapshotMode);
         }
-        return false;
+        {
+            let mut folders = self.sources.write().unwrap();
+            if let Some(source) = folders.get_mut(&source_id) {
+                source.begin_scan();
+            }
+        }
+        self.spawn_reserved_scan(source_id, now_unix)
     }
-    true
+
+    /// Scans one folder source on a background thread and installs the result under a short write lock.
+    ///
+    /// The caller reserves the scan slot and begins the scan (buffering watcher events) before arming
+    /// the watcher, so events that happen during the traversal are replayed onto the installed snapshot.
+    pub(super) fn spawn_reserved_scan(&self, source_id: SourceId, now_unix: i64) -> bool {
+        let prepared = {
+            let folders = self.sources.read().unwrap();
+            let Some(source) = folders.get(&source_id) else {
+                release_scan(&self.scanning, source_id);
+                return false;
+            };
+            (source.root_path.clone(), source.excluded_paths().to_vec())
+        };
+        let (root_path, excluded) = prepared;
+        let thread_ctx = self.clone();
+        let spawned = std::thread::Builder::new()
+            .name("cairn-folder-scan".to_string())
+            .spawn(move || {
+                let scan_guard = ScanGuard {
+                    scanning: Arc::clone(&thread_ctx.scanning),
+                    source_id,
+                };
+                let scanned = FolderSource::new(source_id, &root_path).and_then(|mut source| {
+                    source.rescan(&excluded)?;
+                    Ok(source)
+                });
+                let needs_rescan = match scanned {
+                    Ok(scanned) => install_scanned_source(
+                        &thread_ctx.sources,
+                        &thread_ctx.property_handles,
+                        &thread_ctx.journal,
+                        source_id,
+                        scanned,
+                        now_unix,
+                    ),
+                    Err(err) => {
+                        tracing::warn!(
+                            source = source_id.0,
+                            error = %super::log_safe(&err),
+                            "folder scan failed"
+                        );
+                        let mut folders = thread_ctx.sources.write().unwrap();
+                        if let Some(source) = folders.get_mut(&source_id) {
+                            source.scan_pending = false;
+                            source.set_live_watch_enabled(false);
+                            source.status.set(VolumeState::Offline);
+                        }
+                        false
+                    }
+                };
+                drop(scan_guard);
+                if needs_rescan {
+                    thread_ctx.reserve_and_spawn_scan(source_id, now_unix);
+                }
+            });
+        if spawned.is_err() {
+            release_scan(&self.scanning, source_id);
+            let mut folders = self.sources.write().unwrap();
+            if let Some(source) = folders.get_mut(&source_id) {
+                source.scan_pending = false;
+                source.status.set(VolumeState::SnapshotMode);
+            }
+            return false;
+        }
+        true
+    }
 }
 
 fn install_scanned_source(
     sources: &Arc<RwLock<HashMap<SourceId, FolderSource>>>,
-    properties: &Arc<RwLock<PropertySideTables>>,
+    property_handles: &PropertyRefreshHandles,
     journal: &Arc<Mutex<IndexJournal>>,
     source_id: SourceId,
     mut scanned: FolderSource,
@@ -990,7 +1031,9 @@ fn install_scanned_source(
         let mut needs_rescan = exclusions_changed;
         if !pending.is_empty() {
             let mut journal_lock = journal.lock().unwrap();
-            needs_rescan |= source.apply_folder_events(&pending, Some(&mut journal_lock), now_unix);
+            needs_rescan |= source
+                .apply_folder_events(&pending, Some(&mut journal_lock), now_unix)
+                .needs_rescan;
         }
         let mut retry_overflow = false;
         if overflow {
@@ -1026,18 +1069,17 @@ fn install_scanned_source(
                 "folder scan skipped unreadable entries; source is snapshot-only"
             );
         }
-        let keys = source
+        let present_keys = source
             .records()
             .iter()
             .filter(|record| !record.is_tombstone())
             .map(|record| record.frn)
             .collect();
-        (keys, needs_rescan || retry_overflow)
+        (present_keys, needs_rescan || retry_overflow)
     };
-    properties
-        .write()
-        .unwrap()
-        .retain_source_keys(source_id, &present_keys);
+    if property_handles.retain_and_enqueue_source_with(source_id, || present_keys) {
+        property_handles.wake();
+    }
     needs_follow_up
 }
 
@@ -1394,6 +1436,16 @@ mod tests {
         assert!(normalize_folder_root_syntax(Path::new(r"\\server\share")).is_err());
     }
 
+    fn test_property_handles() -> PropertyRefreshHandles {
+        PropertyRefreshHandles {
+            tables: Arc::new(RwLock::new(PropertySideTables::new(true))),
+            refresh: Arc::new(Mutex::new(
+                super::super::property_pipeline::PropertyRefresh::default(),
+            )),
+            spawner: Arc::new(Mutex::new(None)),
+        }
+    }
+
     /// A scan that overflowed retries once. The retry budget lives on the source across the
     /// reinstall that every completed scan performs; without inheriting it, a repeatedly
     /// overflowing folder would rescan forever.
@@ -1405,13 +1457,13 @@ mod tests {
         old.scan_pending = true;
         old.apply_folder_events(&[FolderWatchEvent::Overflow], None, 0);
         let sources = Arc::new(RwLock::new(HashMap::from([(id, old)])));
-        let properties = Arc::new(RwLock::new(PropertySideTables::new(true)));
+        let property_handles = test_property_handles();
         let journal = Arc::new(Mutex::new(IndexJournal::new(true)));
 
         let scanned = FolderSource::new(id, dir.path()).unwrap();
         assert!(install_scanned_source(
             &sources,
-            &properties,
+            &property_handles,
             &journal,
             id,
             scanned,
@@ -1435,7 +1487,7 @@ mod tests {
         let scanned = FolderSource::new(id, dir.path()).unwrap();
         assert!(!install_scanned_source(
             &sources,
-            &properties,
+            &property_handles,
             &journal,
             id,
             scanned,
@@ -1464,12 +1516,12 @@ mod tests {
         old.set_excluded_paths(&[skipped.to_string_lossy().into_owned()]);
         let scanned = FolderSource::new(id, dir.path()).unwrap();
         let sources = Arc::new(RwLock::new(HashMap::from([(id, old)])));
-        let properties = Arc::new(RwLock::new(PropertySideTables::new(true)));
+        let property_handles = test_property_handles();
         let journal = Arc::new(Mutex::new(IndexJournal::new(true)));
 
         assert!(install_scanned_source(
             &sources,
-            &properties,
+            &property_handles,
             &journal,
             id,
             scanned,
@@ -1495,5 +1547,50 @@ mod tests {
             events,
             vec![FolderWatchEvent::Added(PathBuf::from(r"C:\Watched\a"))]
         );
+    }
+
+    #[test]
+    fn directory_rename_into_scope_and_type_replacement_report_property_work() {
+        let dir = tempdir().unwrap();
+        let mut source = FolderSource::new(SourceId(2200), dir.path()).unwrap();
+        let canonical_dir = PathBuf::from(source.display_root());
+        let sub = canonical_dir.join("bundle");
+        let child = sub.join("track.png");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(&child, b"png").unwrap();
+
+        source.rescan(&[]).unwrap();
+        let child_frn = source
+            .records()
+            .iter()
+            .find(|r| source.arena().get_name(r.name_offset, r.name_len) == "track.png")
+            .unwrap()
+            .frn;
+
+        // Replacing directory `bundle` with a regular file must report the tombstoned child FRN.
+        fs::remove_dir_all(&sub).unwrap();
+        fs::write(&sub, b"now a file").unwrap();
+        let replaced = source.apply_folder_events(&[FolderWatchEvent::Added(sub.clone())], None, 1);
+        assert!(
+            replaced.changed_records.contains(&child_frn),
+            "descendant FRN must be emitted for property slot cleanup: {:?}",
+            replaced.changed_records
+        );
+
+        // Moving an excluded directory into an unexcluded name must ask for a rescan.
+        let hidden = canonical_dir.join("ignored_dir");
+        let shown = canonical_dir.join("shown_dir");
+        fs::create_dir_all(&shown).unwrap();
+        fs::write(shown.join("cover.png"), b"png").unwrap();
+        source.set_excluded_paths(&["ignored_dir".to_string()]);
+        let renamed = source.apply_folder_events(
+            &[FolderWatchEvent::Renamed {
+                old_path: hidden,
+                new_path: shown,
+            }],
+            None,
+            2,
+        );
+        assert!(renamed.needs_rescan);
     }
 }

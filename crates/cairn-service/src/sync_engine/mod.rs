@@ -15,7 +15,7 @@ use cairn_protocol::status::{
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -60,7 +60,7 @@ fn log_safe(text: &str) -> String {
 }
 
 pub struct MultiVolumeEngine {
-    // Lock order invariant: volumes -> folder_sources -> property_tables -> index_journal.
+    // Lock order invariant: config_apply_lock -> property_extract_lock -> volumes -> folder_sources -> property_tables -> property_refresh -> property_status -> index_journal.
     volumes: RwLock<HashMap<char, VolumeIndex>>,
     folder_sources: Arc<RwLock<HashMap<SourceId, folder_source::FolderSource>>>,
     folder_watchers: Mutex<HashMap<SourceId, folder_source::FolderWatcherHandle>>,
@@ -68,8 +68,12 @@ pub struct MultiVolumeEngine {
     next_folder_source_id: AtomicU32,
     property_tables: Arc<RwLock<PropertySideTables>>,
     property_status: RwLock<PropertyIndexStatus>,
-    property_cancel: Arc<AtomicBool>,
+    property_refresh: Arc<Mutex<property_pipeline::PropertyRefresh>>,
+    property_spawner: property_pipeline::PropertySpawner,
+    property_generation: AtomicU64,
+    property_run_cancel: Mutex<Arc<AtomicBool>>,
     property_running: AtomicBool,
+    property_stopped: AtomicBool,
     property_extract_lock: Mutex<()>,
     index_journal: Arc<Mutex<index_journal::IndexJournal>>,
     index_dir: PathBuf,
@@ -515,8 +519,18 @@ impl MultiVolumeEngine {
             } else {
                 PropertyIndexStatus::default()
             }),
-            property_cancel: Arc::new(AtomicBool::new(!property_enabled)),
+            property_refresh: {
+                let refresh = Arc::new(Mutex::new(property_pipeline::PropertyRefresh::default()));
+                if property_enabled {
+                    refresh.lock().unwrap().mark_full();
+                }
+                refresh
+            },
+            property_spawner: Arc::new(Mutex::new(None)),
+            property_generation: AtomicU64::new(0),
+            property_run_cancel: Mutex::new(Arc::new(AtomicBool::new(false))),
             property_running: AtomicBool::new(false),
+            property_stopped: AtomicBool::new(false),
             property_extract_lock: Mutex::new(()),
             index_journal: Arc::new(Mutex::new(index_journal::IndexJournal::new(
                 journal_enabled,
@@ -831,14 +845,17 @@ impl MultiVolumeEngine {
                 continue;
             }
             self.start_folder_watcher_for(sid, root_path);
-            folder_source::spawn_reserved_scan(
-                self.folder_sources.clone(),
-                self.property_tables.clone(),
-                self.folder_scanning.clone(),
-                self.index_journal.clone(),
-                sid,
-                unix_now_secs(),
-            );
+            self.folder_scan_context()
+                .spawn_reserved_scan(sid, unix_now_secs());
+        }
+    }
+
+    fn folder_scan_context(&self) -> folder_source::FolderScanContext {
+        folder_source::FolderScanContext {
+            sources: Arc::clone(&self.folder_sources),
+            property_handles: self.property_refresh_handles(),
+            scanning: Arc::clone(&self.folder_scanning),
+            journal: Arc::clone(&self.index_journal),
         }
     }
 
@@ -886,14 +903,10 @@ impl MultiVolumeEngine {
             drop(previous);
             self.start_folder_watcher_for(source_id, root);
         }
-        if folder_source::spawn_reserved_scan(
-            self.folder_sources.clone(),
-            self.property_tables.clone(),
-            self.folder_scanning.clone(),
-            self.index_journal.clone(),
-            source_id,
-            unix_now_secs(),
-        ) {
+        if self
+            .folder_scan_context()
+            .spawn_reserved_scan(source_id, unix_now_secs())
+        {
             Ok(true)
         } else {
             Err(format!("could not start a scan for source {}", source_id.0))
@@ -911,16 +924,13 @@ impl MultiVolumeEngine {
         let handle_opt = {
             #[cfg(windows)]
             {
-                let sources = Arc::clone(&self.folder_sources);
-                let properties = Arc::clone(&self.property_tables);
-                let scanning = Arc::clone(&self.folder_scanning);
-                let journal = Arc::clone(&self.index_journal);
+                let scan_ctx = self.folder_scan_context();
                 folder_source::spawn_folder_watcher(root_path, move |events| {
                     if events
                         .iter()
                         .any(|event| matches!(event, folder_source::FolderWatchEvent::WatchFailed))
                     {
-                        let mut folders = sources.write().unwrap();
+                        let mut folders = scan_ctx.sources.write().unwrap();
                         if let Some(source) = folders.get_mut(&source_id) {
                             source.set_live_watch_enabled(false);
                         }
@@ -930,33 +940,25 @@ impl MultiVolumeEngine {
                         );
                         return;
                     }
-                    let needs_rescan = {
-                        let mut folders = sources.write().unwrap();
+                    let outcome = {
+                        let mut folders = scan_ctx.sources.write().unwrap();
                         let Some(source) = folders.get_mut(&source_id) else {
                             return;
                         };
-                        let mut journal_lock = journal.lock().unwrap();
+                        let mut journal_lock = scan_ctx.journal.lock().unwrap();
                         source.apply_folder_events(
                             &events,
                             Some(&mut *journal_lock),
                             unix_now_secs(),
                         )
                     };
-                    if needs_rescan && folder_source::reserve_scan(&scanning, source_id) {
-                        {
-                            let mut folders = sources.write().unwrap();
-                            if let Some(source) = folders.get_mut(&source_id) {
-                                source.begin_scan();
-                            }
-                        }
-                        folder_source::spawn_reserved_scan(
-                            Arc::clone(&sources),
-                            Arc::clone(&properties),
-                            Arc::clone(&scanning),
-                            Arc::clone(&journal),
-                            source_id,
-                            unix_now_secs(),
-                        );
+                    if !outcome.changed_records.is_empty() {
+                        scan_ctx
+                            .property_handles
+                            .enqueue_records_and_wake(source_id, outcome.changed_records);
+                    }
+                    if outcome.needs_rescan {
+                        scan_ctx.reserve_and_spawn_scan(source_id, unix_now_secs());
                     }
                 })
             }

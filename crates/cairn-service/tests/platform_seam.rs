@@ -16,7 +16,7 @@ use cairn_core::{
 };
 use cairn_ntfs::mft::ExtractedItem;
 use cairn_ntfs::volume_identity::VolumeIdentity;
-use cairn_protocol::status::{JournalChangeKind, SourceKind, VolumeState};
+use cairn_protocol::status::{ContentIndexState, JournalChangeKind, SourceKind, VolumeState};
 use cairn_service::config::ServiceConfig;
 use cairn_service::sync_engine::folder_source::{
     FolderSource, FolderWatchEvent, FOLDER_CHANGE_BUFFER_CAP,
@@ -125,6 +125,50 @@ fn wait_for_folder_scans(engine: &MultiVolumeEngine, minimum: usize) {
             "folder sources did not finish scanning"
         );
         std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn wait_for_live_folder_watchers(engine: &MultiVolumeEngine, minimum: usize) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let live = engine
+            .get_sources()
+            .into_iter()
+            .filter(|source| source.kind == SourceKind::Folder && source.live_watch_enabled)
+            .count();
+        if live >= minimum {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "folder watchers did not become live"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn run_property_extraction_until(engine: &MultiVolumeEngine, query: &str, expected_total: usize) {
+    let cancel = CancellationToken::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        engine
+            .run_property_extraction_with_worker(&cairn_worker_exe(), Duration::from_secs(10))
+            .expect("isolated extraction");
+        let outcome = engine.execute_search_multi(
+            query,
+            &QueryDefaults::default(),
+            &SortSpec::single(SortColumn::Name, SortDirection::Ascending),
+            &cancel,
+        );
+        if outcome.total == expected_total {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "property refresh did not reach {expected_total} results for {query}: {}",
+            outcome.total
+        );
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -237,13 +281,26 @@ fn folder_source_scans_updates_incrementally_and_recovers_on_buffer_overflow() {
         Some(&mut journal),
         1_700_000_001,
     );
-    assert!(!overflowed);
+    assert!(!overflowed.needs_rescan);
+    assert_eq!(overflowed.changed_records.len(), 1);
     assert!(source
         .records()
         .iter()
         .any(|r| !r.is_tombstone()
             && source.arena().get_name(r.name_offset, r.name_len) == "gamma.txt"));
     assert_eq!(journal.status().entry_count, 1);
+
+    let removed = source.apply_folder_events(
+        &[FolderWatchEvent::Removed(new_file.clone())],
+        Some(&mut journal),
+        1_700_000_002,
+    );
+    assert!(!removed.needs_rescan);
+    assert_eq!(
+        removed.changed_records.len(),
+        1,
+        "the removed record must be reported for property cleanup"
+    );
 
     // Writing another file missed by buffered watcher triggers fallback rescan when > cap.
     fs::write(source_root.join("delta.txt"), "missed during overflow").unwrap();
@@ -254,7 +311,9 @@ fn folder_source_scans_updates_incrementally_and_recovers_on_buffer_overflow() {
         ));
     }
     assert!(
-        source.apply_folder_events(&burst, Some(&mut journal), 1_700_000_002),
+        source
+            .apply_folder_events(&burst, Some(&mut journal), 1_700_000_002)
+            .needs_rescan,
         "exceeding FOLDER_CHANGE_BUFFER_CAP must trigger fallback rescan"
     );
     source.rescan(&[]).expect("overflow fallback rescan");
@@ -514,14 +573,16 @@ fn property_index_degrades_explicitly_when_off_and_handles_missing_worker_cleanl
         property_index_enabled: false,
         ..Default::default()
     };
+    let service_dir = temp.path().join("service");
     let engine = MultiVolumeEngine::with_paths(
-        &temp.path().join("index"),
-        &temp.path().join("content"),
-        &temp.path().join("service.toml"),
+        &service_dir.join("index"),
+        &service_dir.join("content"),
+        &service_dir.join("service.toml"),
         vec![],
         config,
     );
     engine.add_folder_source(&media_dir, false).unwrap();
+    wait_for_folder_scan(&engine, 1);
 
     let cancel = CancellationToken::new();
     let disabled_outcome = engine.execute_search_multi(
@@ -547,6 +608,34 @@ fn property_index_degrades_explicitly_when_off_and_handles_missing_worker_cleanl
     assert!(status.enabled);
     assert_eq!(status.indexed_records, 0);
     assert_eq!(engine.memory_footprint().property_store_bytes, 0);
+    assert!(
+        matches!(status.state, ContentIndexState::Error(_)),
+        "{status:?}"
+    );
+
+    // Re-submitting the enabled switch retries a failed pass instead of leaving the error sticky.
+    let retry = engine.set_property_index_enabled(true);
+    assert!(matches!(retry.state, ContentIndexState::Backfilling { .. }));
+    let retry_status = engine
+        .run_property_extraction_with_worker(&missing_worker, Duration::from_secs(5))
+        .expect("worker invocation failure stays contained");
+    assert!(matches!(retry_status.state, ContentIndexState::Error(_)));
+
+    // An unrelated empty delta (no eligible records queued) preserves Error until retry.
+    let unrelated = media_dir.join("notes.txt");
+    fs::write(&unrelated, b"plain text").unwrap();
+    let empty_pass = engine
+        .run_property_extraction_with_worker(&missing_worker, Duration::from_secs(5))
+        .expect("worker invocation failure stays contained");
+    assert!(matches!(empty_pass.state, ContentIndexState::Error(_)));
+
+    // Submitting `property_index_enabled = true` via `update_config` retries just like the direct switch.
+    let cfg = engine.get_config();
+    engine.update_config(cfg);
+    assert!(matches!(
+        engine.property_index_status().state,
+        ContentIndexState::Backfilling { .. }
+    ));
 
     engine.set_property_index_enabled(false);
     assert!(!engine.property_index_status().enabled);
@@ -584,12 +673,6 @@ fn property_index_extracts_through_real_worker_and_recovers_from_corrupt_files()
     let cancel = CancellationToken::new();
     // Enable properties and invoke real CairnWorker extraction across good + corrupt files.
     engine.set_property_index_enabled(true);
-    let tasks = engine.collect_property_tasks();
-    assert_eq!(
-        tasks.len(),
-        2,
-        "both PNG files must reach the property pipeline: {tasks:?}"
-    );
     engine
         .run_property_extraction_with_worker(&cairn_worker_exe(), Duration::from_secs(10))
         .expect("isolated extraction");
@@ -610,6 +693,101 @@ fn property_index_extracts_through_real_worker_and_recovers_from_corrupt_files()
     );
     assert_eq!(enabled_outcome.degraded, None);
     assert_eq!(enabled_outcome.total, 1);
+
+    // A live modification re-extracts only that record; the stale slot must not satisfy the query.
+    wait_for_live_folder_watchers(&engine, 1);
+    fs::write(&good_png, minimal_png_bytes(640, 480)).unwrap();
+    run_property_extraction_until(&engine, "dimensions:640x480", 1);
+    run_property_extraction_until(&engine, "dimensions:1920x1080", 0);
+    assert_eq!(
+        engine.property_index_status().indexed_records,
+        1,
+        "the modified record must replace its slot, not add a second one"
+    );
+
+    // Overwriting an indexed file with unparseable bytes must drop its old slot and stay Ready.
+    let sibling_png = media_dir.join("keep.png");
+    fs::write(&sibling_png, minimal_png_bytes(1024, 768)).unwrap();
+    run_property_extraction_until(&engine, "dimensions:1024x768", 1);
+    assert_eq!(engine.property_index_status().indexed_records, 2);
+    fs::write(&sibling_png, b"corrupt image payload without headers").unwrap();
+    let corrupt_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        engine
+            .run_property_extraction_with_worker(&cairn_worker_exe(), Duration::from_secs(10))
+            .expect("isolated extraction");
+        if engine.property_index_status().indexed_records == 1 {
+            break;
+        }
+        assert!(
+            Instant::now() < corrupt_deadline,
+            "corrupt record kept its property slot"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    run_property_extraction_until(&engine, "dimensions:1024x768", 0);
+    assert_eq!(
+        engine.property_index_status().state,
+        ContentIndexState::Ready
+    );
+
+    // A source that finishes scanning after properties were enabled queues its own extraction.
+    let second_dir = temp.path().join("second");
+    fs::create_dir_all(&second_dir).unwrap();
+    let second_png = second_dir.join("cover.png");
+    fs::write(&second_png, minimal_png_bytes(800, 600)).unwrap();
+    engine.add_folder_source(&second_dir, false).unwrap();
+    wait_for_folder_scans(&engine, 2);
+    run_property_extraction_until(&engine, "dimensions:800x600", 1);
+
+    // Deleting the file prunes its property slot instead of leaving it resident.
+    let indexed_before_delete = engine.property_index_status().indexed_records;
+    assert!(indexed_before_delete >= 2);
+    fs::remove_file(&second_png).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        engine
+            .run_property_extraction_with_worker(&cairn_worker_exe(), Duration::from_secs(10))
+            .expect("isolated extraction");
+        if engine.property_index_status().indexed_records < indexed_before_delete {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "deleted record kept its property slot"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // Disabling drops every slot; enabling again must leave Backfilling and complete a fresh pass.
+    engine.set_property_index_enabled(false);
+    assert_eq!(engine.memory_footprint().property_store_bytes, 0);
+    engine.set_property_index_enabled(true);
+    assert!(matches!(
+        engine.property_index_status().state,
+        ContentIndexState::Backfilling { .. }
+    ));
+    engine
+        .run_property_extraction_with_worker(&cairn_worker_exe(), Duration::from_secs(10))
+        .expect("isolated extraction");
+    let reenabled = engine.property_index_status();
+    assert_eq!(reenabled.state, ContentIndexState::Ready);
+    assert!(reenabled.indexed_records >= 1);
+
+    // Exclusion rules are part of the extraction scope; changing them drops slots they exclude.
+    let canonical = std::fs::canonicalize(&good_png).expect("canonical banner path");
+    let canonical = canonical.to_string_lossy();
+    let canonical_good = canonical
+        .strip_prefix(r"\\?\")
+        .unwrap_or(&canonical)
+        .to_string();
+    let mut config = engine.get_config();
+    config.excluded_paths = vec![canonical_good];
+    engine.update_config(config);
+    engine
+        .run_property_extraction_with_worker(&cairn_worker_exe(), Duration::from_secs(10))
+        .expect("isolated extraction");
+    assert_eq!(engine.property_index_status().indexed_records, 0);
 
     // Turning properties back off drops all side-table heap memory immediately.
     engine.set_property_index_enabled(false);
