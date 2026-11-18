@@ -1,12 +1,12 @@
 # 搜索 + 启动器三单品研究：Listary、Flow Launcher、PowerToys Run
 
-> 本文是外部产品研究，不是 Cairn 当前实现状态；Cairn 的规范以 [SPEC.md](../SPEC.md) 为准。研究索引见 [README.md](README.md)，交叉形态空白见 [cross-form.md](cross-form.md)。所有版本号、日期与机制描述均附一手来源；查不到的写"未找到公开数据"。
+> 本文是外部产品研究，不是 Cairn 当前实现状态；Cairn 的规范以 [SPEC.md](../SPEC.md) 为准。研究索引见 [README.md](README.md)。所有版本号、日期与机制描述均附一手来源；查不到的写"未找到公开数据"。
 
 ---
 
 ## 0. 结论摘要
 
-1. **三者代表"检索入口"的三种形态**：Listary 是"自建索引 + 全局唤起 + 对话框跳转"的垂直整合单品；Flow Launcher 与 PowerToys Run 是"壳层不建索引、文件检索委托专用索引器"的插件面板。三者都没有 Treemap 或空间维度，查询语法强度也全部弱于 Everything 与 Cairn 的 QRY-04。
+1. **三者代表"检索入口"的三种形态**：Listary 是"自建索引 + 全局唤起 + 对话框跳转"的垂直整合单品；Flow Launcher 与 PowerToys Run 是"壳层不建索引、文件检索委托专用索引器"的插件面板。查询语法强度全部弱于 Everything 与 Cairn 的 QRY-04。
 2. **只有 Listary 自建文件索引**（默认索引所有本地 NTFS 分区 + 实时监控 + 非可靠路径定时扫描降级）；Flow Launcher 默认走 Windows Search Index、可选 Everything SDK IPC，PowerToys Run 只走 Windows Search Index（OLE DB 查 SystemIndex catalog）。
 3. **"快慢两段渐进呈现"与"引擎不可用显式化"是最值得直接借鉴的两个机制**：PowerToys Run 先 `CONTAINS` 后 `LIKE`、快查询 ≤100ms 与延迟执行插件分级；Flow Launcher 对引擎不可用抛显式错误并引导安装（可自动下载 Everything）——分别映射到 Cairn 的 QRY-01/QRY-06 与 SVC-04。
 4. **微软官方正把 PowerToys Run 演进为 v2 "Command Palette"**（独立新应用，release notes 提及 Windows App SDK 运行时与 Native AOT 构建），旧 Run 只收修复；Listary 稳定线更新慢、靠 V7 beta（Rust 重写）续命。
@@ -113,7 +113,6 @@
 - **动作关键词**：Explorer 插件注册全局 `*` 与内容搜索 `doc:`（均可在设置改绑，[plugin.json](https://github.com/Flow-Launcher/Flow.Launcher/blob/dev/Plugins/Flow.Launcher.Plugin.Explorer/plugin.json)）。
 - **结果动作**：Enter 执行、Ctrl+Enter 打开所在文件夹、Ctrl+Tab 自动补全、F1 预览面板、F5 重载插件数据、Ctrl+Shift+Enter 以管理员运行（README）。
 - **Dialog Jump（v2.0.0 新增）**：`Alt+G` 把 Open/Save As 对话框路径跳到活动文件管理器路径，或搜索文件/文件夹后把其路径送进对话框（[v2.0.0 notes](https://github.com/Flow-Launcher/Flow.Launcher/releases/tag/v2.0.0)）——与 Listary Quick Switch 同一生态位。
-- **盘符空间显示**：路径查询指向盘根时结果直接展示盘符空间（`CreateDriveSpaceDisplayResult`，[SearchManager.cs](https://github.com/Flow-Launcher/Flow.Launcher/blob/dev/Plugins/Flow.Launcher.Plugin.Explorer/Search/SearchManager.cs)）。
 - 其余：拖拽、结果优先级排序、书签/浏览器历史、Windows 设置搜索、环境变量路径搜索、主题/暗色（README）。
 
 ### 2.5 扩展与生态
@@ -134,7 +133,7 @@ MIT，免费开源（[GitHub README](https://github.com/Flow-Launcher/Flow.Launc
 
 1. **引擎不可用显式化 + 安装引导**（对照 SVC-04）：Explorer 插件把"依赖谁"做成一等设置，引擎不可用抛 `EngineNotAvailableException` 并在结果面板引导（未装 Everything 时自动下载安装）。Cairn 自带引擎无需委托，但"依赖不可用 → 显式恢复入口 + 引导"与 SVC-04 的服务问题带同构，第三方生态证明这是用户期望形态。
 2. **内容搜索默认关闭并写明原因**（对照 CNT-01）：Flow 默认关闭 Everything 内容搜索并注明 "due to its slowness"，未开启时在结果位直接给出一键开启项——与 CNT-01 "内容索引默认关闭 + 启用即回填"同一取舍，"未就绪时把开启动作放在结果位"值得照搬。
-3. **路径查询内的 `>` 递归枚举与盘符空间结果**（对照 QRY-04 `parent:`、DSV-07）：`C:\dir\>` 递归列子目录、盘根结果显示剩余空间，把"导航"与"空间"做进搜索结果流；Cairn 的 `parent:` 与盘符限定语法可吸收该交互作为输入提示，当时盘符空间显示与 Treemap 板块互补而不重复（该方向已删除）。
+3. **路径查询内的 `>` 递归枚举**（对照 QRY-04 `parent:`）：`C:\dir\>` 递归列子目录，把导航与检索放在同一输入流；Cairn 的 `parent:` 与盘符限定语法可吸收该交互作为输入提示。
 
 ---
 
@@ -185,7 +184,7 @@ MIT，随 PowerToys 免费开源（[GitHub](https://github.com/microsoft/PowerTo
 
 1. **快慢两段渐进呈现**（对照 QRY-01、QRY-06、CNT-06）：先 `CONTAINS` 快查上屏、`LIKE` 全量后到，配合 IPlugin/IDelayedExecutionPlugin 的 100ms 分级，是"首屏不等全量"的成熟范式；Cairn 的文件名查询是单引擎快路径；`content:` 的 `!` / `|` 组合走逐记录布尔慢路径，单查询至多 16 个内容词，纯析取为一次联合检索。正则与内容查询可采用"先出可用结果、全量后到"的交互模式；GUI 已能停止当前查询并丢弃迟到的回答，CNT-06 回填未就绪反馈可沿用同一停止语义。
 2. **输入平滑与习惯加权**（对照 QRY-05）：Input smoothing 与 Selected item weight（选中结果更快上升）+ `!!` 历史插件，与 Listary "smart order according to your habits" 互相印证"按使用习惯调权"是启动器类公认需求；可作 Cairn QRY-05 预排序索引之上的 P2 排序演进候选。
-3. **v2 重写的结构信号**（对照 SPEC §1.1、§2.3）：微软把启动器迁往新 UI 栈（Windows App SDK、Native AOT）并另立 Command Palette，旧 Run 仅维护——小窗启动器的 UI 栈迁移成本高。Cairn 当时走"完整窗口 + 高密度表格 + Treemap"（UI-01、DSV-07；Treemap 已删除），与三者小窗形态结构性不同，无需跟进小窗，UI-08 热键唤起保留即可。
+3. **v2 重写的结构信号**（对照 SPEC §1.1、§2.3）：微软把启动器迁往新 UI 栈（Windows App SDK、Native AOT）并另立 Command Palette，旧 Run 仅维护——小窗启动器的 UI 栈迁移成本高。Cairn 走"完整窗口 + 高密度表格"（UI-01），与三者小窗形态结构性不同，无需跟进小窗，UI-08 热键唤起保留即可。
 
 ---
 
