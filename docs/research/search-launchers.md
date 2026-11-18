@@ -9,7 +9,7 @@
 1. **三者代表"检索入口"的三种形态**：Listary 是"自建索引 + 全局唤起 + 对话框跳转"的垂直整合单品；Flow Launcher 与 PowerToys Run 是"壳层不建索引、文件检索委托专用索引器"的插件面板。查询语法强度全部弱于 Everything 与 Cairn 的 QRY-04。
 2. **只有 Listary 自建文件索引**（默认索引所有本地 NTFS 分区 + 实时监控 + 非可靠路径定时扫描降级）；Flow Launcher 默认走 Windows Search Index、可选 Everything SDK IPC，PowerToys Run 只走 Windows Search Index（OLE DB 查 SystemIndex catalog）。
 3. **"快慢两段渐进呈现"与"引擎不可用显式化"是最值得直接借鉴的两个机制**：PowerToys Run 先 `CONTAINS` 后 `LIKE`、快查询 ≤100ms 与延迟执行插件分级；Flow Launcher 对引擎不可用抛显式错误并引导安装（可自动下载 Everything）——分别映射到 Cairn 的 QRY-01/QRY-06 与 SVC-04。
-4. **微软官方正把 PowerToys Run 演进为 v2 "Command Palette"**（独立新应用，release notes 提及 Windows App SDK 运行时与 Native AOT 构建），旧 Run 只收修复；Listary 稳定线更新慢、靠 V7 beta（Rust 重写）续命。
+4. **微软官方正把 PowerToys Run 演进为 v2 "Command Palette"**（独立新应用，release notes 提及 Windows App SDK 运行时与 Native AOT 构建），旧 Run 只收修复；Listary 稳定线更新慢，由 V7 beta（Rust 重写）维持更新。
 
 ---
 

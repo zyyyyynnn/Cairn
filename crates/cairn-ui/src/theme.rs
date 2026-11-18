@@ -101,8 +101,8 @@ pub fn lightness_step(left: Hsla, right: Hsla) -> f32 {
 }
 
 /// The color's position in OKLCH: perceived lightness in `0.0..=1.0`, chroma, and hue angle in
-/// degrees. A data plane chooses its hues on this scale, because equal numbers here are equal
-/// perceived steps in a way sRGB and HSL numbers are not.
+/// degrees. Equal numbers on this scale are equal perceived steps in a way sRGB and HSL numbers
+/// are not.
 #[cfg(test)]
 pub fn oklch(color: Hsla) -> (f32, f32, f32) {
     let rgb = color.to_rgb();
@@ -156,8 +156,8 @@ pub fn perceptual_distance(left: Hsla, right: Hsla) -> f32 {
 /// Every step of the neutral ramp, light to dark.
 pub const NEUTRAL_RAMP: [Hsla; 16] = gray::ALL;
 
-/// Whether an achromatic color is one of the ramp's steps. A data plane may add hues of its own; no
-/// neutral in the product may land between two steps.
+/// Whether an achromatic color is one of the ramp's steps. No neutral in the product may land
+/// between two steps.
 #[cfg(test)]
 pub fn is_neutral_ramp_step(color: Hsla) -> bool {
     let rgb = color.to_rgb();
@@ -252,7 +252,7 @@ mod gray {
     pub const GRAY_94: Hsla = step(0x14);
 
     /// Every step, light to dark. The ramp is walked for monotonicity in tests and published as
-    /// [`super::NEUTRAL_RAMP`] so a data plane can check a neutral against it.
+    /// [`super::NEUTRAL_RAMP`] for the neutral-ramp checks.
     pub const ALL: [Hsla; 16] = [
         GRAY_3, GRAY_5, GRAY_7, GRAY_9, GRAY_13, GRAY_17, GRAY_33, GRAY_44, GRAY_53, GRAY_61,
         GRAY_72, GRAY_76, GRAY_81, GRAY_88, GRAY_91, GRAY_94,
