@@ -5,6 +5,9 @@
 //! Volume acquisition, rescans, journal polling and index persistence.
 
 use super::{MultiVolumeEngine, VolumeIndex};
+use cairn_core::property_store::SourceId;
+#[cfg(windows)]
+use cairn_ntfs::usn::UsnChange;
 use cairn_ntfs::volume::enumerate_fixed_drives;
 use cairn_protocol::status::VolumeState;
 use std::collections::HashSet;
@@ -96,7 +99,7 @@ impl MultiVolumeEngine {
             // T0 must be read before the scan and the scan must stay outside the volume lock, so the
             // journal is bracketed here and only reconciled once the records are in hand (IDX-07).
             let scan_start = open_journal_at_scan_start(drive);
-            match cairn_ntfs::scan_live_volume_mft(drive, 4096) {
+            let result = match cairn_ntfs::scan_live_volume_mft(drive, 4096) {
                 Ok(items) if !items.is_empty() => {
                     let count = items.len();
                     let live_identity = cairn_ntfs::volume_identity::enumerate_volumes()
@@ -130,7 +133,14 @@ impl MultiVolumeEngine {
                     self.restore_volume_status(drive, previous_status);
                     Err(format!("live MFT scan for {drive}: failed: {e}"))
                 }
+            };
+            if result.is_ok() {
+                if let Some(source_id) = SourceId::for_drive(drive) {
+                    self.property_refresh_handles()
+                        .enqueue_source_and_wake(source_id);
+                }
             }
+            result
         }
         #[cfg(not(windows))]
         {
@@ -167,14 +177,20 @@ impl MultiVolumeEngine {
             crate::exclusion::ExclusionRules::parse(&cfg.excluded_paths).uses_full_path_rules();
         drop(cfg);
         vol.set_full_path_exclusion_rules(full_path_rules);
+        let drive_letter = vol.drive_letter;
         let mut lock = self.volumes.write().unwrap();
         let generation = lock
-            .get(&vol.drive_letter)
+            .get(&drive_letter)
             .map(|previous| previous.generation().wrapping_add(1));
         if let Some(generation) = generation {
             vol.set_generation(generation);
         }
-        lock.insert(vol.drive_letter, vol);
+        lock.insert(drive_letter, vol);
+        drop(lock);
+        if let Some(source_id) = SourceId::for_drive(drive_letter) {
+            self.property_refresh_handles()
+                .enqueue_source_and_wake(source_id);
+        }
     }
 
     /// Atomically saves all non-empty volume indexes to disk.
@@ -223,7 +239,9 @@ impl MultiVolumeEngine {
     }
 
     /// Polls real-time USN change journal on all supported fixed NTFS volumes.
-    pub fn poll_usn_changes(&self) {
+    pub fn poll_usn_changes(self: &std::sync::Arc<Self>) {
+        let mut property_sources: Vec<SourceId> = Vec::new();
+        let mut property_changes: Vec<(SourceId, Vec<u64>)> = Vec::new();
         #[cfg(windows)]
         {
             const USN_READ_BUF_BYTES: usize = 512 * 1024;
@@ -327,6 +345,22 @@ impl MultiVolumeEngine {
                             vol.journal_id = active_jid;
                             vol.last_usn = next_usn;
                             if !changes.is_empty() {
+                                let property_enabled =
+                                    self.property_tables.read().unwrap().is_enabled();
+                                let (needs_source_refresh, changed_records) = if property_enabled {
+                                    let mut source_refresh = false;
+                                    let mut records = Vec::new();
+                                    for change in &changes {
+                                        if usn_change_needs_source_refresh(change) {
+                                            source_refresh = true;
+                                        } else if let Some(frn) = property_changed_record(change) {
+                                            records.push(frn);
+                                        }
+                                    }
+                                    (source_refresh, records)
+                                } else {
+                                    (false, Vec::new())
+                                };
                                 let mut journal = self.index_journal.lock().unwrap();
                                 vol.apply_usn_changes_with_journal(
                                     changes,
@@ -334,6 +368,13 @@ impl MultiVolumeEngine {
                                     super::unix_now_secs(),
                                 );
                                 vol.clear_path_cache();
+                                if let Some(source_id) = SourceId::for_drive(drive) {
+                                    if needs_source_refresh {
+                                        property_sources.push(source_id);
+                                    } else if !changed_records.is_empty() {
+                                        property_changes.push((source_id, changed_records));
+                                    }
+                                }
                             }
                             if is_live_poll_trackable(vol.status.state()) {
                                 vol.status.reconcile_poll(previous_usn, next_usn, tail_usn);
@@ -361,6 +402,82 @@ impl MultiVolumeEngine {
                 }
             }
         }
+        self.ensure_property_runtime();
         self.process_pending_data_changes();
+        self.property_refresh_handles()
+            .enqueue_batch_and_wake(&property_sources, &property_changes);
+    }
+}
+
+#[cfg(windows)]
+fn usn_change_needs_source_refresh(change: &UsnChange) -> bool {
+    // Moving or renaming a directory changes descendants' paths without emitting child USN rows,
+    // which can move existing subtrees into or out of excluded_paths and content_excluded_paths.
+    matches!(change, UsnChange::Renamed { is_dir: true, .. })
+}
+
+#[cfg(windows)]
+fn property_changed_record(change: &UsnChange) -> Option<u64> {
+    match change {
+        UsnChange::Created { frn, .. }
+        | UsnChange::Deleted { frn }
+        | UsnChange::Renamed { frn, .. }
+        | UsnChange::BasicInfoChanged { frn, .. }
+        | UsnChange::DataChanged { frn } => Some(*frn),
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn usn_changes_select_source_refreshes_and_property_records() {
+        let directory_rename = UsnChange::Renamed {
+            frn: 10,
+            parent_frn: 5,
+            name: "dir".to_string(),
+            is_dir: true,
+            is_new_name: true,
+        };
+        assert!(usn_change_needs_source_refresh(&directory_rename));
+        assert_eq!(property_changed_record(&directory_rename), Some(10));
+
+        let file_rename = UsnChange::Renamed {
+            frn: 11,
+            parent_frn: 5,
+            name: "file.png".to_string(),
+            is_dir: false,
+            is_new_name: true,
+        };
+        assert!(!usn_change_needs_source_refresh(&file_rename));
+
+        let records = [
+            (
+                UsnChange::Created {
+                    frn: 12,
+                    parent_frn: 5,
+                    name: "new.png".to_string(),
+                    is_dir: false,
+                    attributes: 0x20,
+                    ts: 1,
+                },
+                12,
+            ),
+            (file_rename, 11),
+            (
+                UsnChange::BasicInfoChanged {
+                    frn: 13,
+                    ts: 1,
+                    attributes: 0x20,
+                },
+                13,
+            ),
+            (UsnChange::DataChanged { frn: 14 }, 14),
+            (UsnChange::Deleted { frn: 15 }, 15),
+        ];
+        for (change, frn) in records {
+            assert_eq!(property_changed_record(&change), Some(frn), "{change:?}");
+        }
     }
 }

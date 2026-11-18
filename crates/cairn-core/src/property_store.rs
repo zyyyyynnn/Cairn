@@ -140,12 +140,17 @@ struct PackedPropertySlot {
     author_len: u16,
     tags_len: u16,
     presence: u8,
-    /// Record modification time (Unix seconds) captured when the properties were extracted.
+    /// Record modification timestamp fingerprint captured when the properties were extracted.
     modified_ts: u32,
 }
 
 fn stamp_u32(timestamp: i64) -> u32 {
-    timestamp.clamp(0, u32::MAX as i64) as u32
+    // The slot only needs to prove version equality, not to expose a date. XOR-folding mixes the
+    // high ticks into the low word so timestamps 2^32 ticks apart do not alias as they would under
+    // a plain truncation.
+    let ticks = timestamp as u64;
+    let folded = ticks ^ (ticks >> 32);
+    (folded ^ (folded >> 16)) as u32
 }
 
 fn rewrite_string_offset(off: &mut u32, len: &mut u16, source: &[u8], target: &mut Vec<u8>) {
@@ -227,6 +232,14 @@ impl PropertySideTables {
         if data.is_empty() {
             self.remove(source, record_key);
             return false;
+        }
+        // Clear any prior slot strings before checking the threshold so an overwrite reclaims its
+        // previous strings and `intern_str` never compacts between `author` and `tags`.
+        if let Some(&idx) = self.index.get(&(source.0, record_key)) {
+            self.slots[idx as usize] = PackedPropertySlot::default();
+        }
+        if self.strings.len() > 64 * 1024 * 1024 {
+            self.compact_strings();
         }
 
         let mut slot = PackedPropertySlot {
@@ -317,6 +330,23 @@ impl PropertySideTables {
         self.compact_strings();
     }
 
+    /// Drops entries whose source is no longer indexed.
+    pub fn retain_sources(&mut self, present: &HashSet<u32>) {
+        let stale: Vec<(u32, u64)> = self
+            .index
+            .keys()
+            .copied()
+            .filter(|(source, _)| !present.contains(source))
+            .collect();
+        if stale.is_empty() {
+            return;
+        }
+        for (source, key) in stale {
+            self.remove(SourceId(source), key);
+        }
+        self.compact_strings();
+    }
+
     /// Rebuilds the string arena from live slots, dropping values no slot references. Called after
     /// full extractions and source pruning so repeated overwrites do not grow memory without bound.
     pub fn compact_strings(&mut self) {
@@ -376,9 +406,6 @@ impl PropertySideTables {
     }
 
     fn intern_str(&mut self, s: &str) -> (u32, u16) {
-        if self.strings.len() > 64 * 1024 * 1024 {
-            self.compact_strings();
-        }
         let max_len = (4096usize).min(s.len());
         let mut valid_len = max_len;
         while valid_len > 0 && !s.is_char_boundary(valid_len) {
@@ -409,5 +436,69 @@ mod tests {
     #[test]
     fn a_property_slot_stays_within_forty_bytes() {
         assert_eq!(size_of::<PackedPropertySlot>(), 40);
+    }
+
+    #[test]
+    fn property_stamps_keep_filetime_ticks_distinct() {
+        let first = 133_800_000_000_000_000i64;
+        let mut tables = super::PropertySideTables::new(true);
+        let source = crate::property_store::SourceId(1);
+        let data = super::RecordPropertyData {
+            dimensions: Some((100, 200)),
+            ..Default::default()
+        };
+        assert!(tables.upsert(source, 42, &data, first));
+        assert!(tables.get(source, 42, first).is_some());
+        assert!(
+            tables.get(source, 42, first + 10_000).is_none(),
+            "a modification one millisecond later must invalidate the slot"
+        );
+        assert!(
+            tables.get(source, 42, first + (1i64 << 32)).is_none(),
+            "timestamps 2^32 ticks apart must not collide as plain u32 truncation would"
+        );
+    }
+
+    #[test]
+    fn retaining_present_sources_drops_the_rest() {
+        let mut tables = super::PropertySideTables::new(true);
+        let data = super::RecordPropertyData {
+            dimensions: Some((10, 20)),
+            ..Default::default()
+        };
+        let present = crate::property_store::SourceId(1);
+        let removed = crate::property_store::SourceId(2);
+        assert!(tables.upsert(present, 7, &data, 12));
+        assert!(tables.upsert(removed, 8, &data, 12));
+
+        tables.retain_sources(&std::collections::HashSet::from([present.0]));
+
+        assert!(tables.get(present, 7, 12).is_some());
+        assert!(tables.get(removed, 8, 12).is_none());
+    }
+
+    #[test]
+    fn compaction_on_upsert_preserves_both_author_and_tags() {
+        let mut tables = super::PropertySideTables::new(true);
+        let pad = "a".repeat(4096);
+        let total_entries = (64 * 1024 * 1024) / 4096;
+        for i in 0..=total_entries as u64 {
+            let entry = super::RecordPropertyData {
+                author: Some(pad.clone()),
+                ..Default::default()
+            };
+            assert!(tables.upsert(crate::property_store::SourceId(1), i, &entry, 10));
+        }
+
+        let target = crate::property_store::SourceId(2);
+        let data = super::RecordPropertyData {
+            author: Some("Alice Author".to_string()),
+            tags: Some("rust,windows".to_string()),
+            ..Default::default()
+        };
+        assert!(tables.upsert(target, 99, &data, 20));
+        let view = tables.get(target, 99, 20).expect("stored slot");
+        assert_eq!(view.author, Some("Alice Author"));
+        assert_eq!(view.tags, Some("rust,windows"));
     }
 }

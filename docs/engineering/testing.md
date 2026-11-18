@@ -44,6 +44,8 @@
 
 全局热键验证：启动应用后按 `Ctrl+Alt+Space`，前台窗口应隐藏，再次按下应从托盘恢复并聚焦；先用其他程序占用该组合后启动，应用应提示一次且托盘仍可打开窗口。
 
+属性增量重抽（USN）：在安装版服务运行、属性索引开启时，创建、修改并删除一个探针图片，并用 `CairnCli "probe dimensions:<宽>x<高>"` 查询，确认结果随文件更新，删除后结果与 `indexed_records` 回落。该路径读取真实 USN 日志，无卷访问的 CI 无法构造。
+
 服务配置的安全写入（`ServiceConfig::save_atomic_secure` 的受限 ACL）需要 `SeRestorePrivilege`：非提权运行时，`apply_config_toml` 只可能返回 `could not persist` 拒绝，测试接受该路径；成功路径在提权 PowerShell 中执行 `cargo test -p cairn-service admin_only_query` 并确认通过，确认 `service.toml` 的所有者与 DACL 已受限。
 
 当前清单：裸盘 MFT/USN 实机索引与增量、服务安装/启动/卸载、UAC 同意对话框的名称与图标、MSI 升级与卸载。
