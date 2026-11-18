@@ -17,30 +17,12 @@ use serde::{Deserialize, Serialize};
 /// Product version from Cargo workspace metadata.
 pub const PRODUCT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Wire guard exchanged at `Hello` handshake and carried in every frame header.
+/// Wire-compatible protocol version carried in every frame header and the `Hello` handshake.
 ///
-/// Encodes `major.minor.patch` so any protocol-bearing patch bump (`0.2.1`) rejects older
-/// builds (`0.2.0`) before `postcard` deserialization (SPEC SVC-03).
-pub const WIRE_GUARD: u16 = pack_wire_guard(PRODUCT_VERSION);
-
-const fn pack_wire_guard(version: &str) -> u16 {
-    let bytes = version.as_bytes();
-    let mut parts = [0u32; 3];
-    let mut part = 0usize;
-    let mut index = 0usize;
-    while index < bytes.len() && part < 3 {
-        let b = bytes[index];
-        if b == b'.' {
-            part += 1;
-        } else if b >= b'0' && b <= b'9' {
-            parts[part] = parts[part] * 10 + (b - b'0') as u32;
-        } else {
-            break;
-        }
-        index += 1;
-    }
-    (((parts[0] & 0x0F) << 12) | ((parts[1] & 0x3F) << 6) | (parts[2] & 0x3F)) as u16
-}
+/// Increment only when the frame payload layout or message semantics change. It is deliberately
+/// independent of [`PRODUCT_VERSION`] so a product release that does not touch the wire protocol
+/// keeps the same compatibility boundary (SPEC SVC-03).
+pub const PROTOCOL_VERSION: u16 = 1;
 
 pub const PIPE_NAME: &str = r"\\.\pipe\Cairn.Service";
 
@@ -329,7 +311,7 @@ mod tests {
             (
                 "hello_ack",
                 ResponsePayload::HelloAck {
-                    server_version: WIRE_GUARD as u32,
+                    server_version: PROTOCOL_VERSION as u32,
                     caller_is_admin: false,
                 },
             ),
@@ -445,7 +427,7 @@ mod tests {
             (
                 "hello",
                 ClientRequest::Hello {
-                    client_version: WIRE_GUARD as u32,
+                    client_version: PROTOCOL_VERSION as u32,
                     pid: 1,
                 },
             ),
@@ -577,19 +559,6 @@ mod tests {
                 "{name} moved off its published wire slot"
             );
         }
-    }
-
-    /// Deriving the guard from `major.minor.patch` ensures any protocol-bearing patch bump (`0.2.1`)
-    /// rejects an older peer (`0.2.0`) at the handshake instead of misreading shifted fields.
-    #[test]
-    fn the_wire_guard_tracks_full_product_version() {
-        assert_eq!(pack_wire_guard("0.1.0"), 0x0040);
-        assert_eq!(pack_wire_guard("0.2.0"), 0x0080);
-        assert_eq!(pack_wire_guard("0.2.1"), 0x0081);
-        assert_ne!(pack_wire_guard("0.2.1"), 0x0002);
-        assert_eq!(pack_wire_guard("1.2.3"), 0x1083);
-        assert_eq!(pack_wire_guard("0.10.5"), 0x0285);
-        assert_eq!(WIRE_GUARD, pack_wire_guard(PRODUCT_VERSION));
     }
 
     /// The rejection is the one payload a peer of another protocol version must be able to read:

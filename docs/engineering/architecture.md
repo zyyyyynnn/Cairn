@@ -85,8 +85,8 @@ flowchart TD
 
 ### 1.6 命名管道 IPC 协议与帧封装
 - 管道地址：`\\.\pipe\Cairn.Service`，只有已安装的 LocalSystem 服务监听该管道。
-- 版本护栏 `WIRE_GUARD` 由工作区 `major.minor.patch` 版本号位打包推导（`((major & 0xF) << 12) | ((minor & 0x3F) << 6) | (patch & 0x3F)`），不手写、不手工递增；连接必须先完成 `Hello` 握手，护栏不一致时拒绝请求。
-- 帧格式：`[u32: 负载长度][u16: 版本护栏][postcard 序列化二进制内容]`。
+- 协议版本由 `cairn-protocol` 的显式 `PROTOCOL_VERSION` 定义，与产品版本解耦，只在帧负载布局或消息语义变化时递增；连接必须先完成 `Hello` 握手，协议版本不一致时拒绝请求。
+- 帧格式：`[u32: 负载长度][u16: 协议版本][postcard 序列化二进制内容]`。
 - 响应封套：所有服务端响应必须包裹 `Envelope<T>`，强制携带各卷实时状态列表（`VolumeStatusSummary`），确保客户端 UI 每一帧都能明确掌握数据同步状态。
 - 请求包含：`Hello`、`Query`、`Cancel`、`GetRows`、`ReloadConfig`、`ClearContentIndex` 等。
 

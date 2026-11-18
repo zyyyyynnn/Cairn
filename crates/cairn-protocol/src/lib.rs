@@ -21,7 +21,7 @@ pub use message::{
     RecordPropertyData, ResponsePayload, SortColumn, SortDirection, SortKey, SortSpec, SourceId,
     ERROR_CODE_ADMIN_ONLY_QUERY, ERROR_CODE_HANDSHAKE_REQUIRED, ERROR_CODE_INVALID_REQUEST,
     ERROR_CODE_PROTOCOL_VERSION_MISMATCH, ERROR_CODE_SESSION_EXPIRED, ERROR_CODE_UNAUTHORIZED,
-    PIPE_NAME, PRODUCT_VERSION, WIRE_GUARD,
+    PIPE_NAME, PRODUCT_VERSION, PROTOCOL_VERSION,
 };
 pub use status::{
     ContentIndexState, ContentIndexStatus, ContentIndexTask, IndexJournalEntry, IndexJournalStatus,

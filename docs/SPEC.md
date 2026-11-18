@@ -154,7 +154,7 @@
 - **同类基线**：后台 Windows 服务（LocalSystem）常驻维护多卷索引，免提权 GUI 客户端通过安全 IPC 通信。
 - **Cairn 实现现状**：
   - `CairnService.exe` 服务具备 Win32 DACL 严格安全描述符与 `PIPE_REJECT_REMOTE_CLIENTS`，仅允许本地交互用户连接。
-  - 管道显式校验版本护栏，防止反序列化漏洞。
+  - 管道显式校验协议版本，防止反序列化漏洞。
   - 索引配置由本地已认证用户经管道提交，服务校验后以 SYSTEM/Administrators 描述符原子持久化并即时应用；配置、重扫、来源、属性索引与索引日志的管理请求 `GetConfig` / `SetConfig` / `ReloadConfig` / `Rescan` / `RescanSource` / `ClearContentIndex` / `GetContentIndexStatus` / `GetSources` / `AddFolderSource` / `RemoveFolderSource` / `GetPropertyIndexStatus` / `SetPropertyIndexEnabled` / `GetIndexJournal` / `SetIndexJournalEnabled` 均已实现于协议、服务与客户端；GUI“索引”菜单提供只读日志弹窗、重扫描（含各索引源）、内容索引与扩展属性管理，CLI `CairnCli` 提供 `sources` / `add-folder` / `remove-folder` / `rescan` / `rescan-source` / `reload-config` / `property-index` / `journal` 子命令；`admin_only_query` 只能由管理员修改。
 
 ### 3.9 本地化与偏好设置（Localization & Settings）
@@ -248,7 +248,7 @@
 |:---|:---|:---|:---|
 | **SVC-01** | P0 | Windows 服务宿主 `CairnService.exe`（`LocalSystem`）：由 MSI 注册为自启动服务，读取裸盘 `$MFT` 与 USN，维护多卷索引并响应管道查询 | 安装后立即运行、开机自启、崩溃自动重启；支持控制台调试模式 `--console` |
 | **SVC-02** | P0 | 命名管道通信 `\\.\pipe\Cairn.Service`，指定 `PIPE_REJECT_REMOTE_CLIENTS` 拒绝一切网络与远程 SMB 访问；配置严格的 Win32 DACL 安全描述符 | 仅允许 SYSTEM、管理员组与本地交互式登录用户（IU）读写；未授权连接直接被拒 |
-| **SVC-03** | P0 | 协议帧携带显式版本护栏（`WIRE_GUARD`，由 `major.minor.patch` 产品版本推导，不手工递增）；客户端连接 `hello()` 握手校验，护栏不一致时阻止连接并提示同时更新应用与服务 | 护栏不一致时安全拦截，不发生反序列化崩溃 |
+| **SVC-03** | P0 | 协议帧携带显式 `PROTOCOL_VERSION`，与产品版本解耦，只在 wire 布局或消息语义变化时递增；客户端连接 `hello()` 握手校验，协议版本不一致时阻止连接并提示同时更新应用与服务 | 协议版本不一致时安全拦截，不发生反序列化崩溃 |
 | **SVC-04** | P0 | 管理员服务随安装包默认安装并由 SCM 自动运行，非管理员双击 `Cairn.exe` 直接显示“所有文件”表格。服务不可达时，GUI 先尝试一次免 UAC 的 SCM 静默启动；仍不可用时保留表头与工作区，结果区显示“后台服务未运行”或“后台服务未安装”的单行离线态，并提供启动、重试或重新安装指引。服务已安装但未运行时提供显式启动恢复；未安装服务时不提供无法执行的启动命令 | 非管理员双击启动即可查询；服务未运行、未安装、协议不兼容或被拒绝启动时显示离线态且不误报为无匹配；启动成功后自动恢复查询；索引来源只有后台服务 |
 | **SVC-05** | P0 | **配置权限边界**：本地已认证用户可通过管道提交配置与索引操作，服务校验后以 SYSTEM/Administrators 描述符原子持久化并即时应用；内容开关先读当前值再提交显式布尔值，失败回滚。`admin_only_query` 仅管理员可改。 | 标准用户改内容索引/范围无需 UAC；未认证与标准用户改管理员策略被拒；重复提交幂等。 |
 | **SVC-06** | P1 | 命名管道广播订阅模式：客户端可订阅卷状态机变化与索引进度 | 卷状态变更 ≤ 200ms 内推送至 GUI |

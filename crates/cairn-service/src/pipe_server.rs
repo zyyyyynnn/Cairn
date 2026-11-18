@@ -20,7 +20,7 @@ use cairn_protocol::codec::{encode_frame_into, peek_frame_header, try_decode_fra
 use cairn_protocol::message::{
     ClientRequest, Envelope, FileRowData, ResponsePayload, ERROR_CODE_HANDSHAKE_REQUIRED,
     ERROR_CODE_INVALID_REQUEST, ERROR_CODE_PROTOCOL_VERSION_MISMATCH, ERROR_CODE_QUERY_TOO_COMPLEX,
-    ERROR_CODE_SESSION_EXPIRED, MAX_SORT_KEYS, PIPE_NAME, PRODUCT_VERSION, WIRE_GUARD,
+    ERROR_CODE_SESSION_EXPIRED, MAX_SORT_KEYS, PIPE_NAME, PROTOCOL_VERSION,
 };
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -62,7 +62,7 @@ impl PipeServer {
             engine,
             sessions,
             pipe_name: PIPE_NAME.to_string(),
-            protocol_version: WIRE_GUARD,
+            protocol_version: PROTOCOL_VERSION,
             heavy_tasks: Arc::new(Semaphore::new(heavy_task_limit())),
         }
     }
@@ -337,7 +337,7 @@ async fn handle_client(
                 };
 
                 write_buf.clear();
-                encode_frame_into(&mut write_buf, WIRE_GUARD, &envelope)?;
+                encode_frame_into(&mut write_buf, PROTOCOL_VERSION, &envelope)?;
                 if let Err(e) = pipe.write_all(&write_buf).await {
                     if is_pipe_closed_error(&e) {
                         return Ok(());
@@ -368,11 +368,11 @@ async fn handle_client(
     Ok(())
 }
 
-fn version_mismatch(server_guard: u16, client_guard: u16) -> ResponsePayload {
+fn version_mismatch(server_version: u16, client_version: u16) -> ResponsePayload {
     ResponsePayload::Error {
         code: ERROR_CODE_PROTOCOL_VERSION_MISMATCH,
         message: format!(
-            "Incompatible build: client guard {client_guard}, service guard {server_guard}; the service is built from {PRODUCT_VERSION}."
+            "Incompatible protocol: client version {client_version}, service version {server_version}."
         ),
     }
 }
@@ -395,14 +395,14 @@ fn process_request(
             client_version,
             pid,
         } => {
-            if client_version != WIRE_GUARD as u32 {
-                version_mismatch(WIRE_GUARD, client_version as u16)
+            if client_version != PROTOCOL_VERSION as u32 {
+                version_mismatch(PROTOCOL_VERSION, client_version as u16)
             } else {
                 info!(
                     "handshake with self-reported pid {pid} accepted; caller classified as {caller:?}"
                 );
                 ResponsePayload::HelloAck {
-                    server_version: WIRE_GUARD as u32,
+                    server_version: PROTOCOL_VERSION as u32,
                     caller_is_admin: caller.is_privileged(),
                 }
             }
@@ -938,7 +938,7 @@ mod tests {
         assert!(matches!(
             harness.handle(
                 ClientRequest::Hello {
-                    client_version: WIRE_GUARD as u32,
+                    client_version: PROTOCOL_VERSION as u32,
                     pid: 1,
                 },
                 CallerAuthorization::StandardUser
@@ -974,7 +974,7 @@ mod tests {
     fn hello_ack_reports_the_callers_privilege_not_a_fixed_value() {
         let harness = Harness::new(ServiceConfig::default());
         let hello = ClientRequest::Hello {
-            client_version: WIRE_GUARD as u32,
+            client_version: PROTOCOL_VERSION as u32,
             pid: 4242,
         };
 
@@ -989,7 +989,7 @@ mod tests {
                     server_version,
                     caller_is_admin,
                 } => {
-                    assert_eq!(server_version, WIRE_GUARD as u32);
+                    assert_eq!(server_version, PROTOCOL_VERSION as u32);
                     assert_eq!(caller_is_admin, expected, "{caller:?}");
                 }
                 other => panic!("unexpected response for {caller:?}: {other:?}"),
@@ -1022,21 +1022,23 @@ mod tests {
         }
     }
 
-    /// A peer whose guard differs from this build's is refused at the message gate, and the reason
-    /// names the product the service was built from rather than a counter.
+    /// A peer whose protocol version differs from this build's is refused at the message gate.
     #[test]
     fn a_client_from_another_build_is_rejected_at_the_message_gate() {
         let harness = Harness::new(ServiceConfig::default());
         let (code, message) = denial(harness.handle(
             ClientRequest::Hello {
-                client_version: WIRE_GUARD as u32 + 7,
+                client_version: PROTOCOL_VERSION as u32 + 7,
                 pid: 1,
             },
             CallerAuthorization::Administrator,
         ));
         assert_eq!(code, ERROR_CODE_PROTOCOL_VERSION_MISMATCH);
         assert!(
-            message.contains(&format!("the service is built from {PRODUCT_VERSION}")),
+            message.contains(&format!(
+                "client version {}, service version {PROTOCOL_VERSION}",
+                PROTOCOL_VERSION + 7
+            )),
             "{message}"
         );
     }
@@ -1284,7 +1286,7 @@ mod tests {
             req: &ClientRequest,
         ) -> Envelope<ResponsePayload> {
             let mut out = Vec::new();
-            encode_frame_into(&mut out, WIRE_GUARD, req).expect("encode frame");
+            encode_frame_into(&mut out, PROTOCOL_VERSION, req).expect("encode frame");
             pipe.write_all(&out).await.expect("write frame");
             pipe.flush().await.expect("flush frame");
 
@@ -1351,7 +1353,7 @@ mod tests {
             let hello_a = send_and_recv(
                 &mut client,
                 &ClientRequest::Hello {
-                    client_version: WIRE_GUARD as u32,
+                    client_version: PROTOCOL_VERSION as u32,
                     pid: std::process::id(),
                 },
             )
@@ -1405,7 +1407,7 @@ mod tests {
                 let hello_b = send_and_recv(
                     &mut client_b,
                     &ClientRequest::Hello {
-                        client_version: WIRE_GUARD as u32,
+                        client_version: PROTOCOL_VERSION as u32,
                         pid: std::process::id(),
                     },
                 )

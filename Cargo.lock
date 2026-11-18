@@ -926,6 +926,7 @@ dependencies = [
  "global-hotkey",
  "gpui-kit",
  "reqwest",
+ "semver",
  "serde",
  "serde_json",
  "sha2 0.11.1",

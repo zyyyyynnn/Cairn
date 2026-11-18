@@ -24,7 +24,7 @@
 
 - 客户端身份由服务端从管道客户端的 **OS access token** 推导；请求中的 `pid` / `client_version` 只是提示，不可作为权限依据。
 - 管道拒绝远程客户端；DACL 由当前配置生成。`admin_only_query` 变更在配置写锁内提交，下一次请求即生效；既有连接上的每个请求都会再次授权。
-- 版本护栏：`WIRE_GUARD`，由 `PRODUCT_VERSION` 的 `major.minor.patch` 推导，协议或发布版本变化均更新护栏，防止未升级旧端误读错位字段。连接必须先完成 `Hello` 握手；护栏不一致、未握手和未授权分别返回专用错误码。
+- 协议版本：帧头与 `Hello` 握手携带显式 `PROTOCOL_VERSION`，与产品版本解耦，只在 wire 布局或消息语义变化时递增，防止未升级旧端误读错位字段。连接必须先完成 `Hello` 握手；协议版本不一致、未握手和未授权分别返回专用错误码。
 - 查询结果采用会话游标分页，不在一次响应中反序列化完整结果集。
 - 客户端连接使用退避重试；服务端每个连接独立处理，支持并发客户端。
 
@@ -37,7 +37,7 @@
 | 400 | `ERROR_CODE_HANDSHAKE_REQUIRED` | 请求在 `Hello` 握手前到达，协议版本尚未协商 |
 | 401 | `ERROR_CODE_ADMIN_ONLY_QUERY` | `admin_only_query` 已开启且调用方不是管理员 |
 | 403 | `ERROR_CODE_UNAUTHORIZED` | 无法从访问令牌推导调用方身份，或策略拒绝该请求（含未认证调用方、非管理员修改 `admin_only_query`） |
-| 409 | `ERROR_CODE_PROTOCOL_VERSION_MISMATCH` | 版本护栏不一致，需同时更新应用与服务 |
+| 409 | `ERROR_CODE_PROTOCOL_VERSION_MISMATCH` | 协议版本不一致，需同时更新应用与服务 |
 | 410 | `ERROR_CODE_SESSION_EXPIRED` | 查询会话不存在或已过期（失效、重载或压缩后） |
 | 416 | `ERROR_CODE_QUERY_TOO_COMPLEX` | 内容检索项超过 `MAX_CONTENT_TERMS`（16）或不同 `child:` 模式超过 `MAX_CHILD_FILTERS`（8），求值前整体拒绝 |
 | 417 | `ERROR_CODE_INVALID_REQUEST` | 请求参数无效或引用了未知来源 |
@@ -76,7 +76,7 @@
 
 ## 代码位置
 
-- `crates/cairn-protocol/src/message.rs`：管道名、产品版本与版本护栏、请求/响应类型。
+- `crates/cairn-protocol/src/message.rs`：管道名、产品版本与协议版本、请求/响应类型。
 - `crates/cairn-service/src/pipe_server.rs`：管道实例、DACL、握手与请求处理。
 - `crates/cairn-service/src/caller_auth.rs`：基于 access token 的调用方识别与授权。
 - `crates/cairn-service/src/security.rs`：数据目录 ACL 与特权使用。

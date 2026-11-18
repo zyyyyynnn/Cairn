@@ -18,6 +18,7 @@ use crate::shell::command_groups::MenuGroup;
 use crate::shell::toast::ToastAction;
 use fluent_bundle::FluentArgs;
 use gpui_kit::gpui::*;
+use semver::Version;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -101,7 +102,7 @@ async fn check_latest() -> Result<Option<ReleaseInfo>, UpdateError> {
     let body = response.text().await.map_err(|_| UpdateError::Network)?;
     let release: GitHubRelease = serde_json::from_str(&body).map_err(|_| UpdateError::Data)?;
     let version = normalize_version(&release.tag_name);
-    if version.is_empty() {
+    if Version::parse(&version).is_err() {
         return Err(UpdateError::Data);
     }
     let setup = release
@@ -194,31 +195,14 @@ fn safe_version(version: &str) -> String {
         .collect()
 }
 
-fn version_parts(version: &str) -> Vec<u64> {
-    normalize_version(version)
-        .split(['.', '-', '+'])
-        .map(|part| {
-            part.chars()
-                .take_while(char::is_ascii_digit)
-                .collect::<String>()
-                .parse()
-                .unwrap_or(0)
-        })
-        .collect()
-}
-
 fn is_newer(candidate: &str, current: &str) -> bool {
-    let left = version_parts(candidate);
-    let right = version_parts(current);
-    let length = left.len().max(right.len());
-    for index in 0..length {
-        let a = left.get(index).copied().unwrap_or(0);
-        let b = right.get(index).copied().unwrap_or(0);
-        if a != b {
-            return a > b;
-        }
-    }
-    false
+    let (Ok(candidate), Ok(current)) = (
+        Version::parse(&normalize_version(candidate)),
+        Version::parse(&normalize_version(current)),
+    ) else {
+        return false;
+    };
+    candidate > current
 }
 
 fn parse_checksum(sums: &str, file: &str) -> Option<String> {
@@ -612,9 +596,10 @@ mod tests {
     #[test]
     fn release_tags_compare_numerically_not_lexically() {
         assert!(is_newer("v0.1.10", "0.1.9"));
-        assert!(is_newer("0.2", "0.1.9"));
+        assert!(is_newer("v0.2.0", "0.1.9"));
         assert!(!is_newer("v0.1.0", "0.1.0"));
         assert!(!is_newer("0.0.9", "0.1.0"));
+        assert!(!is_newer("0.2", "0.1.9"));
         assert_eq!(normalize_version(" V1.2.3 "), "1.2.3");
     }
 

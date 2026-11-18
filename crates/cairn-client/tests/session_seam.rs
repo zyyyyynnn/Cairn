@@ -8,7 +8,7 @@ use cairn_client::client::ClientError;
 use cairn_client::codec::{encode_frame, try_decode_frame};
 use cairn_client::message::{
     ClientRequest, Envelope, QueryDefaults, ResponsePayload, SortColumn, SortDirection, SortKey,
-    SortSpec, SourceId, WIRE_GUARD,
+    SortSpec, SourceId, PROTOCOL_VERSION,
 };
 use cairn_client::status::{
     IndexJournalStatus, PropertyIndexStatus, SourceKind, SourceStatusSummary, VolumeState,
@@ -102,7 +102,7 @@ async fn session_reuses_one_connection_per_slot_across_rpcs() {
                         ClientRequest::Hello { .. } => {
                             hellos.fetch_add(1, Ordering::SeqCst);
                             ResponsePayload::HelloAck {
-                                server_version: WIRE_GUARD as u32,
+                                server_version: PROTOCOL_VERSION as u32,
                                 caller_is_admin: false,
                             }
                         }
@@ -235,7 +235,7 @@ async fn session_reconnects_once_after_cached_pipe_closes() {
                     write_response(
                         &mut s1,
                         ResponsePayload::HelloAck {
-                            server_version: WIRE_GUARD as u32,
+                            server_version: PROTOCOL_VERSION as u32,
                             caller_is_admin: false,
                         },
                     )
@@ -258,7 +258,7 @@ async fn session_reconnects_once_after_cached_pipe_closes() {
                 ClientRequest::Hello { .. } => {
                     hellos_srv.fetch_add(1, Ordering::SeqCst);
                     ResponsePayload::HelloAck {
-                        server_version: WIRE_GUARD as u32,
+                        server_version: PROTOCOL_VERSION as u32,
                         caller_is_admin: false,
                     }
                 }
@@ -324,7 +324,7 @@ async fn a_retried_query_carries_the_same_request() {
                     write_response(
                         &mut s1,
                         ResponsePayload::HelloAck {
-                            server_version: WIRE_GUARD as u32,
+                            server_version: PROTOCOL_VERSION as u32,
                             caller_is_admin: false,
                         },
                     )
@@ -376,7 +376,7 @@ async fn a_retried_query_carries_the_same_request() {
         while let Some(req) = read_one_request(&mut s2, &mut buf).await {
             let reply = match req {
                 ClientRequest::Hello { .. } => ResponsePayload::HelloAck {
-                    server_version: WIRE_GUARD as u32,
+                    server_version: PROTOCOL_VERSION as u32,
                     caller_is_admin: false,
                 },
                 ClientRequest::Query {
@@ -504,7 +504,7 @@ async fn cancel_uses_independent_connection_while_query_is_in_flight() {
                         write_response(
                             &mut s2,
                             ResponsePayload::HelloAck {
-                                server_version: WIRE_GUARD as u32,
+                                server_version: PROTOCOL_VERSION as u32,
                                 caller_is_admin: false,
                             },
                         )
@@ -528,7 +528,7 @@ async fn cancel_uses_independent_connection_while_query_is_in_flight() {
                     write_response(
                         &mut s1,
                         ResponsePayload::HelloAck {
-                            server_version: WIRE_GUARD as u32,
+                            server_version: PROTOCOL_VERSION as u32,
                             caller_is_admin: false,
                         },
                     )
@@ -617,7 +617,7 @@ async fn timed_out_primary_evicts_poisoned_connection() {
                     write_response(
                         &mut s1,
                         ResponsePayload::HelloAck {
-                            server_version: WIRE_GUARD as u32,
+                            server_version: PROTOCOL_VERSION as u32,
                             caller_is_admin: false,
                         },
                     )
@@ -639,7 +639,7 @@ async fn timed_out_primary_evicts_poisoned_connection() {
         while let Some(req) = read_one_request(&mut s2, &mut buf).await {
             let reply = match req {
                 ClientRequest::Hello { .. } => ResponsePayload::HelloAck {
-                    server_version: WIRE_GUARD as u32,
+                    server_version: PROTOCOL_VERSION as u32,
                     caller_is_admin: false,
                 },
                 ClientRequest::GetStatus => ResponsePayload::StatusAck,
@@ -678,7 +678,7 @@ async fn oversized_frame_shrinks_read_buf_back_to_baseline_and_reuses_write_buf(
         while let Some(req) = read_one_request(&mut server, &mut buf).await {
             let reply = match req {
                 ClientRequest::Hello { .. } => ResponsePayload::HelloAck {
-                    server_version: WIRE_GUARD as u32,
+                    server_version: PROTOCOL_VERSION as u32,
                     caller_is_admin: false,
                 },
                 ClientRequest::GetConfig => ResponsePayload::ConfigResult {
