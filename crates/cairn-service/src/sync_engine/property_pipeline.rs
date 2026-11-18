@@ -10,6 +10,7 @@
 //! property system is never queried from the elevated worker.
 
 use super::folder_source::FolderSource;
+use super::property_refresh::{PropertyRefresh, PropertyRefreshHandles};
 use super::volume_index::VolumeIndex;
 use super::{unix_now_secs, MultiVolumeEngine, SourceTableView};
 use crate::config::ServiceConfig;
@@ -23,148 +24,11 @@ use cairn_worker::isolation::{extract_with_isolation, IsolationOutcome};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock, Weak};
+use std::sync::Arc;
 use std::time::Duration;
 
 const PROPERTY_BATCH_SIZE: usize = 64;
 const DEFAULT_PROPERTY_WORKER_TIMEOUT: Duration = Duration::from_secs(15);
-/// Above this many individually tracked records a full revalidation pass replaces the delta set.
-const PROPERTY_DELTA_RECORD_LIMIT: usize = 50_000;
-
-pub(super) type PropertySpawner = Arc<Mutex<Option<Weak<MultiVolumeEngine>>>>;
-
-pub(super) fn wake_property_spawner(spawner: &PropertySpawner) {
-    let target = spawner.lock().unwrap().as_ref().and_then(Weak::upgrade);
-    if let Some(engine) = target {
-        engine.start_queued_property_extraction();
-    }
-}
-
-#[derive(Clone)]
-pub(super) struct PropertyRefreshHandles {
-    pub tables: Arc<RwLock<PropertySideTables>>,
-    pub refresh: Arc<Mutex<PropertyRefresh>>,
-    pub spawner: PropertySpawner,
-}
-
-impl PropertyRefreshHandles {
-    pub(super) fn wake(&self) {
-        wake_property_spawner(&self.spawner);
-    }
-
-    fn enqueue_and_wake(&self, mark: impl FnOnce(&mut PropertyRefresh)) {
-        let queued = {
-            let tables = self.tables.read().unwrap();
-            if tables.is_enabled() {
-                mark(&mut self.refresh.lock().unwrap());
-                true
-            } else {
-                false
-            }
-        };
-        if queued {
-            self.wake();
-        }
-    }
-
-    pub(super) fn enqueue_source_and_wake(&self, source: SourceId) {
-        self.enqueue_and_wake(|refresh| refresh.mark_source(source));
-    }
-
-    pub(super) fn enqueue_records_and_wake(
-        &self,
-        source: SourceId,
-        records: impl IntoIterator<Item = u64>,
-    ) {
-        self.enqueue_and_wake(|refresh| refresh.mark_records(source, records));
-    }
-
-    pub(super) fn enqueue_batch_and_wake(
-        &self,
-        sources: &[SourceId],
-        records: &[(SourceId, Vec<u64>)],
-    ) {
-        if sources.is_empty() && records.is_empty() {
-            return;
-        }
-        self.enqueue_and_wake(|refresh| {
-            for &source_id in sources {
-                refresh.mark_source(source_id);
-            }
-            for (source_id, recs) in records {
-                refresh.mark_records(*source_id, recs.iter().copied());
-            }
-        });
-    }
-
-    pub(super) fn retain_and_enqueue_source_with(
-        &self,
-        source: SourceId,
-        collect_present_keys: impl FnOnce() -> HashSet<u64>,
-    ) -> bool {
-        let mut tables = self.tables.write().unwrap();
-        if tables.is_enabled() {
-            let present_keys = collect_present_keys();
-            tables.retain_source_keys(source, &present_keys);
-            self.refresh.lock().unwrap().mark_source(source);
-            true
-        } else {
-            false
-        }
-    }
-}
-
-/// Coalesced work for the property pipeline. Sources request a complete recheck; USN and watcher
-/// batches request individual records. Requests accumulate while extraction runs and are drained in
-/// the worker loop until idle, so a busy volume never blocks callers or drops concurrent wakeups.
-#[derive(Default)]
-pub(super) struct PropertyRefresh {
-    full: bool,
-    sources: HashSet<SourceId>,
-    records: HashSet<(u32, u64)>,
-}
-
-impl PropertyRefresh {
-    pub(super) fn mark_full(&mut self) {
-        self.full = true;
-        self.sources.clear();
-        self.records.clear();
-    }
-
-    pub(super) fn mark_source(&mut self, source: SourceId) {
-        if !self.full {
-            self.sources.insert(source);
-        }
-    }
-
-    pub(super) fn mark_records(
-        &mut self,
-        source: SourceId,
-        records: impl IntoIterator<Item = u64>,
-    ) {
-        if self.full {
-            return;
-        }
-        self.records
-            .extend(records.into_iter().map(|record| (source.0, record)));
-        if self.records.len() > PROPERTY_DELTA_RECORD_LIMIT {
-            self.mark_full();
-        }
-    }
-
-    pub(super) fn clear(&mut self) {
-        *self = Self::default();
-    }
-
-    fn has_work(&self) -> bool {
-        self.full || !self.sources.is_empty() || !self.records.is_empty()
-    }
-
-    fn take(&mut self) -> Self {
-        std::mem::take(self)
-    }
-}
-
 struct PropertyRunGuard<'a>(&'a AtomicBool);
 
 impl Drop for PropertyRunGuard<'_> {
@@ -218,7 +82,7 @@ impl MultiVolumeEngine {
         self.start_queued_property_extraction();
     }
 
-    fn start_queued_property_extraction(self: &Arc<Self>) {
+    pub(super) fn start_queued_property_extraction(self: &Arc<Self>) {
         if !self.can_run_queued_property_extraction() {
             return;
         }
@@ -322,10 +186,6 @@ impl MultiVolumeEngine {
             return;
         }
         if !enabled {
-            return;
-        }
-        let tables = self.property_tables.read().unwrap();
-        if !tables.is_enabled() {
             return;
         }
         let mut refresh = self.property_refresh.lock().unwrap();
@@ -471,9 +331,9 @@ impl MultiVolumeEngine {
         let Some(requests) = self.take_current_property_refresh(generation) else {
             return Ok(self.property_index_status());
         };
-        let full_pass = requests.full;
+        let full_pass = requests.is_full();
 
-        let planned = self.plan_property_refresh_with_scope(&requests, true);
+        let planned = self.plan_property_refresh_with_scope(&requests);
         let Some(tasks) = self.prepare_extraction_tasks(generation, planned) else {
             return Ok(self.property_index_status());
         };
@@ -557,7 +417,6 @@ impl MultiVolumeEngine {
     fn plan_property_refresh_with_scope(
         &self,
         requests: &PropertyRefresh,
-        track_sources: bool,
     ) -> PlannedPropertyRefresh {
         let cfg = self.config.read().unwrap().clone();
         let collector = PropertyCollector::new(&cfg, &self.self_data_dirs);
@@ -565,7 +424,7 @@ impl MultiVolumeEngine {
             tasks: Vec::new(),
             source_live_keys: Vec::new(),
             stale_records: Vec::new(),
-            present_sources: (track_sources && requests.full).then(HashSet::new),
+            present_sources: requests.is_full().then(HashSet::new),
         };
         let mut seen = HashSet::new();
         let mut selected_sources = HashSet::new();
@@ -580,7 +439,7 @@ impl MultiVolumeEngine {
             .collect();
 
         for (&source_id, volume) in &volumes_by_source {
-            if !requests.full && !requests.sources.contains(&source_id) {
+            if !requests.is_full() && !requests.sources().contains(&source_id) {
                 continue;
             }
             collector.collect_source(
@@ -588,12 +447,11 @@ impl MultiVolumeEngine {
                 &volume.table_view(),
                 &mut seen,
                 &mut selected_sources,
-                track_sources,
                 &mut planned,
             );
         }
         for folder in folders.values() {
-            if !requests.full && !requests.sources.contains(&folder.source_id) {
+            if !requests.is_full() && !requests.sources().contains(&folder.source_id) {
                 continue;
             }
             collector.collect_source(
@@ -601,24 +459,21 @@ impl MultiVolumeEngine {
                 &folder.table_view(),
                 &mut seen,
                 &mut selected_sources,
-                track_sources,
                 &mut planned,
             );
         }
-        if requests.full {
+        if requests.is_full() {
             return planned;
         }
 
-        if track_sources {
-            for &source in &requests.sources {
-                if !selected_sources.contains(&source.0) {
-                    planned.source_live_keys.push((source, HashSet::new()));
-                }
+        for &source in requests.sources() {
+            if !selected_sources.contains(&source.0) {
+                planned.source_live_keys.push((source, HashSet::new()));
             }
         }
-        for &(source, record_key) in &requests.records {
+        for &(source, record_key) in requests.records() {
             let source_id = SourceId(source);
-            if requests.sources.contains(&source_id) || !seen.insert((source, record_key)) {
+            if requests.sources().contains(&source_id) || !seen.insert((source, record_key)) {
                 continue;
             }
             let task = if let Some(volume) = volumes_by_source.get(&source_id) {
@@ -791,27 +646,22 @@ impl PropertyCollector {
         view: &SourceTableView<'_>,
         seen: &mut HashSet<(u32, u64)>,
         selected_sources: &mut HashSet<u32>,
-        track_sources: bool,
         planned: &mut PlannedPropertyRefresh,
     ) {
         selected_sources.insert(source_id.0);
         if let Some(present_sources) = &mut planned.present_sources {
             present_sources.insert(source_id.0);
         }
-        let mut live_keys = track_sources.then(HashSet::new);
+        let mut live_keys = HashSet::new();
         for (index, record) in view.records.iter().enumerate() {
             if let Some(task) = self.task_for_source(source_id, view, index as u32, record) {
                 if seen.insert((source_id.0, record.frn)) {
-                    if let Some(keys) = &mut live_keys {
-                        keys.insert(record.frn);
-                    }
+                    live_keys.insert(record.frn);
                     planned.tasks.push(task);
                 }
             }
         }
-        if let Some(keys) = live_keys {
-            planned.source_live_keys.push((source_id, keys));
-        }
+        planned.source_live_keys.push((source_id, live_keys));
     }
 
     fn task_for_frn(
@@ -919,23 +769,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn refresh_requests_coalesce_and_collapse_large_deltas() {
-        let mut refresh = PropertyRefresh::default();
-        refresh.mark_source(SourceId(1));
-        refresh.mark_records(SourceId(1), [7, 8, 8]);
-        let taken = refresh.take();
-        assert!(taken.sources.contains(&SourceId(1)));
-        assert_eq!(taken.records.len(), 2);
-        assert!(!refresh.has_work());
-
-        let mut large = PropertyRefresh::default();
-        large.mark_records(SourceId(2), 0..=PROPERTY_DELTA_RECORD_LIMIT as u64);
-        assert!(large.full);
-        assert!(large.sources.is_empty());
-        assert!(large.records.is_empty());
-    }
-
-    #[test]
     fn incremental_parse_failure_preserves_ready_while_launch_failure_sets_error() {
         let temp = tempfile::tempdir().unwrap();
         let media = temp.path().join("media");
@@ -1039,13 +872,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .mark_records(source_id, [img_rec.frn]);
-            let planned = engine.plan_property_refresh_with_scope(
-                &PropertyRefresh {
-                    full: true,
-                    ..Default::default()
-                },
-                true,
-            );
+            let planned = engine.plan_property_refresh_with_scope(&PropertyRefresh::full());
             assert_eq!(planned.tasks.len(), 1);
             let after_inc = engine
                 .run_property_extraction_with_worker(&fail_cmd, Duration::from_secs(5))
@@ -1317,13 +1144,7 @@ mod tests {
 
     fn full_plan_tasks(engine: &MultiVolumeEngine) -> Vec<PropertyExtractTask> {
         engine
-            .plan_property_refresh_with_scope(
-                &PropertyRefresh {
-                    full: true,
-                    ..Default::default()
-                },
-                true,
-            )
+            .plan_property_refresh_with_scope(&PropertyRefresh::full())
             .tasks
     }
 

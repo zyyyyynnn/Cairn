@@ -8,7 +8,7 @@
 //! Win32 `ReadDirectoryChangesW` watcher that falls back cleanly to a full rescan on overflow.
 
 use super::index_journal::IndexJournal;
-use super::property_pipeline::PropertyRefreshHandles;
+use super::property_refresh::PropertyRefreshHandles;
 use super::volume_status::VolumeStatus;
 use crate::exclusion::{ExclusionPath, ExclusionRules};
 use crate::filetime::system_time_to_filetime;
@@ -1077,9 +1077,7 @@ fn install_scanned_source(
             .collect();
         (present_keys, needs_rescan || retry_overflow)
     };
-    if property_handles.retain_and_enqueue_source_with(source_id, || present_keys) {
-        property_handles.wake();
-    }
+    property_handles.retain_and_enqueue_source(source_id, present_keys);
     needs_follow_up
 }
 
@@ -1440,7 +1438,7 @@ mod tests {
         PropertyRefreshHandles {
             tables: Arc::new(RwLock::new(PropertySideTables::new(true))),
             refresh: Arc::new(Mutex::new(
-                super::super::property_pipeline::PropertyRefresh::default(),
+                super::super::property_refresh::PropertyRefresh::default(),
             )),
             spawner: Arc::new(Mutex::new(None)),
         }

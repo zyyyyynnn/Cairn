@@ -62,7 +62,7 @@ impl MultiVolumeEngine {
         }
         self.retain_indexed_volumes(&applied);
         self.sync_folder_sources_from_config(&applied.folder_sources, &applied.excluded_paths);
-        super::property_pipeline::wake_property_spawner(&self.property_spawner);
+        super::property_refresh::wake_property_spawner(&self.property_spawner);
         Ok(())
     }
 

@@ -426,3 +426,58 @@ fn property_changed_record(change: &UsnChange) -> Option<u64> {
         | UsnChange::DataChanged { frn } => Some(*frn),
     }
 }
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn usn_changes_select_source_refreshes_and_property_records() {
+        let directory_rename = UsnChange::Renamed {
+            frn: 10,
+            parent_frn: 5,
+            name: "dir".to_string(),
+            is_dir: true,
+            is_new_name: true,
+        };
+        assert!(usn_change_needs_source_refresh(&directory_rename));
+        assert_eq!(property_changed_record(&directory_rename), Some(10));
+
+        let file_rename = UsnChange::Renamed {
+            frn: 11,
+            parent_frn: 5,
+            name: "file.png".to_string(),
+            is_dir: false,
+            is_new_name: true,
+        };
+        assert!(!usn_change_needs_source_refresh(&file_rename));
+
+        let records = [
+            (
+                UsnChange::Created {
+                    frn: 12,
+                    parent_frn: 5,
+                    name: "new.png".to_string(),
+                    is_dir: false,
+                    attributes: 0x20,
+                    ts: 1,
+                },
+                12,
+            ),
+            (file_rename, 11),
+            (
+                UsnChange::BasicInfoChanged {
+                    frn: 13,
+                    ts: 1,
+                    attributes: 0x20,
+                },
+                13,
+            ),
+            (UsnChange::DataChanged { frn: 14 }, 14),
+            (UsnChange::Deleted { frn: 15 }, 15),
+        ];
+        for (change, frn) in records {
+            assert_eq!(property_changed_record(&change), Some(frn), "{change:?}");
+        }
+    }
+}

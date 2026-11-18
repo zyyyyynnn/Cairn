@@ -32,6 +32,7 @@ pub mod journal_reconciliation;
 pub(crate) mod path_exclusions;
 pub mod post_scan;
 pub mod property_pipeline;
+mod property_refresh;
 mod search;
 mod startup_scan;
 mod volume_index;
@@ -68,8 +69,8 @@ pub struct MultiVolumeEngine {
     next_folder_source_id: AtomicU32,
     property_tables: Arc<RwLock<PropertySideTables>>,
     property_status: RwLock<PropertyIndexStatus>,
-    property_refresh: Arc<Mutex<property_pipeline::PropertyRefresh>>,
-    property_spawner: property_pipeline::PropertySpawner,
+    property_refresh: Arc<Mutex<property_refresh::PropertyRefresh>>,
+    property_spawner: property_refresh::PropertySpawner,
     property_generation: AtomicU64,
     property_run_cancel: Mutex<Arc<AtomicBool>>,
     property_running: AtomicBool,
@@ -520,7 +521,7 @@ impl MultiVolumeEngine {
                 PropertyIndexStatus::default()
             }),
             property_refresh: {
-                let refresh = Arc::new(Mutex::new(property_pipeline::PropertyRefresh::default()));
+                let refresh = Arc::new(Mutex::new(property_refresh::PropertyRefresh::default()));
                 if property_enabled {
                     refresh.lock().unwrap().mark_full();
                 }
