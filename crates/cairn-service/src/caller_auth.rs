@@ -408,7 +408,7 @@ mod tests {
     fn access_classes_separate_handshake_read_and_index_mutation() {
         for req in [
             ClientRequest::Hello {
-                client_version: 1,
+                client_protocol_version: 1,
                 pid: 1,
             },
             ClientRequest::Cancel { query_id: 1 },
@@ -536,7 +536,7 @@ mod tests {
         // The handshake itself still works so the client learns the server is there (SVC-03/04).
         assert!(authorize(
             &ClientRequest::Hello {
-                client_version: 1,
+                client_protocol_version: 1,
                 pid: 7
             },
             CallerAuthorization::Unauthenticated,

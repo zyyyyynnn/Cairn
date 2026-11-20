@@ -201,8 +201,9 @@ pub fn default_install_dir() -> PathBuf {
 }
 
 /// Numeric version ordering for the `a.b.c` versions the MSI accepts. Missing components count as
-/// zero; a non-numeric suffix is ignored for ordering.
-pub fn compare_versions(left: &str, right: &str) -> Ordering {
+/// zero; a non-numeric suffix is ignored for ordering. GitHub tag ordering lives in the app's
+/// update checker and uses semver instead.
+fn compare_versions(left: &str, right: &str) -> Ordering {
     let left = version_parts(left);
     let right = version_parts(right);
     let len = left.len().max(right.len());
