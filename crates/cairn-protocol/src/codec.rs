@@ -142,7 +142,7 @@ mod tests {
     #[test]
     fn test_encode_decode_roundtrip() {
         let req = ClientRequest::Hello {
-            client_version: 1,
+            client_protocol_version: 1,
             pid: 1234,
         };
 
@@ -156,10 +156,10 @@ mod tests {
         assert_eq!(decoded.0, frame.len());
         match decoded.1 {
             ClientRequest::Hello {
-                client_version,
+                client_protocol_version,
                 pid,
             } => {
-                assert_eq!(client_version, 1);
+                assert_eq!(client_protocol_version, 1);
                 assert_eq!(pid, 1234);
             }
             _ => panic!("Unexpected decoded variant"),

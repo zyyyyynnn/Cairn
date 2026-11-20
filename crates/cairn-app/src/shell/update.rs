@@ -100,7 +100,11 @@ async fn check_latest() -> Result<Option<ReleaseInfo>, UpdateError> {
     }
 
     let body = response.text().await.map_err(|_| UpdateError::Network)?;
-    let release: GitHubRelease = serde_json::from_str(&body).map_err(|_| UpdateError::Data)?;
+    release_from_json(&body).map(Some)
+}
+
+fn release_from_json(body: &str) -> Result<ReleaseInfo, UpdateError> {
+    let release: GitHubRelease = serde_json::from_str(body).map_err(|_| UpdateError::Data)?;
     let version = normalize_version(&release.tag_name);
     if Version::parse(&version).is_err() {
         return Err(UpdateError::Data);
@@ -115,11 +119,11 @@ async fn check_latest() -> Result<Option<ReleaseInfo>, UpdateError> {
         .iter()
         .find(|asset| asset.name == SUMS_ASSET)
         .ok_or(UpdateError::Incomplete)?;
-    Ok(Some(ReleaseInfo {
+    Ok(ReleaseInfo {
         version,
         setup_url: setup.browser_download_url.clone(),
         sums_url: sums.browser_download_url.clone(),
-    }))
+    })
 }
 
 async fn download_and_verify(release: &ReleaseInfo) -> Result<(PathBuf, String), UpdateError> {
@@ -202,7 +206,7 @@ fn is_newer(candidate: &str, current: &str) -> bool {
     ) else {
         return false;
     };
-    candidate > current
+    candidate.cmp_precedence(&current) == std::cmp::Ordering::Greater
 }
 
 fn parse_checksum(sums: &str, file: &str) -> Option<String> {
@@ -588,7 +592,8 @@ fn version_args(version: &str) -> FluentArgs<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        check_latest, is_newer, normalize_version, parse_checksum, safe_version, GitHubRelease,
+        check_latest, is_newer, normalize_version, parse_checksum, release_from_json, safe_version,
+        UpdateError,
     };
     use crate::shell::i18n::I18nManager;
     use fluent_bundle::FluentArgs;
@@ -600,6 +605,10 @@ mod tests {
         assert!(!is_newer("v0.1.0", "0.1.0"));
         assert!(!is_newer("0.0.9", "0.1.0"));
         assert!(!is_newer("0.2", "0.1.9"));
+        assert!(!is_newer("0.3.0+build.1", "0.3.0"));
+        assert!(!is_newer("0.3.0", "0.3.0+build.1"));
+        assert!(is_newer("0.3.0", "0.3.0-beta.1"));
+        assert!(!is_newer("0.3.0-beta.1", "0.3.0"));
         assert_eq!(normalize_version(" V1.2.3 "), "1.2.3");
     }
 
@@ -643,9 +652,36 @@ mod tests {
                 {"name":"SHA256SUMS.txt","browser_download_url":"https://example.invalid/SHA256SUMS.txt"}
             ]
         }"#;
-        let release: GitHubRelease = serde_json::from_str(body).expect("valid release");
-        assert_eq!(release.tag_name, "v0.2.0");
-        assert_eq!(release.assets.len(), 2);
+        let release = release_from_json(body).expect("valid release");
+        assert_eq!(release.version, "0.2.0");
+        assert!(release.setup_url.ends_with("CairnSetup.exe"));
+        assert!(release.sums_url.ends_with("SHA256SUMS.txt"));
+    }
+
+    #[test]
+    fn release_tags_must_parse_as_semver_and_publish_both_assets() {
+        let malformed = r#"{
+            "tag_name":"v0.2",
+            "assets":[
+                {"name":"CairnSetup.exe","browser_download_url":"https://example.invalid/CairnSetup.exe"},
+                {"name":"SHA256SUMS.txt","browser_download_url":"https://example.invalid/SHA256SUMS.txt"}
+            ]
+        }"#;
+        assert!(matches!(
+            release_from_json(malformed),
+            Err(UpdateError::Data)
+        ));
+
+        let missing_sums = r#"{
+            "tag_name":"v0.2.0",
+            "assets":[
+                {"name":"CairnSetup.exe","browser_download_url":"https://example.invalid/CairnSetup.exe"}
+            ]
+        }"#;
+        assert!(matches!(
+            release_from_json(missing_sums),
+            Err(UpdateError::Incomplete)
+        ));
     }
 
     /// A manual check reports its progress in the Help menu row, not by taking the toast slot:
@@ -692,7 +728,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires network access to the GitHub releases API"]
     async fn the_update_check_reaches_the_release_api() {
-        let release = check_latest().await.expect("the release API answers");
-        assert!(release.is_some(), "the repository publishes releases");
+        // No published release is a valid answer; this test guards the HTTP/TLS dependency path.
+        let _ = check_latest().await.expect("the release API answers");
     }
 }

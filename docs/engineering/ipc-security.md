@@ -22,7 +22,7 @@
 
 ## 3. 授权与协议
 
-- 客户端身份由服务端从管道客户端的 **OS access token** 推导；请求中的 `pid` / `client_version` 只是提示，不可作为权限依据。
+- 客户端身份由服务端从管道客户端的 **OS access token** 推导；`pid` 仅用于日志，`client_protocol_version` 只参与版本协商，二者都不作为权限依据。
 - 管道拒绝远程客户端；DACL 由当前配置生成。`admin_only_query` 变更在配置写锁内提交，下一次请求即生效；既有连接上的每个请求都会再次授权。
 - 协议版本：帧头与 `Hello` 握手携带显式 `PROTOCOL_VERSION`，与产品版本解耦，只在 wire 布局或消息语义变化时递增，防止未升级旧端误读错位字段。连接必须先完成 `Hello` 握手；协议版本不一致、未握手和未授权分别返回专用错误码。
 - 查询结果采用会话游标分页，不在一次响应中反序列化完整结果集。
@@ -76,7 +76,7 @@
 
 ## 代码位置
 
-- `crates/cairn-protocol/src/message.rs`：管道名、产品版本与协议版本、请求/响应类型。
+- `crates/cairn-protocol/src/message.rs`：管道名、协议版本、请求/响应类型。
 - `crates/cairn-service/src/pipe_server.rs`：管道实例、DACL、握手与请求处理。
 - `crates/cairn-service/src/caller_auth.rs`：基于 access token 的调用方识别与授权。
 - `crates/cairn-service/src/security.rs`：数据目录 ACL 与特权使用。

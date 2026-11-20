@@ -14,13 +14,10 @@ pub use cairn_core::sort::{SortColumn, SortDirection, SortKey, SortSpec};
 pub use cairn_core::syntax::QueryDefaults;
 use serde::{Deserialize, Serialize};
 
-/// Product version from Cargo workspace metadata.
-pub const PRODUCT_VERSION: &str = env!("CARGO_PKG_VERSION");
-
 /// Wire-compatible protocol version carried in every frame header and the `Hello` handshake.
 ///
 /// Increment only when the frame payload layout or message semantics change. It is deliberately
-/// independent of [`PRODUCT_VERSION`] so a product release that does not touch the wire protocol
+/// independent of the product version so a product release that does not touch the wire protocol
 /// keeps the same compatibility boundary (SPEC SVC-03).
 pub const PROTOCOL_VERSION: u16 = 1;
 
@@ -53,12 +50,13 @@ pub const MAX_SORT_KEYS: usize = 8;
 
 /// Requests accepted from a pipe client.
 ///
-/// `pid` and `client_version` are self-reported hints only; the service derives the real caller
-/// identity from the pipe client token and enforces authorization server-side (SPEC SVC-02).
+/// `client_protocol_version` is a self-reported compatibility value used only for negotiation;
+/// `pid` is diagnostic. The service derives the real caller identity from the pipe client token
+/// and enforces authorization server-side (SPEC SVC-02).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClientRequest {
     Hello {
-        client_version: u32,
+        client_protocol_version: u32,
         pid: u32,
     },
     /// The query text plus the UI match toggles as structured defaults. The toggles are not
@@ -142,7 +140,7 @@ pub struct Envelope<T> {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ResponsePayload {
     HelloAck {
-        server_version: u32,
+        server_protocol_version: u32,
         /// Whether the *caller* is an administrator or SYSTEM, as derived by the service from the
         /// pipe client's access token. It is not a claim the client can make (SPEC SVC-05).
         caller_is_admin: bool,
@@ -311,7 +309,7 @@ mod tests {
             (
                 "hello_ack",
                 ResponsePayload::HelloAck {
-                    server_version: PROTOCOL_VERSION as u32,
+                    server_protocol_version: PROTOCOL_VERSION as u32,
                     caller_is_admin: false,
                 },
             ),
@@ -427,7 +425,7 @@ mod tests {
             (
                 "hello",
                 ClientRequest::Hello {
-                    client_version: PROTOCOL_VERSION as u32,
+                    client_protocol_version: PROTOCOL_VERSION as u32,
                     pid: 1,
                 },
             ),

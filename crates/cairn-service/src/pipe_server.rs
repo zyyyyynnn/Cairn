@@ -16,7 +16,9 @@ use crate::sync_engine::MultiVolumeEngine;
 use cairn_core::query::QueryDegradedReason;
 use cairn_core::sort::SortSpec;
 use cairn_core::syntax::{parse_query_with, MAX_CHILD_FILTERS, MAX_CONTENT_TERMS};
-use cairn_protocol::codec::{encode_frame_into, peek_frame_header, try_decode_frame};
+use cairn_protocol::codec::{
+    encode_frame_into, encode_frame_with_version, peek_frame_header, try_decode_frame,
+};
 use cairn_protocol::message::{
     ClientRequest, Envelope, FileRowData, ResponsePayload, ERROR_CODE_HANDSHAKE_REQUIRED,
     ERROR_CODE_INVALID_REQUEST, ERROR_CODE_PROTOCOL_VERSION_MISMATCH, ERROR_CODE_QUERY_TOO_COMPLEX,
@@ -238,15 +240,7 @@ async fn handle_client(
         // a peer of another version may serialize a message that would decode into the wrong variant.
         if let Some(header) = peek_frame_header(&read_buf)? {
             if header.version != protocol_version {
-                write_buf.clear();
-                encode_frame_into(
-                    &mut write_buf,
-                    header.version,
-                    &Envelope {
-                        volumes: Vec::new(),
-                        payload: version_mismatch(protocol_version, header.version),
-                    },
-                )?;
+                write_buf = protocol_mismatch_frame(header.version, protocol_version)?;
                 if let Err(e) = pipe.write_all(&write_buf).await {
                     if is_pipe_closed_error(&e) {
                         return Ok(());
@@ -306,6 +300,7 @@ async fn handle_client(
                                 caller,
                                 &owner_blocking,
                                 admin_only_query,
+                                protocol_version,
                             );
                             let omit_volumes = matches!(
                                 resp_payload,
@@ -337,7 +332,7 @@ async fn handle_client(
                 };
 
                 write_buf.clear();
-                encode_frame_into(&mut write_buf, PROTOCOL_VERSION, &envelope)?;
+                encode_frame_into(&mut write_buf, protocol_version, &envelope)?;
                 if let Err(e) = pipe.write_all(&write_buf).await {
                     if is_pipe_closed_error(&e) {
                         return Ok(());
@@ -368,11 +363,24 @@ async fn handle_client(
     Ok(())
 }
 
-fn version_mismatch(server_version: u16, client_version: u16) -> ResponsePayload {
+fn protocol_mismatch_frame(
+    peer_protocol_version: u16,
+    server_protocol_version: u16,
+) -> Result<Vec<u8>, cairn_protocol::codec::CodecError> {
+    encode_frame_with_version(
+        peer_protocol_version,
+        &Envelope {
+            volumes: Vec::new(),
+            payload: version_mismatch(server_protocol_version, u32::from(peer_protocol_version)),
+        },
+    )
+}
+
+fn version_mismatch(server_protocol_version: u16, client_protocol_version: u32) -> ResponsePayload {
     ResponsePayload::Error {
         code: ERROR_CODE_PROTOCOL_VERSION_MISMATCH,
         message: format!(
-            "Incompatible protocol: client version {client_version}, service version {server_version}."
+            "Incompatible protocol: client version {client_protocol_version}, service version {server_protocol_version}."
         ),
     }
 }
@@ -384,6 +392,7 @@ fn process_request(
     caller: CallerAuthorization,
     owner: &QueryOwner,
     admin_only_query: bool,
+    protocol_version: u16,
 ) -> ResponsePayload {
     if let Err((code, message)) = authorize(&req, caller, admin_only_query) {
         warn!("denied {code} from {caller:?}: {message}");
@@ -392,17 +401,17 @@ fn process_request(
 
     match req {
         ClientRequest::Hello {
-            client_version,
+            client_protocol_version,
             pid,
         } => {
-            if client_version != PROTOCOL_VERSION as u32 {
-                version_mismatch(PROTOCOL_VERSION, client_version as u16)
+            if client_protocol_version != u32::from(protocol_version) {
+                version_mismatch(protocol_version, client_protocol_version)
             } else {
                 info!(
                     "handshake with self-reported pid {pid} accepted; caller classified as {caller:?}"
                 );
                 ResponsePayload::HelloAck {
-                    server_version: PROTOCOL_VERSION as u32,
+                    server_protocol_version: u32::from(protocol_version),
                     caller_is_admin: caller.is_privileged(),
                 }
             }
@@ -769,6 +778,7 @@ mod tests {
                 caller,
                 &QueryOwner::default(),
                 admin_only_query,
+                PROTOCOL_VERSION,
             )
         }
     }
@@ -938,7 +948,7 @@ mod tests {
         assert!(matches!(
             harness.handle(
                 ClientRequest::Hello {
-                    client_version: PROTOCOL_VERSION as u32,
+                    client_protocol_version: PROTOCOL_VERSION as u32,
                     pid: 1,
                 },
                 CallerAuthorization::StandardUser
@@ -974,7 +984,7 @@ mod tests {
     fn hello_ack_reports_the_callers_privilege_not_a_fixed_value() {
         let harness = Harness::new(ServiceConfig::default());
         let hello = ClientRequest::Hello {
-            client_version: PROTOCOL_VERSION as u32,
+            client_protocol_version: PROTOCOL_VERSION as u32,
             pid: 4242,
         };
 
@@ -986,10 +996,10 @@ mod tests {
         ] {
             match harness.handle(hello.clone(), caller) {
                 ResponsePayload::HelloAck {
-                    server_version,
+                    server_protocol_version,
                     caller_is_admin,
                 } => {
-                    assert_eq!(server_version, PROTOCOL_VERSION as u32);
+                    assert_eq!(server_protocol_version, PROTOCOL_VERSION as u32);
                     assert_eq!(caller_is_admin, expected, "{caller:?}");
                 }
                 other => panic!("unexpected response for {caller:?}: {other:?}"),
@@ -1022,13 +1032,35 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_mismatched_peer_receives_a_frame_under_its_own_protocol_version() {
+        let peer_protocol_version = PROTOCOL_VERSION + 1;
+        let frame =
+            protocol_mismatch_frame(peer_protocol_version, PROTOCOL_VERSION).expect("encode");
+        let header = peek_frame_header(&frame)
+            .expect("read header")
+            .expect("complete header");
+        assert_eq!(header.version, peer_protocol_version);
+
+        let envelope: Envelope<ResponsePayload> =
+            postcard::from_bytes(&frame[cairn_protocol::codec::HEADER_SIZE..])
+                .expect("peer-readable payload");
+        assert!(matches!(
+            envelope.payload,
+            ResponsePayload::Error {
+                code: ERROR_CODE_PROTOCOL_VERSION_MISMATCH,
+                ..
+            }
+        ));
+    }
+
     /// A peer whose protocol version differs from this build's is refused at the message gate.
     #[test]
     fn a_client_from_another_build_is_rejected_at_the_message_gate() {
         let harness = Harness::new(ServiceConfig::default());
         let (code, message) = denial(harness.handle(
             ClientRequest::Hello {
-                client_version: PROTOCOL_VERSION as u32 + 7,
+                client_protocol_version: PROTOCOL_VERSION as u32 + 7,
                 pid: 1,
             },
             CallerAuthorization::Administrator,
@@ -1353,7 +1385,7 @@ mod tests {
             let hello_a = send_and_recv(
                 &mut client,
                 &ClientRequest::Hello {
-                    client_version: PROTOCOL_VERSION as u32,
+                    client_protocol_version: PROTOCOL_VERSION as u32,
                     pid: std::process::id(),
                 },
             )
@@ -1407,7 +1439,7 @@ mod tests {
                 let hello_b = send_and_recv(
                     &mut client_b,
                     &ClientRequest::Hello {
-                        client_version: PROTOCOL_VERSION as u32,
+                        client_protocol_version: PROTOCOL_VERSION as u32,
                         pid: std::process::id(),
                     },
                 )
