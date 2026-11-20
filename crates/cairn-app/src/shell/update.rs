@@ -682,6 +682,17 @@ mod tests {
             release_from_json(missing_sums),
             Err(UpdateError::Incomplete)
         ));
+
+        let missing_setup = r#"{
+            "tag_name":"v0.2.0",
+            "assets":[
+                {"name":"SHA256SUMS.txt","browser_download_url":"https://example.invalid/SHA256SUMS.txt"}
+            ]
+        }"#;
+        assert!(matches!(
+            release_from_json(missing_setup),
+            Err(UpdateError::Incomplete)
+        ));
     }
 
     /// A manual check reports its progress in the Help menu row, not by taking the toast slot:

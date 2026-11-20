@@ -770,6 +770,15 @@ mod tests {
         }
 
         fn handle(&self, req: ClientRequest, caller: CallerAuthorization) -> ResponsePayload {
+            self.handle_with_protocol_version(req, caller, PROTOCOL_VERSION)
+        }
+
+        fn handle_with_protocol_version(
+            &self,
+            req: ClientRequest,
+            caller: CallerAuthorization,
+            protocol_version: u16,
+        ) -> ResponsePayload {
             let admin_only_query = self.engine.admin_only_query();
             process_request(
                 req,
@@ -778,7 +787,7 @@ mod tests {
                 caller,
                 &QueryOwner::default(),
                 admin_only_query,
-                PROTOCOL_VERSION,
+                protocol_version,
             )
         }
     }
@@ -1052,6 +1061,42 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn hello_uses_the_connection_protocol_version_and_keeps_full_diagnostics() {
+        let harness = Harness::new(ServiceConfig::default());
+        let accepted = harness.handle_with_protocol_version(
+            ClientRequest::Hello {
+                client_protocol_version: 7,
+                pid: 1,
+            },
+            CallerAuthorization::StandardUser,
+            7,
+        );
+        match accepted {
+            ResponsePayload::HelloAck {
+                server_protocol_version,
+                ..
+            } => assert_eq!(server_protocol_version, 7),
+            other => panic!("expected HelloAck, got {other:?}"),
+        }
+
+        let client_protocol_version = 7u32 + 0x1_0000;
+        let (code, message) = denial(harness.handle_with_protocol_version(
+            ClientRequest::Hello {
+                client_protocol_version,
+                pid: 1,
+            },
+            CallerAuthorization::StandardUser,
+            7,
+        ));
+        assert_eq!(code, ERROR_CODE_PROTOCOL_VERSION_MISMATCH);
+        assert!(
+            message.contains(&client_protocol_version.to_string()),
+            "{message}"
+        );
+        assert!(message.contains("service version 7"), "{message}");
     }
 
     /// A peer whose protocol version differs from this build's is refused at the message gate.
