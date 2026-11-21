@@ -4,12 +4,12 @@
 
 //! Multi-snippet content match preview popover, state machine, and client-side term highlighting.
 
-use crate::app::{element_id, join_row_path, layout, CairnApp};
+use crate::app::{CairnApp, element_id, join_row_path, layout};
 use crate::search::query_orchestration::split_name_highlights;
 use crate::shell::commands::PreviewSnippet;
 use crate::shell::theme::ShellTokens;
 use crate::table::rows::styled_highlighted_text;
-use cairn_core::syntax::{parse_query_with, QueryDefaults};
+use cairn_core::syntax::{QueryDefaults, parse_query_with};
 use gpui_kit::base::Selectable;
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::v_flex;
@@ -160,7 +160,7 @@ impl CairnApp {
         &mut self,
         _: &PreviewSnippet,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         if self.recycle_bin.is_open() {
             self.results.snippet_preview = None;
@@ -213,7 +213,7 @@ impl CairnApp {
         ix: usize,
         full_path: &str,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         if self.results.table.focused_idx != Some(ix) {
             self.results.table.select_row(ix, false);
@@ -240,10 +240,10 @@ impl CairnApp {
         cx.notify();
     }
 
-    fn schedule_hover_dismiss(&self, cx: &mut Context<Self>) {
+    fn schedule_hover_dismiss(&self, cx: &mut Context<'_, Self>) {
         let view = cx.entity().downgrade();
         cx.defer(move |cx| {
-            let _ = view.update(cx, |this, cx| this.close_unhovered_snippet_preview(cx));
+            let _ = view.update(cx, Self::close_unhovered_snippet_preview);
         });
     }
 
@@ -251,7 +251,7 @@ impl CairnApp {
         &mut self,
         full_path: &str,
         hovered: bool,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         if hovered {
             match &mut self.results.snippet_preview {
@@ -271,12 +271,12 @@ impl CairnApp {
                     cx.notify();
                 }
             }
-        } else if let Some(preview) = &mut self.results.snippet_preview {
-            if preview.row_path == full_path {
-                preview.badge_hovered = false;
-                if preview.trigger == SnippetPreviewTrigger::Hover {
-                    self.schedule_hover_dismiss(cx);
-                }
+        } else if let Some(preview) = &mut self.results.snippet_preview
+            && preview.row_path == full_path
+        {
+            preview.badge_hovered = false;
+            if preview.trigger == SnippetPreviewTrigger::Hover {
+                self.schedule_hover_dismiss(cx);
             }
         }
     }
@@ -285,34 +285,33 @@ impl CairnApp {
         &mut self,
         full_path: &str,
         hovered: bool,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
-        if let Some(preview) = &mut self.results.snippet_preview {
-            if preview.row_path == full_path {
-                preview.card_hovered = hovered;
-                if !hovered && preview.trigger == SnippetPreviewTrigger::Hover {
-                    self.schedule_hover_dismiss(cx);
-                }
+        if let Some(preview) = &mut self.results.snippet_preview
+            && preview.row_path == full_path
+        {
+            preview.card_hovered = hovered;
+            if !hovered && preview.trigger == SnippetPreviewTrigger::Hover {
+                self.schedule_hover_dismiss(cx);
             }
         }
     }
 
-    fn close_unhovered_snippet_preview(&mut self, cx: &mut Context<Self>) {
-        if let Some(preview) = &self.results.snippet_preview {
-            if preview.trigger == SnippetPreviewTrigger::Hover
-                && !preview.badge_hovered
-                && !preview.card_hovered
-            {
-                self.results.snippet_preview = None;
-                cx.notify();
-            }
+    fn close_unhovered_snippet_preview(&mut self, cx: &mut Context<'_, Self>) {
+        if let Some(preview) = &self.results.snippet_preview
+            && preview.trigger == SnippetPreviewTrigger::Hover
+            && !preview.badge_hovered
+            && !preview.card_hovered
+        {
+            self.results.snippet_preview = None;
+            cx.notify();
         }
     }
 
     pub(crate) fn dismiss_snippet_preview(
         &mut self,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) -> bool {
         if self.results.snippet_preview.take().is_some() {
             self.results.results_focus.focus(window, cx);
@@ -329,7 +328,7 @@ impl CairnApp {
         snippets: Vec<String>,
         tokens: &ShellTokens,
         search_focused: bool,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let preview_state = self
             .results

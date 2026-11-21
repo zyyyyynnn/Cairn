@@ -9,13 +9,13 @@ use super::*;
 use crate::config::ServiceConfig;
 use crate::sync_engine::search::MatchSet;
 use crate::sync_engine::{MultiVolumeEngine, VolumeIndex};
-use cairn_content::{ContentIndex, ContentWriter, CONTENT_RESULT_TOP_K};
+use cairn_content::{CONTENT_RESULT_TOP_K, ContentIndex, ContentWriter};
 use cairn_core::engine::CancellationToken;
 use cairn_core::property_store::SourceId;
 use cairn_core::sort::{SortColumn, SortDirection, SortSpec};
 use cairn_core::syntax::QueryDefaults;
 use cairn_ntfs::mft::ExtractedItem;
-use cairn_ntfs::usn::{UsnChange, FILE_ATTRIBUTE_REPARSE_POINT};
+use cairn_ntfs::usn::{FILE_ATTRIBUTE_REPARSE_POINT, UsnChange};
 use cairn_protocol::status::{ContentIndexState, ContentIndexTask};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -426,10 +426,10 @@ fn compaction_keeps_pending_work_replayed_before_startup() {
 fn the_debounce_refresh_marks_reparse_and_syncs_win32_attributes() {
     use std::os::windows::ffi::OsStrExt;
     use std::path::Component;
-    use windows::core::PCWSTR;
     use windows::Win32::Storage::FileSystem::{
-        SetFileAttributesW, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_SYSTEM,
+        FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_SYSTEM, SetFileAttributesW,
     };
+    use windows::core::PCWSTR;
 
     let outside = tempfile::tempdir().expect("outside target");
     let target_dir = outside.path().join("target_dir");
@@ -731,7 +731,7 @@ fn a_created_event_reads_the_real_size_and_time_from_disk() {
             is_dir: false,
             attributes: 0,
             ts: 1,
-        }])
+        }]);
     });
 
     let created_size = |engine: &MultiVolumeEngine| {
@@ -1160,7 +1160,7 @@ fn a_failed_incremental_batch_keeps_the_ready_snapshot() {
         modified_ts: 1,
         path: r"C:\docs\new.txt".to_string(),
     }];
-    engine.run_incremental_with(tasks, Vec::new(), |_, _, _| {
+    engine.run_incremental_with(&tasks, &[], |_, _, _| {
         // A crashed worker (WER 0xc0000409) is a permanent failure for this batch, but still
         // not a reason to disable content search for every other file.
         BatchOutcome::failed("CairnWorker exited with 0xc0000409")
@@ -1432,15 +1432,16 @@ fn a_content_command_without_a_receiver_reports_an_error() {
 /// The workspace-built content worker, injected into the engine's test seam so
 /// the harness location never decides how the service finds its worker.
 fn content_worker_path() -> std::path::PathBuf {
-    let target = std::env::var_os("CARGO_TARGET_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| {
+    let target = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
+        || {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .parent()
                 .and_then(std::path::Path::parent)
                 .expect("workspace root")
                 .join("target")
-        });
+        },
+        std::path::PathBuf::from,
+    );
     let profile = if cfg!(debug_assertions) {
         "debug"
     } else {

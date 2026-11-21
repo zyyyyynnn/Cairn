@@ -13,9 +13,9 @@ use super::volume_status::VolumeStatus;
 use crate::exclusion::{ExclusionPath, ExclusionRules};
 use crate::filetime::system_time_to_filetime;
 use cairn_core::arena::NamePool;
-use cairn_core::frn_index::{hashmap_table_bytes, FrnLookup, IndexMemoryFootprint};
-use cairn_core::model::{flags_from_win32_attributes, FileRecord, FLAG_REPARSE_POINT};
-use cairn_core::path_cache::{normalize_root, DirectoryPathCache};
+use cairn_core::frn_index::{FrnLookup, IndexMemoryFootprint, hashmap_table_bytes};
+use cairn_core::model::{FLAG_REPARSE_POINT, FileRecord, flags_from_win32_attributes};
+use cairn_core::path_cache::{DirectoryPathCache, normalize_root};
 use cairn_core::property_store::{PropertySideTables, SourceId};
 use cairn_core::query::SourceIndex;
 use cairn_core::sort::PresortedIndices;
@@ -113,8 +113,7 @@ pub fn normalize_folder_root(path: &Path) -> Result<(PathBuf, String), String> {
     let drive = candidate
         .chars()
         .next()
-        .map(|ch| ch.to_ascii_uppercase())
-        .unwrap_or('C');
+        .map_or('C', |ch| ch.to_ascii_uppercase());
     let root_meta = fs::symlink_metadata(probe)
         .map_err(|err| format!("folder source {} is unreachable: {err}", probe.display()))?;
     if !root_meta.is_dir() {
@@ -148,8 +147,8 @@ pub fn normalize_folder_root(path: &Path) -> Result<(PathBuf, String), String> {
 
 #[cfg(windows)]
 fn ensure_local_drive(drive: char) -> Result<(), String> {
-    use windows::core::PCWSTR;
     use windows::Win32::Storage::FileSystem::GetDriveTypeW;
+    use windows::core::PCWSTR;
 
     // GetDriveTypeW returns these documented values; they live outside the windows-rs
     // FileSystem module surface used here.
@@ -176,11 +175,7 @@ fn stable_record_key(rel_key: &str) -> u64 {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
-    if hash == 0 {
-        1
-    } else {
-        hash
-    }
+    if hash == 0 { 1 } else { hash }
 }
 
 fn next_unique_key(rel_key: &str, lookup: &FrnLookup) -> u64 {
@@ -804,10 +799,10 @@ impl FolderSource {
                 FolderWatchEvent::Renamed { old_path, new_path } => {
                     let mut moved_frn = 0;
                     if let Some((old_key, _)) = self.relative_key(old_path) {
-                        if let Some(&idx) = self.path_to_idx.get(&old_key) {
-                            if self.records[idx as usize].is_dir() {
-                                needs_rescan = true;
-                            }
+                        if let Some(&idx) = self.path_to_idx.get(&old_key)
+                            && self.records[idx as usize].is_dir()
+                        {
+                            needs_rescan = true;
                         }
                         moved_frn = self
                             .tombstone_subtree(&old_key, &mut changed_records)
@@ -1103,21 +1098,20 @@ pub(crate) fn spawn_folder_watcher(
     on_events: impl Fn(Vec<FolderWatchEvent>) + Send + 'static,
 ) -> Option<FolderWatcherHandle> {
     use std::os::windows::ffi::OsStrExt;
-    use windows::core::PCWSTR;
     use windows::Win32::Foundation::{
         CloseHandle, HANDLE, INVALID_HANDLE_VALUE, WAIT_EVENT, WAIT_OBJECT_0,
     };
     use windows::Win32::Storage::FileSystem::{
-        CreateFileW, ReadDirectoryChangesW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OVERLAPPED,
-        FILE_LIST_DIRECTORY, FILE_NOTIFY_CHANGE_ATTRIBUTES, FILE_NOTIFY_CHANGE_CREATION,
-        FILE_NOTIFY_CHANGE_DIR_NAME, FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE,
-        FILE_NOTIFY_CHANGE_SIZE, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-        OPEN_EXISTING,
-    };
-    use windows::Win32::System::Threading::{
-        CreateEventW, SetEvent, WaitForMultipleObjects, INFINITE,
+        CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OVERLAPPED, FILE_LIST_DIRECTORY,
+        FILE_NOTIFY_CHANGE_ATTRIBUTES, FILE_NOTIFY_CHANGE_CREATION, FILE_NOTIFY_CHANGE_DIR_NAME,
+        FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_NOTIFY_CHANGE_SIZE,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, ReadDirectoryChangesW,
     };
     use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
+    use windows::Win32::System::Threading::{
+        CreateEventW, INFINITE, SetEvent, WaitForMultipleObjects,
+    };
+    use windows::core::PCWSTR;
 
     let wide_dir: Vec<u16> = root_path
         .as_os_str()
@@ -1142,27 +1136,21 @@ pub(crate) fn spawn_folder_watcher(
     }
 
     // SAFETY: manual-reset Win32 event closed on FolderWatcherHandle::drop.
-    let stop_event = match unsafe { CreateEventW(None, true, false, None) } {
-        Ok(event) => event,
-        Err(_) => {
-            // SAFETY: dir_handle was opened above and is no longer used.
-            unsafe {
-                let _ = CloseHandle(dir_handle);
-            }
-            return None;
+    let Ok(stop_event) = (unsafe { CreateEventW(None, true, false, None) }) else {
+        // SAFETY: dir_handle was opened above and is no longer used.
+        unsafe {
+            let _ = CloseHandle(dir_handle);
         }
+        return None;
     };
     // SAFETY: auto-reset overlapped IO completion event owned by watcher thread.
-    let io_event = match unsafe { CreateEventW(None, false, false, None) } {
-        Ok(event) => event,
-        Err(_) => {
-            // SAFETY: both handles were opened above and are no longer used.
-            unsafe {
-                let _ = CloseHandle(stop_event);
-                let _ = CloseHandle(dir_handle);
-            }
-            return None;
+    let Ok(io_event) = (unsafe { CreateEventW(None, false, false, None) }) else {
+        // SAFETY: both handles were opened above and are no longer used.
+        unsafe {
+            let _ = CloseHandle(stop_event);
+            let _ = CloseHandle(dir_handle);
         }
+        return None;
     };
 
     let dir_raw = dir_handle.0 as usize;
@@ -1504,9 +1492,11 @@ mod tests {
         ));
         let installed = sources.read().unwrap();
         let source = installed.get(&id).unwrap();
-        assert!(source
-            .exclusion_rules
-            .excludes(&ExclusionPath::new(&skipped.to_string_lossy())));
+        assert!(
+            source
+                .exclusion_rules
+                .excludes(&ExclusionPath::new(&skipped.to_string_lossy()))
+        );
     }
 
     #[test]

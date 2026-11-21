@@ -4,11 +4,11 @@
 
 //! Read-only modal viewer for the service's bounded in-memory index change journal.
 
-use crate::app::{layout, CairnApp};
+use crate::app::{CairnApp, layout};
 use crate::shell::dialogs;
 use crate::shell::i18n::I18nManager;
 use crate::shell::status_bar::format_count;
-use crate::shell::theme::{tabular_figures, ShellTokens, HAIRLINE};
+use crate::shell::theme::{HAIRLINE, ShellTokens, tabular_figures};
 use crate::table::model::format_timestamp;
 use cairn_core::format_size_bytes;
 use cairn_protocol::status::{IndexJournalEntry, IndexJournalStatus, JournalChangeKind};
@@ -19,7 +19,7 @@ use gpui_kit::component::button::Button;
 use gpui_kit::component::dialog::{DialogClose, DialogEntrance, DialogFooter};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, Sizable as _, WindowExt as _};
+use gpui_kit::component::{ActiveTheme as _, Sizable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::*;
 
@@ -66,7 +66,7 @@ impl CairnApp {
     pub(crate) fn open_index_journal_dialog(
         &mut self,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         if self.service.connection.is_connected() {
             self.refresh_index_journal_dialog(cx);
@@ -155,6 +155,8 @@ fn render_index_journal_dialog(
             Button::new("index-journal-refresh")
                 .outline()
                 .small()
+                .icon(AssetIconName::RefreshCw)
+                .loading_icon(AssetIconName::LoaderCircle)
                 .label(refresh_label)
                 .disabled(!connected || loading)
                 .loading(loading)
@@ -371,8 +373,6 @@ fn render_journal_rows(
 
 #[cfg(test)]
 mod tests {
-    use core::prelude::rust_2021::test;
-
     use super::{change_kind_label_key, journal_summary_text};
     use crate::shell::i18n::I18nManager;
     use cairn_protocol::status::{IndexJournalStatus, JournalChangeKind};

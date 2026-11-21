@@ -93,8 +93,6 @@ impl IndexMenuState<'_> {
 
 #[cfg(test)]
 mod tests {
-    use core::prelude::rust_2021::test;
-
     use super::{IndexMenuState, SubsystemMenuAccess};
     use cairn_protocol::status::{ContentIndexState, IndexJournalStatus, PropertyIndexStatus};
 

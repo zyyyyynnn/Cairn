@@ -250,21 +250,21 @@ impl PropertySideTables {
             slot.presence |= HAS_LENGTH;
             slot.length_ms = ms;
         }
-        if let Some(ref author) = data.author {
-            if !author.is_empty() {
-                let (off, len) = self.intern_str(author);
-                slot.presence |= HAS_AUTHOR;
-                slot.author_off = off;
-                slot.author_len = len;
-            }
+        if let Some(ref author) = data.author
+            && !author.is_empty()
+        {
+            let (off, len) = self.intern_str(author);
+            slot.presence |= HAS_AUTHOR;
+            slot.author_off = off;
+            slot.author_len = len;
         }
-        if let Some(ref tags) = data.tags {
-            if !tags.is_empty() {
-                let (off, len) = self.intern_str(tags);
-                slot.presence |= HAS_TAGS;
-                slot.tags_off = off;
-                slot.tags_len = len;
-            }
+        if let Some(ref tags) = data.tags
+            && !tags.is_empty()
+        {
+            let (off, len) = self.intern_str(tags);
+            slot.presence |= HAS_TAGS;
+            slot.tags_off = off;
+            slot.tags_len = len;
         }
         if let Some((w, h)) = data.dimensions {
             slot.presence |= HAS_DIMENSIONS;

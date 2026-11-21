@@ -10,14 +10,14 @@ use crate::search::ResultSetChange;
 use crate::service::config_submission::{
     self, IndexScopeChange, SubmissionOutcome, SubmissionState,
 };
-use crate::service::service_issue::{should_try_silent_start, ServiceIssue};
+use crate::service::service_issue::{ServiceIssue, should_try_silent_start};
 use cairn_client::client::ClientError;
 use cairn_protocol::message::{Envelope, ResponsePayload, SourceId};
 use cairn_protocol::status::{
     ContentIndexState, SourceKind, SourceStatusSummary, VolumeState, VolumeStatusSummary,
 };
 use gpui_kit::gpui::{AsyncApp, Context};
-use std::sync::OnceLock;
+use std::sync::LazyLock;
 use std::time::Duration;
 
 #[derive(Clone, Copy)]
@@ -90,15 +90,15 @@ fn volume_status_visibility_changed(
 
 /// Bounded multi-threaded Tokio runtime for desktop IPC operations.
 pub fn get_tokio_runtime() -> &'static tokio::runtime::Runtime {
-    static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-    RT.get_or_init(|| {
+    static RT: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
         tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .max_blocking_threads(4)
             .enable_all()
             .build()
             .expect("Failed to initialize Tokio runtime")
-    })
+    });
+    &RT
 }
 
 async fn wait_for_service_pipe(
@@ -169,7 +169,7 @@ fn finish_subsystem_load<S>(
 
 impl CairnApp {
     /// Probes service reachability without requesting UAC elevation.
-    pub fn check_service_connection(&mut self, cx: &mut Context<Self>) {
+    pub fn check_service_connection(&mut self, cx: &mut Context<'_, Self>) {
         let runtime = get_tokio_runtime();
         let session = self.service.session.clone();
         self.service.connection.set_probing(true);
@@ -219,7 +219,7 @@ impl CairnApp {
     }
 
     /// Polls the service while any volume is building or catching up.
-    pub(crate) fn start_status_refresh(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn start_status_refresh(&mut self, cx: &mut Context<'_, Self>) {
         if self.service.is_refreshing_status || !self.service.status.is_any_loading() {
             return;
         }
@@ -329,7 +329,7 @@ impl CairnApp {
     fn apply_service_connected(
         &mut self,
         volumes: Vec<VolumeStatusSummary>,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         self.service.connection.mark_connected();
         self.service.status.update_volumes(volumes);
@@ -344,7 +344,7 @@ impl CairnApp {
     }
 
     /// Checks SCM registration off the main UI thread and attempts one silent start when stopped.
-    fn handle_probe_failure(&mut self, issue: ServiceIssue, cx: &mut Context<Self>) {
+    fn handle_probe_failure(&mut self, issue: ServiceIssue, cx: &mut Context<'_, Self>) {
         if issue != ServiceIssue::NotRunning {
             let installed = self.service.connection.is_installed();
             let probing = self.service.connection.is_probing();
@@ -394,7 +394,7 @@ impl CairnApp {
         .detach();
     }
 
-    pub fn retry_service_connection(&mut self, cx: &mut Context<Self>) {
+    pub fn retry_service_connection(&mut self, cx: &mut Context<'_, Self>) {
         if self.service.connection.is_probing() {
             return;
         }
@@ -403,7 +403,7 @@ impl CairnApp {
     }
 
     /// Asks SCM to start the installed service through one UAC elevation, then polls for its pipe.
-    pub fn start_service(&mut self, cx: &mut Context<Self>) {
+    pub fn start_service(&mut self, cx: &mut Context<'_, Self>) {
         if self.service.connection.is_probing() {
             return;
         }
@@ -433,7 +433,7 @@ impl CairnApp {
         .detach();
     }
 
-    fn launch_elevated_service_then_poll(&mut self, cx: &mut Context<Self>) {
+    fn launch_elevated_service_then_poll(&mut self, cx: &mut Context<'_, Self>) {
         self.spawn_service_connection_task(cx, move |session| async move {
             let launched = tokio::task::spawn_blocking(
                 crate::service::service_control::start_service_elevated,
@@ -457,13 +457,13 @@ impl CairnApp {
         });
     }
 
-    fn poll_service_until_ready(&mut self, cx: &mut Context<Self>) {
+    fn poll_service_until_ready(&mut self, cx: &mut Context<'_, Self>) {
         self.spawn_service_connection_task(cx, |session| async move {
             wait_for_service_pipe(&session).await
         });
     }
 
-    fn spawn_service_connection_task<F, Fut>(&mut self, cx: &mut Context<Self>, work: F)
+    fn spawn_service_connection_task<F, Fut>(&mut self, cx: &mut Context<'_, Self>, work: F)
     where
         F: FnOnce(cairn_client::ServiceSession) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = (Result<Vec<VolumeStatusSummary>, ClientError>, bool)>
@@ -511,13 +511,13 @@ impl CairnApp {
 
     fn spawn_service_task<T, Fut, OnDone>(
         &mut self,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
         work: impl FnOnce(cairn_client::ServiceSession) -> Fut + Send + 'static,
         on_done: OnDone,
     ) where
         T: Send + 'static,
         Fut: std::future::Future<Output = T> + Send + 'static,
-        OnDone: FnOnce(&mut CairnApp, Option<T>, &mut Context<Self>) + 'static,
+        OnDone: FnOnce(&mut CairnApp, Option<T>, &mut Context<'_, Self>) + 'static,
     {
         let session = self.service.session.clone();
         cx.spawn(async move |this, cx: &mut AsyncApp| {
@@ -535,8 +535,8 @@ impl CairnApp {
 
     fn schedule_delayed_refresh(
         &mut self,
-        cx: &mut Context<Self>,
-        refresh: fn(&mut CairnApp, &mut Context<Self>),
+        cx: &mut Context<'_, Self>,
+        refresh: fn(&mut CairnApp, &mut Context<'_, Self>),
     ) {
         cx.spawn(async move |this, cx: &mut AsyncApp| {
             cx.background_executor()
@@ -547,7 +547,7 @@ impl CairnApp {
         .detach();
     }
 
-    pub fn refresh_content_status(&mut self, cx: &mut Context<Self>) {
+    pub fn refresh_content_status(&mut self, cx: &mut Context<'_, Self>) {
         if !self.service.content.begin_load() {
             return;
         }
@@ -577,15 +577,15 @@ impl CairnApp {
         );
     }
 
-    pub fn set_content_index_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+    pub fn set_content_index_enabled(&mut self, enabled: bool, cx: &mut Context<'_, Self>) {
         self.run_content_action(ContentAction::Set(enabled), cx);
     }
 
-    pub fn clear_content_index(&mut self, cx: &mut Context<Self>) {
+    pub fn clear_content_index(&mut self, cx: &mut Context<'_, Self>) {
         self.run_content_action(ContentAction::Clear, cx);
     }
 
-    fn run_content_action(&mut self, action: ContentAction, cx: &mut Context<Self>) {
+    fn run_content_action(&mut self, action: ContentAction, cx: &mut Context<'_, Self>) {
         if !self.service.content.begin_action() {
             return;
         }
@@ -659,7 +659,7 @@ impl CairnApp {
         title_key: &str,
         body_key: &str,
         detail: impl std::fmt::Display,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         tracing::warn!(request = title_key, error = %detail, "service request failed");
         let title = self.i18n.get_text(title_key);
@@ -667,7 +667,7 @@ impl CairnApp {
         self.show_error_toast(title, body, cx);
     }
 
-    pub fn refresh_property_index_status(&mut self, cx: &mut Context<Self>) {
+    pub fn refresh_property_index_status(&mut self, cx: &mut Context<'_, Self>) {
         if !self.service.property.begin_load() {
             return;
         }
@@ -697,7 +697,7 @@ impl CairnApp {
         );
     }
 
-    pub fn set_property_index_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+    pub fn set_property_index_enabled(&mut self, enabled: bool, cx: &mut Context<'_, Self>) {
         if !self.service.property.begin_action() {
             return;
         }
@@ -740,7 +740,7 @@ impl CairnApp {
         );
     }
 
-    pub fn refresh_index_journal_status(&mut self, cx: &mut Context<Self>) {
+    pub fn refresh_index_journal_status(&mut self, cx: &mut Context<'_, Self>) {
         if !self.service.journal.begin_load() {
             return;
         }
@@ -763,7 +763,7 @@ impl CairnApp {
         );
     }
 
-    pub fn refresh_index_journal_dialog(&mut self, cx: &mut Context<Self>) {
+    pub fn refresh_index_journal_dialog(&mut self, cx: &mut Context<'_, Self>) {
         const JOURNAL_DIALOG_LIMIT: usize = 200;
 
         if !self.service.journal_entries.begin_load() {
@@ -831,7 +831,7 @@ impl CairnApp {
         );
     }
 
-    pub fn set_index_journal_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+    pub fn set_index_journal_enabled(&mut self, enabled: bool, cx: &mut Context<'_, Self>) {
         if !self.service.journal.begin_action() {
             return;
         }
@@ -873,7 +873,7 @@ impl CairnApp {
         );
     }
 
-    pub fn refresh_sources(&mut self, cx: &mut Context<Self>) {
+    pub fn refresh_sources(&mut self, cx: &mut Context<'_, Self>) {
         if self.service.is_refreshing_sources {
             return;
         }
@@ -883,10 +883,10 @@ impl CairnApp {
             |session| async move { session.get_sources().await },
             |this, result, cx| {
                 this.service.is_refreshing_sources = false;
-                if let Some(Ok(envelope)) = result {
-                    if let ResponsePayload::SourcesResult { sources } = envelope.payload {
-                        this.apply_sources_snapshot(sources, cx);
-                    }
+                if let Some(Ok(envelope)) = result
+                    && let ResponsePayload::SourcesResult { sources } = envelope.payload
+                {
+                    this.apply_sources_snapshot(sources, cx);
                 }
             },
         );
@@ -894,7 +894,7 @@ impl CairnApp {
 
     /// Registers a path as a folder source. The service answers with the complete source list,
     /// which replaces the local snapshot without a second read.
-    pub(crate) fn add_folder_source(&mut self, path: String, cx: &mut Context<Self>) {
+    pub(crate) fn add_folder_source(&mut self, path: String, cx: &mut Context<'_, Self>) {
         if path.trim().is_empty() || self.service.folder_source_action_pending {
             return;
         }
@@ -947,7 +947,7 @@ impl CairnApp {
         &mut self,
         _source_id: SourceId,
         path: String,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         if self.service.folder_source_action_pending {
             return;
@@ -1000,7 +1000,7 @@ impl CairnApp {
     pub(crate) fn apply_sources_snapshot(
         &mut self,
         sources: Vec<SourceStatusSummary>,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         let previous = std::mem::take(&mut self.service.sources);
         let folder_ids = |list: &[SourceStatusSummary]| {
@@ -1059,7 +1059,7 @@ impl CairnApp {
         cx.notify();
     }
 
-    fn start_source_status_follow_up(&mut self, cx: &mut Context<Self>) {
+    fn start_source_status_follow_up(&mut self, cx: &mut Context<'_, Self>) {
         let still_loading = self.service.sources.iter().any(|source| {
             source.kind == SourceKind::Folder
                 && matches!(
@@ -1072,7 +1072,7 @@ impl CairnApp {
         }
     }
 
-    pub fn rescan_all(&mut self, cx: &mut Context<Self>) {
+    pub fn rescan_all(&mut self, cx: &mut Context<'_, Self>) {
         if self.service.connection.is_control_pending() {
             return;
         }
@@ -1117,7 +1117,12 @@ impl CairnApp {
         );
     }
 
-    pub fn rescan_source(&mut self, source_id: SourceId, label: String, cx: &mut Context<Self>) {
+    pub fn rescan_source(
+        &mut self,
+        source_id: SourceId,
+        label: String,
+        cx: &mut Context<'_, Self>,
+    ) {
         if self.service.connection.is_control_pending() {
             return;
         }
@@ -1169,11 +1174,9 @@ impl CairnApp {
 
 #[cfg(test)]
 mod tests {
-    use core::prelude::rust_2021::test;
-
     use super::{
-        failure_is_terminal, status_refresh_decision, volume_status_visibility_changed,
-        StatusFailure, StatusRefreshDecision,
+        StatusFailure, StatusRefreshDecision, failure_is_terminal, status_refresh_decision,
+        volume_status_visibility_changed,
     };
     use cairn_protocol::status::{VolumeState, VolumeStatusSummary};
 

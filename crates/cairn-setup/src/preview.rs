@@ -9,8 +9,8 @@
 
 use std::path::PathBuf;
 
-use crate::model::{default_install_dir, InstalledProduct, Launch, Screen, Stage};
 use crate::PRODUCT_VERSION;
+use crate::model::{InstalledProduct, Launch, Screen, Stage, default_install_dir};
 
 #[derive(Clone, Debug)]
 pub struct Preview {

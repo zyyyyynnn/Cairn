@@ -4,7 +4,7 @@
 
 //! Result table column headings, lane sizing, and column resize handles.
 
-use crate::app::{element_id, layout, CairnApp};
+use crate::app::{CairnApp, element_id, layout};
 use crate::shell::accessibility;
 use crate::shell::settings::ColumnSettings;
 use crate::shell::theme::{self, ShellTokens};
@@ -128,7 +128,7 @@ impl CairnApp {
     pub(super) fn render_table_header(
         &self,
         tokens: &ShellTokens,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let control = accessibility::control("table-header");
         let mut header = accessibility::element(control)
@@ -188,7 +188,7 @@ impl CairnApp {
         &self,
         boundary: ColumnBoundary,
         tokens: &ShellTokens,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let id = element_id("column-resize", boundary.key());
         let group = SharedString::from(id.clone());
@@ -234,7 +234,7 @@ impl CairnApp {
         column: SortColumn,
         lane: HeaderLane,
         tokens: &ShellTokens,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let label_key = column.label_key_in(self.recycle_bin.is_open());
         let control = accessibility::control_at(&element_id("column-header", label_key));
@@ -378,8 +378,6 @@ fn sort_indicator(
 
 #[cfg(test)]
 mod tests {
-    use core::prelude::rust_2021::test;
-
     use crate::shell::settings::ColumnSettings;
     use crate::table::model::{ColumnBoundary, TableColumn};
 

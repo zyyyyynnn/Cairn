@@ -30,7 +30,7 @@ pub mod time;
 
 pub use arena::NamePool;
 pub use dir_size::DirectorySizeIndex;
-pub use engine::{execute_query, execute_query_ordered, glob_match, CancellationToken};
+pub use engine::{CancellationToken, execute_query, execute_query_ordered, glob_match};
 pub use file_kind::FileKind;
 pub use filter::{
     AttribFilter, DateFilter, DateOp, DimensionsFilter, DupeMode, SizeFilter, SizeOp,
@@ -38,23 +38,23 @@ pub use filter::{
 pub use format::format_size_bytes;
 pub use frn_index::{FrnLookup, IndexMemoryFootprint};
 pub use model::{
-    flags_from_win32_attributes, FileRecord, FLAG_ARCHIVE, FLAG_COMPRESSED, FLAG_DIRECTORY,
-    FLAG_HIDDEN, FLAG_INDEXED_ATTRIBUTES_MASK, FLAG_READONLY, FLAG_REPARSE_POINT, FLAG_SPARSE,
-    FLAG_SYSTEM, FLAG_TOMBSTONE, WIN32_ATTR_ARCHIVE, WIN32_ATTR_COMPRESSED, WIN32_ATTR_DIRECTORY,
-    WIN32_ATTR_HIDDEN, WIN32_ATTR_READONLY, WIN32_ATTR_REPARSE_POINT, WIN32_ATTR_SPARSE_FILE,
-    WIN32_ATTR_SYSTEM,
+    FLAG_ARCHIVE, FLAG_COMPRESSED, FLAG_DIRECTORY, FLAG_HIDDEN, FLAG_INDEXED_ATTRIBUTES_MASK,
+    FLAG_READONLY, FLAG_REPARSE_POINT, FLAG_SPARSE, FLAG_SYSTEM, FLAG_TOMBSTONE, FileRecord,
+    WIN32_ATTR_ARCHIVE, WIN32_ATTR_COMPRESSED, WIN32_ATTR_DIRECTORY, WIN32_ATTR_HIDDEN,
+    WIN32_ATTR_READONLY, WIN32_ATTR_REPARSE_POINT, WIN32_ATTR_SPARSE_FILE, WIN32_ATTR_SYSTEM,
+    flags_from_win32_attributes,
 };
-pub use path_cache::{normalize_root, DirectoryPathCache};
+pub use path_cache::{DirectoryPathCache, normalize_root};
 pub use property_store::{
-    PropertyKind, PropertySideTables, RecordPropertyData, RecordPropertyView, SourceId,
-    FOLDER_SOURCE_ID_BASE,
+    FOLDER_SOURCE_ID_BASE, PropertyKind, PropertySideTables, RecordPropertyData,
+    RecordPropertyView, SourceId,
 };
 pub use sort::{
-    compare_cross_source_records, sort_indices_with_spec, PresortedIndices, SortColumn,
-    SortContext, SortDirection, SortKey, SortSpec,
+    PresortedIndices, SortColumn, SortContext, SortDirection, SortKey, SortSpec,
+    compare_cross_source_records, sort_indices_with_spec,
 };
 pub use syntax::{
-    parse_query, parse_query_with, parse_search_term, QueryDefaults, QueryExpr, SearchTerm,
+    QueryDefaults, QueryExpr, SearchTerm, parse_query, parse_query_with, parse_search_term,
 };
 
 #[cfg(test)]
@@ -74,11 +74,10 @@ mod proptests {
             let (off, len, ext) = pool.insert(&s);
             let retrieved = pool.get_name(off, len);
             prop_assert_eq!(retrieved, &s);
-            if let Some(dot_pos) = s.rfind('.') {
-                if dot_pos + 1 < s.len() {
+            if let Some(dot_pos) = s.rfind('.')
+                && dot_pos + 1 < s.len() {
                     prop_assert_eq!(pool.get_ext(off, len, ext), &s[dot_pos + 1..]);
                 }
-            }
         }
     }
 }

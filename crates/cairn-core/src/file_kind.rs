@@ -188,10 +188,11 @@ impl FileKind {
             return Self::SourceCode;
         }
 
-        if let Some(rest) = name.strip_prefix('.') {
-            if !rest.is_empty() && !rest.contains('.') {
-                return Self::Config;
-            }
+        if let Some(rest) = name.strip_prefix('.')
+            && !rest.is_empty()
+            && !rest.contains('.')
+        {
+            return Self::Config;
         }
 
         let stem = match name.rsplit_once('.') {
@@ -219,8 +220,7 @@ impl FileKind {
                     .iter()
                     .any(|known| extension.eq_ignore_ascii_case(known))
             })
-            .map(|(kind, _)| *kind)
-            .unwrap_or(Self::Other)
+            .map_or(Self::Other, |(kind, _)| *kind)
     }
 }
 

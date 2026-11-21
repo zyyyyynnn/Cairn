@@ -8,20 +8,20 @@
 use gpui_kit::base::Progress as BaseProgress;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Input;
-use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Icon, IconName, Sizable as _};
+use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::*;
-use gpui_kit::gpui::{ease_in_out, Animation, AnimationExt};
+use gpui_kit::gpui::{Animation, AnimationExt, ease_in_out};
 use std::f32::consts::TAU;
 use std::time::Duration;
 
 use cairn_ui::brand::{
-    app_icon, cjk_heading_font, has_cjk, heading_text, serif_font, tabular_figures,
-    BRAND_TITLE_SIZE, RADIUS, SERIF_LINE_HEIGHT, SMALL_TEXT_SIZE, UI_ICON_SIZE,
+    BRAND_TITLE_SIZE, RADIUS, SERIF_LINE_HEIGHT, SMALL_TEXT_SIZE, UI_ICON_SIZE, app_icon,
+    cjk_heading_font, has_cjk, heading_text, serif_font, tabular_figures,
 };
 
-use crate::app::{visible_progress, SetupApp};
-use crate::model::Screen;
+use crate::app::{SetupApp, visible_progress};
+use crate::model::{InstalledProduct, Screen};
 
 /// One physical platform surface: the caption row is 34 px at every zoom, like the product shell.
 const TITLE_BAR_HEIGHT: Pixels = px(34.0);
@@ -121,7 +121,7 @@ struct DangerAction<'a> {
     id: &'static str,
     label_key: &'static str,
     focus: &'a FocusHandle,
-    on_activate: fn(&mut SetupApp, &mut Context<SetupApp>),
+    on_activate: fn(&mut SetupApp, &mut Context<'_, SetupApp>),
 }
 
 impl Tokens {
@@ -150,16 +150,40 @@ fn progress_fraction(progress: f32) -> f32 {
     (progress / 100.0).clamp(0.0, 1.0)
 }
 
+/// Returns the normalized leading offset of the indeterminate progress segment.
+/// Under reduced motion (`phase = 0.0`), the segment stays centred in the track rather than
+/// starting clipped outside the leading edge at `-PROGRESS_INDETERMINATE_WIDTH`.
+fn indeterminate_left(phase: f32, reduce_motion: bool) -> f32 {
+    if reduce_motion {
+        (1.0 - PROGRESS_INDETERMINATE_WIDTH) / 2.0
+    } else {
+        phase * (1.0 + PROGRESS_INDETERMINATE_WIDTH) - PROGRESS_INDETERMINATE_WIDTH
+    }
+}
+
 /// A slow brightness breath, not a travelling band: the fill stays solid and the progress
 /// surface never reads as a scanning line.
 fn progress_pulse(phase: f32) -> f32 {
     0.82 + 0.18 * (0.5 - 0.5 * (phase * TAU).cos())
 }
 
+fn effective_progress_pulse(phase: f32, reduce_motion: bool) -> f32 {
+    if reduce_motion {
+        1.0
+    } else {
+        progress_pulse(phase)
+    }
+}
+
 /// The track carries the value; the scan line or travelling segment carries the running-work
 /// motion. Neither changes layout. [`BaseProgress`] carries the role, label and numeric value for
 /// assistive technology.
-fn progress_bar(tokens: &Tokens, progress: Option<f32>, phase: f32) -> AnyElement {
+fn progress_bar(
+    tokens: &Tokens,
+    progress: Option<f32>,
+    phase: f32,
+    reduce_motion: bool,
+) -> AnyElement {
     let track = div()
         .relative()
         .w_full()
@@ -169,6 +193,7 @@ fn progress_bar(tokens: &Tokens, progress: Option<f32>, phase: f32) -> AnyElemen
         .border_color(tokens.border)
         .bg(tokens.muted)
         .overflow_hidden();
+    let opacity = effective_progress_pulse(phase, reduce_motion);
     match progress {
         Some(value) => {
             let fill = div()
@@ -179,11 +204,11 @@ fn progress_bar(tokens: &Tokens, progress: Option<f32>, phase: f32) -> AnyElemen
                 .w(relative(progress_fraction(value)))
                 .overflow_hidden()
                 .rounded(PROGRESS_TRACK_RADIUS)
-                .bg(tokens.foreground.opacity(progress_pulse(phase)));
+                .bg(tokens.foreground.opacity(opacity));
             track.child(fill).into_any_element()
         }
         None => {
-            let left = phase * (1.0 + PROGRESS_INDETERMINATE_WIDTH) - PROGRESS_INDETERMINATE_WIDTH;
+            let left = indeterminate_left(phase, reduce_motion);
             track
                 .child(
                     div()
@@ -193,14 +218,19 @@ fn progress_bar(tokens: &Tokens, progress: Option<f32>, phase: f32) -> AnyElemen
                         .left(relative(left))
                         .w(relative(PROGRESS_INDETERMINATE_WIDTH))
                         .rounded(PROGRESS_TRACK_RADIUS)
-                        .bg(tokens.foreground.opacity(progress_pulse(phase))),
+                        .bg(tokens.foreground.opacity(opacity)),
                 )
                 .into_any_element()
         }
     }
 }
 
-fn progress_element(tokens: &Tokens, id: &'static str, progress: Option<f32>) -> AnyElement {
+fn progress_element(
+    tokens: &Tokens,
+    id: &'static str,
+    progress: Option<f32>,
+    reduce_motion: bool,
+) -> AnyElement {
     let tokens = *tokens;
     div()
         .w_full()
@@ -209,7 +239,7 @@ fn progress_element(tokens: &Tokens, id: &'static str, progress: Option<f32>) ->
             Animation::new(PROGRESS_SWEEP)
                 .with_easing(ease_in_out)
                 .repeat(),
-            move |track, phase| track.child(progress_bar(&tokens, progress, phase)),
+            move |track, phase| track.child(progress_bar(&tokens, progress, phase, reduce_motion)),
         )
         .into_any_element()
 }
@@ -235,7 +265,7 @@ impl SetupApp {
         window: &mut Window,
         button: CaptionButton,
         tokens: &Tokens,
-        cx: &mut Context<SetupApp>,
+        cx: &mut Context<'_, SetupApp>,
     ) -> AnyElement {
         let CaptionButton {
             id,
@@ -305,8 +335,9 @@ impl SetupApp {
 }
 
 impl Render for SetupApp {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let tokens = Tokens::new(cx);
+        let reduce_motion = cx.reduce_motion();
         if self.focused_screen != Some(self.screen) {
             self.focused_screen = Some(self.screen);
             window.focus(&self.screen_focus, cx);
@@ -326,7 +357,7 @@ impl Render for SetupApp {
             .track_focus(&self.root_focus)
             .on_action(
                 cx.listener(|this, _: &crate::app::CancelSetup, window, cx| {
-                    this.on_escape(window, cx)
+                    this.on_escape(window, cx);
                 }),
             )
             // Input modality for focus painting. The app-level keystroke interceptor records the
@@ -342,7 +373,7 @@ impl Render for SetupApp {
                 }),
             )
             .child(self.render_titlebar(&tokens, window, cx))
-            .child(self.render_body(&tokens, window, cx))
+            .child(self.render_body(&tokens, reduce_motion, window, cx))
             .child(self.render_footer(&tokens, window, cx))
     }
 }
@@ -352,7 +383,7 @@ impl SetupApp {
         &self,
         tokens: &Tokens,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let subtitle = if self.is_uninstall() {
             "uninstall_subtitle"
@@ -458,18 +489,19 @@ impl SetupApp {
     fn render_body(
         &self,
         tokens: &Tokens,
+        reduce_motion: bool,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let page = match self.screen {
             Screen::License => self.render_license(tokens, window, cx),
             Screen::Location => self.render_location(tokens, window, cx),
-            Screen::Installing => self.render_installing(tokens),
+            Screen::Installing => self.render_installing(tokens, reduce_motion),
             Screen::Finished => self.render_finished(tokens),
             Screen::Failed => self.render_failed(tokens),
             Screen::Maintenance => self.render_maintenance(tokens),
             Screen::Uninstall => self.render_uninstall_confirm(tokens, cx),
-            Screen::Uninstalling => self.render_uninstalling(tokens),
+            Screen::Uninstalling => self.render_uninstalling(tokens, reduce_motion),
             Screen::Uninstalled => self.render_uninstalled(tokens),
         };
         div()
@@ -485,7 +517,7 @@ impl SetupApp {
         &self,
         tokens: &Tokens,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let license_card = h_flex()
             .w_full()
@@ -546,7 +578,7 @@ impl SetupApp {
         &self,
         tokens: &Tokens,
         window: &Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let Some(path_input) = &self.path_input else {
             return div().into_any_element();
@@ -624,7 +656,13 @@ impl SetupApp {
 
     /// The progress page's shared body: current stage, percentage, and the dot matrix.
     /// Setup and uninstall use the same block so their two long-running pages cannot drift.
-    fn progress_block(&self, tokens: &Tokens, id: &'static str, stage_label: String) -> AnyElement {
+    fn progress_block(
+        &self,
+        tokens: &Tokens,
+        id: &'static str,
+        stage_label: String,
+        reduce_motion: bool,
+    ) -> AnyElement {
         let progress = visible_progress(self.progress);
         let percent = self.progress.map(|_| {
             self.i18n.format(
@@ -662,12 +700,12 @@ impl SetupApp {
                     .indeterminate(self.progress.is_none())
                     .accessibility_label(stage_label)
                     .w_full()
-                    .child(progress_element(tokens, id, self.progress)),
+                    .child(progress_element(tokens, id, self.progress, reduce_motion)),
             )
             .into_any_element()
     }
 
-    fn render_installing(&self, tokens: &Tokens) -> AnyElement {
+    fn render_installing(&self, tokens: &Tokens, reduce_motion: bool) -> AnyElement {
         v_flex()
             .gap(MAIN_GAP)
             .child(self.heading("progress_title"))
@@ -675,6 +713,7 @@ impl SetupApp {
                 tokens,
                 "setup-progress",
                 self.i18n.get(self.stage.message_key()),
+                reduce_motion,
             ))
             .into_any_element()
     }
@@ -702,7 +741,7 @@ impl SetupApp {
         let version_line = if self
             .installed
             .as_ref()
-            .is_some_and(|product| product.is_newer_than_package())
+            .is_some_and(InstalledProduct::is_newer_than_package)
         {
             self.i18n
                 .format("maintenance_newer", &[("version", version)])
@@ -793,7 +832,7 @@ impl SetupApp {
         page.into_any_element()
     }
 
-    fn render_uninstall_confirm(&self, tokens: &Tokens, _cx: &mut Context<Self>) -> AnyElement {
+    fn render_uninstall_confirm(&self, tokens: &Tokens, _cx: &mut Context<'_, Self>) -> AnyElement {
         v_flex()
             .gap(MAIN_GAP)
             .child(self.heading("uninstall_title"))
@@ -811,7 +850,7 @@ impl SetupApp {
             .into_any_element()
     }
 
-    fn render_uninstalling(&self, tokens: &Tokens) -> AnyElement {
+    fn render_uninstalling(&self, tokens: &Tokens, reduce_motion: bool) -> AnyElement {
         v_flex()
             .gap(MAIN_GAP)
             .child(self.heading("uninstall_progress_title"))
@@ -819,6 +858,7 @@ impl SetupApp {
                 tokens,
                 "setup-uninstall-progress",
                 self.i18n.get("uninstall_progress_working"),
+                reduce_motion,
             ))
             .into_any_element()
     }
@@ -880,7 +920,7 @@ impl SetupApp {
         &self,
         tokens: &Tokens,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         // Only progress/status text stays on the leading edge. Footer actions sit at the trailing
         // edge. The uninstall confirmation also carries a secondary Cancel, because its primary
@@ -1041,7 +1081,7 @@ impl SetupApp {
             .child(h_flex().gap(GROUP_GAP).items_center().children(actions))
     }
 
-    fn cancel_button(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn cancel_button(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         Button::new("setup-cancel")
             .font_weight(FontWeight::MEDIUM)
             .ghost()
@@ -1050,7 +1090,7 @@ impl SetupApp {
             .into_any_element()
     }
 
-    fn log_button(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn log_button(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         Button::new("setup-log")
             .font_weight(FontWeight::MEDIUM)
             .ghost()
@@ -1068,7 +1108,7 @@ impl SetupApp {
         action: DangerAction<'_>,
         tokens: &Tokens,
         window: &Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let DangerAction {
             id,
@@ -1119,7 +1159,7 @@ impl SetupApp {
         &self,
         tokens: &Tokens,
         window: &Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         self.danger_action(
             DangerAction {
@@ -1146,8 +1186,8 @@ impl SetupApp {
         &self,
         tokens: &Tokens,
         window: &mut Window,
-        cx: &mut Context<SetupApp>,
-        on_click: impl Fn(&mut SetupApp, bool, &mut Window, &mut Context<SetupApp>) + 'static,
+        cx: &mut Context<'_, SetupApp>,
+        on_click: impl Fn(&mut SetupApp, bool, &mut Window, &mut Context<'_, SetupApp>) + 'static,
     ) -> AnyElement {
         let checked = self.accepted;
         let label = self.i18n.get("license_accept");
@@ -1174,7 +1214,10 @@ impl SetupApp {
             .id("setup-accept")
             .role(Role::CheckBox)
             .aria_label(label.clone())
-            .when_some(description, |this, text| this.aria_description(text))
+            .when_some(
+                description,
+                gpui_kit::StatefulInteractiveElement::aria_description,
+            )
             .aria_toggled(if checked {
                 gpui_kit::gpui::accesskit::Toggled::True
             } else {
@@ -1268,7 +1311,10 @@ impl SetupApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{failure_offers_retry, path_accessible_label, progress_fraction};
+    use super::{
+        PROGRESS_INDETERMINATE_WIDTH, effective_progress_pulse, failure_offers_retry,
+        indeterminate_left, path_accessible_label, progress_fraction,
+    };
 
     #[test]
     fn progress_fraction_clamps_to_the_track() {
@@ -1276,6 +1322,18 @@ mod tests {
         assert!((progress_fraction(42.0) - 0.42).abs() < f32::EPSILON);
         assert_eq!(progress_fraction(100.0), 1.0);
         assert_eq!(progress_fraction(140.0), 1.0);
+    }
+
+    #[test]
+    fn indeterminate_progress_stays_visible_and_opaque_under_reduced_motion() {
+        let left = indeterminate_left(0.0, true);
+        assert!(left >= 0.0, "segment must stay inside leading edge: {left}");
+        assert!(
+            left + PROGRESS_INDETERMINATE_WIDTH <= 1.0,
+            "segment must stay inside trailing edge: {left}"
+        );
+        assert_eq!(effective_progress_pulse(0.0, true), 1.0);
+        assert!(indeterminate_left(0.0, false) < 0.0);
     }
 
     #[test]

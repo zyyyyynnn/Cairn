@@ -56,9 +56,10 @@ pub const LOGO_NAME: &str = "cairn-64.png";
 /// workspace. The WiX executable is taken from `CAIRN_WIX` when set, otherwise from `PATH`.
 pub fn run_package<P: AsRef<Path>>(out_dir: P) -> Result<(), Box<dyn Error>> {
     let workspace_root = workspace_root();
-    let bin_dir = std::env::var_os("CAIRN_BIN_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| workspace_root.join("target").join("release"));
+    let bin_dir = std::env::var_os("CAIRN_BIN_DIR").map_or_else(
+        || workspace_root.join("target").join("release"),
+        PathBuf::from,
+    );
 
     run_package_with(
         out_dir.as_ref(),
@@ -70,9 +71,7 @@ pub fn run_package<P: AsRef<Path>>(out_dir: P) -> Result<(), Box<dyn Error>> {
 
 /// The WiX executable used for every build: `CAIRN_WIX` when set, otherwise `wix` from `PATH`.
 fn wix_executable() -> PathBuf {
-    std::env::var_os("CAIRN_WIX")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("wix"))
+    std::env::var_os("CAIRN_WIX").map_or_else(|| PathBuf::from("wix"), PathBuf::from)
 }
 
 /// The Windows SDK manifest tool. `CAIRN_MT` wins; otherwise `mt.exe` from PATH or the newest
@@ -83,14 +82,13 @@ fn mt_executable() -> PathBuf {
     if let Some(path) = std::env::var_os("CAIRN_MT") {
         return PathBuf::from(path);
     }
-    if let Ok(output) = Command::new("where.exe").arg("mt.exe").output() {
-        if output.status.success() {
-            if let Some(line) = String::from_utf8_lossy(&output.stdout).lines().next() {
-                let candidate = PathBuf::from(line.trim());
-                if candidate.is_file() {
-                    return candidate;
-                }
-            }
+    if let Ok(output) = Command::new("where.exe").arg("mt.exe").output()
+        && output.status.success()
+        && let Some(line) = String::from_utf8_lossy(&output.stdout).lines().next()
+    {
+        let candidate = PathBuf::from(line.trim());
+        if candidate.is_file() {
+            return candidate;
         }
     }
     if let Some(kits) = std::env::var_os("ProgramFiles(x86)")
@@ -146,8 +144,7 @@ fn run_package_with(
     let backup_remaining = staging_dir
         .join(".previous")
         .read_dir()
-        .map(|mut entries| entries.next().is_some())
-        .unwrap_or(false);
+        .is_ok_and(|mut entries| entries.next().is_some());
     if succeeded || !backup_remaining {
         let _ = fs::remove_dir_all(&staging_dir);
     } else {
@@ -672,7 +669,7 @@ fn generate_sha256sums(staging_dir: &Path, sums_path: &Path) -> Result<(), Box<d
         require_artifact(&file_path, "SHA-256 manifest")?;
         let bytes = fs::read(&file_path)?;
         let digest = sha256_digest(&bytes);
-        entries.push(format!("{}  {}", digest, file_name));
+        entries.push(format!("{digest}  {file_name}"));
     }
 
     let sums_content = entries.join("\n") + "\n";
@@ -735,7 +732,7 @@ mod tests {
     fn staging_entries(dir: &Path) -> Vec<String> {
         fs::read_dir(dir)
             .expect("read output directory")
-            .filter_map(|entry| entry.ok())
+            .filter_map(Result::ok)
             .filter_map(|entry| entry.file_name().into_string().ok())
             .filter(|name| name.starts_with(".cairn-package-"))
             .collect()
@@ -1044,9 +1041,10 @@ mod tests {
         );
 
         // The guard is what enforces the Program Files rule for a direct `msiexec` invocation.
-        let bin_dir = std::env::var_os("CAIRN_BIN_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| workspace_root().join("target").join("release"));
+        let bin_dir = std::env::var_os("CAIRN_BIN_DIR").map_or_else(
+            || workspace_root().join("target").join("release"),
+            PathBuf::from,
+        );
         let guard = bin_dir.join(GUARD_NAME);
         let bad = Command::new(&guard)
             .args([

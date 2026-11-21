@@ -234,7 +234,7 @@ mod tests {
         buf[8..12].copy_from_slice(&72u32.to_le_bytes()); // RecordLength
         buf[12..14].copy_from_slice(&2u16.to_le_bytes()); // MajorVersion = 2
         buf[16..24].copy_from_slice(&42u64.to_le_bytes()); // FRN
-                                                           // Reason: CREATE | DELETE
+        // Reason: CREATE | DELETE
         let reason = USN_REASON_FILE_CREATE | USN_REASON_FILE_DELETE | USN_REASON_CLOSE;
         buf[48..52].copy_from_slice(&reason.to_le_bytes());
 

@@ -252,7 +252,7 @@ mod tests {
         ]);
         engine.add_volume(vol);
         engine.update_volume('C', |volume| {
-            volume.ensure_presorted_column(SortColumn::Size)
+            volume.ensure_presorted_column(SortColumn::Size);
         });
 
         engine.update_volume('C', |volume| {
@@ -265,7 +265,7 @@ mod tests {
             }]);
         });
         engine.update_volume('C', |volume| {
-            volume.ensure_presorted_column(SortColumn::Size)
+            volume.ensure_presorted_column(SortColumn::Size);
         });
         let merged = engine.with_volumes(|volumes| {
             volumes[&'C']
@@ -275,10 +275,10 @@ mod tests {
         });
 
         engine.update_volume('C', |volume| {
-            volume.ensure_presorted_column(SortColumn::Name)
+            volume.ensure_presorted_column(SortColumn::Name);
         });
         engine.update_volume('C', |volume| {
-            volume.ensure_presorted_column(SortColumn::Size)
+            volume.ensure_presorted_column(SortColumn::Size);
         });
         let rebuilt = engine.with_volumes(|volumes| {
             volumes[&'C']

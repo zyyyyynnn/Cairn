@@ -8,7 +8,7 @@ use cairn_core::{
 };
 use cairn_ntfs::attribute::{ATTR_BITMAP, ATTR_DATA, ATTR_FILE_NAME, ATTR_STANDARD_INFORMATION};
 use cairn_ntfs::mft_reader::{
-    scan_mft_from_file, scan_mft_from_reader, BlockReader, MftScanOptions, SliceBlockReader,
+    BlockReader, MftScanOptions, SliceBlockReader, scan_mft_from_file, scan_mft_from_reader,
 };
 use cairn_ntfs::volume_identity::{enumerate_volumes, parse_volume_path_names};
 use std::sync::Mutex;

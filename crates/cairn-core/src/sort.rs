@@ -7,7 +7,7 @@
 use crate::arena::NamePool;
 use crate::engine::CancellationToken;
 use crate::model::FileRecord;
-use crate::path_cache::{root_path_for_drive, DirectoryPathCache};
+use crate::path_cache::{DirectoryPathCache, root_path_for_drive};
 use crate::property_store::{PropertyKind, PropertySideTables, SourceId};
 use rayon::prelude::*;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -239,10 +239,10 @@ fn parse_sort_key_token(token: &str) -> Result<SortKey, UnknownSortColumn> {
         (" asc", SortDirection::Ascending),
         (" ascending", SortDirection::Ascending),
     ] {
-        if let Some(prefix_len) = lower.len().checked_sub(suffix.len()) {
-            if &lower[prefix_len..] == suffix {
-                return Ok(SortKey::new(token[..prefix_len].trim().parse()?, dir));
-            }
+        if let Some(prefix_len) = lower.len().checked_sub(suffix.len())
+            && &lower[prefix_len..] == suffix
+        {
+            return Ok(SortKey::new(token[..prefix_len].trim().parse()?, dir));
         }
     }
     Ok(SortKey::new(token.parse()?, SortDirection::Ascending))
@@ -864,7 +864,7 @@ fn sort_single_column(
                     ctx.path_cache
                         .get_parent_path_with_root(ctx.records, ctx.arena, ctx.root, idx)
                 },
-                |pa, pb| pa.cmp(pb),
+                Ord::cmp,
             ),
             SortColumn::Size => packed_sort_by_key(
                 indices,

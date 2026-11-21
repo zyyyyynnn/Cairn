@@ -35,7 +35,7 @@ pub fn fold_append(text: &str, folded: &mut Vec<u8>) {
             folded.push(ch.to_ascii_lowercase() as u8);
         } else {
             let ch_len = ch.len_utf8();
-            let lower_count: usize = ch.to_lowercase().map(|c| c.len_utf8()).sum();
+            let lower_count: usize = ch.to_lowercase().map(char::len_utf8).sum();
             if lower_count == ch_len {
                 for lower_ch in ch.to_lowercase() {
                     let mut buf = [0u8; 4];

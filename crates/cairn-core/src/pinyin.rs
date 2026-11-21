@@ -6,8 +6,8 @@
 
 use crate::pinyin_data::{CJK_SYLLABLE_INDEX, SYLLABLES};
 use crate::text_match::{
-    is_combining_mark, is_punctuation_char, normalize_for_match, strip_diacritics_char,
-    TextMatchOptions,
+    TextMatchOptions, is_combining_mark, is_punctuation_char, normalize_for_match,
+    strip_diacritics_char,
 };
 
 const CJK_START: u32 = 0x4E00;
@@ -193,10 +193,10 @@ pub fn pinyin_matches_with_options(haystack: &str, query: &str, opts: TextMatchO
                 if advance_syllable(p, rem, q_pos, next) {
                     return true;
                 }
-                if let Some(alias) = umlaut_alias(p) {
-                    if advance_syllable(alias, rem, q_pos, next) {
-                        return true;
-                    }
+                if let Some(alias) = umlaut_alias(p)
+                    && advance_syllable(alias, rem, q_pos, next)
+                {
+                    return true;
                 }
             }
             for &extra in extras {
@@ -204,10 +204,10 @@ pub fn pinyin_matches_with_options(haystack: &str, query: &str, opts: TextMatchO
                     if advance_syllable(extra, rem, q_pos, next) {
                         return true;
                     }
-                    if let Some(alias) = umlaut_alias(extra) {
-                        if advance_syllable(alias, rem, q_pos, next) {
-                            return true;
-                        }
+                    if let Some(alias) = umlaut_alias(extra)
+                        && advance_syllable(alias, rem, q_pos, next)
+                    {
+                        return true;
                     }
                 }
             }

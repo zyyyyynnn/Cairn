@@ -9,7 +9,7 @@
 //! start is a second copy of this same executable, launched elevated with `--start-service`, so the
 //! consent dialog names Cairn and carries its icon instead of naming a system tool.
 
-use crate::service::elevation::{run_elevated_self, ElevationError};
+use crate::service::elevation::{ElevationError, run_elevated_self};
 
 /// The installed service name, shared with the service, the installer and the WiX template;
 /// the value itself lives in `cairn_protocol::message`.
@@ -64,10 +64,10 @@ pub enum ServiceState {
 /// Reads the service registration: whether it exists and whether it runs.
 #[cfg(windows)]
 pub fn service_state() -> ServiceState {
-    use windows::core::HSTRING;
     use windows::Win32::System::Services::{
         CloseServiceHandle, OpenSCManagerW, OpenServiceW, SC_MANAGER_CONNECT, SERVICE_QUERY_STATUS,
     };
+    use windows::core::HSTRING;
 
     // SAFETY: every SCM handle is opened and closed inside this function.
     unsafe {
@@ -133,12 +133,12 @@ fn start_service_exit_code() -> u32 {
     // SAFETY: every handle opened here is closed before returning, and StartServiceW only asks SCM
     // to transition the already-registered service.
     unsafe {
-        use windows::core::HSTRING;
         use windows::Win32::Foundation::GetLastError;
         use windows::Win32::System::Services::{
-            CloseServiceHandle, OpenSCManagerW, OpenServiceW, StartServiceW, SC_MANAGER_CONNECT,
-            SERVICE_START,
+            CloseServiceHandle, OpenSCManagerW, OpenServiceW, SC_MANAGER_CONNECT, SERVICE_START,
+            StartServiceW,
         };
+        use windows::core::HSTRING;
 
         let Ok(scm) = OpenSCManagerW(None, None, SC_MANAGER_CONNECT) else {
             return GetLastError().0;

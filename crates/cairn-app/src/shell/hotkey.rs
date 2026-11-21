@@ -42,8 +42,6 @@ pub(crate) fn register() -> Result<GlobalHotkey, String> {
 
 #[cfg(test)]
 mod tests {
-    use core::prelude::rust_2021::test;
-
     use super::default_hotkey;
     use global_hotkey::hotkey::{Code, Modifiers};
 

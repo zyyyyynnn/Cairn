@@ -13,7 +13,7 @@
 use std::path::Path;
 
 #[cfg(windows)]
-use crate::win32::{to_wide_literal, win32_code_from_hresult, WIN32_ERROR_USER_CANCELLED};
+use crate::win32::{WIN32_ERROR_USER_CANCELLED, to_wide_literal, win32_code_from_hresult};
 
 /// Why an explicit elevation request did not complete.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -38,11 +38,11 @@ pub enum ElevationError {
 /// and the elevated copy accepts exactly one action and refuses anything else.
 #[cfg(windows)]
 pub fn run_elevated_self(parameters: &str) -> Result<u32, ElevationError> {
-    use windows::core::PCWSTR;
     use windows::Win32::Foundation::{CloseHandle, GetLastError, WAIT_OBJECT_0};
-    use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject, INFINITE};
-    use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
+    use windows::Win32::System::Threading::{GetExitCodeProcess, INFINITE, WaitForSingleObject};
+    use windows::Win32::UI::Shell::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
     use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
+    use windows::core::PCWSTR;
 
     let helper_failed =
         |os_error: Option<u32>, message: String| ElevationError::Failed { os_error, message };
@@ -188,9 +188,9 @@ pub fn launch_elevated_installer(
     installer: &Path,
     expected_sha256: &str,
 ) -> Result<(), ElevationError> {
-    use windows::core::PCWSTR;
-    use windows::Win32::UI::Shell::{ShellExecuteExW, SHELLEXECUTEINFOW};
+    use windows::Win32::UI::Shell::{SHELLEXECUTEINFOW, ShellExecuteExW};
     use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
+    use windows::core::PCWSTR;
 
     if !installer.is_file() {
         return Err(ElevationError::Failed {

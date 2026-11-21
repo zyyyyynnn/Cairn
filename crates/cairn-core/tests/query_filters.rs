@@ -11,10 +11,10 @@
 //! exact hit count so a query that silently degrades to "the whole library" cannot pass.
 
 use cairn_core::arena::NamePool;
-use cairn_core::engine::{execute_query, CancellationToken};
-use cairn_core::model::{FileRecord, FLAG_DIRECTORY};
+use cairn_core::engine::{CancellationToken, execute_query};
+use cairn_core::model::{FLAG_DIRECTORY, FileRecord};
 use cairn_core::path_cache::DirectoryPathCache;
-use cairn_core::syntax::{parse_query_with, QueryDefaults};
+use cairn_core::syntax::{QueryDefaults, parse_query_with};
 
 const KB: u64 = 1024;
 const MB: u64 = 1024 * KB;

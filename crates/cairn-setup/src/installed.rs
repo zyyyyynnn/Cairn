@@ -9,15 +9,15 @@
 
 use std::path::PathBuf;
 
-use windows::core::PCWSTR;
 use windows::Win32::Foundation::{ERROR_NO_MORE_ITEMS, ERROR_SUCCESS};
 use windows::Win32::System::ApplicationInstallationAndServicing::{
-    MsiEnumRelatedProductsW, MsiGetProductInfoW, INSTALLPROPERTY_INSTALLLOCATION,
-    INSTALLPROPERTY_VERSIONSTRING,
+    INSTALLPROPERTY_INSTALLLOCATION, INSTALLPROPERTY_VERSIONSTRING, MsiEnumRelatedProductsW,
+    MsiGetProductInfoW,
 };
 use windows::Win32::System::Registry::{KEY_WOW64_32KEY, KEY_WOW64_64KEY, RRF_RT_REG_SZ};
+use windows::core::PCWSTR;
 
-use crate::model::{default_install_dir, InstalledProduct};
+use crate::model::{InstalledProduct, default_install_dir};
 use crate::msi::LegacyUninstall;
 use crate::registry::{read_hklm_string, subkeys, wide};
 
@@ -68,9 +68,7 @@ pub fn installed_product() -> Option<InstalledProduct> {
     }
     Some(InstalledProduct {
         version: version.unwrap_or_default(),
-        install_dir: install_dir
-            .map(PathBuf::from)
-            .unwrap_or_else(default_install_dir),
+        install_dir: install_dir.map_or_else(default_install_dir, PathBuf::from),
         // The MSI registration is authoritative. A custom ARP key without a product code is a
         // leftover, not an uninstallable product; setup treats it as a repair case.
         product_code: None,
@@ -82,7 +80,7 @@ pub(crate) fn upgrade_code_guid() -> String {
     format!("{{{}}}", crate::MSI_UPGRADE_CODE)
 }
 
-/// The ProductCode of the installed Cairn MSI, if any. This is what the uninstaller passes to
+/// The `ProductCode` of the installed Cairn MSI, if any. This is what the uninstaller passes to
 /// `MsiConfigureProductW`; it is not guessed from a version string.
 pub fn find_product_code() -> Option<String> {
     find_product_codes().into_iter().next()
@@ -228,7 +226,7 @@ fn utf16_until_nul(buffer: &[u16]) -> String {
 }
 
 /// Splits the command string recorded in the old bundle's uninstall entry into a program and its
-/// arguments. The syntax is the Windows CreateProcess form, not a shell script.
+/// arguments. The syntax is the Windows `CreateProcess` form, not a shell script.
 pub fn split_command_line(input: &str) -> Vec<String> {
     let mut parts = Vec::new();
     let mut current = String::new();

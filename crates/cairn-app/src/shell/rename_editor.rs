@@ -5,9 +5,9 @@
 //! In-place rename editor: opening on the single selected result, submitting the typed name to
 //! the shell, and settling the row and focus when the write answers (UI-05).
 
-use crate::app::{join_row_path, CairnApp};
+use crate::app::{CairnApp, join_row_path};
 use crate::shell::commands::RenameSelected;
-use crate::shell::os::{rename_path, BinErrorKind};
+use crate::shell::os::{BinErrorKind, rename_path};
 use crate::shell::rename::{RenameDraft, RenameError};
 use fluent_bundle::FluentArgs;
 use gpui_kit::gpui::*;
@@ -19,7 +19,7 @@ impl CairnApp {
         &mut self,
         _: &RenameSelected,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         if self.rename.in_flight {
             return;
@@ -60,7 +60,7 @@ impl CairnApp {
     }
 
     /// Drops the draft; the editor is a transient surface, not a location.
-    pub(crate) fn discard_rename(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn discard_rename(&mut self, cx: &mut Context<'_, Self>) {
         if self.rename.draft.take().is_some() {
             self.dismiss_rename_error_toast(cx);
         }
@@ -68,7 +68,7 @@ impl CairnApp {
 
     /// Drops the draft when the selection no longer sits on its row, so Enter,
     /// Escape and the row commands act on the visible selection.
-    pub(crate) fn discard_rename_off_row(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn discard_rename_off_row(&mut self, cx: &mut Context<'_, Self>) {
         let Some(draft_path) = self.rename.draft.as_ref().map(|draft| draft.path.clone()) else {
             return;
         };
@@ -83,7 +83,7 @@ impl CairnApp {
 
     /// Drops the draft when a reloaded window no longer contains its row; the
     /// editor cannot stay open on a row the table no longer shows.
-    pub(crate) fn discard_rename_if_row_unloaded(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn discard_rename_if_row_unloaded(&mut self, cx: &mut Context<'_, Self>) {
         let Some(draft_path) = self.rename.draft.as_ref().map(|draft| draft.path.clone()) else {
             return;
         };
@@ -100,7 +100,7 @@ impl CairnApp {
 
     /// Keeps the draft's text in step with the input and retires the previous rejection as soon as
     /// the person edits.
-    pub(crate) fn rename_text_changed(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn rename_text_changed(&mut self, cx: &mut Context<'_, Self>) {
         if self.rename.draft.is_none() {
             return;
         }
@@ -114,7 +114,7 @@ impl CairnApp {
 
     /// Closes the editor without writing and hands the keyboard back to the
     /// table. Escape is the only cancel; a blur keeps the draft.
-    pub(crate) fn cancel_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn cancel_rename(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         if self.rename.draft.take().is_none() {
             return;
         }
@@ -125,7 +125,7 @@ impl CairnApp {
 
     /// Validates the edited name and starts the shell write on its own COM apartment. The draft
     /// stays open with a visible error when the name is rejected or the shell refuses the write.
-    pub(crate) fn commit_rename(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn commit_rename(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) {
         if self.rename.in_flight {
             return;
         }
@@ -199,7 +199,7 @@ impl CairnApp {
         .detach();
     }
 
-    fn show_rename_error(&mut self, error: RenameError, cx: &mut Context<Self>) {
+    fn show_rename_error(&mut self, error: RenameError, cx: &mut Context<'_, Self>) {
         if matches!(error, RenameError::Cancelled) {
             return;
         }
@@ -208,7 +208,7 @@ impl CairnApp {
         self.show_error_toast(title, message, cx);
     }
 
-    fn dismiss_rename_error_toast(&mut self, cx: &mut Context<Self>) {
+    fn dismiss_rename_error_toast(&mut self, cx: &mut Context<'_, Self>) {
         let title = self.i18n.get_text("rename_failed_title");
         self.dismiss_toast_titled(&title, cx);
     }
@@ -254,7 +254,6 @@ mod tests {
     use super::shell_failure_key;
     use crate::app::CairnApp;
     use crate::shell::commands::{EscapeQuery, OpenSelected, RenameSelected};
-    use core::prelude::rust_2021::test;
     use gpui_kit::gpui::AppContext as _;
 
     #[test]

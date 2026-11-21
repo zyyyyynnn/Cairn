@@ -52,7 +52,7 @@ impl CairnApp {
     pub(super) fn render_empty_state(
         &self,
         tokens: &ShellTokens,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) -> ControlElement {
         if self.recycle_bin.error().is_some() {
             let control = accessibility::control("recycle-bin-error");
@@ -218,7 +218,7 @@ impl CairnApp {
                         .on_click(cx.listener(move |this, _, window, cx| {
                             match notice {
                                 Some(ContentQueryNotice::Unreadable) => {
-                                    this.refresh_content_status(cx)
+                                    this.refresh_content_status(cx);
                                 }
                                 _ => this.set_content_index_enabled(true, cx),
                             }
@@ -237,7 +237,7 @@ impl CairnApp {
     pub(super) fn render_service_offline_state(
         &self,
         tokens: &ShellTokens,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) -> ControlElement {
         let issue = self
             .service
@@ -293,9 +293,7 @@ impl CairnApp {
 
 #[cfg(test)]
 mod tests {
-    use core::prelude::rust_2021::test;
-
-    use super::{content_query_notice, ContentQueryNotice};
+    use super::{ContentQueryNotice, content_query_notice};
     use crate::shell::menu_rules::SubsystemMenuAccess;
     use cairn_protocol::status::{ContentIndexState, IndexJournalStatus, PropertyIndexStatus};
 

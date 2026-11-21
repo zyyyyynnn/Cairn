@@ -23,22 +23,20 @@ pub fn quiet_setup(restart_app: bool, expected_sha256: Option<String>) -> i32 {
 
     // The payload is extracted before the up-to-date answer because that answer depends on the
     // build the payload carries: equal versions with different ProductCodes are different builds.
-    let (msi, payload_dir) = match msi_for_this_build(expected_sha256.as_deref()) {
-        Ok(value) => value,
-        Err(_) => return EXIT_ERROR,
+    let Ok((msi, payload_dir)) = msi_for_this_build(expected_sha256.as_deref()) else {
+        return EXIT_ERROR;
     };
     let package_code = msi::package_product_code(&msi);
 
-    if let Some(product) = &installed {
-        if legacy.is_empty()
-            && (product.is_same_build(package_code.as_deref()) || product.is_newer_than_package())
-        {
-            let _ = std::fs::remove_dir_all(&payload_dir);
-            if restart_app {
-                relaunch(&product.install_dir);
-            }
-            return EXIT_OK;
+    if let Some(product) = &installed
+        && legacy.is_empty()
+        && (product.is_same_build(package_code.as_deref()) || product.is_newer_than_package())
+    {
+        let _ = std::fs::remove_dir_all(&payload_dir);
+        if restart_app {
+            relaunch(&product.install_dir);
         }
+        return EXIT_OK;
     }
 
     let install_dir = installed
@@ -47,9 +45,8 @@ pub fn quiet_setup(restart_app: bool, expected_sha256: Option<String>) -> i32 {
         .filter(|path| validate_install_path(&path.to_string_lossy()).is_ok())
         .unwrap_or_else(default_install_dir);
     let app_dir = install_dir.clone();
-    let log = match platform::install_log_path() {
-        Ok(log) => log,
-        Err(_) => return EXIT_ERROR,
+    let Ok(log) = platform::install_log_path() else {
+        return EXIT_ERROR;
     };
 
     let request = InstallRequest {
@@ -85,13 +82,11 @@ pub fn quiet_uninstall() -> i32 {
         return EXIT_OK;
     };
 
-    let log = match platform::uninstall_log_path() {
-        Ok(log) => log,
-        Err(_) => return EXIT_ERROR,
+    let Ok(log) = platform::uninstall_log_path() else {
+        return EXIT_ERROR;
     };
-    let product_codes = match installed::find_product_codes_checked() {
-        Ok(codes) => codes,
-        Err(_) => return EXIT_ERROR,
+    let Ok(product_codes) = installed::find_product_codes_checked() else {
+        return EXIT_ERROR;
     };
     if product_codes.is_empty() {
         return finish_with_cleanup(&product.install_dir, &[], &log);
@@ -161,13 +156,13 @@ pub(crate) fn msi_for_this_build(
         // Release builds always use the payload appended to this executable; an elevated process
         // never installs an arbitrary user-writable path. An update handoff is never overridden.
         #[cfg(debug_assertions)]
-        if expected_sha256.is_none() {
-            if let Some(path) = std::env::var_os("CAIRN_SETUP_MSI_PATH") {
-                let path = PathBuf::from(path);
-                if path.is_file() {
-                    std::fs::copy(&path, &msi).map_err(payload::PayloadError::Io)?;
-                    return Ok(());
-                }
+        if expected_sha256.is_none()
+            && let Some(path) = std::env::var_os("CAIRN_SETUP_MSI_PATH")
+        {
+            let path = PathBuf::from(path);
+            if path.is_file() {
+                std::fs::copy(&path, &msi).map_err(payload::PayloadError::Io)?;
+                return Ok(());
             }
         }
 

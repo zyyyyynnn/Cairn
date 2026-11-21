@@ -4,14 +4,14 @@
 
 //! Manual in-app updates: read the latest stable GitHub release, download the installer and its
 //! checksum, verify it, then hand off to the silent installer. The installer restarts Cairn; the
-//! target version is kept in LocalAppData so the next launch can report success or failure.
+//! target version is kept in `LocalAppData` so the next launch can report success or failure.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::app::CairnApp;
 use crate::service::elevation::{
-    launch_elevated_installer, lock_verified_installer, ElevationError,
+    ElevationError, launch_elevated_installer, lock_verified_installer,
 };
 use crate::service::ipc_tasks::get_tokio_runtime;
 use crate::shell::command_groups::MenuGroup;
@@ -220,8 +220,7 @@ fn parse_checksum(sums: &str, file: &str) -> Option<String> {
 
 fn updates_dir() -> PathBuf {
     std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
+        .map_or_else(std::env::temp_dir, PathBuf::from)
         .join("Cairn")
         .join("updates")
 }
@@ -229,21 +228,20 @@ fn updates_dir() -> PathBuf {
 fn pending_version_path() -> PathBuf {
     updates_dir()
         .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(std::env::temp_dir)
+        .map_or_else(std::env::temp_dir, Path::to_path_buf)
         .join(PENDING_VERSION_FILE)
 }
 
 fn write_pending_version(version: &str) {
     let path = pending_version_path();
-    if let Some(parent) = path.parent() {
-        if let Err(err) = std::fs::create_dir_all(parent) {
-            tracing::warn!(
-                "Failed to create pending-update directory {}: {err}",
-                parent.display()
-            );
-            return;
-        }
+    if let Some(parent) = path.parent()
+        && let Err(err) = std::fs::create_dir_all(parent)
+    {
+        tracing::warn!(
+            "Failed to create pending-update directory {}: {err}",
+            parent.display()
+        );
+        return;
     }
     if let Err(err) = std::fs::write(&path, version) {
         tracing::warn!(
@@ -278,7 +276,7 @@ impl CairnApp {
     pub(crate) fn schedule_startup_notices(
         &mut self,
         hotkey_unavailable: bool,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         let (tx, rx) = tokio::sync::oneshot::channel();
         get_tokio_runtime().spawn_blocking(move || {
@@ -302,7 +300,7 @@ impl CairnApp {
     }
 
     #[cfg(not(test))]
-    fn show_update_notice_for(&mut self, target: &str, cx: &mut Context<Self>) -> bool {
+    fn show_update_notice_for(&mut self, target: &str, cx: &mut Context<'_, Self>) -> bool {
         if target.is_empty() {
             return false;
         }
@@ -320,18 +318,18 @@ impl CairnApp {
         true
     }
 
-    pub(crate) fn start_update_check(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn start_update_check(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         self.start_update_check_with_menu(window, cx, true);
     }
 
-    fn start_update_check_from_toast(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn start_update_check_from_toast(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         self.start_update_check_with_menu(window, cx, false);
     }
 
     fn start_update_check_with_menu(
         &mut self,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
         reopen_help: bool,
     ) {
         if !self.begin_update_check(window, cx, reopen_help) {
@@ -364,7 +362,7 @@ impl CairnApp {
     fn begin_update_check(
         &mut self,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
         reopen_help: bool,
     ) -> bool {
         if self.is_checking_update {
@@ -389,7 +387,7 @@ impl CairnApp {
     fn finish_update_check(
         &mut self,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
         result: Result<Option<ReleaseInfo>, UpdateError>,
     ) {
         self.is_checking_update = false;
@@ -458,7 +456,7 @@ impl CairnApp {
     fn start_update_download(
         &mut self,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
         release: ReleaseInfo,
     ) {
         let title = self.i18n.get_text("update_installing_title");
@@ -487,7 +485,7 @@ impl CairnApp {
 
     fn finish_update_download(
         &mut self,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
         release: ReleaseInfo,
         result: Result<(PathBuf, String), UpdateError>,
     ) {
@@ -508,7 +506,7 @@ impl CairnApp {
 
     fn install_downloaded(
         &mut self,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
         release: ReleaseInfo,
         path: PathBuf,
         expected_sha256: String,
@@ -571,7 +569,7 @@ impl CairnApp {
         title: String,
         body: String,
         release: ReleaseInfo,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         let retry = ToastAction::new(
             self.i18n.get_text("update_retry"),
@@ -592,8 +590,8 @@ fn version_args(version: &str) -> FluentArgs<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        check_latest, is_newer, normalize_version, parse_checksum, release_from_json, safe_version,
-        UpdateError,
+        UpdateError, check_latest, is_newer, normalize_version, parse_checksum, release_from_json,
+        safe_version,
     };
     use crate::shell::i18n::I18nManager;
     use fluent_bundle::FluentArgs;
@@ -722,10 +720,11 @@ mod tests {
                             this.toast.is_none(),
                             "the checking phase belongs to the Help menu row"
                         );
-                        assert!(this
-                            .open_group_menu
-                            .as_ref()
-                            .is_some_and(|menu| menu.group == MenuGroup::Help));
+                        assert!(
+                            this.open_group_menu
+                                .as_ref()
+                                .is_some_and(|menu| menu.group == MenuGroup::Help)
+                        );
                     });
                     cx.quit();
                     app

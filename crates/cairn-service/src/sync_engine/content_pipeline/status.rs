@@ -5,15 +5,15 @@
 //! Content index lifecycle: searcher access, published status, backfill marker and commands.
 
 use super::{
-    BackfillMarker, BatchOutcome, ContentCommand, CONTENT_BACKFILL_MARKER,
-    CONTENT_BACKFILL_MARKER_TMP, CONTENT_BACKFILL_SCHEMA,
+    BackfillMarker, BatchOutcome, CONTENT_BACKFILL_MARKER, CONTENT_BACKFILL_MARKER_TMP,
+    CONTENT_BACKFILL_SCHEMA, ContentCommand,
 };
 use cairn_content::{ContentIndexError, ContentSearcher, ContentWriter};
 use cairn_protocol::status::{ContentIndexState, ContentIndexStatus};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::config::ServiceConfig;
@@ -325,7 +325,7 @@ impl MultiVolumeEngine {
         match command {
             ContentCommand::Start => self.run_full_backfill(),
             ContentCommand::IndexChanges { tasks, deletions } => {
-                self.run_incremental(tasks, deletions)
+                self.run_incremental(&tasks, &deletions);
             }
             ContentCommand::Cancel => {
                 self.content_cancel.store(true, Ordering::SeqCst);
@@ -434,7 +434,7 @@ impl MultiVolumeEngine {
     /// searcher and its Ready state keep answering from the last committed snapshot, while the
     /// resume marker is removed because the drained USN changes will not be replayed on the next
     /// start; that start performs a full backfill and repairs the gap.
-    pub(super) fn keep_last_content_snapshot(&self, error: String) {
+    pub(super) fn keep_last_content_snapshot(&self, error: &str) {
         self.remove_backfill_marker();
         tracing::warn!(
             "content incremental batch failed; keeping the last committed snapshot: {error}"

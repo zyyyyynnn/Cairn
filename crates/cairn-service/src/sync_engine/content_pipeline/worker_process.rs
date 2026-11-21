@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Worker process surface: locating, spawning, bounding and collecting CairnWorker batches.
+//! Worker process surface: locating, spawning, bounding and collecting `CairnWorker` batches.
 
 use super::BatchOutcome;
 use cairn_protocol::status::ContentIndexTask;
@@ -22,7 +22,7 @@ const CONTENT_WORKER_TIMEOUT: Duration = Duration::from_secs(300);
 fn lower_worker_priority(child: &std::process::Child) {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Threading::{
-        OpenProcess, SetPriorityClass, PROCESS_MODE_BACKGROUND_BEGIN, PROCESS_SET_INFORMATION,
+        OpenProcess, PROCESS_MODE_BACKGROUND_BEGIN, PROCESS_SET_INFORMATION, SetPriorityClass,
     };
 
     // SAFETY: the handle is opened for the child this process just spawned and is closed below.
@@ -167,11 +167,11 @@ impl MultiVolumeEngine {
             remove_worker_files(&cleanup_paths);
             return BatchOutcome::failed(err);
         }
-        if let Some(path) = &delete_path {
-            if let Err(err) = write_json_lines(path, deletions) {
-                remove_worker_files(&cleanup_paths);
-                return BatchOutcome::failed(err);
-            }
+        if let Some(path) = &delete_path
+            && let Err(err) = write_json_lines(path, deletions)
+        {
+            remove_worker_files(&cleanup_paths);
+            return BatchOutcome::failed(err);
         }
 
         let cfg = self.get_config();

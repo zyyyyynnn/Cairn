@@ -4,12 +4,12 @@
 
 //! One adapter for the HKLM reads shared by setup start-up and the uninstaller.
 
-use windows::core::PCWSTR;
 use windows::Win32::Foundation::{ERROR_NO_MORE_ITEMS, ERROR_SUCCESS};
 use windows::Win32::System::Registry::{
-    RegCloseKey, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW, HKEY, HKEY_LOCAL_MACHINE, KEY_READ,
-    REG_ROUTINE_FLAGS, REG_SAM_FLAGS,
+    HKEY, HKEY_LOCAL_MACHINE, KEY_READ, REG_ROUTINE_FLAGS, REG_SAM_FLAGS, RegCloseKey,
+    RegEnumKeyExW, RegGetValueW, RegOpenKeyExW,
 };
+use windows::core::PCWSTR;
 
 pub(crate) fn wide(value: &std::ffi::OsStr) -> Vec<u16> {
     use std::os::windows::ffi::OsStrExt;

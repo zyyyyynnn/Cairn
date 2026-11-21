@@ -288,7 +288,7 @@ pub fn visible_range(
     start..end
 }
 
-/// Maximum number of rows retained in memory by TableState to prevent unbounded allocation.
+/// Maximum number of rows retained in memory by `TableState` to prevent unbounded allocation.
 pub const MAX_LOADED_ROWS: usize = 2000;
 
 /// Row model plus selection, sort and viewport state for the result table.
@@ -844,11 +844,9 @@ pub fn format_timestamp(ts: i64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use core::prelude::rust_2021::test;
-
     use super::{
-        format_timestamp, visible_range, ColumnBoundary, ColumnWidths, SortColumn, TableState,
-        OVERSCAN_ROWS,
+        ColumnBoundary, ColumnWidths, OVERSCAN_ROWS, SortColumn, TableState, format_timestamp,
+        visible_range,
     };
     use cairn_protocol::message::FileRowData;
 
@@ -1476,9 +1474,11 @@ mod tests {
         );
 
         assert_eq!(table.loaded_range(), offset..offset + limit);
-        assert!(visible
-            .clone()
-            .all(|ix| table.row(ix).is_some_and(|r| r.name.starts_with("fresh"))));
+        assert!(
+            visible
+                .clone()
+                .all(|ix| table.row(ix).is_some_and(|r| r.name.starts_with("fresh")))
+        );
     }
 
     /// A top-anchored refresh only invalidates the rows below its first page. A viewport that stays

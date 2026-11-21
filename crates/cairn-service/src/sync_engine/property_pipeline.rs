@@ -12,19 +12,19 @@
 use super::folder_source::FolderSource;
 use super::property_refresh::{PropertyRefresh, PropertyRefreshHandles};
 use super::volume_index::VolumeIndex;
-use super::{unix_now_secs, MultiVolumeEngine, SourceTableView};
+use super::{MultiVolumeEngine, SourceTableView, unix_now_secs};
 use crate::config::ServiceConfig;
 use crate::exclusion::{ExclusionPath, ExclusionRules};
 use cairn_core::model::FileRecord;
-use cairn_core::property_store::{PropertySideTables, SourceId, PROPERTY_INDEX_EXTENSIONS};
+use cairn_core::property_store::{PROPERTY_INDEX_EXTENSIONS, PropertySideTables, SourceId};
 use cairn_protocol::status::{
     ContentIndexState, PropertyExtractResult, PropertyExtractTask, PropertyIndexStatus,
 };
-use cairn_worker::isolation::{extract_with_isolation, IsolationOutcome};
+use cairn_worker::isolation::{IsolationOutcome, extract_with_isolation};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 const PROPERTY_BATCH_SIZE: usize = 64;
@@ -92,17 +92,19 @@ impl MultiVolumeEngine {
         let engine = Arc::clone(self);
         let spawned = std::thread::Builder::new()
             .name("cairn-property-extract".to_string())
-            .spawn(move || loop {
-                {
-                    let _guard = PropertyRunGuard(&engine.property_running);
-                    while engine.can_run_queued_property_extraction() {
-                        engine.run_property_extraction();
+            .spawn(move || {
+                loop {
+                    {
+                        let _guard = PropertyRunGuard(&engine.property_running);
+                        while engine.can_run_queued_property_extraction() {
+                            engine.run_property_extraction();
+                        }
                     }
-                }
-                if !engine.can_run_queued_property_extraction()
-                    || engine.property_running.swap(true, Ordering::SeqCst)
-                {
-                    break;
+                    if !engine.can_run_queued_property_extraction()
+                        || engine.property_running.swap(true, Ordering::SeqCst)
+                    {
+                        break;
+                    }
                 }
             });
         if spawned.is_err() {
@@ -499,7 +501,11 @@ impl MultiVolumeEngine {
         planned
     }
 
-    fn process_property_chunk(&self, chunk: &[PropertyExtractTask], run: &mut PropertyExtraction) {
+    fn process_property_chunk(
+        &self,
+        chunk: &[PropertyExtractTask],
+        run: &mut PropertyExtraction<'_>,
+    ) {
         if chunk.is_empty() || run.cancel.load(Ordering::SeqCst) {
             return;
         }
@@ -654,11 +660,11 @@ impl PropertyCollector {
         }
         let mut live_keys = HashSet::new();
         for (index, record) in view.records.iter().enumerate() {
-            if let Some(task) = self.task_for_source(source_id, view, index as u32, record) {
-                if seen.insert((source_id.0, record.frn)) {
-                    live_keys.insert(record.frn);
-                    planned.tasks.push(task);
-                }
+            if let Some(task) = self.task_for_source(source_id, view, index as u32, record)
+                && seen.insert((source_id.0, record.frn))
+            {
+                live_keys.insert(record.frn);
+                planned.tasks.push(task);
             }
         }
         planned.source_live_keys.push((source_id, live_keys));
@@ -1238,9 +1244,11 @@ mod tests {
 
         let initial_tasks = full_plan_tasks(&engine);
         assert_eq!(initial_tasks.len(), 2);
-        assert!(initial_tasks
-            .iter()
-            .any(|t| t.record_key == 20 && t.path.eq_ignore_ascii_case(r"C:\Docs\visible.png")));
+        assert!(
+            initial_tasks
+                .iter()
+                .any(|t| t.record_key == 20 && t.path.eq_ignore_ascii_case(r"C:\Docs\visible.png"))
+        );
         assert!(initial_tasks.iter().any(
             |t| t.record_key == 30 && t.path.eq_ignore_ascii_case(r"C:\Docs\album\nested.png")
         ));

@@ -5,8 +5,8 @@
 //! Text extraction trait and implementations for plain text, Office, and PDF documents.
 
 use crate::detector::decode_bytes_to_string;
-use quick_xml::events::Event;
 use quick_xml::Reader as XmlReader;
+use quick_xml::events::Event;
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
@@ -138,8 +138,7 @@ impl TextExtractor for PlainTextExtractor {
         let file = open_no_follow(path)?;
         let cap = file
             .metadata()
-            .map(|m| (m.len() as usize).min(max_bytes))
-            .unwrap_or(0);
+            .map_or(0, |m| (m.len() as usize).min(max_bytes));
         let mut buffer = Vec::with_capacity(cap);
         file.take(max_bytes as u64).read_to_end(&mut buffer)?;
         let mut text = decode_bytes_to_string(&buffer);
@@ -243,15 +242,15 @@ impl TextExtractor for PdfExtractor {
         let file = open_no_follow(path)?;
         let budget = extractor_input_budget(max_bytes);
         let file_len = file.metadata().map(|m| m.len()).ok();
-        if let Some(len) = file_len {
-            if len > budget as u64 {
-                return Err(ExtractError::Pdf(format!(
-                    "PDF size {len} exceeds read budget {budget}"
-                )));
-            }
+        if let Some(len) = file_len
+            && len > budget as u64
+        {
+            return Err(ExtractError::Pdf(format!(
+                "PDF size {len} exceeds read budget {budget}"
+            )));
         }
 
-        let cap = file_len.map(|len| (len as usize).min(budget)).unwrap_or(0);
+        let cap = file_len.map_or(0, |len| (len as usize).min(budget));
         let mut buffer = Vec::with_capacity(cap);
         file.take(budget as u64 + 1).read_to_end(&mut buffer)?;
         if buffer.len() > budget {

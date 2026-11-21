@@ -380,18 +380,16 @@ pub struct CairnApp {
 
 impl CairnApp {
     #[cfg(test)]
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let bundle = crate::startup::StartupCoordinator::prepare(
-            Vec::new(),
-            &crate::startup::SystemBootstrapPorts,
-        );
+    pub fn new(window: &mut Window, cx: &mut Context<'_, Self>) -> Self {
+        let bundle =
+            crate::startup::StartupCoordinator::prepare(&[], &crate::startup::SystemBootstrapPorts);
         Self::new_with_startup(bundle, window, cx)
     }
 
     pub(crate) fn new_with_startup(
         startup: crate::startup::StartupBundle,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) -> Self {
         crate::shell::perf::mark("app new");
         let crate::startup::StartupBundle {
@@ -612,7 +610,7 @@ impl CairnApp {
     }
 
     /// Starts the results panel's entrance and closes the pending session.
-    pub(crate) fn bump_table_reveal(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn bump_table_reveal(&mut self, cx: &mut Context<'_, Self>) {
         self.table_reveal.generation = self.table_reveal.generation.wrapping_add(1);
         self.table_reveal.pending = false;
         self.table_reveal.fade_epoch = self.table_reveal.generation;
@@ -633,7 +631,7 @@ impl CairnApp {
 
     /// Starts the table entrance once a panel session actually has rows, so the
     /// fade begins with content rather than while the query is still in flight.
-    pub(crate) fn note_table_content(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn note_table_content(&mut self, cx: &mut Context<'_, Self>) {
         if self.table_reveal.pending && self.results.table.total_rows() > 0 {
             self.bump_table_reveal(cx);
         }
@@ -641,13 +639,13 @@ impl CairnApp {
 
     /// Starts the same entrance for a new session whose answer is empty; the
     /// state band is content too, not a reason to leave the old frame static.
-    pub(crate) fn note_table_empty(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn note_table_empty(&mut self, cx: &mut Context<'_, Self>) {
         if self.table_reveal.pending {
             self.bump_table_reveal(cx);
         }
     }
 
-    pub fn set_initial_query(&mut self, text: &str, cx: &mut Context<Self>) {
+    pub fn set_initial_query(&mut self, text: &str, cx: &mut Context<'_, Self>) {
         self.query.search_input.text = text.to_string();
         self.query.search_input.selection = text.len()..text.len();
         self.request_result_set(crate::search::ResultSetChange::Replace, cx);
@@ -716,7 +714,7 @@ pub fn trim_working_set() {}
 /// Hides the main Cairn window to the system tray and aggressively trims the process working set.
 #[cfg(windows)]
 pub fn hide_main_window() {
-    use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
+    use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, ShowWindow};
 
     if let Some(hwnd) = crate::shell::tray::find_main_window() {
         // SAFETY: `hwnd` was found by `find_main_window` for the current process window.
@@ -736,25 +734,23 @@ impl EntityInputHandler for CairnApp {
         range_utf16: Range<usize>,
         adjusted_range: &mut Option<Range<usize>>,
         _window: &mut Window,
-        _cx: &mut Context<Self>,
+        _cx: &mut Context<'_, Self>,
     ) -> Option<String> {
         let mapper = crate::search::input::Utf16Utf8Mapper::new(&self.query.search_input.text);
         let u8_range = mapper.utf16_to_utf8_range(range_utf16.clone());
         let start = u8_range.start.min(self.query.search_input.text.len());
         let end = u8_range.end.min(self.query.search_input.text.len());
-        if start <= end {
+        (start <= end).then(|| {
             *adjusted_range = Some(range_utf16);
-            Some(self.query.search_input.text[start..end].to_string())
-        } else {
-            None
-        }
+            self.query.search_input.text[start..end].to_string()
+        })
     }
 
     fn selected_text_range(
         &mut self,
         _ignore_disabled_input: bool,
         _window: &mut Window,
-        _cx: &mut Context<Self>,
+        _cx: &mut Context<'_, Self>,
     ) -> Option<UTF16Selection> {
         let (start, end) = self.query.search_input.normalized_selection();
         let mapper = crate::search::input::Utf16Utf8Mapper::new(&self.query.search_input.text);
@@ -767,14 +763,14 @@ impl EntityInputHandler for CairnApp {
     fn marked_text_range(
         &self,
         _window: &mut Window,
-        _cx: &mut Context<Self>,
+        _cx: &mut Context<'_, Self>,
     ) -> Option<Range<usize>> {
         let marked = self.query.search_input.marked_range.as_ref()?;
         let mapper = crate::search::input::Utf16Utf8Mapper::new(&self.query.search_input.text);
         Some(mapper.utf8_to_utf16_range(marked.clone()))
     }
 
-    fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) {
         self.query.search_input.marked_range = None;
         cx.notify();
     }
@@ -784,7 +780,7 @@ impl EntityInputHandler for CairnApp {
         replacement_range: Option<Range<usize>>,
         text: &str,
         _window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         self.query
             .search_input
@@ -799,7 +795,7 @@ impl EntityInputHandler for CairnApp {
         new_text: &str,
         new_selected_range: Option<Range<usize>>,
         _window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         self.query
             .search_input
@@ -812,7 +808,7 @@ impl EntityInputHandler for CairnApp {
         range_utf16: Range<usize>,
         element_bounds: Bounds<Pixels>,
         window: &mut Window,
-        _cx: &mut Context<Self>,
+        _cx: &mut Context<'_, Self>,
     ) -> Option<Bounds<Pixels>> {
         // The platform hands us the painted text area; keep it so a click after an IME commit uses
         // this frame's origin rather than a stale one.
@@ -833,7 +829,7 @@ impl EntityInputHandler for CairnApp {
         &mut self,
         point: Point<Pixels>,
         window: &mut Window,
-        _cx: &mut Context<Self>,
+        _cx: &mut Context<'_, Self>,
     ) -> Option<usize> {
         let byte_index = self.query_byte_index_for_point(point, window);
         let mapper = crate::search::input::Utf16Utf8Mapper::new(&self.query.search_input.text);
@@ -844,7 +840,7 @@ impl EntityInputHandler for CairnApp {
         &mut self,
         range_utf16: Range<usize>,
         _window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         let mapper = crate::search::input::Utf16Utf8Mapper::new(&self.query.search_input.text);
         self.query.search_input.selection = mapper.utf16_to_utf8_range(range_utf16);
@@ -857,9 +853,7 @@ pub(crate) use tests::test_row;
 
 #[cfg(test)]
 mod tests {
-    use core::prelude::rust_2021::test;
-
-    use super::{join_row_path, CairnApp};
+    use super::{CairnApp, join_row_path};
     use crate::search::ResultSetChange;
     use cairn_protocol::message::{FileRowData, SourceId};
     use cairn_protocol::status::{
@@ -884,7 +878,7 @@ mod tests {
     }
 
     fn with_app(
-        test: impl FnOnce(&mut CairnApp, &mut gpui_kit::gpui::Context<CairnApp>) + 'static,
+        test: impl FnOnce(&mut CairnApp, &mut gpui_kit::gpui::Context<'_, CairnApp>) + 'static,
     ) {
         gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
             gpui_kit::init(cx);

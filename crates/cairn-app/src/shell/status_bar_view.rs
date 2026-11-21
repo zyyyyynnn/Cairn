@@ -4,7 +4,7 @@
 
 //! The bottom status band: the number of objects the current query matched.
 
-use crate::app::{layout, CairnApp};
+use crate::app::{CairnApp, layout};
 use crate::search::ResultSetChange;
 use crate::shell::accessibility::{self, ControlElement};
 use crate::shell::status_bar::format_count;
@@ -14,7 +14,7 @@ use fluent_bundle::FluentArgs;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::status_bar::StatusBar;
-use gpui_kit::component::{h_flex, Icon, Sizable as _};
+use gpui_kit::component::{Icon, Sizable as _, h_flex};
 use gpui_kit::gpui::*;
 
 /// The band marks a loading state only while the current view has nothing to show.
@@ -35,7 +35,7 @@ impl CairnApp {
         &self,
         tokens: &ShellTokens,
         _window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) -> ControlElement {
         let bar = accessibility::control("status-bar");
         let mut summary: Option<AnyElement> = None;
@@ -156,40 +156,41 @@ impl CairnApp {
             // The window root clears selection on every left press; the idle refresh is a control,
             // not a click on the canvas.
             .on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, _, cx| {
-                cx.stop_propagation()
+                cx.stop_propagation();
             })
             .child(refresh);
 
         let mut right: Option<AnyElement> = None;
         let in_index_table = !self.recycle_bin.is_open();
-        if in_index_table && !summary_loading {
-            if let Some(degraded) = &self.query.degraded {
-                let notice = match degraded {
-                    QueryDegradedReason::PropertyIndexDisabled { .. } => {
-                        self.cached_text("query_degraded_property_index")
-                    }
-                };
-                summary_aria = Some(match summary_aria.take() {
-                    Some(existing) => format!("{existing} {notice}"),
-                    None => notice.to_string(),
-                });
-                right = Some(
-                    h_flex()
-                        .items_center()
-                        .gap(rems(layout::SPACE_4))
-                        .flex_shrink_0()
-                        .text_sm()
-                        .text_color(tokens.warning_ink)
-                        .child(
-                            Icon::new(IconName::TriangleAlert)
-                                .xsmall()
-                                .flex_shrink_0()
-                                .text_color(tokens.warning_ink),
-                        )
-                        .child(notice)
-                        .into_any_element(),
-                );
-            }
+        if in_index_table
+            && !summary_loading
+            && let Some(degraded) = &self.query.degraded
+        {
+            let notice = match degraded {
+                QueryDegradedReason::PropertyIndexDisabled { .. } => {
+                    self.cached_text("query_degraded_property_index")
+                }
+            };
+            summary_aria = Some(match summary_aria.take() {
+                Some(existing) => format!("{existing} {notice}"),
+                None => notice.to_string(),
+            });
+            right = Some(
+                h_flex()
+                    .items_center()
+                    .gap(rems(layout::SPACE_4))
+                    .flex_shrink_0()
+                    .text_sm()
+                    .text_color(tokens.warning_ink)
+                    .child(
+                        Icon::new(IconName::TriangleAlert)
+                            .xsmall()
+                            .flex_shrink_0()
+                            .text_color(tokens.warning_ink),
+                    )
+                    .child(notice)
+                    .into_any_element(),
+            );
         }
 
         // Opt-in acceptance trace (`CAIRN_PERF_LOG`): the visible summary and the loading state,
@@ -200,14 +201,16 @@ impl CairnApp {
             self.query.query_id(),
         ));
 
-        let aria_summary: SharedString =
-            summary_aria.map(SharedString::from).unwrap_or_else(|| {
+        let aria_summary: SharedString = summary_aria.map_or_else(
+            || {
                 if summary_loading {
                     self.cached_text("status_loading")
                 } else {
                     self.cached_text("status_refresh")
                 }
-            });
+            },
+            SharedString::from,
+        );
 
         let mut left = h_flex()
             .min_w_0()
@@ -243,7 +246,7 @@ impl CairnApp {
             .child(status_bar)
     }
 
-    pub(crate) fn refresh_current_view(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn refresh_current_view(&mut self, cx: &mut Context<'_, Self>) {
         if self.recycle_bin.is_open() {
             self.begin_recycle_bin_load(cx);
             cx.notify();

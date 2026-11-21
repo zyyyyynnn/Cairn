@@ -267,12 +267,11 @@ pub fn results_region_bindings() -> Vec<(&'static str, &'static str)> {
 
 #[cfg(test)]
 mod keymap_table {
-    // The same shadow the headless module above documents: `super::*` reaches GPUI's `test` attribute
-    // macro through this crate's prelude, and expanding a built-in `#[test]` with it recurses until
-    // rustc overflows its own stack. Re-importing the built-in wins over the glob.
-    use core::prelude::rust_2021::test;
-
-    use super::*;
+    use super::{
+        KeyBindingEntry, RESULTS_CONTEXT, ResetZoom, ToggleSidebar, ToggleWholeWord,
+        WINDOW_CONTEXT, ZoomIn, ZoomOut, key_bindings, results_region_bindings,
+    };
+    use gpui_kit::gpui::Action;
 
     /// `left`, `right`, `home` and `end` move the columns, and the query box is where the window's
     /// focus normally sits. Bound to the window context they resolve before the box ever sees them, so

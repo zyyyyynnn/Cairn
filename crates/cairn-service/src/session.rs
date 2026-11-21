@@ -215,7 +215,7 @@ impl SessionManager {
         &self,
         owner: QueryOwner,
         rows: MatchSet,
-        highlight_terms: Vec<String>,
+        highlight_terms: &[String],
         snippets: HashMap<(u32, u64), Vec<String>>,
     ) -> u64 {
         let session_id = self.next_session_id.fetch_add(1, Ordering::Relaxed);
@@ -235,13 +235,14 @@ impl SessionManager {
             lock.len() >= self.max_sessions
                 || total_items.saturating_add(new_items) > MAX_TOTAL_CACHED_ITEMS
         } {
-            if let Some((&oldest_id, _)) = lock.iter().min_by_key(|(&id, s)| {
+            if let Some((oldest_id, _)) = lock.iter().min_by_key(|(id, s)| {
                 (
                     s.last_accessed_nanos.load(Ordering::Relaxed),
                     s.created_nanos,
-                    id,
+                    *id,
                 )
             }) {
+                let oldest_id = *oldest_id;
                 lock.remove(&oldest_id);
             } else {
                 break;
@@ -362,7 +363,7 @@ fn rows_for_all_files(
                 sources
                     .properties
                     .get(view.source_id, frn, modified_ts)
-                    .map(|v| v.to_owned())
+                    .map(cairn_core::RecordPropertyView::to_owned)
             },
         ) {
             rows.push(row);
@@ -432,7 +433,7 @@ fn rows_for_items(
                 sources
                     .properties
                     .get(item.source_id, frn, modified_ts)
-                    .map(|v| v.to_owned())
+                    .map(cairn_core::RecordPropertyView::to_owned)
             },
         ) {
             rows.push(row);
@@ -523,9 +524,11 @@ mod tests {
             sessions.get_rows_multi(&owner(2), session_id, 0, 10, &tables),
             Err(RowsError::UnknownSession)
         );
-        assert!(sessions
-            .get_rows_multi(&owner(1), session_id, 0, 10, &tables)
-            .is_ok());
+        assert!(
+            sessions
+                .get_rows_multi(&owner(1), session_id, 0, 10, &tables)
+                .is_ok()
+        );
     }
 
     fn create_items(
@@ -533,7 +536,7 @@ mod tests {
         owner: QueryOwner,
         items: Vec<SearchResultItem>,
     ) -> u64 {
-        sessions.create_session(owner, MatchSet::Items(items), Vec::new(), HashMap::new())
+        sessions.create_session(owner, MatchSet::Items(items), &[], HashMap::new())
     }
 
     fn three_file_volume() -> VolumeIndex {
@@ -594,12 +597,7 @@ mod tests {
         let sessions = SessionManager::default();
         let vol = three_file_volume();
         let (view, volumes) = all_files_view(vol, cairn_core::sort::SortColumn::Name, true, &[]);
-        let id = sessions.create_session(
-            owner(7),
-            MatchSet::AllFiles(view),
-            Vec::new(),
-            HashMap::new(),
-        );
+        let id = sessions.create_session(owner(7), MatchSet::AllFiles(view), &[], HashMap::new());
 
         let first = get_rows(&sessions, id, 0, 2, &volumes).expect("first page");
         assert_eq!(first.len(), 2);
@@ -623,12 +621,7 @@ mod tests {
             true,
             &["$Recycle.Bin".to_string()],
         );
-        let id = sessions.create_session(
-            owner(7),
-            MatchSet::AllFiles(view),
-            Vec::new(),
-            HashMap::new(),
-        );
+        let id = sessions.create_session(owner(7), MatchSet::AllFiles(view), &[], HashMap::new());
 
         volumes
             .get_mut(&'C')
@@ -668,12 +661,7 @@ mod tests {
         let sessions = SessionManager::default();
         let vol = three_file_volume();
         let (view, volumes) = all_files_view(vol, cairn_core::sort::SortColumn::Name, false, &[]);
-        let id = sessions.create_session(
-            owner(7),
-            MatchSet::AllFiles(view),
-            Vec::new(),
-            HashMap::new(),
-        );
+        let id = sessions.create_session(owner(7), MatchSet::AllFiles(view), &[], HashMap::new());
         let page = get_rows(&sessions, id, 0, 2, &volumes).expect("first page");
         assert_eq!(page[0].name, "c.txt");
         assert_eq!(page[1].name, "b.txt");
@@ -686,12 +674,7 @@ mod tests {
         let sessions = SessionManager::default();
         let vol = three_file_volume();
         let (view, volumes) = all_files_view(vol, cairn_core::sort::SortColumn::Name, true, &[]);
-        let id = sessions.create_session(
-            owner(7),
-            MatchSet::AllFiles(view),
-            Vec::new(),
-            HashMap::new(),
-        );
+        let id = sessions.create_session(owner(7), MatchSet::AllFiles(view), &[], HashMap::new());
 
         let mut volumes = volumes;
         volumes
@@ -785,19 +768,19 @@ mod tests {
             },
         );
         let vol = volume_with("notes.txt");
-        let gen = vol.generation();
+        let generation = vol.generation();
         let volumes = HashMap::from([('C', vol)]);
 
-        let s1 = create_items(&sessions, owner(7), vec![item(gen)]);
+        let s1 = create_items(&sessions, owner(7), vec![item(generation)]);
         clock.advance(Duration::from_millis(20));
-        let s2 = create_items(&sessions, owner(7), vec![item(gen)]);
+        let s2 = create_items(&sessions, owner(7), vec![item(generation)]);
 
         // Access s1, making s2 the least recently accessed
         clock.advance(Duration::from_millis(20));
         assert!(get_rows(&sessions, s1, 0, 10, &volumes).is_ok());
 
         // Create s3: capacity is 2, so s2 should be evicted because s1 was accessed more recently
-        let s3 = create_items(&sessions, owner(7), vec![item(gen)]);
+        let s3 = create_items(&sessions, owner(7), vec![item(generation)]);
 
         assert!(get_rows(&sessions, s1, 0, 10, &volumes).is_ok());
         assert_eq!(
@@ -818,12 +801,12 @@ mod tests {
             },
         );
         let vol = volume_with("notes.txt");
-        let gen = vol.generation();
+        let generation = vol.generation();
         let volumes = HashMap::from([('C', vol)]);
 
-        let s1 = create_items(&sessions, owner(7), vec![item(gen)]);
+        let s1 = create_items(&sessions, owner(7), vec![item(generation)]);
         clock.advance(Duration::from_secs(299));
-        let _s2 = create_items(&sessions, owner(7), vec![item(gen)]);
+        let _s2 = create_items(&sessions, owner(7), vec![item(generation)]);
         assert!(
             get_rows(&sessions, s1, 0, 10, &volumes).is_ok(),
             "session accessed before TTL must stay live"
@@ -831,7 +814,7 @@ mod tests {
 
         // Accessing s1 reset its idle timer; advance full 300s to cross expiry.
         clock.advance(Duration::from_secs(300));
-        let _s3 = create_items(&sessions, owner(7), vec![item(gen)]);
+        let _s3 = create_items(&sessions, owner(7), vec![item(generation)]);
         assert_eq!(
             get_rows(&sessions, s1, 0, 10, &volumes),
             Err(RowsError::UnknownSession)
@@ -849,12 +832,12 @@ mod tests {
             },
         ));
         let vol = volume_with("notes.txt");
-        let gen = vol.generation();
+        let generation = vol.generation();
         let volumes = std::sync::Arc::new(HashMap::from([('C', vol)]));
 
-        let s1 = create_items(&sessions, owner(7), vec![item(gen)]);
+        let s1 = create_items(&sessions, owner(7), vec![item(generation)]);
         clock.advance(Duration::from_secs(1));
-        let s2 = create_items(&sessions, owner(7), vec![item(gen)]);
+        let s2 = create_items(&sessions, owner(7), vec![item(generation)]);
         clock.advance(Duration::from_secs(1));
 
         std::thread::scope(|scope| {
@@ -869,7 +852,7 @@ mod tests {
             }
         });
 
-        let _s3 = create_items(&sessions, owner(7), vec![item(gen)]);
+        let _s3 = create_items(&sessions, owner(7), vec![item(generation)]);
         assert!(get_rows(&sessions, s1, 0, 10, &volumes).is_ok());
         assert_eq!(
             get_rows(&sessions, s2, 0, 10, &volumes),
@@ -1009,7 +992,7 @@ mod tests {
                 (name == "report.mp4").then_some((i as u32, rec.frn, rec.modified_ts))
             })
             .expect("indexed report.mp4");
-        let gen = source.generation();
+        let generation = source.generation();
 
         let mut props = PropertySideTables::new(true);
         let expected_props = RecordPropertyData {
@@ -1033,9 +1016,9 @@ mod tests {
             MatchSet::Items(vec![SearchResultItem {
                 source_id,
                 record_idx: idx,
-                generation: gen,
+                generation,
             }]),
-            vec!["report".to_string()],
+            &["report".to_string()],
             snippets,
         );
 

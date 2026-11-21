@@ -5,8 +5,8 @@
 //! Journal reconciliation: aligns live NTFS change journal with MFT scan snapshots
 //! to prove freshness before declaring an index Synced (SPEC IDX-05, IDX-07).
 
-use super::post_scan::{apply_post_scan_decision, post_scan_decision};
 use super::VolumeIndex;
+use super::post_scan::{apply_post_scan_decision, post_scan_decision};
 use cairn_protocol::status::VolumeState;
 use std::path::Path;
 

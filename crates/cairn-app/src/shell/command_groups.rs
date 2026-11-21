@@ -338,8 +338,8 @@ impl GroupCommand {
     /// item and its shortcut on one implementation.
     ///
     /// A command with no Action of its own — every choice in a single-owner family such as the sort
-    /// columns, the settings choices, the headings, and ClearQuery — returns `None` and the view
-    /// wires its click to the owner method directly. ClearQuery's key is the dismissal cascade
+    /// columns, the settings choices, the headings, and `ClearQuery` — returns `None` and the view
+    /// wires its click to the owner method directly. `ClearQuery`'s key is the dismissal cascade
     /// rather than this command, so it advertises the key through [`Self::hint_action`].
     pub fn action(self) -> Option<Box<dyn Action>> {
         match self {
@@ -367,7 +367,7 @@ impl GroupCommand {
 
     /// The Action whose binding supplies this row's hint while the click runs the command.
     ///
-    /// ClearQuery is click-only: Escape belongs to the window's dismissal cascade, so dispatching
+    /// `ClearQuery` is click-only: Escape belongs to the window's dismissal cascade, so dispatching
     /// it from the Edit menu would close the menu (or a toast) and leave the query in place. The
     /// row still advertises Escape through this hint, without dispatching it.
     pub fn hint_action(self) -> Option<Box<dyn Action>> {
@@ -631,11 +631,9 @@ pub fn all_commands() -> Vec<GroupCommand> {
 
 #[cfg(test)]
 mod tests {
-    use core::prelude::rust_2021::test;
-
     use super::{
-        all_commands, group_spec, menu_groups, GroupCommand, MenuGroup, ZoomPreset,
-        CONTENT_INDEX_SECTIONS, PROPERTY_INDEX_SECTIONS, RESCAN_SECTIONS,
+        CONTENT_INDEX_SECTIONS, GroupCommand, MenuGroup, PROPERTY_INDEX_SECTIONS, RESCAN_SECTIONS,
+        ZoomPreset, all_commands, group_spec, menu_groups,
     };
     use crate::shell::i18n::I18nManager;
     use crate::table::model::{SortColumn, TableColumn};
@@ -703,9 +701,11 @@ mod tests {
             "Tools keeps only language and autostart"
         );
         assert!(tool_commands.contains(&GroupCommand::ToggleAutostart));
-        assert!(tool_commands
-            .iter()
-            .any(|cmd| matches!(cmd, GroupCommand::Submenu("settings_section_language", _))));
+        assert!(
+            tool_commands
+                .iter()
+                .any(|cmd| matches!(cmd, GroupCommand::Submenu("settings_section_language", _)))
+        );
 
         let index = group_spec(MenuGroup::Index);
         let index_commands: Vec<GroupCommand> = index
@@ -953,7 +953,7 @@ mod tests {
     }
 
     /// The Edit menu's 清空搜索 row dispatches the command itself; Escape is only the hint beside
-    /// its label. Dispatching EscapeQuery would close the menu and return before touching the query.
+    /// its label. Dispatching `EscapeQuery` would close the menu and return before touching the query.
     #[test]
     fn clear_query_runs_as_a_command_and_borrows_escape_only_as_a_hint() {
         use crate::shell::commands::EscapeQuery;

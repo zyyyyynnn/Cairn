@@ -221,11 +221,11 @@ pub fn default_settings_path() -> PathBuf {
 /// Configures current-user autostart via Windows Registry HKCU Run key (SET-03).
 #[cfg(windows)]
 pub fn set_autostart_registry(enable: bool) -> Result<(), Box<dyn std::error::Error>> {
-    use windows::core::w;
     use windows::Win32::System::Registry::{
-        RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegSetValueExW, HKEY_CURRENT_USER,
-        KEY_SET_VALUE, REG_SZ,
+        HKEY_CURRENT_USER, KEY_SET_VALUE, REG_SZ, RegCloseKey, RegDeleteValueW, RegOpenKeyExW,
+        RegSetValueExW,
     };
+    use windows::core::w;
 
     let subkey = w!(r"Software\Microsoft\Windows\CurrentVersion\Run");
     let value_name = w!("Cairn");
@@ -236,7 +236,7 @@ pub fn set_autostart_registry(enable: bool) -> Result<(), Box<dyn std::error::Er
         let mut hkey = windows::Win32::System::Registry::HKEY::default();
         let status = RegOpenKeyExW(HKEY_CURRENT_USER, subkey, None, KEY_SET_VALUE, &mut hkey);
         if status.is_err() {
-            return Err(format!("RegOpenKeyExW failed with code {:?}", status).into());
+            return Err(format!("RegOpenKeyExW failed with code {status:?}").into());
         }
 
         if enable {
@@ -256,7 +256,7 @@ pub fn set_autostart_registry(enable: bool) -> Result<(), Box<dyn std::error::Er
             );
             let _ = RegCloseKey(hkey);
             if res.is_err() {
-                return Err(format!("RegSetValueExW failed: {:?}", res).into());
+                return Err(format!("RegSetValueExW failed: {res:?}").into());
             }
         } else {
             let _ = RegDeleteValueW(hkey, value_name);

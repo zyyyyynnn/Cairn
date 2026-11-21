@@ -113,12 +113,11 @@ fn links_in(text: &str) -> Vec<(usize, String)> {
             }
             rest = &after[end + 1..];
         }
-        if let Some(rest) = line.trim_start().strip_prefix('[') {
-            if let Some((_, target)) = rest.split_once("]: ") {
-                if let Some(target) = link_target(target) {
-                    links.push((index + 1, target));
-                }
-            }
+        if let Some(rest) = line.trim_start().strip_prefix('[')
+            && let Some((_, target)) = rest.split_once("]: ")
+            && let Some(target) = link_target(target)
+        {
+            links.push((index + 1, target));
         }
     }
     links
@@ -161,7 +160,7 @@ fn resolve_link(workspace: &Path, source: &Path, target: &str) -> Option<PathBuf
 
 #[cfg(test)]
 mod tests {
-    use super::{check_docs, links_in, REQUIRED};
+    use super::{REQUIRED, check_docs, links_in};
 
     #[test]
     fn fenced_code_and_external_links_are_not_targets() {

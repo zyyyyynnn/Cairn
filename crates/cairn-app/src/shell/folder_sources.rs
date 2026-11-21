@@ -5,7 +5,7 @@
 //! Folder sources: the sidebar section that scopes a query to one indexed folder, and the
 //! manager dialog that adds, rescans and removes folder sources.
 
-use crate::app::{element_id, layout, CairnApp};
+use crate::app::{CairnApp, element_id, layout};
 use crate::shell::dialogs;
 use crate::shell::i18n::I18nManager;
 use crate::shell::theme::{self, ShellTokens};
@@ -15,7 +15,7 @@ use gpui_kit::base::Disableable;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::dialog::{DialogEntrance, DialogFooter};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, Icon, Sizable as _, WindowExt as _};
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::*;
 use std::cell::Cell;
@@ -57,7 +57,11 @@ pub(crate) struct FolderSourcesDialogView {
 }
 
 impl FolderSourcesDialogView {
-    pub(crate) fn new(app: Entity<CairnApp>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(
+        app: Entity<CairnApp>,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> Self {
         let placeholder = app
             .read(cx)
             .i18n
@@ -89,7 +93,7 @@ impl FolderSourcesDialogView {
         self.input.read(cx).value().trim().to_string()
     }
 
-    fn submit_add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn submit_add(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let path = self.input_value(cx);
         if path.is_empty() || self.app.read(cx).service.folder_source_action_pending {
             return;
@@ -104,7 +108,7 @@ impl FolderSourcesDialogView {
         &mut self,
         source_id: cairn_protocol::message::SourceId,
         path: String,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         if self.app.read(cx).service.folder_source_action_pending {
             return;
@@ -117,7 +121,7 @@ impl FolderSourcesDialogView {
         &mut self,
         source_id: cairn_protocol::message::SourceId,
         label: String,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         let app = self.app.read(cx);
         if app.service.connection.is_control_pending() || app.service.folder_source_action_pending {
@@ -134,7 +138,7 @@ impl FolderSourcesDialogView {
         tokens: &ShellTokens,
         busy: bool,
         window: &Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let status = source_state_label(i18n, source.status);
         let rescan_label = i18n.get_text("folder_sources_rescan");
@@ -206,7 +210,7 @@ impl FolderSourcesDialogView {
                 .disabled(busy)
                 .on_click(move |_, _, cx| {
                     view_rescan.update(cx, |this, cx| {
-                        this.rescan_source(source_id, rescan_path.clone(), cx)
+                        this.rescan_source(source_id, rescan_path.clone(), cx);
                     });
                 }),
             )
@@ -223,7 +227,7 @@ impl FolderSourcesDialogView {
                 .disabled(busy)
                 .on_click(move |_, _, cx| {
                     view_remove.update(cx, |this, cx| {
-                        this.remove_source(source_id, remove_path.clone(), cx)
+                        this.remove_source(source_id, remove_path.clone(), cx);
                     });
                 }),
             )
@@ -233,7 +237,7 @@ impl FolderSourcesDialogView {
 }
 
 impl Render for FolderSourcesDialogView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let tokens = ShellTokens::current(cx);
         let app = self.app.read(cx);
         let i18n = app.i18n.clone();
@@ -277,12 +281,14 @@ impl Render for FolderSourcesDialogView {
             );
 
         let list: Vec<AnyElement> = if sources.is_empty() {
-            vec![div()
-                .py(rems(layout::SPACE_8))
-                .text_sm()
-                .text_color(tokens.muted_foreground)
-                .child(empty_label)
-                .into_any_element()]
+            vec![
+                div()
+                    .py(rems(layout::SPACE_8))
+                    .text_sm()
+                    .text_color(tokens.muted_foreground)
+                    .child(empty_label)
+                    .into_any_element(),
+            ]
         } else {
             sources
                 .iter()
@@ -318,7 +324,7 @@ impl CairnApp {
     pub(crate) fn select_folder_source(
         &mut self,
         source_id: cairn_protocol::message::SourceId,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         if !self
             .service
@@ -350,7 +356,7 @@ impl CairnApp {
     pub(crate) fn open_folder_sources_dialog(
         &mut self,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         self.close_group();
         self.refresh_sources(cx);
@@ -388,12 +394,11 @@ impl CairnApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{folder_source_summaries, source_state_key, FolderSourcesDialogView};
+    use super::{FolderSourcesDialogView, folder_source_summaries, source_state_key};
     use crate::app::CairnApp;
     use crate::shell::i18n::I18nManager;
     use cairn_protocol::message::SourceId;
     use cairn_protocol::status::{SourceKind, SourceStatusSummary, VolumeState};
-    use core::prelude::rust_2021::test;
     use gpui_kit::gpui::AppContext as _;
 
     fn source(id: u32, kind: SourceKind, status: VolumeState, root: &str) -> SourceStatusSummary {
@@ -447,11 +452,11 @@ mod tests {
 
     fn with_dialog(
         test: impl FnOnce(
-                &gpui_kit::gpui::Entity<CairnApp>,
-                &gpui_kit::gpui::Entity<FolderSourcesDialogView>,
-                &mut gpui_kit::gpui::Window,
-                &mut gpui_kit::gpui::App,
-            ) + 'static,
+            &gpui_kit::gpui::Entity<CairnApp>,
+            &gpui_kit::gpui::Entity<FolderSourcesDialogView>,
+            &mut gpui_kit::gpui::Window,
+            &mut gpui_kit::gpui::App,
+        ) + 'static,
     ) {
         gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
             gpui_kit::init(cx);
@@ -506,7 +511,7 @@ mod tests {
             );
 
             app.update(cx, |app, _| {
-                app.service.folder_source_action_pending = false
+                app.service.folder_source_action_pending = false;
             });
             dialog.update(cx, |dialog, cx| dialog.submit_add(window, cx));
             assert!(app.read(cx).service.folder_source_action_pending);
@@ -518,7 +523,7 @@ mod tests {
     fn removing_a_row_starts_a_remove_request() {
         with_dialog(|app, dialog, _window, cx| {
             dialog.update(cx, |dialog, cx| {
-                dialog.remove_source(SourceId(1000), r"D:\Work".to_string(), cx)
+                dialog.remove_source(SourceId(1000), r"D:\Work".to_string(), cx);
             });
             assert!(app.read(cx).service.folder_source_action_pending);
         });

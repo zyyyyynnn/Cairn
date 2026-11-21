@@ -10,8 +10,8 @@
 #![forbid(unsafe_code)]
 
 use cairn_core::property_store::RecordPropertyData;
-use quick_xml::events::Event;
 use quick_xml::Reader;
+use quick_xml::events::Event;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
@@ -26,7 +26,7 @@ pub fn extract_file_properties(path: &Path) -> Option<RecordPropertyData> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
-        .map(|s| s.to_ascii_lowercase())?;
+        .map(str::to_ascii_lowercase)?;
     if !cairn_core::property_store::PROPERTY_INDEX_EXTENSIONS.contains(&ext.as_str()) {
         return None;
     }
@@ -126,7 +126,7 @@ fn read_capped<R: Read>(reader: &mut R, max_bytes: usize) -> Option<Vec<u8>> {
     Some(buf)
 }
 
-fn clean_opt_text(value: String) -> Option<String> {
+fn clean_opt_text(value: &str) -> Option<String> {
     let trimmed = value.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
@@ -383,11 +383,11 @@ fn parse_vorbis_comments(body: &[u8], out: &mut RecordPropertyData) {
         if let Some((k, v)) = entry.split_once('=') {
             let key = k.trim().to_ascii_uppercase();
             if matches!(key.as_str(), "ARTIST" | "AUTHOR" | "ALBUMARTIST") && out.author.is_none() {
-                out.author = clean_opt_text(v.to_string());
-            } else if matches!(key.as_str(), "GENRE" | "TAGS" | "KEYWORDS") {
-                if let Some(clean) = clean_opt_text(v.to_string()) {
-                    tags.push(clean);
-                }
+                out.author = clean_opt_text(v);
+            } else if matches!(key.as_str(), "GENRE" | "TAGS" | "KEYWORDS")
+                && let Some(clean) = clean_opt_text(v)
+            {
+                tags.push(clean);
             }
         }
     }
@@ -458,10 +458,10 @@ fn parse_id3v2_frames(tag: &[u8], major: u8, out: &mut RecordPropertyData) {
         pos += size;
         if matches!(id, b"TPE1" | b"TPE2" | b"TCOM") && out.author.is_none() {
             out.author = decode_id3_text(payload);
-        } else if matches!(id, b"TCON" | b"TIT1") {
-            if let Some(text) = decode_id3_text(payload) {
-                tags.push(text);
-            }
+        } else if matches!(id, b"TCON" | b"TIT1")
+            && let Some(text) = decode_id3_text(payload)
+        {
+            tags.push(text);
         }
     }
     if out.tags.is_none() && !tags.is_empty() {
@@ -502,7 +502,7 @@ fn decode_id3_text(payload: &[u8]) -> Option<String> {
         }
         _ => return None,
     };
-    clean_opt_text(decoded.trim_matches('\0').to_string())
+    clean_opt_text(decoded.trim_matches('\0'))
 }
 
 fn find_mp3_frame(bytes: &[u8]) -> Option<usize> {
@@ -717,12 +717,12 @@ fn parse_mp4_trak(trak: &[u8], out: &mut RecordPropertyData) {
     if (is_video || sample_delta.is_some()) && out.dimensions.is_none() {
         out.dimensions = dims;
     }
-    if is_video || out.dimensions.is_some() {
-        if let (Some(ts), Some(delta)) = (timescale, sample_delta) {
-            let mfps = (u64::from(ts) * 1000 + u64::from(delta) / 2) / u64::from(delta);
-            if mfps > 0 && out.framerate_mfps.is_none() {
-                out.framerate_mfps = u32::try_from(mfps).ok();
-            }
+    if (is_video || out.dimensions.is_some())
+        && let (Some(ts), Some(delta)) = (timescale, sample_delta)
+    {
+        let mfps = (u64::from(ts) * 1000 + u64::from(delta) / 2) / u64::from(delta);
+        if mfps > 0 && out.framerate_mfps.is_none() {
+            out.framerate_mfps = u32::try_from(mfps).ok();
         }
     }
 }
@@ -735,8 +735,8 @@ fn extract_mp4_ilst_text(atom: &[u8]) -> Option<String> {
             break;
         }
         if &atom[pos + 4..pos + 8] == b"data" && size > 16 {
-            let text = String::from_utf8_lossy(&atom[pos + 16..pos + size]).into_owned();
-            return clean_opt_text(text);
+            let text = String::from_utf8_lossy(&atom[pos + 16..pos + size]);
+            return clean_opt_text(&text);
         }
         pos += size;
     }
@@ -745,19 +745,30 @@ fn extract_mp4_ilst_text(atom: &[u8]) -> Option<String> {
 
 fn parse_zip_office<R: Read + Seek>(reader: R) -> Option<RecordPropertyData> {
     let mut archive = zip::ZipArchive::new(reader).ok()?;
+    let read_options = zip::read::ZipReadOptions::new().enforce_header_consistency(true);
+    let mut xml_bytes = Vec::new();
     for entry_name in ["docProps/core.xml", "meta.xml"] {
-        let Ok(entry) = archive.by_name(entry_name) else {
+        let Ok(entry) = archive.by_name_with_options(entry_name, read_options.clone()) else {
             continue;
         };
         if entry.size() > MAX_XML_ENTRY_BYTES {
             continue;
         }
-        let mut xml = String::new();
-        entry
-            .take(MAX_XML_ENTRY_BYTES)
-            .read_to_string(&mut xml)
-            .ok()?;
-        let data = parse_core_properties_xml(&xml);
+        xml_bytes.clear();
+        if entry
+            .take(MAX_XML_ENTRY_BYTES + 1)
+            .read_to_end(&mut xml_bytes)
+            .is_err()
+        {
+            continue;
+        }
+        if xml_bytes.len() > MAX_XML_ENTRY_BYTES as usize {
+            continue;
+        }
+        let Ok(xml) = std::str::from_utf8(&xml_bytes) else {
+            continue;
+        };
+        let data = parse_core_properties_xml(xml);
         if !data.is_empty() {
             return Some(data);
         }
@@ -768,14 +779,26 @@ fn parse_zip_office<R: Read + Seek>(reader: R) -> Option<RecordPropertyData> {
 fn parse_core_properties_xml(xml: &str) -> RecordPropertyData {
     let mut reader = Reader::from_str(xml);
     let mut current: Option<&'static str> = None;
+    let mut pending: Option<std::borrow::Cow<'_, str>> = None;
     let mut creator = None;
     let mut keywords = None;
     let mut subject = None;
-    let mut buf = Vec::new();
+
+    let mut commit_field = |field: &str, raw: &str| {
+        if let Some(clean) = clean_opt_text(raw) {
+            match field {
+                "creator" if creator.is_none() => creator = Some(clean),
+                "keywords" => keywords = Some(clean),
+                "subject" if subject.is_none() => subject = Some(clean),
+                _ => {}
+            }
+        }
+    };
 
     loop {
-        match reader.read_event_into(&mut buf) {
+        match reader.read_event() {
             Ok(Event::Start(tag)) => {
+                pending = None;
                 current = match tag.name().as_ref() {
                     "dc:creator" | "meta:initial-creator" => Some("creator"),
                     "cp:keywords" | "meta:keyword" => Some("keywords"),
@@ -783,26 +806,52 @@ fn parse_core_properties_xml(xml: &str) -> RecordPropertyData {
                     _ => None,
                 };
             }
-            Ok(Event::End(_)) => current = None,
-            Ok(Event::Text(text)) => {
-                if let Some(field) = current {
-                    let raw = quick_xml::escape::unescape(text.as_ref())
-                        .map(|s| s.into_owned())
-                        .unwrap_or_else(|_| text.as_ref().to_string());
-                    if let Some(clean) = clean_opt_text(raw) {
-                        match field {
-                            "creator" if creator.is_none() => creator = Some(clean),
-                            "keywords" => keywords = Some(clean),
-                            "subject" if subject.is_none() => subject = Some(clean),
-                            _ => {}
-                        }
+            Ok(Event::End(_)) => {
+                if let (Some(field), Some(raw)) = (current.take(), pending.take()) {
+                    commit_field(field, &raw);
+                }
+            }
+            Ok(Event::Text(text)) if current.is_some() => {
+                let piece = match text.into_inner() {
+                    std::borrow::Cow::Borrowed(s) => {
+                        quick_xml::escape::unescape(s).unwrap_or(std::borrow::Cow::Borrowed(s))
+                    }
+                    owned @ std::borrow::Cow::Owned(_) => owned,
+                };
+                match &mut pending {
+                    None => pending = Some(piece),
+                    Some(acc) => acc.to_mut().push_str(&piece),
+                }
+            }
+            Ok(Event::GeneralRef(entity)) if current.is_some() => {
+                if let Ok(Some(ch)) = entity.resolve_char_ref() {
+                    match &mut pending {
+                        None => pending = Some(std::borrow::Cow::Owned(ch.to_string())),
+                        Some(acc) => acc.to_mut().push(ch),
+                    }
+                } else if let Some(resolved) = match entity.as_ref() {
+                    "amp" => Some("&"),
+                    "lt" => Some("<"),
+                    "gt" => Some(">"),
+                    "apos" => Some("'"),
+                    "quot" => Some("\""),
+                    _ => None,
+                } {
+                    match &mut pending {
+                        None => pending = Some(std::borrow::Cow::Borrowed(resolved)),
+                        Some(acc) => acc.to_mut().push_str(resolved),
                     }
                 }
             }
-            Ok(Event::Eof) | Err(_) => break,
+            Ok(Event::Eof) => {
+                if let (Some(field), Some(raw)) = (current.take(), pending.take()) {
+                    commit_field(field, &raw);
+                }
+                break;
+            }
+            Err(_) => break,
             _ => {}
         }
-        buf.clear();
     }
 
     RecordPropertyData {
@@ -836,9 +885,98 @@ fn read_pdf_text(dict: &lopdf::Dictionary, key: &[u8]) -> Option<String> {
         return None;
     };
     let text = if bytes.starts_with(&[0xFE, 0xFF]) {
-        decode_utf16_bytes(&bytes[2..], false)
+        std::borrow::Cow::Owned(decode_utf16_bytes(&bytes[2..], false))
     } else {
-        String::from_utf8_lossy(bytes).into_owned()
+        String::from_utf8_lossy(bytes)
     };
-    clean_opt_text(text)
+    clean_opt_text(&text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn build_office_zip(
+        entry_name: &str,
+        payload: &[u8],
+        method: zip::CompressionMethod,
+    ) -> Vec<u8> {
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut cursor);
+            let options = zip::write::SimpleFileOptions::default().compression_method(method);
+            writer.start_file(entry_name, options).expect("start entry");
+            writer.write_all(payload).expect("write entry");
+            writer.finish().expect("finish zip");
+        }
+        cursor.into_inner()
+    }
+
+    #[test]
+    fn rejects_oversized_office_xml_entry_without_truncating() {
+        let padding = "x".repeat(MAX_XML_ENTRY_BYTES as usize + 1024);
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <dc:creator>Alice</dc:creator>
+  <dc:description>{padding}</dc:description>
+</cp:coreProperties>"#
+        );
+        let zip_bytes = build_office_zip(
+            "docProps/core.xml",
+            xml.as_bytes(),
+            zip::CompressionMethod::Deflated,
+        );
+        assert_eq!(parse_properties_from_bytes("docx", &zip_bytes), None);
+    }
+
+    #[test]
+    fn rejects_office_zip_with_inconsistent_local_header() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <dc:creator>Alice</dc:creator>
+</cp:coreProperties>"#;
+        let mut zip_bytes = build_office_zip(
+            "docProps/core.xml",
+            xml.as_bytes(),
+            zip::CompressionMethod::Stored,
+        );
+        assert_eq!(
+            parse_properties_from_bytes("docx", &zip_bytes)
+                .and_then(|p| p.author)
+                .as_deref(),
+            Some("Alice")
+        );
+
+        // Mutate the local file header's entry name while leaving the central directory entry
+        // unchanged so header consistency validation rejects the mismatch.
+        let local_name_offset = zip_bytes
+            .windows(b"docProps/core.xml".len())
+            .position(|window| window == b"docProps/core.xml")
+            .expect("local header filename");
+        zip_bytes[local_name_offset..local_name_offset + b"docProps/core.xml".len()]
+            .copy_from_slice(b"docProps/fake.xml");
+
+        assert_eq!(parse_properties_from_bytes("docx", &zip_bytes), None);
+    }
+
+    #[test]
+    fn pdf_text_and_xml_unescape_preserve_decoded_values() {
+        let mut dict = lopdf::Dictionary::new();
+        dict.set("Author", lopdf::Object::string_literal("Alice"));
+        let mut utf16 = vec![0xFE, 0xFF];
+        for unit in "Bob".encode_utf16() {
+            utf16.extend_from_slice(&unit.to_be_bytes());
+        }
+        dict.set("Subject", lopdf::Object::string_literal(utf16));
+        assert_eq!(read_pdf_text(&dict, b"Author").as_deref(), Some("Alice"));
+        assert_eq!(read_pdf_text(&dict, b"Subject").as_deref(), Some("Bob"));
+
+        let parsed = parse_core_properties_xml(
+            r#"<cp:coreProperties><dc:creator>A &amp; B</dc:creator><cp:keywords>one, two</cp:keywords></cp:coreProperties>"#,
+        );
+        assert_eq!(parsed.author.as_deref(), Some("A & B"));
+        assert_eq!(parsed.tags.as_deref(), Some("one, two"));
+    }
 }

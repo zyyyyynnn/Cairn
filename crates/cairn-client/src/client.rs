@@ -4,11 +4,11 @@
 
 //! Named Pipe IPC client for Cairn GUI and CLI applications.
 
-use cairn_protocol::codec::{encode_frame_into, try_decode_frame, CodecError};
+use cairn_protocol::codec::{CodecError, encode_frame_into, try_decode_frame};
 use cairn_protocol::message::{
-    ClientRequest, Envelope, QueryDefaults, ResponsePayload, SortSpec, SourceId,
-    ERROR_CODE_ADMIN_ONLY_QUERY, ERROR_CODE_HANDSHAKE_REQUIRED,
-    ERROR_CODE_PROTOCOL_VERSION_MISMATCH, ERROR_CODE_UNAUTHORIZED, PIPE_NAME, PROTOCOL_VERSION,
+    ClientRequest, ERROR_CODE_ADMIN_ONLY_QUERY, ERROR_CODE_HANDSHAKE_REQUIRED,
+    ERROR_CODE_PROTOCOL_VERSION_MISMATCH, ERROR_CODE_UNAUTHORIZED, Envelope, PIPE_NAME,
+    PROTOCOL_VERSION, QueryDefaults, ResponsePayload, SortSpec, SourceId,
 };
 use std::time::Duration;
 use thiserror::Error;
@@ -533,9 +533,8 @@ mod tests {
     async fn a_missing_pipe_fails_without_waiting_out_the_backoff() {
         let started = std::time::Instant::now();
         let pipe = format!(r"\\.\pipe\cairn.client.missing.{}", std::process::id());
-        let error = match CairnClient::connect_to(&pipe).await {
-            Ok(_) => panic!("a missing pipe cannot connect"),
-            Err(error) => error,
+        let Err(error) = CairnClient::connect_to(&pipe).await else {
+            panic!("a missing pipe cannot connect");
         };
         assert!(matches!(error, ClientError::ConnectFailed(_)));
         assert!(

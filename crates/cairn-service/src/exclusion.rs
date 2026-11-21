@@ -47,7 +47,7 @@ impl ExclusionRule {
         let segments: Vec<String> = cleaned
             .split('\\')
             .filter(|segment| !segment.is_empty())
-            .map(|segment| segment.to_ascii_lowercase())
+            .map(str::to_ascii_lowercase)
             .collect();
         if segments.is_empty() {
             return None;
@@ -165,8 +165,6 @@ impl ExclusionRules {
 
 #[cfg(test)]
 mod tests {
-    use core::prelude::rust_2021::test;
-
     use super::{ExclusionPath, ExclusionRule, ExclusionRules};
 
     fn excluded(path: &str, rule: &str) -> bool {

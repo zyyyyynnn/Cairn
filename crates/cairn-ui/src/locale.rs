@@ -7,6 +7,12 @@
 pub const LANGUAGE_ZH_CN: &str = "zh-CN";
 pub const LANGUAGE_EN_US: &str = "en-US";
 
+/// Forces left-to-right layout globally after `gpui_kit::init` because Cairn only ships
+/// `zh-CN` and `en-US` interfaces.
+pub fn init_layout_direction(cx: &mut gpui_kit::gpui::App) {
+    gpui_kit::base::LayoutDirection::set_global(gpui_kit::base::LayoutDirection::Ltr, cx);
+}
+
 /// The OS UI language, reduced to the two locales Cairn ships. Any non-Chinese UI language uses
 /// the English bundle rather than showing a half-translated third locale.
 pub fn system_language() -> &'static str {
@@ -35,8 +41,8 @@ pub fn system_language() -> &'static str {
 pub fn system_prefers_dark() -> bool {
     #[cfg(windows)]
     {
+        use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
         use windows::core::w;
-        use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
 
         let mut light_theme = 1u32;
         let mut size = std::mem::size_of::<u32>() as u32;
@@ -58,5 +64,24 @@ pub fn system_prefers_dark() -> bool {
     #[cfg(not(windows))]
     {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::init_layout_direction;
+    use gpui_kit::base::LayoutDirection;
+
+    #[test]
+    fn init_layout_direction_forces_ltr_from_rtl() {
+        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
+            gpui_kit::init(cx);
+            LayoutDirection::set_global(LayoutDirection::Rtl, cx);
+            assert_eq!(LayoutDirection::global(cx), LayoutDirection::Rtl);
+
+            init_layout_direction(cx);
+            assert_eq!(LayoutDirection::global(cx), LayoutDirection::Ltr);
+            cx.quit();
+        });
     }
 }
