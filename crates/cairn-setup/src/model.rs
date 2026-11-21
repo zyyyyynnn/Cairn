@@ -8,8 +8,8 @@
 use std::cmp::Ordering;
 use std::path::PathBuf;
 
-pub use crate::install_path::{validate_install_path_under, PathProblem};
 use crate::PRODUCT_VERSION;
+pub use crate::install_path::{PathProblem, validate_install_path_under};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Launch {
@@ -101,8 +101,8 @@ impl InstalledProduct {
         compare_versions(&self.version, PRODUCT_VERSION) == Ordering::Equal
     }
 
-    /// True when the installed copy is this exact build: same version and same ProductCode. A
-    /// package built from another commit keeps the version but carries a new ProductCode, so it is
+    /// True when the installed copy is this exact build: same version and same `ProductCode`. A
+    /// package built from another commit keeps the version but carries a new `ProductCode`, so it is
     /// not "already installed" and has to be installed over the copy on disk.
     pub fn is_same_build(&self, package_product_code: Option<&str>) -> bool {
         if !self.is_same_as_package() {
@@ -175,7 +175,7 @@ pub fn validate_install_path(raw: &str) -> Result<PathBuf, PathProblem> {
 pub fn program_files_root() -> PathBuf {
     #[cfg(windows)]
     {
-        use windows::Win32::UI::Shell::{SHGetFolderPathW, CSIDL_PROGRAM_FILES};
+        use windows::Win32::UI::Shell::{CSIDL_PROGRAM_FILES, SHGetFolderPathW};
 
         let mut buffer = [0u16; 260];
         // SAFETY: `buffer` is a writable stack buffer of MAX_PATH (260) UTF-16 code units as required by SHGetFolderPathW.
@@ -231,12 +231,12 @@ fn version_parts(version: &str) -> Vec<u64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        compare_versions, initial_screen, uninstall_error_key, validate_install_path,
-        InstalledProduct, Launch, PathProblem, Screen,
+        InstalledProduct, Launch, PathProblem, Screen, compare_versions, initial_screen,
+        uninstall_error_key, validate_install_path,
     };
     use std::cmp::Ordering;
 
-    /// An equal version is not enough: a build from another commit carries a new ProductCode and
+    /// An equal version is not enough: a build from another commit carries a new `ProductCode` and
     /// must be installed over the copy on disk.
     #[test]
     fn a_same_version_build_is_only_up_to_date_with_the_same_product_code() {

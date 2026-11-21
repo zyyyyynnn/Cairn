@@ -6,16 +6,16 @@
 
 use crate::arena::NamePool;
 use crate::model::FileRecord;
-use crate::path_cache::{root_path_for_drive, DirectoryPathCache};
+use crate::path_cache::{DirectoryPathCache, root_path_for_drive};
 use crate::pinyin::pinyin_matches_with_options;
 use crate::syntax::{QueryExpr, SearchTerm};
-use crate::text_match::{normalize_for_match, TextMatchOptions};
+use crate::text_match::{TextMatchOptions, normalize_for_match};
 use memchr::memmem::Finder;
 use rayon::prelude::*;
 use regex::Regex;
 use std::ops::Range;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Cooperative cancellation token checked during long scans and sorts.
 #[derive(Clone, Default)]
@@ -343,21 +343,19 @@ impl CompiledGlob {
                     }
                 }
             }
-            if let Some(star_pos) = tokens.iter().position(|&t| t == GlobToken::Star) {
-                if star_pos > 0
-                    && star_pos + 1 < tokens.len()
-                    && tokens[..star_pos]
-                        .iter()
-                        .all(|t| matches!(t, GlobToken::Char(_)))
-                    && tokens[star_pos + 1..]
-                        .iter()
-                        .all(|t| matches!(t, GlobToken::Char(_)))
-                {
-                    let prefix = Self::tokens_to_ascii_bytes(&tokens[..star_pos], case_sensitive)?;
-                    let suffix =
-                        Self::tokens_to_ascii_bytes(&tokens[star_pos + 1..], case_sensitive)?;
-                    return Some(AsciiGlobFast::Affix { prefix, suffix });
-                }
+            if let Some(star_pos) = tokens.iter().position(|&t| t == GlobToken::Star)
+                && star_pos > 0
+                && star_pos + 1 < tokens.len()
+                && tokens[..star_pos]
+                    .iter()
+                    .all(|t| matches!(t, GlobToken::Char(_)))
+                && tokens[star_pos + 1..]
+                    .iter()
+                    .all(|t| matches!(t, GlobToken::Char(_)))
+            {
+                let prefix = Self::tokens_to_ascii_bytes(&tokens[..star_pos], case_sensitive)?;
+                let suffix = Self::tokens_to_ascii_bytes(&tokens[star_pos + 1..], case_sensitive)?;
+                return Some(AsciiGlobFast::Affix { prefix, suffix });
             }
         }
         None
@@ -502,11 +500,8 @@ impl CompiledTermPlan {
         } else {
             None
         };
-        let glob = if term.whole_filename && !term.is_regex {
-            Some(CompiledGlob::compile(&term.text, term.case_sensitive))
-        } else {
-            None
-        };
+        let glob = (term.whole_filename && !term.is_regex)
+            .then(|| CompiledGlob::compile(&term.text, term.case_sensitive));
         let text_opts = TextMatchOptions {
             case_sensitive: term.case_sensitive,
             ignore_punctuation: term.ignore_punctuation,
@@ -519,22 +514,15 @@ impl CompiledTermPlan {
             String::new()
         };
         let normalized_glob =
-            if term.whole_filename && !term.is_regex && text_opts.needs_custom_normalization() {
-                Some(CompiledGlob::compile(&normalized_query, true))
-            } else {
-                None
-            };
-        let ascii_lower_bytes = if term.text.is_ascii() {
-            Some(
-                term.text
-                    .as_bytes()
-                    .iter()
-                    .map(u8::to_ascii_lowercase)
-                    .collect(),
-            )
-        } else {
-            None
-        };
+            (term.whole_filename && !term.is_regex && text_opts.needs_custom_normalization())
+                .then(|| CompiledGlob::compile(&normalized_query, true));
+        let ascii_lower_bytes = term.text.is_ascii().then(|| {
+            term.text
+                .as_bytes()
+                .iter()
+                .map(u8::to_ascii_lowercase)
+                .collect()
+        });
         let lower = term.text.to_lowercase();
         let folded = NamePool::fold_query_bytes(&term.text);
         let finder = Finder::new(&folded).into_owned();
@@ -630,19 +618,18 @@ fn evaluate_compiled_term(
     if (term.folder_only || term.empty_folder_only) && !rec.is_dir() {
         return false;
     }
-    if let Some(af) = term.attrib_filter {
-        if !af.matches(rec.flags) {
-            return false;
-        }
+    if let Some(af) = term.attrib_filter
+        && !af.matches(rec.flags)
+    {
+        return false;
     }
 
-    if let Some(req_drive) = term.drive {
-        if ctx
+    if let Some(req_drive) = term.drive
+        && ctx
             .drive_letter
             .is_none_or(|d| !d.eq_ignore_ascii_case(&req_drive))
-        {
-            return false;
-        }
+    {
+        return false;
     }
 
     if !term.ext_filter.is_empty() {
@@ -670,10 +657,10 @@ fn evaluate_compiled_term(
         }
     }
 
-    if let Some(ref size_filter) = term.size_filter {
-        if !size_filter.matches(rec.size) {
-            return false;
-        }
+    if let Some(ref size_filter) = term.size_filter
+        && !size_filter.matches(rec.size)
+    {
+        return false;
     }
     if let Some(ref len_filter) = term.len_filter {
         let name = ctx.arena.get_name(rec.name_offset, rec.name_len);
@@ -681,15 +668,15 @@ fn evaluate_compiled_term(
             return false;
         }
     }
-    if let Some(ref dm_filter) = term.dm_filter {
-        if !dm_filter.matches(rec.modified_ts) {
-            return false;
-        }
+    if let Some(ref dm_filter) = term.dm_filter
+        && !dm_filter.matches(rec.modified_ts)
+    {
+        return false;
     }
-    if let Some(ref dc_filter) = term.dc_filter {
-        if !dc_filter.matches(rec.created_ts) {
-            return false;
-        }
+    if let Some(ref dc_filter) = term.dc_filter
+        && !dc_filter.matches(rec.created_ts)
+    {
+        return false;
     }
 
     if let Some(ref parent_req) = term.parent_filter {
@@ -1474,7 +1461,7 @@ mod tests {
     /// out of the result set, and with the defaults off the result set is unchanged.
     #[test]
     fn test_attribute_defaults_filter_records() {
-        use crate::syntax::{parse_query_with, QueryDefaults};
+        use crate::syntax::{QueryDefaults, parse_query_with};
 
         let names = ["plain.txt", "secret.txt", "boot.ini", "windows.ini"];
         let (pool, mut records) = records_of(&names);

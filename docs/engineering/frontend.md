@@ -1,7 +1,7 @@
 # 前端与 GPUI 规范
 
 
-本文是 Cairn 在 `gpui-kit 0.9.1` / `gpui-component 0.9.1` 上验证的工程约束。图标、控件和窗口行为会随依赖版本变化；涉及框架内部实现的项目在升级依赖后必须重新复验。
+本文是 Cairn 在 `gpui-kit 0.10.0` / `gpui-component 0.10.0` 上验证的工程约束。图标、控件和窗口行为会随依赖版本变化；涉及框架内部实现的项目在升级依赖后必须重新复验。
 
 ## 布局与尺寸
 
@@ -29,13 +29,16 @@
 16. **Dialog 不能在窗口创建闭包中打开**：`window.open_dialog(...)` 必须由后续用户动作触发，否则会撞上组件窗口状态未初始化。
 17. **Button 的重复 Hover 会 panic**：在主题与全局交互样式中统一配置，不在 `Button` 上重复声明 `.hover()`。
 18. **SidebarMenuItem 高度**：组件在 `refine_style` 后会把高度固定为 `h_7`；外部 `.h()` 可能被吞掉，需要改用 `min-height` 约束。
+19. **加载态按钮需固定图标**：无图标 `Button::loading(true)` 会动态插入默认 `IconName::Loader` spinner 导致按钮宽度跳动；加载态按钮须同时配置固定 `.icon(...)` 与 `.loading_icon(IconName::LoaderCircle)`。
 
 ## 窗口与平台
 
-19. **单实例唤醒匹配产品标题，不匹配共享类名**：GPUI 的窗口类名可能与其他应用共用。当前 Cairn 通过 `EnumWindows` 匹配标题 `Cairn`（或校验进程）后调用 `ShowWindow(SW_RESTORE)`、`BringWindowToTop`、`SetForegroundWindow`；没有活动窗口时允许新实例自愈启动。托盘唤醒走同一路径。
-20. **主题切换分两步**：在同一个 `Theme::update` 中同时修改 mode 与修复颜色可能被丢弃；先切 mode，再在下一步修复颜色。
-21. **UI 验收依赖真实窗口**：当前应用涉及窗口截图、焦点与输入法的验证在真实窗口中完成；`shell/accessibility.rs` 的控件注册表只保证键、角色与文案自洽，控件是否真正按注册表渲染及窗口是否报告对应角色，依赖真实窗口验收。
-22. **Sidebar 的辅助功能边界**：`Sidebar<E>` 不提供独立 a11y 树；不要把它的根节点当成可靠的导航 landmark。需要可访问交互时，由应用层建立显式 role/name/focus 结构。
+20. **单实例唤醒匹配产品标题，不匹配共享类名**：GPUI 的窗口类名可能与其他应用共用。当前 Cairn 通过 `EnumWindows` 匹配标题 `Cairn`（或校验进程）后调用 `ShowWindow(SW_RESTORE)`、`BringWindowToTop`、`SetForegroundWindow`；没有活动窗口时允许新实例自愈启动。托盘唤醒走同一路径。
+21. **主题切换分两步**：在同一个 `Theme::update` 中同时修改 mode 与修复颜色可能被丢弃；先切 mode，再在下一步修复颜色。
+22. **UI 验收依赖真实窗口**：当前应用涉及窗口截图、焦点与输入法的验证在真实窗口中完成；`shell/accessibility.rs` 的控件注册表只保证键、角色与文案自洽，控件是否真正按注册表渲染及窗口是否报告对应角色，依赖真实窗口验收。
+23. **Sidebar 的辅助功能边界**：`Sidebar<E>` 不提供独立 a11y 树；不要把它的根节点当成可靠的导航 landmark。需要可访问交互时，由应用层建立显式 role/name/focus 结构。
+24. **初始化后固定 LTR 布局方向**：`gpui_kit::init(cx)` 会按系统语言自动初始化 `LayoutDirection`；仅提供 `zh-CN`/`en-US` 界面的应用须在 `init` 后显式调用 `cairn_ui::locale::init_layout_direction(cx)` 固定 `LayoutDirection::Ltr`。
+25. **Windows 滚动条外观映射**：在 Windows 上 `Theme::sync_scrollbar_appearance` 将系统自动隐藏滚动条设置映射为 `ScrollbarMode::Hover`（开启自动隐藏）或 `ScrollbarMode::Always`（关闭自动隐藏）。
 
 ## 相关代码
 

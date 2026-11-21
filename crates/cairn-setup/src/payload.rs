@@ -167,8 +167,8 @@ fn extract_payload_from(file: &mut File, destination: &Path) -> Result<(), Paylo
 #[cfg(test)]
 mod tests {
     use super::{
-        append_payload, extract_payload, extract_payload_locked, has_payload, sha256_file,
-        PayloadError,
+        PayloadError, append_payload, extract_payload, extract_payload_locked, has_payload,
+        sha256_file,
     };
 
     fn fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {

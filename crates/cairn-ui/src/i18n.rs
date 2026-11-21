@@ -71,7 +71,12 @@ impl Messages {
     }
 
     /// Formats `key` with `args`; `None` when the message or its value is absent.
-    pub fn format(&self, language: &str, key: &str, args: Option<&FluentArgs>) -> Option<String> {
+    pub fn format(
+        &self,
+        language: &str,
+        key: &str,
+        args: Option<&FluentArgs<'_>>,
+    ) -> Option<String> {
         let bundle = self.bundle(language);
         let pattern = bundle.get_message(key)?.value()?;
         let mut errors = Vec::new();

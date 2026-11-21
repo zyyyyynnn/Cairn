@@ -9,7 +9,7 @@ use crate::shell::accessibility::{self, ControlElement, KeyControl};
 use crate::shell::theme::ShellTokens;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{h_flex, Sizable as _};
+use gpui_kit::component::{Sizable as _, h_flex};
 use gpui_kit::gpui::*;
 
 /// One recovery action in a state surface or toast: a 24px semantic icon whose tooltip and
@@ -27,6 +27,7 @@ pub(crate) fn icon_action(
         .min_w(rems(layout::SPACE_24))
         .min_h(rems(layout::SPACE_24))
         .icon(icon)
+        .loading_icon(IconName::LoaderCircle)
         .tooltip(label.clone())
         .accessibility_label(label)
 }

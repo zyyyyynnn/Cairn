@@ -6,19 +6,19 @@
 
 use super::index_journal::IndexJournal;
 use super::volume_status::VolumeStatus;
-use crate::persistence::{headroom_for_arena, headroom_for_records, LoadedIndexData};
+use crate::persistence::{LoadedIndexData, headroom_for_arena, headroom_for_records};
+use cairn_core::DirectorySizeIndex;
 use cairn_core::arena::NamePool;
 use cairn_core::frn_index::{FrnLookup, IndexMemoryFootprint};
 use cairn_core::model::{
-    flags_from_win32_attributes, FileRecord, FLAG_DIRECTORY, FLAG_INDEXED_ATTRIBUTES_MASK,
+    FLAG_DIRECTORY, FLAG_INDEXED_ATTRIBUTES_MASK, FileRecord, flags_from_win32_attributes,
 };
-use cairn_core::path_cache::{root_path_for_drive, DirectoryPathCache};
+use cairn_core::path_cache::{DirectoryPathCache, root_path_for_drive};
 use cairn_core::property_store::{PropertySideTables, RecordPropertyData, SourceId};
 use cairn_core::query::SourceIndex;
 use cairn_core::sort::{PresortedIndices, SortColumn};
-use cairn_core::DirectorySizeIndex;
 use cairn_ntfs::mft::ExtractedItem;
-use cairn_ntfs::usn::{file_record_flags, UsnChange};
+use cairn_ntfs::usn::{UsnChange, file_record_flags};
 use cairn_ntfs::volume_identity::VolumeIdentity;
 use cairn_protocol::message::FileRowData;
 use cairn_protocol::status::{
@@ -428,7 +428,7 @@ impl VolumeIndex {
     pub fn new(drive_letter: char) -> Self {
         Self {
             drive_letter,
-            volume_guid: format!("VOL_{}:", drive_letter),
+            volume_guid: format!("VOL_{drive_letter}:"),
             status: VolumeStatus::rebuilding(),
             records: Vec::new(),
             arena: NamePool::default(),
@@ -1352,23 +1352,23 @@ impl VolumeIndex {
                     if kind_changed {
                         self.mark_presorted_sizes_changed(affected);
                     }
-                    if journal.is_some() {
-                        if let Some(idx) = modified_idx {
-                            let path = self.path_cache.get_full_path(
-                                &self.records,
-                                &self.arena,
-                                self.drive_letter,
-                                idx,
-                            );
-                            self.record_journal_event(
-                                &mut journal,
-                                frn,
-                                JournalChangeKind::AttributeChanged,
-                                path,
-                                None,
-                                now_unix,
-                            );
-                        }
+                    if journal.is_some()
+                        && let Some(idx) = modified_idx
+                    {
+                        let path = self.path_cache.get_full_path(
+                            &self.records,
+                            &self.arena,
+                            self.drive_letter,
+                            idx,
+                        );
+                        self.record_journal_event(
+                            &mut journal,
+                            frn,
+                            JournalChangeKind::AttributeChanged,
+                            path,
+                            None,
+                            now_unix,
+                        );
                     }
                 }
                 if kind_changed {
@@ -1385,23 +1385,23 @@ impl VolumeIndex {
                 if self.excluded_frns.contains(&frn) {
                     return;
                 }
-                if journal.is_some() {
-                    if let Some(idx) = self.first_record_index_for_frn(frn) {
-                        let path = self.path_cache.get_full_path(
-                            &self.records,
-                            &self.arena,
-                            self.drive_letter,
-                            idx,
-                        );
-                        self.record_journal_event(
-                            &mut journal,
-                            frn,
-                            JournalChangeKind::Modified,
-                            path,
-                            None,
-                            now_unix,
-                        );
-                    }
+                if journal.is_some()
+                    && let Some(idx) = self.first_record_index_for_frn(frn)
+                {
+                    let path = self.path_cache.get_full_path(
+                        &self.records,
+                        &self.arena,
+                        self.drive_letter,
+                        idx,
+                    );
+                    self.record_journal_event(
+                        &mut journal,
+                        frn,
+                        JournalChangeKind::Modified,
+                        path,
+                        None,
+                        now_unix,
+                    );
                 }
                 self.pending_data_changes.insert(frn);
             }
@@ -1651,11 +1651,7 @@ impl VolumeIndex {
 
     /// Rewrites the table without tombstones or excluded subtrees and repacks the name arena with
     /// controlled growth headroom.
-    fn compact_with_states(
-        &mut self,
-        excluded: Vec<u8>,
-        kept_name_bytes: usize,
-    ) -> CompactionReport {
+    fn compact_with_states(&mut self, excluded: &[u8], kept_name_bytes: usize) -> CompactionReport {
         let old_len = self.records.len();
         let old_arena_len = self.arena.len();
         let mut remap = vec![u32::MAX; old_len];
@@ -1763,7 +1759,7 @@ impl VolumeIndex {
         if !records_over_limit && !arena_over_limit {
             return None;
         }
-        Some(self.compact_with_states(states, kept_name_bytes))
+        Some(self.compact_with_states(&states, kept_name_bytes))
     }
 
     /// Compacts large volumes once dead weight or arena rename bloat crosses the production
@@ -1856,11 +1852,12 @@ pub(crate) fn calculate_matched_bytes_for_records(
     let mut matched_dirs = BitSet::with_capacity(records.len());
     let mut has_matched_dirs = false;
     for &idx in matched_indices {
-        if let Some(record) = records.get(idx as usize) {
-            if record.is_dir() && !record.is_tombstone() {
-                matched_dirs.insert(idx as usize);
-                has_matched_dirs = true;
-            }
+        if let Some(record) = records.get(idx as usize)
+            && record.is_dir()
+            && !record.is_tombstone()
+        {
+            matched_dirs.insert(idx as usize);
+            has_matched_dirs = true;
         }
     }
 

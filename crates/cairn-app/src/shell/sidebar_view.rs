@@ -4,7 +4,7 @@
 
 //! Locations and organization sidebar view.
 
-use crate::app::{element_id, layout, CairnApp};
+use crate::app::{CairnApp, element_id, layout};
 use crate::search::filters::FilterCategory;
 use crate::shell::accessibility::{self, ControlElement};
 use crate::shell::commands::OpenSelected;
@@ -14,7 +14,7 @@ use cairn_protocol::status::VolumeState;
 use fluent_bundle::FluentArgs;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::StyledExt;
-use gpui_kit::component::{h_flex, v_flex, Icon};
+use gpui_kit::component::{Icon, h_flex, v_flex};
 use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::{AssetSource as _, *};
 use std::cell::RefCell;
@@ -231,7 +231,7 @@ fn sidebar_caption(
     title: SharedString,
     window: &Window,
     tokens: &ShellTokens,
-) -> impl IntoElement {
+) -> impl IntoElement + use<> {
     let ink_offset = sidebar_caption_ink_offset(window, title.as_ref());
     accessibility::element(control)
         .aria_label(title.clone())
@@ -249,7 +249,7 @@ fn sidebar_caption(
 }
 
 /// The action a sidebar row runs when the pointer or the keyboard chooses it.
-type SidebarActivate = dyn Fn(&mut CairnApp, &mut Window, &mut Context<CairnApp>);
+type SidebarActivate = dyn Fn(&mut CairnApp, &mut Window, &mut Context<'_, CairnApp>);
 
 /// A sidebar row the keyboard can reach.
 ///
@@ -269,8 +269,8 @@ fn keyboard_row(
     is_focused: bool,
     tokens: &ShellTokens,
     content: impl IntoElement,
-    activate: impl Fn(&mut CairnApp, &mut Window, &mut Context<CairnApp>) + 'static,
-    cx: &mut Context<CairnApp>,
+    activate: impl Fn(&mut CairnApp, &mut Window, &mut Context<'_, CairnApp>) + 'static,
+    cx: &mut Context<'_, CairnApp>,
 ) -> AnyElement {
     let activate: Rc<SidebarActivate> = Rc::new(activate);
     let action_activate = activate.clone();
@@ -282,9 +282,8 @@ fn keyboard_row(
         .flex_shrink_0()
         .rounded(tokens.radius)
         .cursor_pointer()
-        // The wrapper is the interactive element, so it is the node GPUI hit-tests for hover. The
-        // child row draws only the active fill; a hover style on that plain child stopped firing
-        // once the shell moved to gpui-kit 0.8 and the navigation pane lost its pointer feedback.
+        // The interactive wrapper owns the GPUI hit-test area for hover feedback; the child row
+        // draws only the active fill because hover styles on a non-interactive child do not fire.
         .hover(|this| {
             this.bg(tokens.row_hover)
                 .text_color(tokens.sidebar_accent_foreground)
@@ -322,8 +321,8 @@ impl CairnApp {
         tokens: &ShellTokens,
         sidebar_width: f32,
         window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
         if sidebar_width <= 0.5 {
             return div()
                 .id("cairn-sidebar-collapsed")
@@ -404,7 +403,7 @@ impl CairnApp {
             bin_is_focused,
             tokens,
             bin_row,
-            |this, window, cx| this.open_recycle_bin(window, cx),
+            Self::open_recycle_bin,
             cx,
         );
 
@@ -483,7 +482,7 @@ impl CairnApp {
                     tokens,
                     icon_metrics,
                 ),
-                |this, window, cx| this.open_folder_sources_dialog(window, cx),
+                Self::open_folder_sources_dialog,
                 cx,
             );
 
@@ -583,8 +582,8 @@ impl CairnApp {
                     .child(sidebar_caption(locations, locations_title, window, tokens))
                     .children(quick_access)
                     .child(recycle_entry)
-                    .when_some(folder_section, |this, section| this.child(section))
-                    .when_some(index_state, |this, status| this.child(status)),
+                    .when_some(folder_section, gpui_kit::ParentElement::child)
+                    .when_some(index_state, gpui_kit::ParentElement::child),
             );
 
         div()

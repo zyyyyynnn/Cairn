@@ -6,7 +6,7 @@
 
 use crate::client::{CairnClient, ClientError};
 use cairn_protocol::message::{
-    Envelope, QueryDefaults, ResponsePayload, SortSpec, SourceId, PIPE_NAME,
+    Envelope, PIPE_NAME, QueryDefaults, ResponsePayload, SortSpec, SourceId,
 };
 use std::future::Future;
 use std::sync::Arc;

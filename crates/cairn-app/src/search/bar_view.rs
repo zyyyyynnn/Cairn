@@ -4,13 +4,13 @@
 
 //! Search input band and matching options trigger view.
 
-use crate::app::{layout, CairnApp};
+use crate::app::{CairnApp, layout};
 use crate::shell::accessibility::{self, ControlElement};
 use crate::shell::theme::{self, ShellTokens};
 use crate::view::announce_shortcut;
 use gpui_kit::assets::IconName as AssetIconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{h_flex, Icon, IconName, Sizable as _};
+use gpui_kit::component::{Icon, IconName, Sizable as _, h_flex};
 use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::*;
 
@@ -30,7 +30,7 @@ impl CairnApp {
         focus_handle: FocusHandle,
         view: Entity<CairnApp>,
         window: &Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) -> Div {
         h_flex()
             .h(rems(layout::SEARCH_BAND_HEIGHT))
@@ -57,7 +57,7 @@ impl CairnApp {
         focus_handle: FocusHandle,
         view: Entity<CairnApp>,
         window: &Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) -> ControlElement {
         let control = accessibility::control("search-input");
         let clear = accessibility::control("search-clear");

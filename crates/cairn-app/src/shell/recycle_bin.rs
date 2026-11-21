@@ -9,12 +9,12 @@
 //! renders service pages, so a large bin stays virtualized without asking the service for rows
 //! the index does not hold.
 
-use crate::app::{layout, CairnApp};
+use crate::app::{CairnApp, layout};
 use crate::shell::os::{BinErrorKind, RecycleBinItem};
 use crate::shell::toast::ToastAction;
 use crate::table::model::SortColumn;
 use cairn_protocol::message::FileRowData;
-use gpui_kit::gpui::{px, Context, Pixels, Point, Window};
+use gpui_kit::gpui::{Context, Pixels, Point, Window, px};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -454,7 +454,11 @@ fn merge_bin_selection_keys(
 impl CairnApp {
     /// Rebuilds the visible bin rows from the full listing and the current search text. The
     /// search box filters this location in place instead of launching an index query.
-    pub(crate) fn apply_recycle_bin_filter(&mut self, reset_scroll: bool, cx: &mut Context<Self>) {
+    pub(crate) fn apply_recycle_bin_filter(
+        &mut self,
+        reset_scroll: bool,
+        cx: &mut Context<'_, Self>,
+    ) {
         if self.recycle_bin.error().is_some() {
             return;
         }
@@ -500,7 +504,7 @@ impl CairnApp {
 
     /// Re-filters after a text edit while the bin is open. This is the search band's path in the
     /// bin, so typing never replaces the location with an index query.
-    pub(crate) fn filter_recycle_bin(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn filter_recycle_bin(&mut self, cx: &mut Context<'_, Self>) {
         if !self.recycle_bin.is_open() || self.recycle_bin.error().is_some() {
             return;
         }
@@ -510,7 +514,7 @@ impl CairnApp {
     }
 
     /// Clears the bin's in-place search and keeps the location open.
-    pub(crate) fn clear_bin_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn clear_bin_filter(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         if !self.recycle_bin.is_open() {
             return;
         }
@@ -527,7 +531,11 @@ impl CairnApp {
 
     /// Rebuilds the table's fetched window from the first bin page. `reset_scroll` is false when
     /// an operation removed or restored a row and the person should stay where they were reading.
-    pub(crate) fn install_recycle_bin_rows(&mut self, reset_scroll: bool, cx: &mut Context<Self>) {
+    pub(crate) fn install_recycle_bin_rows(
+        &mut self,
+        reset_scroll: bool,
+        cx: &mut Context<'_, Self>,
+    ) {
         let Some(items) = self.recycle_bin.rows() else {
             return;
         };
@@ -557,7 +565,7 @@ impl CairnApp {
     }
 
     /// Installs the page the viewport needs from the in-memory bin, with no IPC request.
-    pub(crate) fn fill_recycle_bin_page(&mut self, row_height: Pixels, cx: &mut Context<Self>) {
+    pub(crate) fn fill_recycle_bin_page(&mut self, row_height: Pixels, cx: &mut Context<'_, Self>) {
         if !self.recycle_bin.is_open() {
             return;
         }
@@ -600,7 +608,7 @@ impl CairnApp {
 
     /// Reorders the full in-memory listing to the table's current sort and re-applies the
     /// in-place search from the top.
-    pub(crate) fn sort_recycle_bin(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn sort_recycle_bin(&mut self, cx: &mut Context<'_, Self>) {
         if self.recycle_bin.error().is_some() || self.recycle_bin.is_loading() {
             return;
         }
@@ -614,7 +622,7 @@ impl CairnApp {
     /// Starts a background shell read for the current bin location. The GPUI thread remains responsive
     /// while a dedicated COM apartment walks the shell; the generation token discards
     /// a result that arrives after the person has left or reloaded the location.
-    pub(crate) fn begin_recycle_bin_load(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn begin_recycle_bin_load(&mut self, cx: &mut Context<'_, Self>) {
         let generation = self.recycle_bin.begin_load();
         // The bin owns the table; an index answer still in flight must not
         // land on top of its rows.
@@ -645,7 +653,7 @@ impl CairnApp {
         result: Result<Vec<RecycleBinItem>, String>,
         reset_scroll: bool,
         anchor: Option<usize>,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         if !self.recycle_bin.is_open() || self.recycle_bin.generation() != generation {
             return;
@@ -661,17 +669,15 @@ impl CairnApp {
                     self.query.search_input.clear();
                 }
                 self.apply_recycle_bin_filter(reset_scroll, cx);
-                if let Some(anchor) = anchor {
-                    if self.recycle_bin.selected_keys().is_empty()
-                        && self.results.table.selected_indices.is_empty()
-                    {
-                        let total = self.recycle_bin.rows().map_or(0, |items| items.len());
-                        if total > 0 {
-                            let index = anchor.min(total - 1);
-                            if self.results.table.is_loaded(index) {
-                                self.results.table.select_row(index, false);
-                            }
-                        }
+                if let Some(anchor) = anchor
+                    && self.recycle_bin.selected_keys().is_empty()
+                    && self.results.table.selected_indices.is_empty()
+                    && let Some(rows) = self.recycle_bin.rows()
+                    && !rows.is_empty()
+                {
+                    let index = anchor.min(rows.len() - 1);
+                    if self.results.table.is_loaded(index) {
+                        self.results.table.select_row(index, false);
                     }
                 }
             }
@@ -732,7 +738,7 @@ impl CairnApp {
         fallback_names: &[String],
         failure: &crate::shell::os::BinOperationError,
         retry: BinRetry,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         if failure.is_cancelled() {
             tracing::info!("recycle bin operation cancelled: {}", failure.reason());
@@ -762,7 +768,7 @@ impl CairnApp {
         self.show_error_toast_with_action(title, message, action, cx);
     }
 
-    fn run_bin_retry(&mut self, retry: BinRetry, cx: &mut Context<Self>) {
+    fn run_bin_retry(&mut self, retry: BinRetry, cx: &mut Context<'_, Self>) {
         match retry {
             BinRetry::DeletePaths(paths) => self.delete_paths(paths, cx),
             BinRetry::DeletePermanently(items) => self.delete_bin_items_permanently(items, cx),
@@ -824,12 +830,9 @@ fn item_names_summary(i18n: &crate::shell::i18n::I18nManager, names: &[String]) 
 
 #[cfg(test)]
 mod tests {
-    use core::prelude::rust_2021::test;
-
     use super::{
-        bin_icon_extensions, bin_icon_key, filter_items, item_names_summary,
+        RecycleBinView, bin_icon_extensions, bin_icon_key, filter_items, item_names_summary,
         merge_bin_selection_keys, row_for, row_for_filtered, shell_reason_key, sort_items,
-        RecycleBinView,
     };
     use crate::shell::i18n::I18nManager;
     use crate::shell::os::{BinErrorKind, RecycleBinItem};
@@ -990,9 +993,11 @@ mod tests {
         ];
         let by_name = filter_items(&items, "report", false);
         assert_eq!(by_name.len(), 2);
-        assert!(by_name
-            .iter()
-            .all(|item| item.name.to_lowercase().contains("report")));
+        assert!(
+            by_name
+                .iter()
+                .all(|item| item.name.to_lowercase().contains("report"))
+        );
         let by_path = filter_items(&items, "pictures", false);
         assert_eq!(by_path.len(), 1);
         assert_eq!(by_path[0].name, "photo.png");
@@ -1006,9 +1011,11 @@ mod tests {
         let case_insensitive = row_for_filtered(&report, "report", false);
         assert_eq!(case_insensitive.name_highlights, vec![(0, 6)]);
         assert_eq!(case_insensitive.path_highlights, vec![(8, 14)]);
-        assert!(row_for_filtered(&report, "report", true)
-            .name_highlights
-            .is_empty());
+        assert!(
+            row_for_filtered(&report, "report", true)
+                .name_highlights
+                .is_empty()
+        );
 
         let chinese = item("屏幕录制 2026.mp4", r"C:\视频\屏幕录制", 40, 20);
         let row = row_for_filtered(&chinese, "屏幕", false);
@@ -1042,7 +1049,7 @@ mod tests {
         let i18n = I18nManager::new("zh-CN");
         let names: Vec<String> = ["a.txt", "b.txt", "c.txt", "d.txt", "e.txt"]
             .iter()
-            .map(|name| name.to_string())
+            .map(ToString::to_string)
             .collect();
         let mut more_args = fluent_bundle::FluentArgs::new();
         more_args.set("count", 2i64);
@@ -1112,7 +1119,7 @@ mod tests {
         let mut view = open_view();
         assert!(view.is_open());
         assert_eq!(view.all().len(), 2);
-        assert_eq!(view.rows().map_or(0, |rows| rows.len()), 1);
+        assert_eq!(view.rows().expect("open bin has rows").len(), 1);
         assert_eq!(view.selected_keys().len(), 1);
 
         assert!(view.leave());
@@ -1123,9 +1130,10 @@ mod tests {
         assert!(view.selected_keys().is_empty());
         assert!(view.error().is_none());
         assert!(!view.is_loading());
-        assert!(view
-            .icon_extension(bin_icon_key("alpha.txt", r"C:\work", 10, 1, false))
-            .is_none());
+        assert!(
+            view.icon_extension(bin_icon_key("alpha.txt", r"C:\work", 10, 1, false))
+                .is_none()
+        );
     }
 
     #[test]
@@ -1160,7 +1168,7 @@ mod tests {
         assert_eq!(view.error(), Some("access denied"));
         assert!(view.all().is_empty());
         assert!(view.selected_keys().is_empty());
-        assert_eq!(view.rows().map_or(0, |rows| rows.len()), 0);
+        assert!(view.rows().is_none());
     }
 
     #[test]

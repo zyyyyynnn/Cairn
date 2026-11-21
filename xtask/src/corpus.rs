@@ -39,7 +39,7 @@ pub fn generate_synthetic_corpus<P: AsRef<Path>>(
     for i in 0..total_count {
         let prefix = prefixes[i % prefixes.len()];
         let ext = exts[i % exts.len()];
-        let name = format!("{}_{:07}.{}", prefix, i, ext);
+        let name = format!("{prefix}_{i:07}.{ext}");
         let size = (i as u64 * 1024) % (10 * 1024 * 1024);
         let parent = match i % 5 {
             0 => r"C:\Windows\System32\drivers",

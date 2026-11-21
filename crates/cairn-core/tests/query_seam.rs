@@ -8,9 +8,9 @@
 use cairn_core::engine::CancellationToken;
 use cairn_core::model::{FLAG_DIRECTORY, FLAG_HIDDEN, FLAG_READONLY, FLAG_SYSTEM, FLAG_TOMBSTONE};
 use cairn_core::property_store::{PropertyKind, PropertySideTables, RecordPropertyData, SourceId};
-use cairn_core::query::{execute_query, QueryDegradedReason, QueryPolicy, QueryRows, SourceIndex};
+use cairn_core::query::{QueryDegradedReason, QueryPolicy, QueryRows, SourceIndex, execute_query};
 use cairn_core::sort::{PresortedIndices, SortColumn, SortDirection, SortKey, SortSpec};
-use cairn_core::syntax::{parse_query, parse_query_with, QueryDefaults};
+use cairn_core::syntax::{QueryDefaults, parse_query, parse_query_with};
 use cairn_core::{DirectoryPathCache, FileRecord, NamePool};
 
 struct FixtureBuilder {

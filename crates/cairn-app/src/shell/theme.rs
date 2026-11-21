@@ -11,8 +11,8 @@ use gpui_kit::component::{ActiveTheme, Theme};
 use gpui_kit::gpui::{App, Global, Hsla, Pixels, Window};
 
 pub use cairn_ui::brand::{
-    serif_font, tabular_figures, BASE_FONT_PX, BRAND_TITLE_SIZE, HAIRLINE, RADIUS,
-    SERIF_LINE_HEIGHT, SMALL_TEXT_SIZE, UI_ICON_SIZE,
+    BASE_FONT_PX, BRAND_TITLE_SIZE, HAIRLINE, RADIUS, SERIF_LINE_HEIGHT, SMALL_TEXT_SIZE,
+    UI_ICON_SIZE, serif_font, tabular_figures,
 };
 pub use cairn_ui::locale::system_prefers_dark;
 pub use cairn_ui::theme::{clamp_zoom, control_stroke, warning_ink};
@@ -79,10 +79,10 @@ impl ShellTokens {
     /// computes once as a fallback when no global cache has been primed yet.
     pub fn current(cx: &App) -> Self {
         let key = ThemeKey::from_theme(cx.theme());
-        if let Some(cached) = cx.try_global::<CachedShellTokens>() {
-            if cached.key == key {
-                return cached.tokens;
-            }
+        if let Some(cached) = cx.try_global::<CachedShellTokens>()
+            && cached.key == key
+        {
+            return cached.tokens;
         }
         Self::compute(cx)
     }
@@ -161,10 +161,10 @@ fn resolve_cached_tokens<K: PartialEq + Copy, V: Copy>(
     key: K,
     compute: impl FnOnce() -> V,
 ) -> V {
-    if let Some((cached_key, cached_value)) = *cached {
-        if cached_key == key {
-            return cached_value;
-        }
+    if let Some((cached_key, cached_value)) = *cached
+        && cached_key == key
+    {
+        return cached_value;
     }
     let value = compute();
     *cached = Some((key, value));

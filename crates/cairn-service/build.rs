@@ -25,7 +25,7 @@ fn main() {
         res.set("LegalCopyright", "Copyright (c) 2026 Cairn Contributors");
 
         if let Err(e) = res.write_resource_file(&rc_path) {
-            eprintln!("cargo:warning=Failed to write resource file: {}", e);
+            eprintln!("cargo:warning=Failed to write resource file: {e}");
             return;
         }
 
@@ -47,7 +47,7 @@ fn main() {
                 eprintln!("cargo:warning=rc.exe failed with exit code: {:?}", s.code());
             }
             Err(e) => {
-                eprintln!("cargo:warning=Failed to run rc.exe: {}", e);
+                eprintln!("cargo:warning=Failed to run rc.exe: {e}");
             }
         }
     }

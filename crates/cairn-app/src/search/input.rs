@@ -327,16 +327,14 @@ impl SearchInputState {
     ) {
         let now = Instant::now();
         // Suppress duplicate insertion when Win32 posts a trailing WM_CHAR for an active IME commit.
-        if let Some(ref last_committed) = self.last_committed_text {
-            if let Some(last_time) = self.last_commit_time {
-                if now.duration_since(last_time) < Duration::from_millis(80)
-                    && last_committed == new_text
-                    && self.marked_range.is_none()
-                {
-                    self.last_committed_text = None;
-                    return; // Suppress redundant WM_CHAR
-                }
-            }
+        if let Some(ref last_committed) = self.last_committed_text
+            && let Some(last_time) = self.last_commit_time
+            && now.duration_since(last_time) < Duration::from_millis(80)
+            && last_committed == new_text
+            && self.marked_range.is_none()
+        {
+            self.last_committed_text = None;
+            return; // Suppress redundant WM_CHAR
         }
 
         let is_paste_or_multi =
@@ -388,8 +386,7 @@ impl SearchInputState {
             let prev_boundary = self.text[..cursor]
                 .char_indices()
                 .last()
-                .map(|(idx, _)| idx)
-                .unwrap_or(0);
+                .map_or(0, |(idx, _)| idx);
             self.selection = self.selection.start..prev_boundary;
         } else if self.has_selection() {
             let (start, _) = self.normalized_selection();
@@ -401,8 +398,7 @@ impl SearchInputState {
             let prev_boundary = self.text[..cursor]
                 .char_indices()
                 .last()
-                .map(|(idx, _)| idx)
-                .unwrap_or(0);
+                .map_or(0, |(idx, _)| idx);
             self.selection = prev_boundary..prev_boundary;
         }
         self.marked_range = None;
@@ -418,8 +414,7 @@ impl SearchInputState {
                 self.text[cursor..]
                     .chars()
                     .next()
-                    .map(|ch| cursor + ch.len_utf8())
-                    .unwrap_or(self.text.len())
+                    .map_or(self.text.len(), |ch| cursor + ch.len_utf8())
             } else {
                 self.text.len()
             };
@@ -435,8 +430,7 @@ impl SearchInputState {
                 self.text[cursor..]
                     .chars()
                     .next()
-                    .map(|ch| cursor + ch.len_utf8())
-                    .unwrap_or(self.text.len())
+                    .map_or(self.text.len(), |ch| cursor + ch.len_utf8())
             } else {
                 self.text.len()
             };
@@ -724,9 +718,8 @@ impl SearchInputState {
 
 #[cfg(test)]
 mod tests {
-    use super::{candidate_window_bounds, SearchInputState, Utf16Utf8Mapper};
-    use core::prelude::rust_2021::test;
-    use gpui_kit::gpui::{point, px, size, Bounds};
+    use super::{SearchInputState, Utf16Utf8Mapper, candidate_window_bounds};
+    use gpui_kit::gpui::{Bounds, point, px, size};
 
     #[test]
     fn test_utf16_utf8_mapper() {

@@ -6,7 +6,7 @@ use super::*;
 use crate::config::ServiceConfig;
 use crate::persistence;
 use crate::sync_engine::{
-    apply_post_scan_decision, post_scan_decision, MultiVolumeEngine, PostScanDecision, VolumeIndex,
+    MultiVolumeEngine, PostScanDecision, VolumeIndex, apply_post_scan_decision, post_scan_decision,
 };
 use cairn_core::engine::CancellationToken;
 use cairn_core::sort::SortColumn;

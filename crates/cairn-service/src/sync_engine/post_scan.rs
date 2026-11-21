@@ -80,11 +80,7 @@ mod tests {
 
     fn applied_state(decision: PostScanDecision) -> Option<VolumeState> {
         let mut vol = VolumeIndex::new('C');
-        if apply_post_scan_decision(&mut vol, decision) {
-            Some(vol.status.state())
-        } else {
-            None
-        }
+        apply_post_scan_decision(&mut vol, decision).then(|| vol.status.state())
     }
 
     #[test]

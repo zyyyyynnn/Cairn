@@ -106,7 +106,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             package::run_package(out_dir)?;
         }
         Commands::GenCorpus { output, count } => {
-            println!("Generating {} synthetic records to {:?}...", count, output);
+            println!("Generating {count} synthetic records to {output:?}...");
             corpus::generate_synthetic_corpus(&output, count)?;
             println!("Done.");
         }

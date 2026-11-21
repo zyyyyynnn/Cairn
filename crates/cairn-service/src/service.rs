@@ -198,7 +198,7 @@ fn spawn_start_checkpoint_reporter(
     (stop_tx, reporter)
 }
 
-/// Stops the checkpoint reporter before the final status is reported, so no stale StartPending can
+/// Stops the checkpoint reporter before the final status is reported, so no stale `StartPending` can
 /// overwrite Running or Stopped.
 fn stop_start_checkpoint_reporter(sender: mpsc::Sender<()>, reporter: JoinHandle<()>) {
     let _ = sender.send(());

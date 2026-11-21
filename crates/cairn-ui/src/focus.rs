@@ -13,8 +13,8 @@
 
 use gpui_kit::component::{Icon, IconName};
 use gpui_kit::gpui::{
-    div, px, rems, AnyElement, App, FocusHandle, Global, Hsla, IntoElement as _,
-    ParentElement as _, Pixels, Styled as _, Subscription, Window,
+    AnyElement, App, FocusHandle, Global, Hsla, IntoElement as _, ParentElement as _, Pixels,
+    Styled as _, Subscription, Window, div, px, rems,
 };
 
 /// The focus frame's width. One pixel, flush on the control's visible surface, matching the
@@ -31,8 +31,7 @@ impl Global for KeyboardNavigation {}
 /// Whether the keyboard is currently driving focus in this process.
 pub fn keyboard_navigation(cx: &App) -> bool {
     cx.try_global::<KeyboardNavigation>()
-        .map(|mode| mode.0)
-        .unwrap_or(false)
+        .is_some_and(|mode| mode.0)
 }
 
 /// Switches the product between keyboard and pointer focus presentation.

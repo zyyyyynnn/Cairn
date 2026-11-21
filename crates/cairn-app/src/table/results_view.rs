@@ -4,15 +4,15 @@
 
 //! Results table region: viewport scrolling containers, virtual row band, and state overlays.
 
-use crate::app::{layout, CairnApp};
+use crate::app::{CairnApp, layout};
 use crate::shell::accessibility::{self, ControlElement};
 use crate::shell::commands::RESULTS_CONTEXT;
 use crate::shell::theme::ShellTokens;
-use crate::table::rows::{rows_to_paint, RowBand};
-use crate::table::surface::{result_surface, ResultSurface, ResultSurfaceInputs};
+use crate::table::rows::{RowBand, rows_to_paint};
+use crate::table::surface::{ResultSurface, ResultSurfaceInputs, result_surface};
 use crate::view::announce_shortcut;
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
-use gpui_kit::component::{h_flex, v_flex, InteractiveElementExt as _};
+use gpui_kit::component::{InteractiveElementExt as _, h_flex, v_flex};
 use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::*;
 use std::ops::Range;
@@ -25,7 +25,7 @@ impl CairnApp {
         row_height: Pixels,
         results_hold_focus: bool,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let search_focused = self.query.search_focus.is_focused(window);
         let header = self.render_table_header(tokens, cx);
@@ -51,8 +51,8 @@ impl CairnApp {
 
         let has_content = rows.is_some();
         let has_state = state.is_some();
-        let rows = rows.map(|body| body.into_any_element());
-        let state = state.map(|body| body.into_any_element());
+        let rows = rows.map(gpui_kit::IntoElement::into_any_element);
+        let state = state.map(gpui_kit::IntoElement::into_any_element);
         let overflows_sideways = self.results.table_scroll.max_offset().x > px(0.0);
 
         let viewport = div()
@@ -72,7 +72,7 @@ impl CairnApp {
                     .flex_1()
                     .min_h_0()
                     .child(header)
-                    .when_some(rows, |this, rows| this.child(rows)),
+                    .when_some(rows, gpui_kit::ParentElement::child),
             );
 
         let control = accessibility::control("result-table");
@@ -93,7 +93,7 @@ impl CairnApp {
             .flex_col()
             .child(
                 h_flex()
-                    .when(has_content, |this| this.flex_1())
+                    .when(has_content, gpui_kit::Styled::flex_1)
                     .min_w_0()
                     .min_h_0()
                     .items_stretch()
@@ -137,7 +137,7 @@ impl CairnApp {
                     ),
                 )
             })
-            .when_some(state, |this, band| this.child(band))
+            .when_some(state, gpui_kit::ParentElement::child)
             .when(surface == ResultSurface::Loading, |this| {
                 this.child(
                     div()
@@ -193,7 +193,7 @@ impl CairnApp {
         visible: Range<usize>,
         row_height: Pixels,
         search_focused: bool,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) -> ControlElement {
         let extent = px(self.results.table.scroll_extent(f32::from(row_height)));
         let painted = rows_to_paint(
@@ -285,7 +285,7 @@ impl CairnApp {
         row_height: Pixels,
         interactive: bool,
         search_focused: bool,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) -> Vec<AnyElement> {
         let band = RowBand {
             total: self.results.table.total_rows(),
@@ -308,8 +308,6 @@ impl CairnApp {
 
 #[cfg(test)]
 mod tests {
-    use core::prelude::rust_2021::test;
-
     use crate::table::rows::{rows_band_local_top, rows_to_paint};
 
     #[test]

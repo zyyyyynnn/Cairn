@@ -106,8 +106,6 @@ pub(crate) fn format_count(count: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use core::prelude::rust_2021::test;
-
     use super::*;
     use crate::shell::i18n::I18nManager;
 

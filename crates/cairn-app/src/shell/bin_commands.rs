@@ -7,18 +7,18 @@
 //! listing that follows it, reconciled against the shell's fresh read.
 
 use crate::app::CairnApp;
-use crate::search::filters::FilterCategory;
 use crate::search::ResultSetChange;
+use crate::search::filters::FilterCategory;
 use crate::shell::commands::{DeleteSelected, RestoreAll, RestoreSelected};
 use crate::shell::dialogs::{self, confirmation_alert, confirmation_alert_with_variant};
 use crate::shell::os::{
-    delete_permanently_from_recycle_bin, delete_to_recycle_bin, empty_recycle_bin,
-    restore_from_recycle_bin, BinOperationError, RecycleBinItem,
+    BinOperationError, RecycleBinItem, delete_permanently_from_recycle_bin, delete_to_recycle_bin,
+    empty_recycle_bin, restore_from_recycle_bin,
 };
 use crate::shell::recycle_bin::BinRetry;
 use fluent_bundle::FluentArgs;
-use gpui_kit::component::button::ButtonVariant;
 use gpui_kit::component::WindowExt as _;
+use gpui_kit::component::button::ButtonVariant;
 use gpui_kit::gpui::*;
 
 /// The shell can report a batch as successful while a progress dialog skipped one item. The
@@ -66,7 +66,7 @@ fn reconcile_empty_bin(
 impl CairnApp {
     /// Opens the Recycle Bin view: the shell reports the bin's contents and
     /// the table renders them. Any query leaves the view.
-    pub fn open_recycle_bin(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    pub fn open_recycle_bin(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) {
         // The bin is a location, so its first listing fades in instead of
         // replacing the table text in place.
         self.discard_rename(cx);
@@ -103,7 +103,7 @@ impl CairnApp {
         &mut self,
         _: &DeleteSelected,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         if let Some(items) = self.selected_bin_items() {
             self.open_bin_delete_confirmation(items, window, cx);
@@ -119,7 +119,7 @@ impl CairnApp {
         &mut self,
         items: Vec<std::sync::Arc<RecycleBinItem>>,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         if items.is_empty() {
             return;
@@ -154,7 +154,7 @@ impl CairnApp {
                     let items = items.clone();
                     move |_, _, cx| {
                         view.update(cx, |this, cx| {
-                            this.delete_bin_items_permanently(items.clone(), cx)
+                            this.delete_bin_items_permanently(items.clone(), cx);
                         });
                         true
                     }
@@ -167,7 +167,7 @@ impl CairnApp {
     pub(crate) fn delete_bin_items_permanently(
         &mut self,
         items: Vec<std::sync::Arc<RecycleBinItem>>,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         if items.is_empty() {
             return;
@@ -200,7 +200,7 @@ impl CairnApp {
         &mut self,
         paths: Vec<String>,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         if paths.is_empty() {
             return;
@@ -254,7 +254,7 @@ impl CairnApp {
         reset_scroll: bool,
         retry: BinRetry,
         task: F,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) where
         F: FnOnce(
                 isize,
@@ -284,16 +284,16 @@ impl CairnApp {
             };
             let _ = this.update(cx, |this, cx| {
                 this.finish_recycle_bin_load(generation, listing, reset_scroll, anchor, cx);
-                if let Err(failure) = outcome {
-                    if !failure.is_cancelled() {
-                        this.notify_bin_operation_error(
-                            title_key,
-                            &fallback_names,
-                            &failure,
-                            retry.clone(),
-                            cx,
-                        );
-                    }
+                if let Err(failure) = outcome
+                    && !failure.is_cancelled()
+                {
+                    this.notify_bin_operation_error(
+                        title_key,
+                        &fallback_names,
+                        &failure,
+                        retry.clone(),
+                        cx,
+                    );
                 }
                 cx.notify();
             });
@@ -308,7 +308,7 @@ impl CairnApp {
         &mut self,
         _: &RestoreSelected,
         _window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         let Some(items) = self.selected_bin_items() else {
             return;
@@ -321,7 +321,7 @@ impl CairnApp {
     pub(crate) fn restore_bin_items(
         &mut self,
         items: Vec<std::sync::Arc<RecycleBinItem>>,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         if items.is_empty() {
             return;
@@ -347,19 +347,19 @@ impl CairnApp {
         );
     }
 
-    /// Action handler for the RestoreAll command.
+    /// Action handler for the `RestoreAll` command.
     pub fn restore_all_action(
         &mut self,
         _: &RestoreAll,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         self.restore_all(window, cx);
     }
 
     /// Confirms restoring all items from the Recycle Bin through Cairn's unified dialog style
     /// before delegating to the shell's restore pipeline.
-    pub(super) fn restore_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn restore_all(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         if !self.recycle_bin.is_open()
             || self.recycle_bin.is_loading()
             || self.recycle_bin.all().is_empty()
@@ -388,7 +388,7 @@ impl CairnApp {
             .on_ok({
                 let view = view.clone();
                 move |_, _, cx| {
-                    view.update(cx, |this, cx| this.execute_restore_all(cx));
+                    view.update(cx, Self::execute_restore_all);
                     true
                 }
             })
@@ -396,7 +396,7 @@ impl CairnApp {
     }
 
     /// Dispatches restore of all items in the bin.
-    pub fn execute_restore_all(&mut self, cx: &mut Context<Self>) {
+    pub fn execute_restore_all(&mut self, cx: &mut Context<'_, Self>) {
         if !self.recycle_bin.is_open() || self.recycle_bin.is_loading() {
             return;
         }
@@ -406,7 +406,7 @@ impl CairnApp {
 
     /// Confirms emptying the Recycle Bin through Cairn's unified dialog style before
     /// dispatching the operation to the shell.
-    pub(super) fn empty_bin(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn empty_bin(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         if !self.recycle_bin.is_open()
             || self.recycle_bin.is_loading()
             || self.recycle_bin.all().is_empty()
@@ -426,7 +426,7 @@ impl CairnApp {
                 .on_ok({
                     let view = view.clone();
                     move |_, _, cx| {
-                        view.update(cx, |this, cx| this.execute_empty_bin(cx));
+                        view.update(cx, Self::execute_empty_bin);
                         true
                     }
                 })
@@ -436,7 +436,7 @@ impl CairnApp {
     /// Empties the bin through the shell's own command, then re-reads it. The loading flag is
     /// set before the background operation starts, so it is also the in-flight guard: a second
     /// invocation before the first listing lands must not start a second shell empty.
-    pub fn execute_empty_bin(&mut self, cx: &mut Context<Self>) {
+    pub fn execute_empty_bin(&mut self, cx: &mut Context<'_, Self>) {
         if !self.recycle_bin.is_open() || self.recycle_bin.is_loading() {
             return;
         }
@@ -457,7 +457,7 @@ impl CairnApp {
 
     /// Deletes the given paths to the Recycle Bin and reflects the result in
     /// the result table. Shared by the Delete command and the row actions.
-    pub fn delete_paths(&mut self, paths: Vec<String>, cx: &mut Context<Self>) {
+    pub fn delete_paths(&mut self, paths: Vec<String>, cx: &mut Context<'_, Self>) {
         if paths.is_empty() || self.delete_in_flight {
             return;
         }
@@ -509,16 +509,16 @@ impl CairnApp {
             let _ = this.update(cx, |this, cx| {
                 this.delete_in_flight = false;
                 if let Ok(outcome) = received {
-                    if let Err(failure) = &outcome {
-                        if !failure.is_cancelled() {
-                            this.notify_bin_operation_error(
-                                "delete_failed_title",
-                                &names,
-                                failure,
-                                BinRetry::DeletePaths(retry_paths.clone()),
-                                cx,
-                            );
-                        }
+                    if let Err(failure) = &outcome
+                        && !failure.is_cancelled()
+                    {
+                        this.notify_bin_operation_error(
+                            "delete_failed_title",
+                            &names,
+                            failure,
+                            BinRetry::DeletePaths(retry_paths.clone()),
+                            cx,
+                        );
                     }
                     this.request_result_set(ResultSetChange::Replace, cx);
                 }
@@ -534,7 +534,6 @@ mod bin_command_tests {
     use super::{reconcile_bin_items, reconcile_empty_bin};
     use crate::app::CairnApp;
     use crate::shell::os::{BinOperationError, RecycleBinItem};
-    use core::prelude::rust_2021::test;
     use gpui_kit::gpui::AppContext as _;
 
     fn item(name: &str) -> RecycleBinItem {

@@ -150,9 +150,7 @@ pub fn validate_name(current: &str, proposed: &str) -> Result<String, RenameErro
 
 #[cfg(test)]
 mod tests {
-    use core::prelude::rust_2021::test;
-
-    use super::{validate_name, RenameDraft, RenameError, MAX_NAME_UTF16_UNITS};
+    use super::{MAX_NAME_UTF16_UNITS, RenameDraft, RenameError, validate_name};
 
     #[test]
     fn a_name_must_differ_from_the_one_it_replaces() {

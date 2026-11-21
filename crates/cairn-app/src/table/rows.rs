@@ -4,7 +4,7 @@
 
 //! Result table rows, cells, placeholders, virtual painting window, and row context menu.
 
-use crate::app::{element_id, join_row_path, layout, split_name_highlights, CairnApp};
+use crate::app::{CairnApp, element_id, join_row_path, layout, split_name_highlights};
 use crate::shell::accessibility;
 use crate::shell::command_groups::GroupCommand;
 use crate::shell::file_icon::file_kind_icon;
@@ -12,8 +12,8 @@ use crate::shell::theme::{self, ShellTokens};
 use crate::table::header::ColumnLane as _;
 use crate::table::model::{OptionalColumn, TableColumn};
 use crate::table::presentation::{format_optional_cell, format_timestamp_cached};
-use cairn_core::format_size_bytes;
 use cairn_core::FileKind;
+use cairn_core::format_size_bytes;
 use cairn_protocol::message::FileRowData;
 use gpui_kit::assets::IconName as AssetIconName;
 use gpui_kit::component::input::Input;
@@ -148,7 +148,7 @@ impl CairnApp {
         ix: usize,
         row: &FileRowData,
         band: &RowBand<'_>,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let total = band.total;
         let tokens = band.tokens;
@@ -293,7 +293,7 @@ impl CairnApp {
         &self,
         ctx: &RowRender<'_>,
         snippets: Vec<String>,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) -> Stateful<Div> {
         let RowRender {
             ix,
@@ -608,9 +608,7 @@ fn result_text(text: &str, highlights: &[(usize, usize)], tokens: &ShellTokens) 
 
 #[cfg(test)]
 mod tests {
-    use core::prelude::rust_2021::test;
-
-    use super::{result_row_icon, BIN_COMMANDS, RESULT_COMMANDS};
+    use super::{BIN_COMMANDS, RESULT_COMMANDS, result_row_icon};
     use crate::shell::command_groups::GroupCommand;
     use gpui_kit::assets::IconName as AssetIconName;
 
@@ -701,7 +699,7 @@ mod tests {
 
     #[test]
     fn snippet_preview_opens_via_alt_space_click_hover_and_dismisses_cleanly() {
-        use crate::app::{test_row, CairnApp};
+        use crate::app::{CairnApp, test_row};
         use crate::shell::commands::{EscapeQuery, PreviewSnippet};
         use crate::table::snippets::SnippetPreviewTrigger;
         use gpui_kit::gpui::AppContext as _;

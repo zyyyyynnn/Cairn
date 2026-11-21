@@ -30,8 +30,8 @@
 //!   not "match all") is an explicit product decision pinned in `tests/query_filters.rs`.
 
 use cairn_core::arena::NamePool;
-use cairn_core::engine::{execute_query, CancellationToken};
-use cairn_core::model::{FileRecord, FLAG_DIRECTORY};
+use cairn_core::engine::{CancellationToken, execute_query};
+use cairn_core::model::{FLAG_DIRECTORY, FileRecord};
 use cairn_core::path_cache::DirectoryPathCache;
 use cairn_core::syntax::parse_query;
 

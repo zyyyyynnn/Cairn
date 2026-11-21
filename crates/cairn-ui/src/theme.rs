@@ -12,9 +12,9 @@
 //! roles keep the component palette.
 
 use gpui_kit::component::{
-    red_300, red_400, red_500, red_600, red_700, red_800, Colorize as _, Theme, ThemeMode,
+    Colorize as _, Theme, ThemeMode, red_300, red_400, red_500, red_600, red_700, red_800,
 };
-use gpui_kit::gpui::{hsla, px, App, Hsla, Pixels};
+use gpui_kit::gpui::{App, Hsla, Pixels, hsla, px};
 
 use crate::brand::{BASE_FONT_PX, RADIUS};
 
@@ -336,11 +336,7 @@ pub const DARK_PALETTE: ModePalette = ModePalette {
 
 /// The palette for one appearance.
 pub const fn mode_palette(dark: bool) -> &'static ModePalette {
-    if dark {
-        &DARK_PALETTE
-    } else {
-        &LIGHT_PALETTE
-    }
+    if dark { &DARK_PALETTE } else { &LIGHT_PALETTE }
 }
 
 /// Writes the mode's roles into the component theme. Button fields are written on both the colors
@@ -688,14 +684,12 @@ pub fn rem(window: &gpui_kit::gpui::Window) -> Pixels {
 
 #[cfg(test)]
 mod tests {
-    use core::prelude::rust_2021::test;
-
     use super::{
-        apply_danger_button_palette, apply_unified_interaction_fill, clamp_zoom, contrast_ratio,
-        dialog_surface, enforce_contrast_floor, gray, is_neutral_ramp_step, lightness_step,
-        mode_palette, oklch, overlay_color, perceptual_distance, relative_luminance,
-        repair_ink_contrast, ModePalette, DARK_PALETTE, INK_CONTRAST_FLOOR, LIGHT_PALETTE,
-        MAX_ZOOM, MIN_ZOOM, NEUTRAL_RAMP, RING_CONTRAST_FLOOR, SURFACE_CONTRAST_FLOOR,
+        DARK_PALETTE, INK_CONTRAST_FLOOR, LIGHT_PALETTE, MAX_ZOOM, MIN_ZOOM, ModePalette,
+        NEUTRAL_RAMP, RING_CONTRAST_FLOOR, SURFACE_CONTRAST_FLOOR, apply_danger_button_palette,
+        apply_unified_interaction_fill, clamp_zoom, contrast_ratio, dialog_surface,
+        enforce_contrast_floor, gray, is_neutral_ramp_step, lightness_step, mode_palette, oklch,
+        overlay_color, perceptual_distance, relative_luminance, repair_ink_contrast,
     };
     use gpui_kit::component::{Theme, ThemeMode};
     use gpui_kit::gpui::Hsla;

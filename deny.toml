@@ -9,7 +9,7 @@ targets = ["x86_64-pc-windows-msvc"]
 
 [advisories]
 ignore = [
-    { id = "RUSTSEC-2024-0384", reason = "instant is pulled by gpui-kit 0.8; no safe upgrade, no direct use" },
+    { id = "RUSTSEC-2024-0384", reason = "instant is pulled by gpui-kit/gpui-base; no safe upgrade, no direct use" },
     { id = "RUSTSEC-2024-0436", reason = "paste is pulled by gpui-component/gpui-pre; no safe upgrade, no direct use" },
     { id = "RUSTSEC-2026-0206", reason = "rustybuzz is pulled by gpui-kit's SVG/usvg stack; no safe upgrade" },
     { id = "RUSTSEC-2026-0192", reason = "ttf-parser is pulled by gpui-kit's SVG/font stack; no safe upgrade" },
@@ -25,7 +25,6 @@ allow = [
     "BSD-3-Clause",
     "BSL-1.0",
     "CC0-1.0",
-    "CDLA-Permissive-2.0",
     "ISC",
     "MIT",
     "MIT-0",

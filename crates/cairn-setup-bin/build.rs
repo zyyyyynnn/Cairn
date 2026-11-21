@@ -20,7 +20,7 @@ fn main() {
         res.set("CompanyName", "Cairn Contributors");
         res.set("LegalCopyright", "Copyright (c) 2026 Cairn Contributors");
         if let Err(e) = res.compile() {
-            eprintln!("cargo:warning=Failed to compile Windows resource: {}", e);
+            eprintln!("cargo:warning=Failed to compile Windows resource: {e}");
         }
     }
 }

@@ -236,7 +236,7 @@ pub struct FileRowData {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codec::{encode_frame, HEADER_SIZE};
+    use crate::codec::{HEADER_SIZE, encode_frame};
 
     /// The slot each published payload occupies on the wire.
     ///

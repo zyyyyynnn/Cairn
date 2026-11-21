@@ -87,9 +87,7 @@ pub(crate) fn result_surface(inputs: ResultSurfaceInputs) -> ResultSurface {
 
 #[cfg(test)]
 mod tests {
-    use core::prelude::rust_2021::test;
-
-    use super::{result_surface, ResultSurface, ResultSurfaceInputs};
+    use super::{ResultSurface, ResultSurfaceInputs, result_surface};
 
     #[test]
     fn the_cover_only_answers_a_request_that_is_actually_in_flight() {

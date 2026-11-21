@@ -4,9 +4,9 @@
 
 //! One exclusion view for a query or a content batch.
 
+use super::VolumeIndex;
 use super::folder_source::FolderSource;
 use super::volume_index::SUBTREE_EXCLUDED;
-use super::VolumeIndex;
 use crate::exclusion::{ExclusionPath, ExclusionRules};
 use std::collections::HashMap;
 use std::sync::Arc;

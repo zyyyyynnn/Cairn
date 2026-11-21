@@ -4,7 +4,7 @@
 
 //! Service configuration reads, hot apply and secure persistence.
 
-use super::{content_pipeline, MultiVolumeEngine};
+use super::{MultiVolumeEngine, content_pipeline};
 use crate::config::ServiceConfig;
 use cairn_protocol::status::ContentIndexState;
 use std::sync::atomic::Ordering;
@@ -194,12 +194,16 @@ mod tests {
     fn only_an_administrator_may_change_the_administrators_only_query_mode() {
         let off = config(false);
         let on = config(true);
-        assert!(check_admin_only_query_change(&off, &on, false)
-            .expect_err("a standard user must not switch the mode on")
-            .contains("administrator"));
-        assert!(check_admin_only_query_change(&on, &off, false)
-            .expect_err("a standard user must not switch the mode off")
-            .contains("administrator"));
+        assert!(
+            check_admin_only_query_change(&off, &on, false)
+                .expect_err("a standard user must not switch the mode on")
+                .contains("administrator")
+        );
+        assert!(
+            check_admin_only_query_change(&on, &off, false)
+                .expect_err("a standard user must not switch the mode off")
+                .contains("administrator")
+        );
         check_admin_only_query_change(&off, &off, false)
             .expect("keeping the mode as it is is not a change");
         check_admin_only_query_change(&on, &on, false)

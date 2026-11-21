@@ -10,15 +10,11 @@
 //! this executable and waits for its exit code.
 
 #[cfg(windows)]
-use windows::core::PCWSTR;
-#[cfg(windows)]
-use windows::core::{Interface as _, PWSTR};
-#[cfg(windows)]
 use windows::Win32::Foundation::{FILETIME, HWND, PROPERTYKEY};
 #[cfg(windows)]
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL,
-    COINIT_APARTMENTTHREADED,
+    CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
+    CoUninitialize,
 };
 #[cfg(windows)]
 use windows::Win32::System::SystemServices::{SFGAO_FLAGS, SFGAO_FOLDER};
@@ -27,18 +23,22 @@ use windows::Win32::System::SystemServices::{SFGAO_FLAGS, SFGAO_FOLDER};
 use windows::Win32::UI::Shell::PropertiesSystem::PSGetPropertyKeyFromName;
 #[cfg(windows)]
 use windows::Win32::UI::Shell::{
-    BHID_EnumItems, FOLDERID_RecycleBinFolder, FileOperation, IEnumShellItems, IFileOperation,
-    IShellItem, IShellItem2, SHCreateItemFromIDList, SHEmptyRecycleBinW, SHGetKnownFolderIDList,
-    SHParseDisplayName, ShellExecuteExW, FOFX_RECYCLEONDELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION,
-    FOF_WANTNUKEWARNING, SEE_MASK_INVOKEIDLIST, SHELLEXECUTEINFOW, SIGDN_FILESYSPATH,
-    SIGDN_NORMALDISPLAY,
+    BHID_EnumItems, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_WANTNUKEWARNING, FOFX_RECYCLEONDELETE,
+    FOLDERID_RecycleBinFolder, FileOperation, IEnumShellItems, IFileOperation, IShellItem,
+    IShellItem2, SEE_MASK_INVOKEIDLIST, SHCreateItemFromIDList, SHELLEXECUTEINFOW,
+    SHEmptyRecycleBinW, SHGetKnownFolderIDList, SHParseDisplayName, SIGDN_FILESYSPATH,
+    SIGDN_NORMALDISPLAY, ShellExecuteExW,
 };
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SW_SHOWNORMAL};
+#[cfg(windows)]
+use windows::core::PCWSTR;
+#[cfg(windows)]
+use windows::core::{Interface as _, PWSTR};
 
 use crate::shell::rename::RenameError;
 #[cfg(windows)]
-use crate::win32::{win32_code_from_hresult, WIN32_ERROR_USER_CANCELLED};
+use crate::win32::{WIN32_ERROR_USER_CANCELLED, win32_code_from_hresult};
 
 /// The app's active top-level window, used as the owner of native Shell dialogs. Returned as a
 /// plain integer so a worker thread can carry it to its own STA without sharing a GPUI handle.
@@ -103,9 +103,9 @@ pub fn open_folder_and_select(path: &str) -> Result<(), Box<dyn std::error::Erro
     #[cfg(windows)]
     {
         // Spawns `explorer.exe /select,"<path>"` which natively supports long and complex paths
-        let explorer_arg = format!("/select,\"{}\"", path);
+        let explorer_arg = format!("/select,\"{path}\"");
         let wide_file: Vec<u16> = "explorer.exe\0".encode_utf16().collect();
-        let wide_params: Vec<u16> = format!("{}\0", explorer_arg).encode_utf16().collect();
+        let wide_params: Vec<u16> = format!("{explorer_arg}\0").encode_utf16().collect();
 
         let mut exec_info = SHELLEXECUTEINFOW {
             cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
@@ -358,9 +358,7 @@ fn hresult_is_cancelled(code: windows::core::HRESULT) -> bool {
 #[cfg(windows)]
 fn operation_was_aborted(operation: &IFileOperation) -> bool {
     // SAFETY: the operation is live and already performed its queue.
-    unsafe { operation.GetAnyOperationsAborted() }
-        .map(|aborted| aborted.as_bool())
-        .unwrap_or(false)
+    unsafe { operation.GetAnyOperationsAborted() }.is_ok_and(windows::core::BOOL::as_bool)
 }
 
 /// Resolves a canonical property name (`System.Recycle.DeletedFrom`) to its
@@ -406,12 +404,13 @@ impl Drop for ComApartment {
 /// produced. Restore consumes these items directly instead of re-parsing `$R`
 /// filesystem paths, so the move stays inside the shell's own Restore semantics.
 #[cfg(windows)]
-struct BinEntry {
+struct BinEntry<'com> {
     item: RecycleBinItem,
     shell_item: IShellItem,
+    _com: std::marker::PhantomData<&'com ComApartment>,
 }
 
-/// Copies a shell-owned `PWSTR` and releases the CoTaskMem allocation the
+/// Copies a shell-owned `PWSTR` and releases the `CoTaskMem` allocation the
 /// shell handed out. `PWSTR` has no `Drop`, so skipping the free leaks one
 /// allocation per display/property read.
 #[cfg(windows)]
@@ -425,9 +424,7 @@ unsafe fn shell_string(value: PWSTR) -> String {
 }
 
 #[cfg(windows)]
-fn enumerate_recycle_bin() -> Result<Vec<BinEntry>, String> {
-    let _com = ComApartment::enter();
-
+fn enumerate_recycle_bin(_com: &ComApartment) -> Result<Vec<BinEntry<'_>>, String> {
     // SAFETY: the known-folder GUID is a constant; the returned PIDL is
     // consumed by SHCreateItemFromIDList and freed with CoTaskMemFree.
     let bin_pidl = unsafe { SHGetKnownFolderIDList(&FOLDERID_RecycleBinFolder, 0, None) }
@@ -489,8 +486,7 @@ fn enumerate_recycle_bin() -> Result<Vec<BinEntry>, String> {
                 .unwrap_or(normal_display);
             // SAFETY: `shell_item` is a live shell item from `IEnumShellItems::Next`.
             let is_dir = unsafe { shell_item.GetAttributes(SFGAO_FOLDER) }
-                .map(|flags: SFGAO_FLAGS| flags.contains(SFGAO_FOLDER))
-                .unwrap_or(false);
+                .is_ok_and(|flags: SFGAO_FLAGS| flags.contains(SFGAO_FOLDER));
 
             // Cast before taking the optional filesystem path: a failed cast must not strand the
             // CoTaskMem PWSTR that GetDisplayName would have handed out.
@@ -511,13 +507,12 @@ fn enumerate_recycle_bin() -> Result<Vec<BinEntry>, String> {
                 .map(|pwstr| unsafe { shell_string(pwstr) })
                 .unwrap_or_default();
             // SAFETY: `item2` and `deleted_date_key` are valid property-store arguments.
-            let deleted_ts = unsafe { item2.GetFileTime(&deleted_date_key) }
-                .map(|filetime: FILETIME| {
+            let deleted_ts =
+                unsafe { item2.GetFileTime(&deleted_date_key) }.map_or(0, |filetime: FILETIME| {
                     let ticks =
                         ((filetime.dwHighDateTime as u64) << 32) | filetime.dwLowDateTime as u64;
                     cairn_core::time::filetime_ticks_to_unix_seconds(ticks)
-                })
-                .unwrap_or(0);
+                });
             // SAFETY: `item2` and `size_key` are valid property-store arguments.
             let size = unsafe { item2.GetUInt64(&size_key) }.unwrap_or(0);
             // SAFETY: `pwstr` came from `GetDisplayName(SIGDN_FILESYSPATH)` above and is consumed once here.
@@ -541,6 +536,7 @@ fn enumerate_recycle_bin() -> Result<Vec<BinEntry>, String> {
                     is_dir,
                 },
                 shell_item,
+                _com: std::marker::PhantomData,
             });
         }
     }
@@ -554,7 +550,9 @@ fn enumerate_recycle_bin() -> Result<Vec<BinEntry>, String> {
 pub fn list_recycle_bin() -> Result<Vec<RecycleBinItem>, String> {
     #[cfg(windows)]
     {
-        enumerate_recycle_bin().map(|entries| entries.into_iter().map(|entry| entry.item).collect())
+        let _com = ComApartment::enter();
+        let entries = enumerate_recycle_bin(&_com)?;
+        Ok(entries.into_iter().map(|entry| entry.item).collect())
     }
     #[cfg(not(windows))]
     {
@@ -641,9 +639,9 @@ pub fn restore_from_recycle_bin(
         }
         let _com = ComApartment::enter();
         let requested: Vec<String> = items.iter().map(|item| item.name.clone()).collect();
-        let entries = enumerate_recycle_bin()
+        let entries = enumerate_recycle_bin(&_com)
             .map_err(|reason| BinOperationError::failed(reason, dedup_names(requested.clone())))?;
-        let mut by_fs_path: std::collections::HashMap<&str, &BinEntry> =
+        let mut by_fs_path: std::collections::HashMap<&str, &BinEntry<'_>> =
             std::collections::HashMap::new();
         for entry in &entries {
             if !entry.item.fs_path.is_empty() {
@@ -802,9 +800,9 @@ pub fn delete_permanently_from_recycle_bin(
         }
         let _com = ComApartment::enter();
         let requested: Vec<String> = items.iter().map(|item| item.name.clone()).collect();
-        let entries = enumerate_recycle_bin()
+        let entries = enumerate_recycle_bin(&_com)
             .map_err(|reason| BinOperationError::failed(reason, dedup_names(requested.clone())))?;
-        let mut by_fs_path: std::collections::HashMap<&str, &BinEntry> =
+        let mut by_fs_path: std::collections::HashMap<&str, &BinEntry<'_>> =
             std::collections::HashMap::new();
         for entry in &entries {
             if !entry.item.fs_path.is_empty() {
@@ -1138,7 +1136,7 @@ pub fn set_clipboard_text(text: &str) -> Result<(), Box<dyn std::error::Error>> 
             CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
         };
         use windows::Win32::System::Memory::{
-            GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE,
+            GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock,
         };
 
         let u16_chars: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
@@ -1232,7 +1230,7 @@ pub fn get_clipboard_text() -> Option<String> {
 fn to_wide_path(path: &str) -> Vec<u16> {
     let mut p = path.to_string();
     if p.len() >= 260 && !p.starts_with(r"\\?\") {
-        p = format!(r"\\?\{}", p);
+        p = format!(r"\\?\{p}");
     }
     p.encode_utf16().chain(std::iter::once(0)).collect()
 }
@@ -1276,8 +1274,6 @@ fn shell_item_from_path(path: &str) -> Result<IShellItem, String> {
 
 #[cfg(test)]
 mod tests {
-    use core::prelude::rust_2021::test;
-
     use super::*;
 
     #[test]

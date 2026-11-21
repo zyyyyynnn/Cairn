@@ -9,21 +9,21 @@ use super::folder_source::FolderSource;
 use super::path_exclusions::PathExclusions;
 use super::volume_index::BitSet;
 use super::{MultiVolumeEngine, VolumeIndex};
-use cairn_content::{ContentSearcher, CONTENT_RESULT_TOP_K};
+use cairn_content::{CONTENT_RESULT_TOP_K, ContentSearcher};
+use cairn_core::FileRecord;
 use cairn_core::arena::NamePool;
 use cairn_core::engine::CancellationToken;
-use cairn_core::path_cache::{root_path_for_drive, DirectoryPathCache};
+use cairn_core::path_cache::{DirectoryPathCache, root_path_for_drive};
 use cairn_core::property_store::{PropertySideTables, SourceId};
 use cairn_core::query::{
-    detect_degraded_properties, execute_query, QueryDegradedReason, QueryPolicy, QueryRows,
-    SourceIndex,
+    QueryDegradedReason, QueryPolicy, QueryRows, SourceIndex, detect_degraded_properties,
+    execute_query,
 };
 use cairn_core::sort::{
-    compare_cross_source_records, sort_indices_with_spec, SortColumn, SortContext, SortDirection,
-    SortSpec,
+    SortColumn, SortContext, SortDirection, SortSpec, compare_cross_source_records,
+    sort_indices_with_spec,
 };
-use cairn_core::syntax::{parse_query_with, QueryDefaults, QueryExpr};
-use cairn_core::FileRecord;
+use cairn_core::syntax::{QueryDefaults, QueryExpr, parse_query_with};
 use rayon::prelude::*;
 use rayon::slice::ParallelSliceMut;
 use std::collections::HashMap;
@@ -168,11 +168,7 @@ impl MultiVolumeEngine {
                         generation: view.generation,
                     });
                 });
-                if visible {
-                    items
-                } else {
-                    Default::default()
-                }
+                if visible { items } else { Default::default() }
             }
         }
     }
@@ -617,22 +613,21 @@ impl MultiVolumeEngine {
                                 && active_vols[0].drive_letter == drive
                         }
                     };
-                if view_allowed && degraded.is_none() {
-                    if let Some(volume) = volumes.get(&drive) {
-                        if volume
-                            .presorted_order(applied_sort.primary().column)
-                            .is_some()
-                        {
-                            return Self::all_files_outcome(
-                                volume,
-                                applied_sort,
-                                exclusions,
-                                cancel,
-                                highlight_terms,
-                                degraded,
-                            );
-                        }
-                    }
+                if view_allowed
+                    && degraded.is_none()
+                    && let Some(volume) = volumes.get(&drive)
+                    && volume
+                        .presorted_order(applied_sort.primary().column)
+                        .is_some()
+                {
+                    return Self::all_files_outcome(
+                        volume,
+                        applied_sort,
+                        exclusions,
+                        cancel,
+                        highlight_terms,
+                        degraded,
+                    );
                 }
             }
 
@@ -783,40 +778,41 @@ impl MultiVolumeEngine {
                 return SearchOutcome::empty(highlight_terms, applied_sort, degraded);
             }
 
-            if let Some((searcher, _, snippet_terms)) = content_plan {
-                if !all_results.is_empty() && !snippet_terms.is_empty() {
-                    let src_by_id: HashMap<SourceId, &IndexedSource<'_>> =
-                        sources.iter().map(|s| (s.source_id(), s)).collect();
-                    let limit = all_results.len().min(CONTENT_RESULT_TOP_K);
-                    let mut keys = Vec::with_capacity(limit);
-                    for item in &all_results[..limit] {
-                        if let Some(src) = src_by_id.get(&item.source_id) {
-                            if let Some(rec) = src.records().get(item.record_idx as usize) {
-                                keys.push((item.source_id.0 as u64, rec.frn));
-                            }
-                        }
+            if let Some((searcher, _, snippet_terms)) = content_plan
+                && !all_results.is_empty()
+                && !snippet_terms.is_empty()
+            {
+                let src_by_id: HashMap<SourceId, &IndexedSource<'_>> =
+                    sources.iter().map(|s| (s.source_id(), s)).collect();
+                let limit = all_results.len().min(CONTENT_RESULT_TOP_K);
+                let mut keys = Vec::with_capacity(limit);
+                for item in &all_results[..limit] {
+                    if let Some(src) = src_by_id.get(&item.source_id)
+                        && let Some(rec) = src.records().get(item.record_idx as usize)
+                    {
+                        keys.push((item.source_id.0 as u64, rec.frn));
                     }
-                    if !keys.is_empty() {
-                        snippet_request = Some((searcher, keys, snippet_terms));
-                    }
+                }
+                if !keys.is_empty() {
+                    snippet_request = Some((searcher, keys, snippet_terms));
                 }
             }
         }
 
         let mut snippets = HashMap::new();
-        if let Some((searcher, keys, snippet_terms)) = snippet_request {
-            if !cancel.is_cancelled() {
-                match searcher.snippets_for_keys(&keys, &snippet_terms) {
-                    Ok(by_key) => {
-                        for ((vol_id, frn), list) in by_key {
-                            if let Ok(sid) = u32::try_from(vol_id) {
-                                snippets.insert((sid, frn), list);
-                            }
+        if let Some((searcher, keys, snippet_terms)) = snippet_request
+            && !cancel.is_cancelled()
+        {
+            match searcher.snippets_for_keys(&keys, &snippet_terms) {
+                Ok(by_key) => {
+                    for ((vol_id, frn), list) in by_key {
+                        if let Ok(sid) = u32::try_from(vol_id) {
+                            snippets.insert((sid, frn), list);
                         }
                     }
-                    Err(err) => {
-                        tracing::warn!("snippet extraction failed: {err}");
-                    }
+                }
+                Err(err) => {
+                    tracing::warn!("snippet extraction failed: {err}");
                 }
             }
         }

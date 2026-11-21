@@ -5,11 +5,11 @@
 //! Brand constants and the decoded app mark, shared by every Cairn window.
 
 use std::borrow::Cow;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, LazyLock, OnceLock};
 
 use gpui_kit::gpui::{
-    div, AnyElement, App, Font, FontFallbacks, FontWeight, Image, ImageFormat, IntoElement as _,
-    ParentElement as _, SharedString, Styled as _, TextRenderingMode,
+    AnyElement, App, Font, FontFallbacks, FontWeight, Image, ImageFormat, IntoElement as _,
+    ParentElement as _, SharedString, Styled as _, TextRenderingMode, div,
 };
 
 /// The base font of a Cairn window at zoom 1.0, in pixels. It anchors every `rem` helper.
@@ -87,18 +87,16 @@ pub const APP_ICON_PNG: &[u8] = include_bytes!("../../../assets/icons/cairn-32.p
 
 /// The decoded app mark, built once at first paint.
 pub fn app_icon() -> Arc<Image> {
-    static APP_ICON: OnceLock<Arc<Image>> = OnceLock::new();
-    APP_ICON
-        .get_or_init(|| Arc::new(Image::from_bytes(ImageFormat::Png, APP_ICON_PNG.to_vec())))
-        .clone()
+    static APP_ICON: LazyLock<Arc<Image>> =
+        LazyLock::new(|| Arc::new(Image::from_bytes(ImageFormat::Png, APP_ICON_PNG.to_vec())));
+    APP_ICON.clone()
 }
 
 /// Fixed-width figures for every value whose digits change while a window is open.
 pub fn tabular_figures() -> gpui_kit::gpui::FontFeatures {
-    static FEATURES: OnceLock<gpui_kit::gpui::FontFeatures> = OnceLock::new();
-    FEATURES
-        .get_or_init(|| gpui_kit::gpui::FontFeatures(Arc::new(vec![("tnum".to_string(), 1)])))
-        .clone()
+    static FEATURES: LazyLock<gpui_kit::gpui::FontFeatures> =
+        LazyLock::new(|| gpui_kit::gpui::FontFeatures(Arc::new(vec![("tnum".to_string(), 1)])));
+    FEATURES.clone()
 }
 
 struct SerifConfig {
@@ -107,8 +105,7 @@ struct SerifConfig {
 }
 
 fn resolve_serif() -> &'static SerifConfig {
-    static CONFIG: OnceLock<SerifConfig> = OnceLock::new();
-    CONFIG.get_or_init(|| {
+    static CONFIG: LazyLock<SerifConfig> = LazyLock::new(|| {
         let primary = SharedString::from(SERIF_FONT_FAMILY_WESTERN);
 
         // GPUI resolves fallback families against the system font collection, so the embedded
@@ -119,7 +116,8 @@ fn resolve_serif() -> &'static SerifConfig {
             primary,
             fallbacks: Some(FontFallbacks::from_fonts(fallbacks)),
         }
-    })
+    });
+    &CONFIG
 }
 
 /// Returns the Western heading font: embedded Cormorant, with the platform UI sans for any
@@ -213,7 +211,7 @@ pub fn cjk_heading_font() -> Font {
         family: SERIF_FONT_FAMILY_CJK.into(),
         features: Default::default(),
         fallbacks: Some(FontFallbacks::from_fonts(vec![
-            SERIF_FONT_FALLBACK_SYSTEM.to_string()
+            SERIF_FONT_FALLBACK_SYSTEM.to_string(),
         ])),
         weight: FontWeight::NORMAL,
         style: Default::default(),
@@ -298,7 +296,7 @@ mod tests {
         assert_eq!(&CJK_SERIF_REGULAR[0..4], &[0x00, 0x01, 0x00, 0x00]);
         let family: Vec<u8> = SERIF_FONT_FAMILY_CJK
             .encode_utf16()
-            .flat_map(|unit| unit.to_be_bytes())
+            .flat_map(u16::to_be_bytes)
             .collect();
         assert!(
             CJK_SERIF_REGULAR

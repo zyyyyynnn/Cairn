@@ -79,6 +79,7 @@ fn run(launch: Launch) {
         .with_assets(SetupAssets)
         .run(move |cx: &mut App| {
             gpui_kit::init(cx);
+            cairn_ui::locale::init_layout_direction(cx);
             cairn_ui::brand::init_fonts(cx);
             cairn_ui::brand::init_text_rendering(cx);
             let dark = preview

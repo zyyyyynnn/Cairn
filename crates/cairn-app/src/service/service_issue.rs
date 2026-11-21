@@ -105,9 +105,7 @@ pub const fn band_action(issue: ServiceIssue, service_installed: bool) -> Servic
 
 #[cfg(test)]
 mod tests {
-    use core::prelude::rust_2021::test;
-
-    use super::{band_action, should_try_silent_start, ServiceBandAction, ServiceIssue};
+    use super::{ServiceBandAction, ServiceIssue, band_action, should_try_silent_start};
 
     #[test]
     fn a_stopped_installed_service_gets_one_silent_start_attempt() {

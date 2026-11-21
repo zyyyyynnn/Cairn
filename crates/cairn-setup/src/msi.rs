@@ -12,16 +12,16 @@ use crate::registry::wide;
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Mutex;
-use windows::core::{PCWSTR, PWSTR};
+use std::sync::mpsc::{self, Receiver, Sender};
 use windows::Win32::System::ApplicationInstallationAndServicing::{
-    MsiConfigureProductW, MsiEnableLogW, MsiInstallProductW, MsiRecordGetInteger,
-    MsiRecordGetStringW, MsiSetExternalUIRecord, MsiSetInternalUI, INSTALLLEVEL_DEFAULT,
-    INSTALLLOGMODE_ACTIONSTART, INSTALLLOGMODE_ERROR, INSTALLLOGMODE_PROGRESS,
-    INSTALLLOGMODE_VERBOSE, INSTALLMESSAGE_ACTIONSTART, INSTALLMESSAGE_ERROR,
-    INSTALLMESSAGE_PROGRESS, INSTALLSTATE_ABSENT, INSTALLUILEVEL_NONE, MSIHANDLE,
+    INSTALLLEVEL_DEFAULT, INSTALLLOGMODE_ACTIONSTART, INSTALLLOGMODE_ERROR,
+    INSTALLLOGMODE_PROGRESS, INSTALLLOGMODE_VERBOSE, INSTALLMESSAGE_ACTIONSTART,
+    INSTALLMESSAGE_ERROR, INSTALLMESSAGE_PROGRESS, INSTALLSTATE_ABSENT, INSTALLUILEVEL_NONE,
+    MSIHANDLE, MsiConfigureProductW, MsiEnableLogW, MsiInstallProductW, MsiRecordGetInteger,
+    MsiRecordGetStringW, MsiSetExternalUIRecord, MsiSetInternalUI,
 };
+use windows::core::{PCWSTR, PWSTR};
 
 const MSI_FILTER: u32 = INSTALLMESSAGE_PROGRESS.0 as u32
     | INSTALLMESSAGE_ACTIONSTART.0 as u32
@@ -442,7 +442,7 @@ unsafe extern "system" fn external_ui_handler(
         let event = context
             .progress
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .apply(kind, value);
         if let Some((current, total)) = event {
             let _ = context.sender.send(MsiEvent::Progress { current, total });
@@ -461,12 +461,12 @@ unsafe extern "system" fn external_ui_handler(
     0
 }
 
-/// The ProductCode a package carries. It is generated per build, so it names the build rather than
+/// The `ProductCode` a package carries. It is generated per build, so it names the build rather than
 /// the product version: two packages of the same version carry different codes.
 pub fn package_product_code(package: &std::path::Path) -> Option<String> {
     use windows::Win32::System::ApplicationInstallationAndServicing::{
-        MsiCloseHandle, MsiDatabaseOpenViewW, MsiOpenDatabaseW, MsiViewExecute, MsiViewFetch,
-        MSIDBOPEN_READONLY,
+        MSIDBOPEN_READONLY, MsiCloseHandle, MsiDatabaseOpenViewW, MsiOpenDatabaseW, MsiViewExecute,
+        MsiViewFetch,
     };
 
     let path = wide(package.as_os_str());
@@ -525,7 +525,7 @@ unsafe fn record_string(record: MSIHANDLE, field: u32) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{finish, FailureKind, MsiFailure, ProgressState};
+    use super::{FailureKind, MsiFailure, ProgressState, finish};
     use std::path::PathBuf;
 
     #[test]

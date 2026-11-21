@@ -6,7 +6,7 @@
 //!
 //! The service owns MFT discovery and decides which files are eligible. Extraction and Tantivy
 //! writes happen in `CairnWorker.exe`; this module only builds batches, drives the worker and
-//! publishes a state machine the GUI can show. The worker is never handed the LocalSystem
+//! publishes a state machine the GUI can show. The worker is never handed the `LocalSystem`
 //! service's address space, so a malformed document cannot take the service down.
 
 use cairn_protocol::status::ContentIndexTask;

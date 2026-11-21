@@ -23,9 +23,9 @@ pub(crate) const WINDOW_TITLE: &str = "Cairn";
 
 #[cfg(windows)]
 fn acquire_single_instance_mutex() -> Option<windows::Win32::Foundation::HANDLE> {
-    use windows::core::w;
-    use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+    use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
     use windows::Win32::System::Threading::CreateMutexW;
+    use windows::core::w;
 
     // SAFETY: `w!(...)` is a static null-terminated wide string and the returned mutex handle
     // is closed on duplicate-instance exit or kept alive until process termination.
@@ -42,7 +42,9 @@ fn acquire_single_instance_mutex() -> Option<windows::Win32::Foundation::HANDLE>
                     }
                     // If no existing window could be found or activated (e.g. headless orphan process),
                     // proceed to launch rather than trapping the user in an unresponsive state.
-                    tracing::warn!("Existing Cairn mutex detected but no active window found; launching new instance.");
+                    tracing::warn!(
+                        "Existing Cairn mutex detected but no active window found; launching new instance."
+                    );
                     Some(h)
                 } else {
                     Some(h)
@@ -68,14 +70,13 @@ fn main() {
     let _ = tracing_subscriber::fmt::try_init();
 
     #[cfg(windows)]
-    let _mutex = match acquire_single_instance_mutex() {
-        Some(handle) => handle,
-        None => return,
+    let Some(_mutex) = acquire_single_instance_mutex() else {
+        return;
     };
 
     // Prepare settings, OS theme preference, CLI launch flags and shared locale state once before
     // building the tray or window.
-    let startup = startup::StartupCoordinator::prepare(raw_args, &startup::SystemBootstrapPorts);
+    let startup = startup::StartupCoordinator::prepare(&raw_args, &startup::SystemBootstrapPorts);
     crate::shell::perf::mark("startup prepared");
 
     #[cfg(windows)]
@@ -94,6 +95,7 @@ fn main() {
             // `gpui_kit::open_window` so `Root` owns the first level of the window.
             crate::shell::perf::mark("app loop start");
             gpui_kit::init(cx);
+            cairn_ui::locale::init_layout_direction(cx);
             crate::shell::perf::mark("kit ready");
             cairn_ui::brand::init_fonts(cx);
             crate::shell::perf::mark("fonts ready");

@@ -10,8 +10,8 @@
 //! prompt. The only administrative guard is `admin_only_query`, which the service refuses to let a
 //! standard user change.
 
-use cairn_client::client::{CairnClient, ClientError};
 use cairn_client::ServiceSession;
+use cairn_client::client::{CairnClient, ClientError};
 
 /// The index-configuration change this build can submit.
 ///
@@ -112,7 +112,7 @@ pub fn submission_from_service_answer(
 /// Runs the whole submission against the running service.
 ///
 /// Sequence: read the live configuration over the pipe, edit it, send the edited document back via
-/// `SetConfig`. No elevation is involved; the service persists the document as LocalSystem.
+/// `SetConfig`. No elevation is involved; the service persists the document as `LocalSystem`.
 pub async fn submit_index_scope(
     session: &ServiceSession,
     change: IndexScopeChange,
@@ -160,8 +160,6 @@ async fn submit_config(
 
 #[cfg(test)]
 mod tests {
-    use core::prelude::rust_2021::test;
-
     use super::*;
 
     #[test]

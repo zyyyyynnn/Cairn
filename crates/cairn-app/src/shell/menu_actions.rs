@@ -6,25 +6,25 @@
 //! built from, the label and state each command reports, the dispatch table behind them, and the
 //! table keyboard selection, scrolling and focus actions.
 
-use crate::app::{join_row_path, layout, CairnApp};
-use crate::search::filters::FilterCategory;
+use crate::app::{CairnApp, join_row_path, layout};
 use crate::search::ResultSetChange;
-use crate::shell::command_groups::{group_spec, GroupCommand, MenuGroup, ZoomPreset};
+use crate::search::filters::FilterCategory;
+use crate::shell::command_groups::{GroupCommand, MenuGroup, ZoomPreset, group_spec};
 use crate::shell::commands::*;
 use crate::shell::dialogs;
 use crate::shell::menu_rules::{IndexMenuState, SubsystemMenuAccess};
 use crate::shell::os::{
     open_file, open_folder_and_select, open_url, set_clipboard_text, show_properties_dialog,
 };
-use crate::shell::reveal::{reveal_targets, MAX_REVEAL_TARGETS};
+use crate::shell::reveal::{MAX_REVEAL_TARGETS, reveal_targets};
 use crate::shell::status_bar::format_count;
-use crate::table::model::{format_timestamp, SELECT_ALL_LIMIT};
+use crate::table::model::{SELECT_ALL_LIMIT, format_timestamp};
 use crate::view;
 use cairn_core::format_size_bytes;
 use cairn_protocol::status::{ContentIndexState, SourceKind};
 use fluent_bundle::FluentArgs;
-use gpui_kit::component::menu::PopupMenu;
 use gpui_kit::component::WindowExt as _;
+use gpui_kit::component::menu::PopupMenu;
 use gpui_kit::gpui::*;
 use std::rc::Rc;
 
@@ -62,7 +62,7 @@ fn build_submenu_popup(
     view: &Entity<CairnApp>,
     child_entries: Vec<view::MenuEntry>,
     window: &mut Window,
-    cx: &mut Context<CairnApp>,
+    cx: &mut Context<'_, CairnApp>,
 ) -> Option<Entity<PopupMenu>> {
     if child_entries.is_empty() {
         return None;
@@ -83,7 +83,7 @@ fn rescan_submenu_entries(
     app: &CairnApp,
     view: &Entity<CairnApp>,
     window: &mut Window,
-    cx: &mut Context<CairnApp>,
+    cx: &mut Context<'_, CairnApp>,
 ) -> Vec<view::MenuEntry> {
     let mut entries = menu_entries_from_sections(
         app,
@@ -100,13 +100,15 @@ fn rescan_submenu_entries(
                 .root_path
                 .chars()
                 .next()
-                .filter(|ch| ch.is_ascii_alphabetic())
-                .map(|ch| {
-                    let mut args = FluentArgs::new();
-                    args.set("drive", ch.to_ascii_uppercase().to_string());
-                    app.i18n.get_text_with_args("drive_label", &args)
-                })
-                .unwrap_or_else(|| source.root_path.clone()),
+                .filter(char::is_ascii_alphabetic)
+                .map_or_else(
+                    || source.root_path.clone(),
+                    |ch| {
+                        let mut args = FluentArgs::new();
+                        args.set("drive", ch.to_ascii_uppercase().to_string());
+                        app.i18n.get_text_with_args("drive_label", &args)
+                    },
+                ),
             SourceKind::Folder => source.root_path.clone(),
         };
         let toast_label = label.clone();
@@ -136,7 +138,7 @@ fn menu_entries_from_sections(
     view: &Entity<CairnApp>,
     sections: &'static [&'static [GroupCommand]],
     window: &mut Window,
-    cx: &mut Context<CairnApp>,
+    cx: &mut Context<'_, CairnApp>,
 ) -> Vec<view::MenuEntry> {
     let mut items = Vec::new();
     let mut had_visible_section = false;
@@ -162,7 +164,7 @@ fn menu_entries(
     view: &Entity<CairnApp>,
     commands: &'static [GroupCommand],
     window: &mut Window,
-    cx: &mut Context<CairnApp>,
+    cx: &mut Context<'_, CairnApp>,
 ) -> Vec<view::MenuEntry> {
     commands
         .iter()
@@ -241,7 +243,7 @@ impl CairnApp {
         forwards: bool,
         extend: bool,
         row_height: Pixels,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         // Arrow keys are the table's keyboard path; moving through rows is what makes the focus
         // ring meaningful, and a pointer press must not suppress keyboard navigation. Focus
@@ -254,20 +256,20 @@ impl CairnApp {
         } else {
             self.results.table.move_selection_up(extend);
         }
-        if self.results.table.focused_idx != before {
-            if let Some(ix) = self.results.table.focused_idx {
-                let current = self.scrolled_pixels();
-                self.results.table.scroll_top = current;
+        if self.results.table.focused_idx != before
+            && let Some(ix) = self.results.table.focused_idx
+        {
+            let current = self.scrolled_pixels();
+            self.results.table.scroll_top = current;
+            self.results
+                .table
+                .ensure_row_visible(ix, f32::from(row_height));
+            if self.results.table.scroll_top != current {
                 self.results
-                    .table
-                    .ensure_row_visible(ix, f32::from(row_height));
-                if self.results.table.scroll_top != current {
-                    self.results
-                        .rows_scroll
-                        .set_offset(point(px(0.0), -px(self.results.table.scroll_top)));
-                }
-                self.ensure_visible_rows_loaded(row_height, cx);
+                    .rows_scroll
+                    .set_offset(point(px(0.0), -px(self.results.table.scroll_top)));
             }
+            self.ensure_visible_rows_loaded(row_height, cx);
         }
         self.discard_rename_off_row(cx);
         cx.notify();
@@ -277,7 +279,7 @@ impl CairnApp {
         &mut self,
         _: &SelectPreviousRow,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         let extend = window.modifiers().shift;
         self.move_selection(false, extend, layout::row_height(window), cx);
@@ -288,7 +290,7 @@ impl CairnApp {
         &mut self,
         _: &SelectNextRow,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         let extend = window.modifiers().shift;
         self.move_selection(true, extend, layout::row_height(window), cx);
@@ -297,13 +299,13 @@ impl CairnApp {
 
     /// Arrow-key selection moves the keyboard into the table, where F2 and the
     /// row commands live; the search box keeps its text.
-    fn focus_table_after_arrow(&self, window: &mut Window, cx: &mut Context<Self>) {
+    fn focus_table_after_arrow(&self, window: &mut Window, cx: &mut Context<'_, Self>) {
         if self.results.table.focused_idx.is_some() {
             self.results.results_focus.focus(window, cx);
         }
     }
 
-    pub fn scroll_table(&mut self, request: TableScroll, cx: &mut Context<Self>) {
+    pub fn scroll_table(&mut self, request: TableScroll, cx: &mut Context<'_, Self>) {
         cairn_ui::focus::set_keyboard_navigation(true, cx);
         self.results.snippet_preview = None;
         let offset = self.results.table_scroll.offset();
@@ -325,7 +327,7 @@ impl CairnApp {
         &mut self,
         _: &ScrollTableLeft,
         _window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         self.scroll_table(TableScroll::Left, cx);
     }
@@ -334,7 +336,7 @@ impl CairnApp {
         &mut self,
         _: &ScrollTableRight,
         _window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         self.scroll_table(TableScroll::Right, cx);
     }
@@ -343,7 +345,7 @@ impl CairnApp {
         &mut self,
         _: &ScrollTableStart,
         _window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         self.scroll_table(TableScroll::Start, cx);
     }
@@ -352,7 +354,7 @@ impl CairnApp {
         &mut self,
         _: &ScrollTableEnd,
         _window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         self.scroll_table(TableScroll::End, cx);
     }
@@ -361,7 +363,7 @@ impl CairnApp {
         &mut self,
         _: &FocusSearchBox,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         self.dismiss_result_selection_on_chrome_press(cx);
         self.close_group();
@@ -373,7 +375,7 @@ impl CairnApp {
     /// Clears the result selection and its keyboard anchor. The result rows stop the pointer
     /// press that selects them, so every other content surface can call this on its own press
     /// without deselecting the row the person just clicked.
-    pub(crate) fn dismiss_result_selection(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn dismiss_result_selection(&mut self, cx: &mut Context<'_, Self>) {
         if self.results.table.selected_indices.is_empty()
             && self.results.table.focused_idx.is_none()
             && self.results.table.selection_anchor.is_none()
@@ -390,7 +392,7 @@ impl CairnApp {
     /// is the exception: its selection is carried by item identity, and the next filter or sort
     /// merges the row indices into those keys. Clearing the indices on a press that is not a
     /// row would therefore delete the keys and drop the selection instead of preserving it.
-    pub(crate) fn dismiss_result_selection_on_chrome_press(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn dismiss_result_selection_on_chrome_press(&mut self, cx: &mut Context<'_, Self>) {
         if !self.recycle_bin.is_open() {
             self.dismiss_result_selection(cx);
         }
@@ -399,7 +401,11 @@ impl CairnApp {
     /// Clears the query text and the filter attached to it, then returns focus to the search box.
     /// Both the clear affordance and Escape land here, so focus never stays on the clear button as
     /// it unmounts.
-    pub(crate) fn clear_query_and_scope(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn clear_query_and_scope(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
         if self.recycle_bin.is_open() {
             self.clear_bin_filter(window, cx);
             return;
@@ -414,7 +420,12 @@ impl CairnApp {
         cx.notify();
     }
 
-    pub fn escape_query(&mut self, _: &EscapeQuery, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn escape_query(
+        &mut self,
+        _: &EscapeQuery,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
         if self.rename.draft.is_some() {
             self.cancel_rename(window, cx);
             return;
@@ -450,7 +461,12 @@ impl CairnApp {
         crate::app::hide_main_window();
     }
 
-    pub fn show_group(&mut self, group: MenuGroup, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn show_group(
+        &mut self,
+        group: MenuGroup,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
         if self
             .open_group_menu
             .as_ref()
@@ -462,7 +478,12 @@ impl CairnApp {
         cx.notify();
     }
 
-    pub fn toggle_group(&mut self, group: MenuGroup, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn toggle_group(
+        &mut self,
+        group: MenuGroup,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
         if self
             .open_group_menu
             .as_ref()
@@ -477,7 +498,12 @@ impl CairnApp {
     }
 
     /// Pointer arrival on a menu-bar trigger while a group is open.
-    pub fn hover_group(&mut self, group: MenuGroup, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn hover_group(
+        &mut self,
+        group: MenuGroup,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
         let open_group = self.open_group_menu.as_ref().map(|menu| menu.group);
         let menu_entered = self
             .open_group_menu
@@ -506,7 +532,7 @@ impl CairnApp {
         group: MenuGroup,
         is_open: bool,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         if is_open {
             self.show_group(group, window, cx);
@@ -527,7 +553,12 @@ impl CairnApp {
         self.open_group_menu = None;
     }
 
-    fn build_group_menu(&mut self, group: MenuGroup, window: &mut Window, cx: &mut Context<Self>) {
+    fn build_group_menu(
+        &mut self,
+        group: MenuGroup,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
         if group == MenuGroup::Index
             && self.service.connection.is_connected()
             && self.service.sources.is_empty()
@@ -564,7 +595,7 @@ impl CairnApp {
         &mut self,
         _: &OpenFileMenu,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         self.toggle_group(MenuGroup::File, window, cx);
     }
@@ -573,7 +604,7 @@ impl CairnApp {
         &mut self,
         _: &OpenEditMenu,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         self.toggle_group(MenuGroup::Edit, window, cx);
     }
@@ -582,7 +613,7 @@ impl CairnApp {
         &mut self,
         _: &OpenViewMenu,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         self.toggle_group(MenuGroup::View, window, cx);
     }
@@ -591,7 +622,7 @@ impl CairnApp {
         &mut self,
         _: &OpenSearchMenu,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         self.toggle_group(MenuGroup::Search, window, cx);
     }
@@ -600,7 +631,7 @@ impl CairnApp {
         &mut self,
         _: &OpenIndexMenu,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         self.toggle_group(MenuGroup::Index, window, cx);
     }
@@ -609,7 +640,7 @@ impl CairnApp {
         &mut self,
         _: &OpenToolsMenu,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         self.toggle_group(MenuGroup::Tools, window, cx);
     }
@@ -618,7 +649,7 @@ impl CairnApp {
         &mut self,
         _: &OpenHelpMenu,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         self.toggle_group(MenuGroup::Help, window, cx);
     }
@@ -893,7 +924,7 @@ impl CairnApp {
         &mut self,
         command: GroupCommand,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         // A command the keymap already owns runs through its Action, so the menu item and its
         // shortcut reach one implementation.
@@ -970,7 +1001,7 @@ impl CairnApp {
                         .on_ok({
                             let view = view.clone();
                             move |_, _, cx| {
-                                view.update(cx, |this, cx| this.clear_content_index(cx));
+                                view.update(cx, Self::clear_content_index);
                                 true
                             }
                         })
@@ -1011,7 +1042,7 @@ impl CairnApp {
         }
     }
 
-    pub fn select_all(&mut self, _: &SelectAll, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn select_all(&mut self, _: &SelectAll, window: &mut Window, cx: &mut Context<'_, Self>) {
         // A row click keeps the search box focused so typing continues there.
         // An existing row selection is the signal that the result list, not the
         // query text, is the surface Ctrl+A should act on.
@@ -1044,7 +1075,12 @@ impl CairnApp {
         cx.notify();
     }
 
-    pub fn open_selected(&mut self, _: &OpenSelected, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn open_selected(
+        &mut self,
+        _: &OpenSelected,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
         // Open is a read action: let a focused inline rename handle Enter itself,
         // otherwise dismiss the unfocused editor before opening the row.
         if self.rename.draft.is_some() {
@@ -1076,7 +1112,7 @@ impl CairnApp {
         &mut self,
         _: &RevealSelectedLocation,
         _w: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         if self.recycle_bin.is_open() {
             return;
@@ -1107,7 +1143,12 @@ impl CairnApp {
         cx.notify();
     }
 
-    pub fn copy_full_paths(&mut self, _: &CopyFullPaths, _w: &mut Window, cx: &mut Context<Self>) {
+    pub fn copy_full_paths(
+        &mut self,
+        _: &CopyFullPaths,
+        _w: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
         let paths = self.collect_selected_paths();
         copy_lines(&paths);
         cx.notify();
@@ -1165,7 +1206,7 @@ impl CairnApp {
         indices
     }
 
-    pub fn show_selected_properties(&mut self, cx: &mut Context<Self>) {
+    pub fn show_selected_properties(&mut self, cx: &mut Context<'_, Self>) {
         // The properties sheet of a bin payload describes the `$R` file, not
         // the item Explorer shows; the bin hides this command rather than
         // presenting a misleading name and location.
@@ -1178,11 +1219,16 @@ impl CairnApp {
         cx.notify();
     }
 
-    pub fn show_properties(&mut self, _: &ShowProperties, _w: &mut Window, cx: &mut Context<Self>) {
+    pub fn show_properties(
+        &mut self,
+        _: &ShowProperties,
+        _w: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
         self.show_selected_properties(cx);
     }
 
-    pub fn focus_row_for_context(&mut self, ix: usize, cx: &mut Context<Self>) {
+    pub fn focus_row_for_context(&mut self, ix: usize, cx: &mut Context<'_, Self>) {
         self.results.snippet_preview = None;
         if !self.results.table.selected_indices.contains(&ix) {
             self.results.table.select_row(ix, false);
@@ -1198,7 +1244,7 @@ impl CairnApp {
         extend_selection: bool,
         is_double_click: bool,
         row_height: Pixels,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         cairn_ui::focus::set_keyboard_navigation(false, cx);
         self.results.snippet_preview = None;
@@ -1369,8 +1415,11 @@ mod confirmation_tests {
 
 #[cfg(test)]
 mod visibility_tests {
-    use super::*;
-    use core::prelude::rust_2021::test;
+    use super::{
+        CairnApp, ContentIndexState, EscapeQuery, GroupCommand, ResultSetChange, SelectNextRow,
+        menu_entries,
+    };
+    use gpui_kit::gpui::AppContext as _;
 
     #[test]
     fn clear_content_follows_content_or_failure_not_only_state() {
@@ -1638,7 +1687,7 @@ mod visibility_tests {
 
 #[cfg(test)]
 mod hover_group_tests {
-    use super::{decide_group_hover, GroupHoverAction};
+    use super::{GroupHoverAction, decide_group_hover};
     use crate::shell::command_groups::MenuGroup;
 
     #[test]

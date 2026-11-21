@@ -51,7 +51,7 @@ impl<'a> ContentRules<'a> {
 impl MultiVolumeEngine {
     /// Number of eligible records, used for the backfill denominator. Uses the same task builder
     /// as the scan so path exclusions cannot make the progress total disagree with the work.
-    fn count_eligible(&self, rules: &ContentRules) -> u64 {
+    fn count_eligible(&self, rules: &ContentRules<'_>) -> u64 {
         let volumes = self.volumes.read().unwrap();
         volumes
             .values()
@@ -104,7 +104,7 @@ impl MultiVolumeEngine {
         &self,
         volume: &VolumeIndex,
         index: usize,
-        rules: &ContentRules,
+        rules: &ContentRules<'_>,
     ) -> Option<ContentIndexTask> {
         if !Self::content_eligible(volume, index, rules.cfg) {
             return None;
@@ -129,7 +129,7 @@ impl MultiVolumeEngine {
         &self,
         drive: char,
         start: usize,
-        rules: &ContentRules,
+        rules: &ContentRules<'_>,
     ) -> (Vec<ContentIndexTask>, usize) {
         let volumes = self.volumes.read().unwrap();
         let Some(volume) = volumes.get(&drive) else {
@@ -152,7 +152,7 @@ impl MultiVolumeEngine {
     pub(super) fn changed_content_tasks(
         &self,
         changes: &HashMap<char, HashSet<u64>>,
-        rules: &ContentRules,
+        rules: &ContentRules<'_>,
     ) -> (Vec<ContentIndexTask>, Vec<(u64, u64)>) {
         let volumes = self.volumes.read().unwrap();
         let mut tasks = Vec::new();
@@ -188,7 +188,7 @@ impl MultiVolumeEngine {
     pub(super) fn drain_pending_content_deletions(&self) -> HashSet<(u64, u64)> {
         let mut lock = self.volumes.write().unwrap();
         lock.values_mut()
-            .flat_map(|volume| volume.flush_pending_content_deletions())
+            .flat_map(VolumeIndex::flush_pending_content_deletions)
             .collect()
     }
 
@@ -197,7 +197,7 @@ impl MultiVolumeEngine {
     pub(super) fn resolve_content_deletions(
         &self,
         pending: HashSet<(u64, u64)>,
-        rules: &ContentRules,
+        rules: &ContentRules<'_>,
     ) -> Vec<(u64, u64)> {
         let volumes = self.volumes.read().unwrap();
         let mut out: Vec<(u64, u64)> = pending
@@ -449,7 +449,7 @@ impl MultiVolumeEngine {
         self.write_backfill_marker(&cfg);
     }
 
-    pub(super) fn run_incremental(&self, tasks: Vec<ContentIndexTask>, deletions: Vec<(u64, u64)>) {
+    pub(super) fn run_incremental(&self, tasks: &[ContentIndexTask], deletions: &[(u64, u64)]) {
         self.run_incremental_with(tasks, deletions, |tasks, deletions, clear| {
             self.run_worker_batch(tasks, deletions, clear)
         });
@@ -459,8 +459,8 @@ impl MultiVolumeEngine {
     /// `CairnWorker`; production always passes [`Self::run_worker_batch`].
     pub(super) fn run_incremental_with<F>(
         &self,
-        tasks: Vec<ContentIndexTask>,
-        deletions: Vec<(u64, u64)>,
+        tasks: &[ContentIndexTask],
+        deletions: &[(u64, u64)],
         run_batch: F,
     ) where
         F: Fn(&[ContentIndexTask], &[(u64, u64)], bool) -> BatchOutcome,
@@ -485,7 +485,7 @@ impl MultiVolumeEngine {
         if tasks.is_empty() {
             // A deletion-only cycle still has to run the worker once; it never writes from the
             // service process.
-            match run_batch(&[], &deletions, false) {
+            match run_batch(&[], deletions, false) {
                 BatchOutcome::Completed => {}
                 BatchOutcome::Cancelled => {
                     self.drop_content_searcher();
@@ -493,7 +493,7 @@ impl MultiVolumeEngine {
                     return;
                 }
                 BatchOutcome::Failed(failure) => {
-                    self.keep_last_content_snapshot(failure.message);
+                    self.keep_last_content_snapshot(&failure.message);
                     return;
                 }
             }
@@ -508,7 +508,7 @@ impl MultiVolumeEngine {
                 // Deletions travel with the last chunk so one worker process applies the whole
                 // incremental cycle when possible.
                 let chunk_deletions = if chunk_index + 1 == chunk_count {
-                    deletions.as_slice()
+                    deletions
                 } else {
                     &[]
                 };
@@ -520,7 +520,7 @@ impl MultiVolumeEngine {
                         return;
                     }
                     BatchOutcome::Failed(failure) => {
-                        self.keep_last_content_snapshot(failure.message);
+                        self.keep_last_content_snapshot(&failure.message);
                         return;
                     }
                 }

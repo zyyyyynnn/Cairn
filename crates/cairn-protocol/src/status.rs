@@ -116,7 +116,7 @@ impl Default for ContentIndexStatus {
 }
 
 /// One file handed to `CairnWorker.exe`. The service owns discovery and MFT metadata; the worker
-/// owns extraction and Tantivy writes, so a malformed document cannot take down the LocalSystem
+/// owns extraction and Tantivy writes, so a malformed document cannot take down the `LocalSystem`
 /// process.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContentIndexTask {
@@ -259,11 +259,7 @@ mod tests {
             assert_eq!(state.state_key(), expected);
             assert_eq!(
                 state.progress_percent(),
-                if expected == "catching_up" {
-                    Some(42)
-                } else {
-                    None
-                }
+                (expected == "catching_up").then_some(42)
             );
             keys.push(state.state_key());
         }

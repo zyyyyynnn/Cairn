@@ -6,13 +6,13 @@
 //! locations fixed by SPEC SET-02.
 
 #[cfg(windows)]
-use windows::core::PCWSTR;
-#[cfg(windows)]
-use windows::Win32::Foundation::{LocalFree, HLOCAL};
+use windows::Win32::Foundation::{HLOCAL, LocalFree};
 #[cfg(windows)]
 use windows::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
 #[cfg(windows)]
 use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
+#[cfg(windows)]
+use windows::core::PCWSTR;
 
 /// SDDL string granting Generic All to SYSTEM and Administrators, and Read/Write to Interactive Users:
 /// `D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)`
@@ -87,7 +87,7 @@ pub struct ServiceDataLayout {
     /// `service.toml` existed but was not owned and controlled by SYSTEM/Administrators. Its ACL has
     /// been repaired and its contents are not applied by this startup: because a standard account may
     /// create files in `%ProgramData%`, an unverified configuration file can have been planted for the
-    /// LocalSystem service to hot-apply (SVC-05).
+    /// `LocalSystem` service to hot-apply (SVC-05).
     pub config_untrusted: bool,
 }
 
@@ -125,7 +125,7 @@ pub fn default_service_data_root() -> std::path::PathBuf {
 
 /// Held for exactly as long as the SPEC SET-02 ownership repair needs `SeRestorePrivilege`.
 struct RestorePrivilege {
-    /// `true` only when this process turned it on. The LocalSystem service already holds it, and
+    /// `true` only when this process turned it on. The `LocalSystem` service already holds it, and
     /// starting up must not take it away from the account that is meant to have it.
     taken_here: bool,
 }
@@ -133,13 +133,13 @@ struct RestorePrivilege {
 impl Drop for RestorePrivilege {
     fn drop(&mut self) {
         #[cfg(windows)]
-        if self.taken_here {
-            if let Err(reason) = windows_acl::disable_restore_privilege() {
-                tracing::warn!(
-                    "SeRestorePrivilege could not be put back ({reason}); this process keeps the \
+        if self.taken_here
+            && let Err(reason) = windows_acl::disable_restore_privilege()
+        {
+            tracing::warn!(
+                "SeRestorePrivilege could not be put back ({reason}); this process keeps the \
                      right to name any SID as an owner until it exits"
-                );
-            }
+            );
         }
     }
 }
@@ -162,7 +162,7 @@ impl Drop for RestorePrivilege {
 /// needs that lying around.
 ///
 /// The logging keeps the service quiet without a console-only gate: the already-enabled case, which is
-/// what LocalSystem sees on every start, is recorded at `debug`, while the warning only ever fires for
+/// what `LocalSystem` sees on every start, is recorded at `debug`, while the warning only ever fires for
 /// a token that genuinely lacks the privilege. Gating that warning on `--console` instead would
 /// silence the only signal that the *service* account has been stripped of it, which is a real
 /// misconfiguration worth hearing about.
@@ -171,7 +171,7 @@ fn apply_ownership_privileges() -> RestorePrivilege {
     let taken_here = {
         match windows_acl::enable_take_ownership_privilege() {
             Ok(true) => {
-                tracing::debug!("SeTakeOwnershipPrivilege was already enabled on this process")
+                tracing::debug!("SeTakeOwnershipPrivilege was already enabled on this process");
             }
             Ok(false) => tracing::info!("enabled SeTakeOwnershipPrivilege on this process"),
             Err(reason) => tracing::warn!(
@@ -217,7 +217,7 @@ fn apply_ownership_privileges() -> RestorePrivilege {
 ///
 /// `Path::exists()` cannot answer this. It reports `false` both when nothing is at the path and when
 /// the directory *is* there but this process may not query it, and the second case is the normal state
-/// of a `%ProgramData%\Cairn` that a LocalSystem run has already locked down: SPEC SET-02 grants
+/// of a `%ProgramData%\Cairn` that a `LocalSystem` run has already locked down: SPEC SET-02 grants
 /// `BUILTIN\Users` nothing at all, so the attribute query a standard account makes for
 /// `%ProgramData%\Cairn\index` is refused while the directory sits there. Reading that refusal as
 /// absence sends `create_dir_all` into an existing directory, `ERROR_ALREADY_EXISTS` (os error 183)
@@ -255,7 +255,7 @@ fn location_presence(path: &std::path::Path) -> LocationPresence {
 ///
 /// An existing tree is never trusted: `%ProgramData%` grants `BUILTIN\Users` the right to create
 /// files and directories, so a standard account can pre-empt `%ProgramData%\Cairn` and hand the
-/// LocalSystem service a configuration it controls. Detection, repair, and — when the repair is not
+/// `LocalSystem` service a configuration it controls. Detection, repair, and — when the repair is not
 /// possible from this process — refusal to continue are all part of this call.
 /// The tree is created first and locked down afterwards, location by location, and every location is
 /// attempted: stopping at the first refusal would leave the later ones inherited and writable. The
@@ -407,7 +407,9 @@ pub enum DataDirectoryError {
         path: std::path::PathBuf,
         reason: String,
     },
-    #[error("{path} is owned by {owner}; restoring a trusted owner needs SeRestorePrivilege enabled, which lets this process name any SID as owner ({reason})")]
+    #[error(
+        "{path} is owned by {owner}; restoring a trusted owner needs SeRestorePrivilege enabled, which lets this process name any SID as owner ({reason})"
+    )]
     Ownership {
         path: std::path::PathBuf,
         owner: String,
@@ -424,27 +426,27 @@ pub enum DataDirectoryError {
 mod windows_acl {
     use super::{DataDirectoryError, PathTrust, RESTRICTED_SDDL};
     use std::path::{Path, PathBuf};
-    use windows::core::{BOOL, PCWSTR, PWSTR};
     use windows::Win32::Foundation::{
-        CloseHandle, GetLastError, LocalFree, SetLastError, ERROR_NOT_ALL_ASSIGNED, ERROR_SUCCESS,
-        HANDLE, HLOCAL, LUID, WIN32_ERROR,
+        CloseHandle, ERROR_NOT_ALL_ASSIGNED, ERROR_SUCCESS, GetLastError, HANDLE, HLOCAL, LUID,
+        LocalFree, SetLastError, WIN32_ERROR,
     };
     use windows::Win32::Security::Authorization::{
         ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
-        ConvertStringSidToSidW, GetNamedSecurityInfoW, SetNamedSecurityInfoW, SE_FILE_OBJECT,
+        ConvertStringSidToSidW, GetNamedSecurityInfoW, SE_FILE_OBJECT, SetNamedSecurityInfoW,
     };
     use windows::Win32::Security::{
-        AdjustTokenPrivileges, EqualSid, GetAce, GetSecurityDescriptorControl,
-        GetSecurityDescriptorDacl, GetSecurityDescriptorOwner, LookupPrivilegeValueW,
-        ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, LUID_AND_ATTRIBUTES,
+        ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, AdjustTokenPrivileges, DACL_SECURITY_INFORMATION,
+        EqualSid, GetAce, GetSecurityDescriptorControl, GetSecurityDescriptorDacl,
+        GetSecurityDescriptorOwner, LUID_AND_ATTRIBUTES, LookupPrivilegeValueW,
         OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
         PSID, SE_DACL_PROTECTED, SE_PRIVILEGE_ENABLED, SE_RESTORE_NAME, SE_TAKE_OWNERSHIP_NAME,
         TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_PRIVILEGES_ATTRIBUTES, TOKEN_QUERY,
     };
     use windows::Win32::Storage::FileSystem::{
-        GetFileAttributesW, FILE_ATTRIBUTE_REPARSE_POINT, INVALID_FILE_ATTRIBUTES,
+        FILE_ATTRIBUTE_REPARSE_POINT, GetFileAttributesW, INVALID_FILE_ATTRIBUTES,
     };
     use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    use windows::core::{BOOL, PCWSTR, PWSTR};
 
     const GENERIC_ALL: u32 = 0x1000_0000;
     /// `FILE_ALL_ACCESS`, the standard-plus-specific form the object store keeps once a `GA` ACE has
@@ -475,7 +477,7 @@ mod windows_acl {
                 // SAFETY: LocalAlloc'd block handed out by ConvertStringSidToSidW; the SID is not
                 // used after this point.
                 unsafe {
-                    let _ = LocalFree(Some(HLOCAL(self.0 .0)));
+                    let _ = LocalFree(Some(HLOCAL(self.0.0)));
                 }
             }
         }
@@ -486,12 +488,12 @@ mod windows_acl {
 
     impl Drop for OwnedDescriptor {
         fn drop(&mut self) {
-            if !self.0 .0.is_null() {
+            if !self.0.0.is_null() {
                 // SAFETY: LocalAlloc'd block handed out by GetNamedSecurityInfoW or
                 // ConvertStringSecurityDescriptorToSecurityDescriptorW. Every pointer derived from it
                 // is consumed while the guard is still alive.
                 unsafe {
-                    let _ = LocalFree(Some(HLOCAL(self.0 .0)));
+                    let _ = LocalFree(Some(HLOCAL(self.0.0)));
                 }
             }
         }
@@ -903,7 +905,7 @@ mod windows_acl {
     /// Naming an owner the caller is not needs `SeRestorePrivilege` *enabled*; `SeTakeOwnershipPrivilege`
     /// on its own only lets a holder claim the object for a SID it may legitimately use, which for an
     /// elevated administrator means itself and never `SY`. Both are attempted by
-    /// [`super::apply_ownership_privileges`] before anything is enforced, and the LocalSystem service
+    /// [`super::apply_ownership_privileges`] before anything is enforced, and the `LocalSystem` service
     /// holds both from the start. Group is deliberately left alone: bundling it would refuse the owner
     /// for any process that cannot claim `SY` as its primary group. `Ok(None)` means the write was
     /// accepted.
@@ -945,7 +947,7 @@ mod windows_acl {
     /// Order matters and is the whole point: the DACL is written unconditionally first, and only then
     /// is ownership attempted as a separate call. A refused owner repair cannot undo the lockdown,
     /// because leaving the inherited `BUILTIN\Users` grants in place would let a standard account
-    /// pre-empt the directory and feed the LocalSystem service a `service.toml` it controls.
+    /// pre-empt the directory and feed the `LocalSystem` service a `service.toml` it controls.
     pub fn enforce(path: &Path) -> Result<(), DataDirectoryError> {
         if is_reparse_point(path) {
             return Err(DataDirectoryError::ReparsePoint {
@@ -1021,23 +1023,23 @@ mod tests {
     #[cfg(windows)]
     fn apply_sddl(path: &std::path::Path, sddl: &str) -> Result<(), DataDirectoryError> {
         use std::os::windows::ffi::OsStrExt;
-        use windows::core::{BOOL, PCWSTR};
-        use windows::Win32::Foundation::{LocalFree, HLOCAL};
+        use windows::Win32::Foundation::{HLOCAL, LocalFree};
         use windows::Win32::Security::Authorization::{
-            ConvertStringSecurityDescriptorToSecurityDescriptorW, SetNamedSecurityInfoW,
-            SE_FILE_OBJECT,
+            ConvertStringSecurityDescriptorToSecurityDescriptorW, SE_FILE_OBJECT,
+            SetNamedSecurityInfoW,
         };
         use windows::Win32::Security::{
-            GetSecurityDescriptorDacl, ACL, DACL_SECURITY_INFORMATION,
+            ACL, DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl,
             PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
         };
+        use windows::core::{BOOL, PCWSTR};
 
         struct DescriptorGuard(PSECURITY_DESCRIPTOR);
         impl Drop for DescriptorGuard {
             fn drop(&mut self) {
-                if !self.0 .0.is_null() {
+                if !self.0.0.is_null() {
                     // SAFETY: allocated by ConvertStringSecurityDescriptorToSecurityDescriptorW.
-                    let _ = unsafe { LocalFree(Some(HLOCAL(self.0 .0))) };
+                    let _ = unsafe { LocalFree(Some(HLOCAL(self.0.0))) };
                 }
             }
         }
@@ -1106,13 +1108,13 @@ mod tests {
 
     #[cfg(windows)]
     fn take_ownership_privilege_is_effective() -> bool {
-        use windows::core::{BOOL, PCWSTR};
         use windows::Win32::Foundation::{CloseHandle, HANDLE, LUID};
         use windows::Win32::Security::{
-            LookupPrivilegeValueW, PrivilegeCheck, LUID_AND_ATTRIBUTES, PRIVILEGE_SET,
+            LUID_AND_ATTRIBUTES, LookupPrivilegeValueW, PRIVILEGE_SET, PrivilegeCheck,
             SE_TAKE_OWNERSHIP_NAME, TOKEN_QUERY,
         };
         use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+        use windows::core::{BOOL, PCWSTR};
 
         let mut luid = LUID {
             LowPart: 0,
@@ -1140,8 +1142,7 @@ mod tests {
         let mut result = BOOL::default();
         // SAFETY: `token` is open and `required`/`result` outlive the call.
         let ok = unsafe { PrivilegeCheck(token, &mut required, &mut result) }
-            .map(|_| result.as_bool())
-            .unwrap_or(false);
+            .is_ok_and(|_| result.as_bool());
         // SAFETY: `token` was opened above.
         let _ = unsafe { CloseHandle(token) };
         ok
@@ -1434,7 +1435,9 @@ mod tests {
             // SPEC SET-02 writes, so it can still list the protected parent and this machine cannot produce
             // the blocked traversal at all. Nothing here is an existing tree that has to be enforced,
             // so record that the case was not exercised rather than assert a different one.
-            eprintln!("this token can still list the locked-down parent; unlistable-tree check not exercised");
+            eprintln!(
+                "this token can still list the locked-down parent; unlistable-tree check not exercised"
+            );
             cleanup(&probe);
             return;
         }
@@ -1482,7 +1485,7 @@ mod tests {
         cleanup(&probe);
     }
 
-    /// A reparse point in the data path would let the LocalSystem process write through a link that
+    /// A reparse point in the data path would let the `LocalSystem` process write through a link that
     /// an unprivileged account created, so it must be refused outright.
     #[cfg(windows)]
     #[test]
@@ -1499,8 +1502,7 @@ mod tests {
             .arg(&link)
             .arg(&target)
             .output()
-            .map(|out| out.status.success())
-            .unwrap_or(false);
+            .is_ok_and(|out| out.status.success());
 
         if made {
             let error = enforce_restricted_acl(&link)
@@ -1525,7 +1527,7 @@ mod tests {
     ///
     /// Whichever token the suite runs under, one of the two branches is exercised: a standard account
     /// has no `SeTakeOwnershipPrivilege` to enable, an elevated one has it assigned and disabled until
-    /// this call enables it, and LocalSystem holds it enabled from the start.
+    /// this call enables it, and `LocalSystem` holds it enabled from the start.
     #[cfg(windows)]
     #[test]
     fn the_privilege_report_agrees_with_the_token_that_holds_it() {

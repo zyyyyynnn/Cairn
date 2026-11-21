@@ -83,7 +83,7 @@ impl I18nManager {
             .unwrap_or_else(|| key.to_string())
     }
 
-    pub fn get_text_with_args(&self, key: &str, args: &FluentArgs) -> String {
+    pub fn get_text_with_args(&self, key: &str, args: &FluentArgs<'_>) -> String {
         self.messages
             .format(self.language(), key, Some(args))
             .unwrap_or_else(|| key.to_string())

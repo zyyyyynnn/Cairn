@@ -13,44 +13,44 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::registry::{read_hklm_string, subkeys, wide};
 use cairn_protocol::message::SERVICE_NAME;
 
-use windows::core::{BOOL, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
-    CloseHandle, GetLastError, LocalFree, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND,
-    ERROR_SUCCESS, GENERIC_READ, HANDLE, HLOCAL, LPARAM, WAIT_ABANDONED, WAIT_OBJECT_0, WPARAM,
+    CloseHandle, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, GENERIC_READ,
+    GetLastError, HANDLE, HLOCAL, LPARAM, LocalFree, WAIT_ABANDONED, WAIT_OBJECT_0, WPARAM,
 };
 use windows::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
-    GetNamedSecurityInfoW, SetSecurityInfo, SE_FILE_OBJECT,
+    GetNamedSecurityInfoW, SE_FILE_OBJECT, SetSecurityInfo,
 };
 use windows::Win32::Security::{
-    GetSecurityDescriptorControl, GetSecurityDescriptorDacl, GetSecurityDescriptorOwner, ACL,
-    DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+    ACL, DACL_SECURITY_INFORMATION, GetSecurityDescriptorControl, GetSecurityDescriptorDacl,
+    GetSecurityDescriptorOwner, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
     PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED,
 };
 use windows::Win32::Storage::FileSystem::{
-    CreateDirectoryW, CreateFileW, FileAttributeTagInfo, GetFileInformationByHandle,
-    GetFileInformationByHandleEx, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY,
+    BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, CreateFileW, FILE_ATTRIBUTE_DIRECTORY,
     FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, OPEN_EXISTING, READ_CONTROL, WRITE_DAC,
-    WRITE_OWNER,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FileAttributeTagInfo,
+    GetFileInformationByHandle, GetFileInformationByHandleEx, OPEN_EXISTING, READ_CONTROL,
+    WRITE_DAC, WRITE_OWNER,
 };
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
+    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
 };
 use windows::Win32::System::Registry::{
-    RegCloseKey, RegDeleteTreeW, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
     HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, HKEY_USERS, KEY_READ, KEY_SET_VALUE,
-    KEY_WOW64_64KEY, REG_EXPAND_SZ, REG_SZ, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ,
+    KEY_WOW64_64KEY, REG_EXPAND_SZ, REG_SZ, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ, RegCloseKey,
+    RegDeleteTreeW, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
 };
 use windows::Win32::System::Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject};
 use windows::Win32::UI::Shell::{
-    FileOpenDialog, IFileOpenDialog, IShellItem, FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST,
-    FOS_PICKFOLDERS, SIGDN_FILESYSPATH,
+    FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST, FOS_PICKFOLDERS, FileOpenDialog, IFileOpenDialog,
+    IShellItem, SIGDN_FILESYSPATH,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetForegroundWindow, GetWindowTextW, SendMessageTimeoutW, SetForegroundWindow,
-    ShowWindow, HWND_BROADCAST, SMTO_ABORTIFHUNG, SW_RESTORE, WM_SETTINGCHANGE,
+    EnumWindows, GetForegroundWindow, GetWindowTextW, HWND_BROADCAST, SMTO_ABORTIFHUNG, SW_RESTORE,
+    SendMessageTimeoutW, SetForegroundWindow, ShowWindow, WM_SETTINGCHANGE,
 };
+use windows::core::{BOOL, PCWSTR, PWSTR};
 
 impl Drop for InstanceLock {
     fn drop(&mut self) {
@@ -111,9 +111,8 @@ pub enum InstanceLock {
 pub fn acquire_instance(mutex_name: &str, window_titles: &[&str]) -> InstanceLock {
     let name = wide(OsStr::new(mutex_name));
     // SAFETY: `name` is null-terminated and lives for the `CreateMutexW` call.
-    let handle = match unsafe { CreateMutexW(None, true, PCWSTR(name.as_ptr())) } {
-        Ok(handle) => handle,
-        Err(_) => return InstanceLock::Unavailable,
+    let Ok(handle) = (unsafe { CreateMutexW(None, true, PCWSTR(name.as_ptr())) }) else {
+        return InstanceLock::Unavailable;
     };
     // SAFETY: `GetLastError` checks whether `CreateMutexW` opened an existing named mutex.
     if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
@@ -290,7 +289,7 @@ fn is_stale_log(name: &str, age: std::time::Duration) -> bool {
 /// A shell known folder, never an environment variable: an elevated installer must not let a
 /// standard account redirect a machine path to a directory it controls.
 fn known_folder(folder: &windows::core::GUID) -> std::io::Result<PathBuf> {
-    use windows::Win32::UI::Shell::{SHGetKnownFolderPath, KF_FLAG_DEFAULT};
+    use windows::Win32::UI::Shell::{KF_FLAG_DEFAULT, SHGetKnownFolderPath};
 
     // SAFETY: the shell returns a CoTaskMem-allocated, null-terminated path that is freed below.
     let path = unsafe { SHGetKnownFolderPath(folder, KF_FLAG_DEFAULT, None) }
@@ -376,11 +375,11 @@ struct OwnedDescriptor(PSECURITY_DESCRIPTOR);
 
 impl Drop for OwnedDescriptor {
     fn drop(&mut self) {
-        if !self.0 .0.is_null() {
+        if !self.0.0.is_null() {
             // SAFETY: LocalAlloc'd by ConvertStringSecurityDescriptorToSecurityDescriptorW or
             // GetNamedSecurityInfoW; every pointer derived from it is gone by this point.
             unsafe {
-                let _ = LocalFree(Some(HLOCAL(self.0 .0)));
+                let _ = LocalFree(Some(HLOCAL(self.0.0)));
             }
         }
     }
@@ -424,7 +423,7 @@ fn secure_staging_root(root: &Path) -> std::io::Result<()> {
     let path = wide(root.as_os_str());
     let security = windows::Win32::Security::SECURITY_ATTRIBUTES {
         nLength: std::mem::size_of::<windows::Win32::Security::SECURITY_ATTRIBUTES>() as u32,
-        lpSecurityDescriptor: descriptor.0 .0,
+        lpSecurityDescriptor: descriptor.0.0,
         bInheritHandle: BOOL(0),
     };
     // SAFETY: `path` is null-terminated and `security` stays alive across the call.
@@ -1026,18 +1025,18 @@ fn remove_orphan_shortcuts() -> Vec<String> {
             .join("Start Menu")
             .join("Programs")
             .join("Cairn");
-        if dir.is_dir() {
-            if let Err(error) = std::fs::remove_dir_all(&dir) {
-                failures.push(format!("start menu: {error}"));
-            }
+        if dir.is_dir()
+            && let Err(error) = std::fs::remove_dir_all(&dir)
+        {
+            failures.push(format!("start menu: {error}"));
         }
     }
     if let Ok(desktop) = public_desktop_root() {
         let shortcut = desktop.join("Cairn.lnk");
-        if shortcut.is_file() {
-            if let Err(error) = std::fs::remove_file(&shortcut) {
-                failures.push(format!("desktop shortcut: {error}"));
-            }
+        if shortcut.is_file()
+            && let Err(error) = std::fs::remove_file(&shortcut)
+        {
+            failures.push(format!("desktop shortcut: {error}"));
         }
     }
     failures
@@ -1206,10 +1205,10 @@ mod tests {
     #[test]
     fn staging_attributes_reject_reparse_points_and_files() {
         assert!(check_staging_attributes(FILE_ATTRIBUTE_DIRECTORY.0).is_ok());
-        assert!(check_staging_attributes(
-            FILE_ATTRIBUTE_DIRECTORY.0 | FILE_ATTRIBUTE_REPARSE_POINT.0
-        )
-        .is_err());
+        assert!(
+            check_staging_attributes(FILE_ATTRIBUTE_DIRECTORY.0 | FILE_ATTRIBUTE_REPARSE_POINT.0)
+                .is_err()
+        );
         assert!(check_staging_attributes(0).is_err());
     }
 

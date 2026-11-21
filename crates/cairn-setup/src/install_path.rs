@@ -130,7 +130,7 @@ fn is_under(path: &Path, root: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_install_path_under, PathProblem};
+    use super::{PathProblem, validate_install_path_under};
     use std::path::PathBuf;
 
     #[test]

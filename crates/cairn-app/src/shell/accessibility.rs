@@ -19,7 +19,7 @@
 use crate::shell::i18n::I18nManager;
 use gpui_kit::base::{ObservedElement, TestSupportExt};
 use gpui_kit::gpui::{
-    div, Div, InteractiveElement, Role, SharedString, Stateful, StatefulInteractiveElement,
+    Div, InteractiveElement, Role, SharedString, Stateful, StatefulInteractiveElement, div,
 };
 
 /// One key control as assistive technology must see it.
@@ -787,8 +787,7 @@ pub fn shortcuts_for(element_id: &str) -> &'static [&'static str] {
     CONTROL_SHORTCUTS
         .iter()
         .find(|(element, _)| *element == element_id)
-        .map(|(_, shortcuts)| *shortcuts)
-        .unwrap_or(&[])
+        .map_or(&[][..], |(_, shortcuts)| *shortcuts)
 }
 
 /// Accessible name of `control` in the language `i18n` currently speaks.
@@ -818,10 +817,10 @@ pub fn label_carries_mnemonic(text: &str) -> bool {
             .filter(|c| **c != '&' && !c.is_whitespace())
             .collect();
         let mut letters = inner.chars();
-        if let (Some(letter), None) = (letters.next(), letters.next()) {
-            if letter.is_ascii_alphabetic() {
-                return true;
-            }
+        if let (Some(letter), None) = (letters.next(), letters.next())
+            && letter.is_ascii_alphabetic()
+        {
+            return true;
         }
     }
     false
@@ -829,12 +828,10 @@ pub fn label_carries_mnemonic(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use core::prelude::rust_2021::test;
-
     use super::*;
     use crate::search::filters::FilterCategory;
     use crate::service::service_issue::ServiceIssue;
-    use crate::shell::command_groups::{all_commands, menu_groups};
+    use crate::shell::command_groups::{GroupCommand, all_commands, menu_groups};
     use gpui_kit::gpui::Keystroke;
     use std::collections::HashSet;
 
@@ -1286,7 +1283,11 @@ mod tests {
             .iter()
             .flat_map(|(_, shortcuts)| shortcuts.iter().copied())
             .chain(menu_groups().iter().flat_map(|spec| spec.group.keys()))
-            .chain(all_commands().into_iter().filter_map(|cmd| cmd.shortcut()))
+            .chain(
+                all_commands()
+                    .into_iter()
+                    .filter_map(GroupCommand::shortcut),
+            )
             .collect();
         found.sort_unstable();
         found.dedup();

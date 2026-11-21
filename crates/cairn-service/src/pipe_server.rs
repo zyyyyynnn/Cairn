@@ -9,20 +9,20 @@
 //! the engine currently holds, so `admin_only_query` takes effect on the next request rather than on
 //! the next pipe instance.
 
-use crate::caller_auth::{authenticate_pipe_client, authorize, CallerAuthorization};
+use crate::caller_auth::{CallerAuthorization, authenticate_pipe_client, authorize};
 use crate::security::SafeSecurityDescriptor;
 use crate::session::{QueryOwner, RowsError, SessionManager};
 use crate::sync_engine::MultiVolumeEngine;
 use cairn_core::query::QueryDegradedReason;
 use cairn_core::sort::SortSpec;
-use cairn_core::syntax::{parse_query_with, MAX_CHILD_FILTERS, MAX_CONTENT_TERMS};
+use cairn_core::syntax::{MAX_CHILD_FILTERS, MAX_CONTENT_TERMS, parse_query_with};
 use cairn_protocol::codec::{
     encode_frame_into, encode_frame_with_version, peek_frame_header, try_decode_frame,
 };
 use cairn_protocol::message::{
-    ClientRequest, Envelope, FileRowData, ResponsePayload, ERROR_CODE_HANDSHAKE_REQUIRED,
-    ERROR_CODE_INVALID_REQUEST, ERROR_CODE_PROTOCOL_VERSION_MISMATCH, ERROR_CODE_QUERY_TOO_COMPLEX,
-    ERROR_CODE_SESSION_EXPIRED, MAX_SORT_KEYS, PIPE_NAME, PROTOCOL_VERSION,
+    ClientRequest, ERROR_CODE_HANDSHAKE_REQUIRED, ERROR_CODE_INVALID_REQUEST,
+    ERROR_CODE_PROTOCOL_VERSION_MISMATCH, ERROR_CODE_QUERY_TOO_COMPLEX, ERROR_CODE_SESSION_EXPIRED,
+    Envelope, FileRowData, MAX_SORT_KEYS, PIPE_NAME, PROTOCOL_VERSION, ResponsePayload,
 };
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -51,9 +51,7 @@ pub struct PipeServer {
 }
 
 fn heavy_task_limit() -> usize {
-    std::thread::available_parallelism()
-        .map(|parallelism| parallelism.get().clamp(2, 8))
-        .unwrap_or(4)
+    std::thread::available_parallelism().map_or(4, |parallelism| parallelism.get().clamp(2, 8))
 }
 
 impl PipeServer {
@@ -107,10 +105,10 @@ impl PipeServer {
                 )
                 .await
                 {
-                    if let Some(io_err) = e.downcast_ref::<std::io::Error>() {
-                        if is_pipe_closed_error(io_err) {
-                            return;
-                        }
+                    if let Some(io_err) = e.downcast_ref::<std::io::Error>()
+                        && is_pipe_closed_error(io_err)
+                    {
+                        return;
                     }
                     error!("Client connection on {pipe_name} error: {}", e);
                 }
@@ -429,16 +427,16 @@ fn process_request(
             // precedes begin_query, which cancels every other in-flight query. A scope that does
             // not name an active source is refused for the same reason: the caller asked for a
             // place the index cannot answer.
-            if let Some(source_id) = source_scope {
-                if !engine.is_known_source(source_id) {
-                    return ResponsePayload::Error {
-                        code: ERROR_CODE_INVALID_REQUEST,
-                        message: format!(
-                            "query source_scope {} is not an active indexed source",
-                            source_id.0
-                        ),
-                    };
-                }
+            if let Some(source_id) = source_scope
+                && !engine.is_known_source(source_id)
+            {
+                return ResponsePayload::Error {
+                    code: ERROR_CODE_INVALID_REQUEST,
+                    message: format!(
+                        "query source_scope {} is not an active indexed source",
+                        source_id.0
+                    ),
+                };
             }
             let parsed = parse_query_with(&raw_query, &defaults);
             let content_terms = parsed.content_term_count();
@@ -487,7 +485,7 @@ fn process_request(
                 let session_id = sessions.create_session(
                     owner.clone(),
                     outcome.rows,
-                    outcome.highlight_terms,
+                    &outcome.highlight_terms,
                     outcome.snippets,
                 );
                 let first_page = engine.with_sources_for_rows(|sources| {
@@ -835,7 +833,9 @@ mod tests {
         match payload {
             ResponsePayload::SetConfigAck { .. } => {}
             ResponsePayload::Error { code, message } => {
-                panic!("a standard user must be authorized to change index configuration: {code}: {message}")
+                panic!(
+                    "a standard user must be authorized to change index configuration: {code}: {message}"
+                )
             }
             other => panic!("unexpected response: {other:?}"),
         }
@@ -1313,8 +1313,8 @@ mod tests {
 
     #[test]
     fn a_query_for_an_inactive_source_scope_is_rejected() {
-        use cairn_protocol::message::SourceId;
         use cairn_protocol::message::ERROR_CODE_INVALID_REQUEST;
+        use cairn_protocol::message::SourceId;
 
         let harness = Harness::new(ServiceConfig::default());
         let mut request = content_query_request(0);
@@ -1328,7 +1328,7 @@ mod tests {
 
     #[test]
     fn pipe_server_with_pipe_name_sets_custom_name() {
-        use crate::session::{SystemClock, DEFAULT_SESSION_TTL};
+        use crate::session::{DEFAULT_SESSION_TTL, SystemClock};
         let engine = Arc::new(MultiVolumeEngine::new());
         let sessions = Arc::new(SessionManager::new(
             10,

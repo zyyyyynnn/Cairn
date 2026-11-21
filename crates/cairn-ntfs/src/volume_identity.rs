@@ -26,14 +26,14 @@ pub fn parse_volume_path_names(multi_sz: &[u16]) -> Vec<String> {
 
 #[cfg(windows)]
 mod win {
-    use super::{drive_letter_of_mount, parse_volume_path_names, VolumeIdentity};
+    use super::{VolumeIdentity, drive_letter_of_mount, parse_volume_path_names};
     use std::collections::HashSet;
-    use windows::core::PCWSTR;
     use windows::Win32::Foundation::{ERROR_MORE_DATA, HANDLE, INVALID_HANDLE_VALUE};
     use windows::Win32::Storage::FileSystem::{
         FindFirstVolumeW, FindNextVolumeW, FindVolumeClose, GetDriveTypeW, GetLogicalDrives,
         GetVolumeInformationW, GetVolumeNameForVolumeMountPointW, GetVolumePathNamesForVolumeNameW,
     };
+    use windows::core::PCWSTR;
 
     const DRIVE_FIXED: u32 = 3;
 
@@ -73,11 +73,9 @@ mod win {
             return None;
         }
         let fs_name = wide_slice_to_string(&fs_name_buf);
-        if fs_name.eq_ignore_ascii_case("NTFS") {
-            Some(serial as u64)
-        } else {
-            None
-        }
+        fs_name
+            .eq_ignore_ascii_case("NTFS")
+            .then_some(serial as u64)
     }
 
     fn query_volume_mount_paths(volume_guid_wide: &[u16]) -> Vec<String> {
@@ -130,29 +128,29 @@ mod win {
 
                 // SAFETY: guid_wide is a valid null-terminated UTF-16 volume path.
                 let drive_type = unsafe { GetDriveTypeW(PCWSTR(guid_wide.as_ptr())) };
-                if drive_type == DRIVE_FIXED {
-                    if let Some(serial) = query_ntfs_serial(&guid_wide) {
-                        let mount_paths = query_volume_mount_paths(&guid_wide);
-                        if !mount_paths.is_empty() {
-                            let drive_mount = mount_paths
-                                .iter()
-                                .find_map(|p| drive_letter_of_mount(p).map(|ch| (ch, p.clone())));
-                            let (drive_letter, mount_point) = match drive_mount {
-                                Some((ch, p)) => (Some(ch), p),
-                                None => (None, mount_paths[0].clone()),
-                            };
-                            let guid_key = volume_guid.to_ascii_lowercase();
-                            if seen_guids.insert(guid_key) {
-                                if let Some(ch) = drive_letter {
-                                    seen_letters.insert(ch);
-                                }
-                                volumes.push(VolumeIdentity {
-                                    drive_letter,
-                                    mount_point,
-                                    volume_guid,
-                                    volume_serial: serial,
-                                });
+                if drive_type == DRIVE_FIXED
+                    && let Some(serial) = query_ntfs_serial(&guid_wide)
+                {
+                    let mount_paths = query_volume_mount_paths(&guid_wide);
+                    if !mount_paths.is_empty() {
+                        let drive_mount = mount_paths
+                            .iter()
+                            .find_map(|p| drive_letter_of_mount(p).map(|ch| (ch, p.clone())));
+                        let (drive_letter, mount_point) = match drive_mount {
+                            Some((ch, p)) => (Some(ch), p),
+                            None => (None, mount_paths[0].clone()),
+                        };
+                        let guid_key = volume_guid.to_ascii_lowercase();
+                        if seen_guids.insert(guid_key) {
+                            if let Some(ch) = drive_letter {
+                                seen_letters.insert(ch);
                             }
+                            volumes.push(VolumeIdentity {
+                                drive_letter,
+                                mount_point,
+                                volume_guid,
+                                volume_serial: serial,
+                            });
                         }
                     }
                 }

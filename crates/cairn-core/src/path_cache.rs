@@ -35,11 +35,8 @@ pub fn root_path_for_drive(drive_letter: char) -> Arc<str> {
 #[inline]
 pub fn drive_letter_prefix(path: &str) -> Option<char> {
     let bytes = path.as_bytes();
-    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
-        Some((bytes[0] as char).to_ascii_uppercase())
-    } else {
-        None
-    }
+    (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
+        .then(|| (bytes[0] as char).to_ascii_uppercase())
 }
 
 /// Extracts the uppercase ASCII drive letter from an exact mount root (`X:\` or `X:/`).
@@ -56,13 +53,12 @@ pub fn drive_letter_of_mount(path: &str) -> Option<char> {
 /// `D:\Projects`) into an `Arc<str>` ending with `\` while reusing static drive roots when matched.
 pub fn normalize_root(root_prefix: &str) -> Arc<str> {
     let trimmed = root_prefix.trim();
-    if let Some(drive) = drive_letter_prefix(trimmed) {
-        if trimmed.as_bytes()[2..]
+    if let Some(drive) = drive_letter_prefix(trimmed)
+        && trimmed.as_bytes()[2..]
             .iter()
             .all(|ch| *ch == b'\\' || *ch == b'/')
-        {
-            return root_path_for_drive(drive);
-        }
+    {
+        return root_path_for_drive(drive);
     }
     if trimmed.is_empty() {
         return Arc::from("");
@@ -125,10 +121,10 @@ impl DirectoryPathCache {
             return root.clone();
         }
 
-        if let Ok(read_guard) = self.cache.read() {
-            if let Some(cached) = read_guard.get(&parent_idx) {
-                return cached.clone();
-            }
+        if let Ok(read_guard) = self.cache.read()
+            && let Some(cached) = read_guard.get(&parent_idx)
+        {
+            return cached.clone();
         }
 
         let (computed_path, intermediates) =

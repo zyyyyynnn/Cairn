@@ -11,7 +11,7 @@
 //! failures stay until the person dismisses them because they carry an outcome
 //! that should not disappear before it is read.
 
-use crate::app::{layout, CairnApp};
+use crate::app::{CairnApp, layout};
 use crate::shell::accessibility;
 use crate::shell::state_view::icon_action;
 use crate::shell::theme::ShellTokens;
@@ -19,10 +19,10 @@ use fluent_bundle::FluentArgs;
 use gpui_kit::assets::IconName as AssetIconName;
 use gpui_kit::base::StyledExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{h_flex, v_flex, Icon, Sizable as _};
+use gpui_kit::component::{Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::*;
-use gpui_kit::gpui::{ease_out_quint, Animation, AnimationExt};
+use gpui_kit::gpui::{Animation, AnimationExt, ease_out_quint};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -40,7 +40,7 @@ pub(crate) enum ToastKind {
     Info,
 }
 
-type ToastRun = Arc<dyn Fn(&mut CairnApp, &mut Window, &mut Context<CairnApp>)>;
+type ToastRun = Arc<dyn Fn(&mut CairnApp, &mut Window, &mut Context<'_, CairnApp>)>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ToastActionStyle {
@@ -58,7 +58,7 @@ pub(crate) struct ToastAction {
 impl ToastAction {
     pub(crate) fn new(
         label: impl Into<SharedString>,
-        run: impl Fn(&mut CairnApp, &mut Window, &mut Context<CairnApp>) + 'static,
+        run: impl Fn(&mut CairnApp, &mut Window, &mut Context<'_, CairnApp>) + 'static,
     ) -> Self {
         Self {
             label: label.into(),
@@ -69,7 +69,7 @@ impl ToastAction {
 
     pub(crate) fn labeled(
         label: impl Into<SharedString>,
-        run: impl Fn(&mut CairnApp, &mut Window, &mut Context<CairnApp>) + 'static,
+        run: impl Fn(&mut CairnApp, &mut Window, &mut Context<'_, CairnApp>) + 'static,
     ) -> Self {
         Self {
             label: label.into(),
@@ -97,7 +97,7 @@ impl CairnApp {
         &mut self,
         title: impl Into<String>,
         message: impl Into<String>,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         self.show_toast(
             ToastKind::Error,
@@ -114,7 +114,7 @@ impl CairnApp {
         title: impl Into<String>,
         message: impl Into<String>,
         action: ToastAction,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         self.show_toast(
             ToastKind::Error,
@@ -130,7 +130,7 @@ impl CairnApp {
         &mut self,
         title: impl Into<String>,
         message: impl Into<String>,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         self.show_toast(
             ToastKind::Info,
@@ -146,7 +146,7 @@ impl CairnApp {
         &mut self,
         title: impl Into<String>,
         message: impl Into<String>,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         self.show_toast(
             ToastKind::Info,
@@ -163,7 +163,7 @@ impl CairnApp {
         title: impl Into<String>,
         message: impl Into<String>,
         action: ToastAction,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         self.show_toast(
             ToastKind::Info,
@@ -182,7 +182,7 @@ impl CairnApp {
         message: String,
         action: Option<ToastAction>,
         auto_dismiss: bool,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         self.toast_serial = self.toast_serial.wrapping_add(1);
         let serial = self.toast_serial;
@@ -222,13 +222,13 @@ impl CairnApp {
         &mut self,
         action: ToastAction,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         self.dismiss_toast(cx);
         (action.run)(self, window, cx);
     }
 
-    pub(crate) fn dismiss_toast(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn dismiss_toast(&mut self, cx: &mut Context<'_, Self>) {
         let serial = self.toast_serial;
         self.begin_toast_exit(serial, cx);
     }
@@ -236,7 +236,7 @@ impl CairnApp {
     /// Removes the current toast only when it is the one `title` names. A
     /// corrected field must not leave its stale validation card behind, and
     /// an unrelated operation's error must stay readable.
-    pub(crate) fn dismiss_toast_titled(&mut self, title: &str, cx: &mut Context<Self>) {
+    pub(crate) fn dismiss_toast_titled(&mut self, title: &str, cx: &mut Context<'_, Self>) {
         let matches = self
             .toast
             .as_ref()
@@ -248,7 +248,7 @@ impl CairnApp {
 
     /// Keeps the card mounted for one short fade-out, then drops it. A newer toast bumps the
     /// serial, so a stale exit timer can never remove the replacement.
-    fn begin_toast_exit(&mut self, serial: u64, cx: &mut Context<Self>) {
+    fn begin_toast_exit(&mut self, serial: u64, cx: &mut Context<'_, Self>) {
         let Some(toast) = self.toast.as_mut() else {
             return;
         };
@@ -283,7 +283,7 @@ impl CairnApp {
         toast: ToastState,
         tokens: &ShellTokens,
         _window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let is_error = toast.kind == ToastKind::Error;
         let control = if is_error {

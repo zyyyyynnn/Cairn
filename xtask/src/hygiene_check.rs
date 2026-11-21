@@ -59,28 +59,86 @@ pub fn check_hygiene(workspace: &Path) -> Result<(), String> {
     Ok(())
 }
 
+const WORKSPACE_EDITION: &str = "2024";
+
+const REQUIRED_RUST_LINTS: &[(&str, &str)] = &[
+    ("unsafe_op_in_unsafe_fn", "deny"),
+    ("elided_lifetimes_in_paths", "warn"),
+];
+const REQUIRED_RUSTDOC_LINTS: &[(&str, &str)] = &[
+    ("broken_intra_doc_links", "deny"),
+    ("private_intra_doc_links", "deny"),
+];
+const REQUIRED_CLIPPY_LINTS: &[(&str, &str)] = &[
+    ("undocumented_unsafe_blocks", "deny"),
+    ("missing_safety_doc", "deny"),
+    ("await_holding_lock", "deny"),
+    ("too_many_arguments", "deny"),
+    ("large_enum_variant", "deny"),
+    ("dbg_macro", "deny"),
+    ("todo", "deny"),
+    ("unimplemented", "deny"),
+];
+
 fn check_workspace_lints(workspace: &Path, violations: &mut Vec<String>) -> Result<usize, String> {
     let root_toml = read_rel(workspace, Path::new("Cargo.toml"))?;
-    let required_lints = [
-        "unsafe_op_in_unsafe_fn = \"deny\"",
-        "undocumented_unsafe_blocks = \"deny\"",
-        "missing_safety_doc = \"deny\"",
-        "await_holding_lock = \"deny\"",
-        "too_many_arguments = \"deny\"",
-        "large_enum_variant = \"deny\"",
-        "dbg_macro = \"deny\"",
-        "todo = \"deny\"",
-        "unimplemented = \"deny\"",
-    ];
-    if !root_toml.contains("[workspace.lints.rust]")
-        || !root_toml.contains("[workspace.lints.rustdoc]")
-        || !root_toml.contains("[workspace.lints.clippy]")
-        || required_lints.iter().any(|lint| !root_toml.contains(lint))
-    {
-        violations.push(format!(
-            "Cargo.toml must define the workspace lint sections and deny every required lint: {}",
-            required_lints.join(", ")
-        ));
+    let root_doc = match root_toml.parse::<toml::Table>() {
+        Ok(table) => Some(table),
+        Err(err) => {
+            violations.push(format!("Cargo.toml: invalid TOML: {err}"));
+            None
+        }
+    };
+
+    let workspace_table = root_doc
+        .as_ref()
+        .and_then(|doc| doc.get("workspace"))
+        .and_then(toml::Value::as_table);
+
+    let root_edition = workspace_table
+        .and_then(|ws| ws.get("package"))
+        .and_then(toml::Value::as_table)
+        .and_then(|pkg| pkg.get("edition"))
+        .and_then(toml::Value::as_str);
+
+    match root_edition {
+        Some(edition) if edition == WORKSPACE_EDITION => {}
+        Some(edition) => violations.push(format!(
+            "Cargo.toml: [workspace.package].edition is `{edition}`, expected `{WORKSPACE_EDITION}`"
+        )),
+        None => {
+            violations.push("Cargo.toml: missing string `[workspace.package].edition`".to_string());
+        }
+    }
+
+    let lints_table = workspace_table
+        .and_then(|ws| ws.get("lints"))
+        .and_then(toml::Value::as_table);
+    for (section, required) in [
+        ("rust", REQUIRED_RUST_LINTS),
+        ("rustdoc", REQUIRED_RUSTDOC_LINTS),
+        ("clippy", REQUIRED_CLIPPY_LINTS),
+    ] {
+        let Some(section_table) = lints_table
+            .and_then(|lints| lints.get(section))
+            .and_then(toml::Value::as_table)
+        else {
+            violations.push(format!(
+                "Cargo.toml: missing `[workspace.lints.{section}]` table"
+            ));
+            continue;
+        };
+        for &(key, expected_level) in required {
+            match section_table.get(key).and_then(toml::Value::as_str) {
+                Some(level) if level == expected_level => {}
+                Some(level) => violations.push(format!(
+                    "Cargo.toml: [workspace.lints.{section}].{key} is `{level}`, expected `{expected_level}`"
+                )),
+                None => violations.push(format!(
+                    "Cargo.toml: missing `[workspace.lints.{section}].{key} = \"{expected_level}\"`"
+                )),
+            }
+        }
     }
 
     for entry_rel in FORBID_UNSAFE_ENTRYPOINTS {
@@ -96,17 +154,28 @@ fn check_workspace_lints(workspace: &Path, violations: &mut Vec<String>) -> Resu
         }
     }
 
+    let expected_edition = root_edition.unwrap_or(WORKSPACE_EDITION);
     let rustfmt_path = workspace.join("rustfmt.toml");
     if !rustfmt_path.is_file() {
         violations.push("rustfmt.toml is missing at workspace root".to_string());
     } else {
         let rustfmt = fs::read_to_string(&rustfmt_path)
             .map_err(|err| format!("{}: {err}", rustfmt_path.display()))?;
-        if !rustfmt
-            .lines()
-            .any(|line| line.trim() == r#"edition = "2021""#)
-        {
-            violations.push(r#"rustfmt.toml must set edition = "2021""#.to_string());
+        match rustfmt.parse::<toml::Table>() {
+            Ok(table) => {
+                match table.get("edition").and_then(toml::Value::as_str) {
+                    Some(edition) if edition == expected_edition => {}
+                    Some(edition) => violations.push(format!(
+                        "rustfmt.toml: `edition = \"{edition}\"` does not match `[workspace.package].edition` (`{expected_edition}`)"
+                    )),
+                    None => violations.push(format!(
+                        "rustfmt.toml: missing `edition = \"{expected_edition}\"`"
+                    )),
+                }
+            }
+            Err(err) => {
+                violations.push(format!("rustfmt.toml: invalid TOML: {err}"));
+            }
         }
     }
 
@@ -132,36 +201,43 @@ fn check_workspace_lints(workspace: &Path, violations: &mut Vec<String>) -> Resu
     for manifest in &manifests {
         let content =
             fs::read_to_string(manifest).map_err(|err| format!("{}: {err}", manifest.display()))?;
-        if !has_workspace_lints_section(&content) {
+        let rel = rel_display(workspace, manifest);
+        let parsed = match content.parse::<toml::Table>() {
+            Ok(table) => table,
+            Err(err) => {
+                violations.push(format!("{rel}: invalid TOML: {err}"));
+                continue;
+            }
+        };
+        if !inherits_workspace_key(&parsed, &["package", "edition"]) {
             violations.push(format!(
-                "{}: missing `[lints] workspace = true`",
-                rel_display(workspace, manifest)
+                "{rel}: missing `[package] edition.workspace = true`"
             ));
+        }
+        if !inherits_workspace_key(&parsed, &["lints"]) {
+            violations.push(format!("{rel}: missing `[lints] workspace = true`"));
         }
     }
 
     Ok(manifests.len())
 }
 
-fn has_workspace_lints_section(manifest: &str) -> bool {
-    let mut in_lints = false;
-    for raw_line in manifest.lines() {
-        let line = raw_line.split('#').next().unwrap_or("").trim();
-        if line.is_empty() {
-            continue;
-        }
-        if line.starts_with('[') {
-            in_lints = line == "[lints]";
-            continue;
-        }
-        if in_lints {
-            let normalized: String = line.chars().filter(|ch| !ch.is_whitespace()).collect();
-            if normalized == "workspace=true" {
-                return true;
-            }
-        }
+fn inherits_workspace_key(manifest: &toml::Table, path: &[&str]) -> bool {
+    let mut current: Option<&toml::Value> = None;
+    for (idx, segment) in path.iter().enumerate() {
+        current = if idx == 0 {
+            manifest.get(*segment)
+        } else {
+            current
+                .and_then(toml::Value::as_table)
+                .and_then(|t| t.get(*segment))
+        };
     }
-    false
+    current
+        .and_then(toml::Value::as_table)
+        .and_then(|table| table.get("workspace"))
+        .and_then(toml::Value::as_bool)
+        == Some(true)
 }
 
 fn check_sources(
@@ -280,7 +356,7 @@ fn find_fn_keyword(line: &str) -> Option<&str> {
     for (idx, _) in line.match_indices("fn") {
         let prev_ok = idx == 0 || bytes[idx - 1].is_ascii_whitespace();
         let after = idx + 2;
-        let next_ok = bytes.get(after).is_some_and(|b| b.is_ascii_whitespace());
+        let next_ok = bytes.get(after).is_some_and(u8::is_ascii_whitespace);
         if prev_ok && next_ok {
             return Some(line[after..].trim_start());
         }
@@ -392,7 +468,7 @@ fn find_banned_comment_marker(comment: &str) -> Option<&'static str> {
 
 fn starts_with_numbered_step(comment: &str) -> bool {
     let trimmed = comment.trim_start();
-    let digit_len = trimmed.chars().take_while(|ch| ch.is_ascii_digit()).count();
+    let digit_len = trimmed.chars().take_while(char::is_ascii_digit).count();
     digit_len > 0 && trimmed[digit_len..].starts_with(". ")
 }
 
@@ -722,11 +798,7 @@ fn match_raw_string_start(chars: &[char], idx: usize) -> Option<(usize, usize)> 
         hashes += 1;
         pos += 1;
     }
-    if pos < chars.len() && chars[pos] == '"' {
-        Some((pos + 1, hashes))
-    } else {
-        None
-    }
+    (pos < chars.len() && chars[pos] == '"').then(|| (pos + 1, hashes))
 }
 
 fn skip_raw_string(
@@ -855,19 +927,19 @@ mod tests {
 
         fs::write(
             root.join("Cargo.toml"),
-            "[workspace.lints.rust]\nunsafe_op_in_unsafe_fn = \"deny\"\n[workspace.lints.rustdoc]\nbroken_intra_doc_links = \"deny\"\nprivate_intra_doc_links = \"deny\"\n[workspace.lints.clippy]\nundocumented_unsafe_blocks = \"deny\"\nmissing_safety_doc = \"deny\"\nawait_holding_lock = \"deny\"\ntoo_many_arguments = \"deny\"\nlarge_enum_variant = \"deny\"\ndbg_macro = \"deny\"\ntodo = \"deny\"\nunimplemented = \"deny\"\n",
+            "[workspace.package]\nedition = \"2024\"\n[workspace.lints.rust]\nunsafe_op_in_unsafe_fn = \"deny\"\nelided_lifetimes_in_paths = \"warn\"\n[workspace.lints.rustdoc]\nbroken_intra_doc_links = \"deny\"\nprivate_intra_doc_links = \"deny\"\n[workspace.lints.clippy]\nundocumented_unsafe_blocks = \"deny\"\nmissing_safety_doc = \"deny\"\nawait_holding_lock = \"deny\"\ntoo_many_arguments = \"deny\"\nlarge_enum_variant = \"deny\"\ndbg_macro = \"deny\"\ntodo = \"deny\"\nunimplemented = \"deny\"\n",
         )
         .expect("root cargo");
-        fs::write(root.join("rustfmt.toml"), "edition = \"2021\"\n").expect("rustfmt");
+        fs::write(root.join("rustfmt.toml"), "edition = \"2024\"\n").expect("rustfmt");
         fs::write(root.join("xtask/src/lib.rs"), "#![forbid(unsafe_code)]\n").expect("xtask lib");
         fs::write(
             root.join("crates/demo/Cargo.toml"),
-            "[package]\nname = \"demo\"\n[lints]\nworkspace = true\n",
+            "[package]\nname = \"demo\"\nedition.workspace = true\n[lints]\nworkspace = true\n",
         )
         .expect("demo cargo");
         fs::write(
             root.join("xtask/Cargo.toml"),
-            "[package]\nname = \"xtask\"\n[lints]\nworkspace = true\n",
+            "[package]\nname = \"xtask\"\nedition.workspace = true\n[lints]\nworkspace = true\n",
         )
         .expect("xtask cargo");
         fs::write(
@@ -1022,5 +1094,55 @@ mod tests {
         );
         assert!(err.contains("首期"), "{err}");
         assert!(err.contains("U+00B7"), "{err}");
+    }
+
+    #[test]
+    fn missing_elided_lifetimes_lint_fails() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        seed_valid_workspace(temp.path());
+        fs::write(
+            temp.path().join("Cargo.toml"),
+            "[workspace.package]\nedition = \"2024\"\n[workspace.lints.rust]\nunsafe_op_in_unsafe_fn = \"deny\"\n[workspace.lints.rustdoc]\nbroken_intra_doc_links = \"deny\"\nprivate_intra_doc_links = \"deny\"\n[workspace.lints.clippy]\nundocumented_unsafe_blocks = \"deny\"\nmissing_safety_doc = \"deny\"\nawait_holding_lock = \"deny\"\ntoo_many_arguments = \"deny\"\nlarge_enum_variant = \"deny\"\ndbg_macro = \"deny\"\ntodo = \"deny\"\nunimplemented = \"deny\"\n",
+        )
+        .expect("root cargo");
+
+        let err =
+            check_hygiene(temp.path()).expect_err("missing elided_lifetimes_in_paths must fail");
+        assert!(err.contains("elided_lifetimes_in_paths"), "{err}");
+    }
+
+    #[test]
+    fn root_and_rustfmt_edition_drift_fails() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        seed_valid_workspace(temp.path());
+        fs::write(temp.path().join("rustfmt.toml"), "edition = \"2021\"\n").expect("rustfmt");
+
+        let err = check_hygiene(temp.path()).expect_err("rustfmt edition drift must fail");
+        assert!(err.contains("rustfmt.toml"), "{err}");
+
+        let temp_root = tempfile::tempdir().expect("tempdir");
+        seed_valid_workspace(temp_root.path());
+        let root_cargo = fs::read_to_string(temp_root.path().join("Cargo.toml"))
+            .expect("read root cargo")
+            .replace("edition = \"2024\"", "edition = \"2021\"");
+        fs::write(temp_root.path().join("Cargo.toml"), root_cargo).expect("write root cargo");
+
+        let err = check_hygiene(temp_root.path()).expect_err("root edition drift must fail");
+        assert!(err.contains("[workspace.package].edition"), "{err}");
+    }
+
+    #[test]
+    fn member_manifest_without_workspace_edition_fails() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        seed_valid_workspace(temp.path());
+        fs::write(
+            temp.path().join("crates/demo/Cargo.toml"),
+            "[package]\nname = \"demo\"\nedition = \"2024\"\n[lints]\nworkspace = true\n",
+        )
+        .expect("overwrite demo cargo");
+
+        let err = check_hygiene(temp.path()).expect_err("non-inherited member edition must fail");
+        assert!(err.contains("crates/demo/Cargo.toml"), "{err}");
+        assert!(err.contains("edition.workspace = true"), "{err}");
     }
 }

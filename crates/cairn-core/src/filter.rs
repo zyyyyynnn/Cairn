@@ -57,14 +57,14 @@ impl SizeFilter {
                 op: SizeOp::Range(min, max),
             });
         }
-        if let Some((left, right)) = trimmed.split_once('-') {
-            if !left.is_empty() && !right.is_empty() {
-                if let (Some(min), Some(max)) = (parse_val(left), parse_val(right)) {
-                    return Some(Self {
-                        op: SizeOp::Range(min, max),
-                    });
-                }
-            }
+        if let Some((left, right)) = trimmed.split_once('-')
+            && !left.is_empty()
+            && !right.is_empty()
+            && let (Some(min), Some(max)) = (parse_val(left), parse_val(right))
+        {
+            return Some(Self {
+                op: SizeOp::Range(min, max),
+            });
         }
 
         if let Some(rest) = trimmed.strip_prefix(">=") {
@@ -447,17 +447,17 @@ impl DateFilter {
             });
         }
 
-        if let Some((left, right)) = trimmed.split_once('-') {
-            if !left.is_empty() && !right.is_empty() {
-                if let (Some((min, _)), Some((_, max))) = (
-                    parse_date_span(left, now_sec),
-                    parse_date_span(right, now_sec),
-                ) {
-                    return Some(Self {
-                        op: DateOp::Range(min, max),
-                    });
-                }
-            }
+        if let Some((left, right)) = trimmed.split_once('-')
+            && !left.is_empty()
+            && !right.is_empty()
+            && let (Some((min, _)), Some((_, max))) = (
+                parse_date_span(left, now_sec),
+                parse_date_span(right, now_sec),
+            )
+        {
+            return Some(Self {
+                op: DateOp::Range(min, max),
+            });
         }
 
         if let Some(rest) = trimmed.strip_prefix("!=") {
@@ -617,18 +617,18 @@ pub fn parse_date_span(s: &str, now_sec: i64) -> Option<(i64, i64)> {
         return Some((now_sec - n, now_sec));
     }
 
-    if let Some((m_str, y_str)) = s.split_once('/') {
-        if let (Ok(m), Ok(y)) = (m_str.trim().parse::<i64>(), y_str.trim().parse::<i64>()) {
-            if (1..=12).contains(&m) && y > 0 {
-                let start = ymd_to_timestamp(y, m, 1);
-                let end = if m == 12 {
-                    ymd_to_timestamp(y + 1, 1, 1)
-                } else {
-                    ymd_to_timestamp(y, m + 1, 1)
-                };
-                return Some((start, end));
-            }
-        }
+    if let Some((m_str, y_str)) = s.split_once('/')
+        && let (Ok(m), Ok(y)) = (m_str.trim().parse::<i64>(), y_str.trim().parse::<i64>())
+        && (1..=12).contains(&m)
+        && y > 0
+    {
+        let start = ymd_to_timestamp(y, m, 1);
+        let end = if m == 12 {
+            ymd_to_timestamp(y + 1, 1, 1)
+        } else {
+            ymd_to_timestamp(y, m + 1, 1)
+        };
+        return Some((start, end));
     }
 
     if s.len() == 10 && s.as_bytes()[4] == b'-' && s.as_bytes()[7] == b'-' {
@@ -652,21 +652,23 @@ pub fn parse_date_span(s: &str, now_sec: i64) -> Option<(i64, i64)> {
         }
     }
 
-    if s.len() == 4 && s.chars().all(|c| c.is_ascii_digit()) {
-        if let Ok(year) = s.parse::<i64>() {
-            let start = ymd_to_timestamp(year, 1, 1);
-            let end = ymd_to_timestamp(year + 1, 1, 1);
-            return Some((start, end));
-        }
+    if s.len() == 4
+        && s.chars().all(|c| c.is_ascii_digit())
+        && let Ok(year) = s.parse::<i64>()
+    {
+        let start = ymd_to_timestamp(year, 1, 1);
+        let end = ymd_to_timestamp(year + 1, 1, 1);
+        return Some((start, end));
     }
 
-    if s.len() == 2 && s.chars().all(|c| c.is_ascii_digit()) {
-        if let Ok(yy) = s.parse::<i64>() {
-            let year = if yy >= 70 { 1900 + yy } else { 2000 + yy };
-            let start = ymd_to_timestamp(year, 1, 1);
-            let end = ymd_to_timestamp(year + 1, 1, 1);
-            return Some((start, end));
-        }
+    if s.len() == 2
+        && s.chars().all(|c| c.is_ascii_digit())
+        && let Ok(yy) = s.parse::<i64>()
+    {
+        let year = if yy >= 70 { 1900 + yy } else { 2000 + yy };
+        let start = ymd_to_timestamp(year, 1, 1);
+        let end = ymd_to_timestamp(year + 1, 1, 1);
+        return Some((start, end));
     }
 
     None
