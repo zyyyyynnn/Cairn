@@ -18,8 +18,9 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
 
-# Rust caches are keyed by shared-key + lockfiles + toolchain; only main pushes write caches so
-# pull requests restore without paying save cost or crowding the 10 GiB cache budget.
+# Rust caches are keyed by shared-key + lockfiles + toolchain with workspace crates excluded, so
+# PRs matching main hit the primary key without saving, and lockfile-changing PRs warm their own
+# branch cache for follow-up pushes.
 
 jobs:
   changes:
@@ -66,7 +67,6 @@ jobs:
           add-job-id-key: false
           cache-bin: false
           cache-workspace-crates: false
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Run repository gates
         run: |
           if [[ "${{ needs.changes.outputs.docs_only }}" == "true" ]]; then
@@ -95,7 +95,6 @@ jobs:
           add-job-id-key: false
           cache-bin: false
           cache-workspace-crates: false
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Install NASM
         shell: pwsh
         run: |
@@ -176,7 +175,6 @@ jobs:
           add-job-id-key: false
           cache-bin: false
           cache-workspace-crates: false
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Run engine and tooling tests
         run: cargo test -p cairn-protocol -p cairn-core -p cairn-ntfs -p cairn-content -p cairn-client -p cairn-worker -p cairn-service -p cairn-cli -p xtask
       - name: Run worker end-to-end tests and export installer test binary
@@ -245,7 +243,6 @@ jobs:
           add-job-id-key: false
           cache-bin: false
           cache-workspace-crates: false
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Install NASM
         shell: pwsh
         run: |
@@ -293,7 +290,6 @@ jobs:
           add-job-id-key: false
           cache-bin: false
           cache-workspace-crates: false
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Build engine release binaries
         run: cargo build --release -p cairn-service -p cairn-cli -p cairn-worker -p xtask
       - name: Query memory and latency regression check
@@ -330,7 +326,6 @@ jobs:
           add-job-id-key: false
           cache-bin: false
           cache-workspace-crates: false
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Install NASM
         shell: pwsh
         run: |
@@ -387,7 +382,7 @@ jobs:
       - name: Cache WiX Toolset
         id: wix-cache
         if: needs.changes.outputs.docs_only != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.dotnet/tools
