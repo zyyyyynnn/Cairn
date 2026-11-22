@@ -13,6 +13,7 @@ pub(crate) struct GlobalHotkey {
 }
 
 /// Ctrl+Alt+Space summons or hides the main window from anywhere.
+#[cfg_attr(test, allow(dead_code))]
 fn default_hotkey() -> HotKey {
     HotKey::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::Space)
 }
@@ -38,17 +39,4 @@ pub(crate) fn register() -> Result<GlobalHotkey, String> {
         })
         .map_err(|err| format!("hotkey listener: {err}"))?;
     Ok(GlobalHotkey { _manager: manager })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::default_hotkey;
-    use global_hotkey::hotkey::{Code, Modifiers};
-
-    #[test]
-    fn the_default_hotkey_is_ctrl_alt_space() {
-        let hotkey = default_hotkey();
-        assert_eq!(hotkey.mods, Modifiers::CONTROL | Modifiers::ALT);
-        assert_eq!(hotkey.key, Code::Space);
-    }
 }

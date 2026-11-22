@@ -266,59 +266,37 @@ mod tests {
     }
 
     #[test]
-    fn a_registration_without_a_product_code_is_repaired() {
-        let mut damaged = product(env!("CARGO_PKG_VERSION"));
-        damaged.product_code = None;
-        assert_eq!(
-            initial_screen(Launch::Setup, Some(&damaged), false),
-            Screen::License
-        );
-    }
+    fn initial_screen_routes_install_upgrade_maintenance_and_uninstall() {
+        let mut no_code = product(env!("CARGO_PKG_VERSION"));
+        no_code.product_code = None;
+        let current = product(env!("CARGO_PKG_VERSION"));
+        let newer = product("9.0.0");
+        let older = product("0.0.1");
+        let burn = product("0.1.2");
+        let uninstall_target = product("0.1.0");
 
-    #[test]
-    fn a_fresh_machine_starts_at_the_license() {
-        assert_eq!(initial_screen(Launch::Setup, None, false), Screen::License);
-    }
-
-    #[test]
-    fn a_newer_or_equal_install_opens_maintenance() {
-        assert_eq!(
-            initial_screen(Launch::Setup, Some(&product("9.0.0")), false),
-            Screen::Maintenance
-        );
-        assert_eq!(
-            initial_screen(
-                Launch::Setup,
-                Some(&product(env!("CARGO_PKG_VERSION"))),
-                false
+        let cases = [
+            (Launch::Setup, None, false, Screen::License),
+            (Launch::Setup, Some(&no_code), false, Screen::License),
+            (Launch::Setup, Some(&newer), false, Screen::Maintenance),
+            (Launch::Setup, Some(&current), false, Screen::Maintenance),
+            (Launch::Setup, Some(&older), false, Screen::License),
+            (Launch::Setup, Some(&burn), true, Screen::License),
+            (Launch::Uninstall, None, false, Screen::Failed),
+            (
+                Launch::Uninstall,
+                Some(&uninstall_target),
+                false,
+                Screen::Uninstall,
             ),
-            Screen::Maintenance
-        );
-    }
-
-    #[test]
-    fn an_older_install_updates_and_a_legacy_burn_install_is_migrated() {
-        assert_eq!(
-            initial_screen(Launch::Setup, Some(&product("0.0.1")), false),
-            Screen::License
-        );
-        assert_eq!(
-            initial_screen(Launch::Setup, Some(&product("0.1.2")), true),
-            Screen::License,
-            "the legacy Burn product must be removable even when its version is higher"
-        );
-    }
-
-    #[test]
-    fn uninstall_without_a_product_reports_the_missing_install() {
-        assert_eq!(
-            initial_screen(Launch::Uninstall, None, false),
-            Screen::Failed
-        );
-        assert_eq!(
-            initial_screen(Launch::Uninstall, Some(&product("0.1.0")), false),
-            Screen::Uninstall
-        );
+        ];
+        for (launch, installed, legacy_burn, expected) in cases {
+            assert_eq!(
+                initial_screen(launch, installed, legacy_burn),
+                expected,
+                "launch={launch:?} installed={installed:?} legacy_burn={legacy_burn}"
+            );
+        }
     }
 
     #[test]

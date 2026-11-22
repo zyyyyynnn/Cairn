@@ -1743,34 +1743,43 @@ mod hover_group_tests {
     use crate::shell::command_groups::MenuGroup;
 
     #[test]
-    fn hovering_open_trigger_without_entering_popup_does_not_rebuild_menu() {
-        assert_eq!(
-            decide_group_hover(Some(MenuGroup::File), MenuGroup::File, false, false),
-            GroupHoverAction::Noop
-        );
-    }
-
-    #[test]
-    fn returning_from_popup_to_open_trigger_rebuilds_menu_once() {
-        assert_eq!(
-            decide_group_hover(Some(MenuGroup::File), MenuGroup::File, true, false),
-            GroupHoverAction::RebuildOpenGroup(MenuGroup::File)
-        );
-    }
-
-    #[test]
-    fn hovering_different_trigger_or_keyboard_navigation_behaves_expectedly() {
-        assert_eq!(
-            decide_group_hover(Some(MenuGroup::File), MenuGroup::View, false, false),
-            GroupHoverAction::SwitchGroup(MenuGroup::View)
-        );
-        assert_eq!(
-            decide_group_hover(Some(MenuGroup::File), MenuGroup::File, true, true),
-            GroupHoverAction::Noop
-        );
-        assert_eq!(
-            decide_group_hover(None, MenuGroup::File, false, false),
-            GroupHoverAction::Noop
-        );
+    fn hover_decisions_cover_open_popup_switch_and_keyboard_states() {
+        let cases = [
+            (
+                Some(MenuGroup::File),
+                MenuGroup::File,
+                false,
+                false,
+                GroupHoverAction::Noop,
+            ),
+            (
+                Some(MenuGroup::File),
+                MenuGroup::File,
+                true,
+                false,
+                GroupHoverAction::RebuildOpenGroup(MenuGroup::File),
+            ),
+            (
+                Some(MenuGroup::File),
+                MenuGroup::View,
+                false,
+                false,
+                GroupHoverAction::SwitchGroup(MenuGroup::View),
+            ),
+            (
+                Some(MenuGroup::File),
+                MenuGroup::File,
+                true,
+                true,
+                GroupHoverAction::Noop,
+            ),
+            (None, MenuGroup::File, false, false, GroupHoverAction::Noop),
+        ];
+        for (open_group, hovered, inside_popup, keyboard_nav, expected) in cases {
+            assert_eq!(
+                decide_group_hover(open_group, hovered, inside_popup, keyboard_nav),
+                expected
+            );
+        }
     }
 }

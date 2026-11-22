@@ -9571,21 +9571,15 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 name = "xtask"
 version = "0.2.1"
 dependencies = [
- "cairn-client",
  "cairn-core",
  "cairn-ntfs",
  "cairn-protocol",
  "cairn-service",
  "cairn-setup",
  "clap",
- "rayon",
- "serde",
- "serde_json",
  "sha2 0.11.1",
  "tempfile",
- "thiserror 2.0.21",
  "toml 1.2.1+spec-1.1.0",
- "windows 0.62.2",
  "winresource",
 ]
 

@@ -33,7 +33,7 @@ cairn-service = { path = "crates/cairn-service" }
 cairn-worker = { path = "crates/cairn-worker" }
 cairn-client = { path = "crates/cairn-client" }
 cairn-ui = { path = "crates/cairn-ui" }
-cairn-setup = { path = "crates/cairn-setup" }
+cairn-setup = { path = "crates/cairn-setup", default-features = false }
 
 # Serialization & IPC
 serde = { version = "1.0", features = ["derive"] }

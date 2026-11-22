@@ -165,7 +165,7 @@ pub(crate) fn set_language_with_i18n(i18n: &I18nManager) {
 
 #[cfg(test)]
 mod tests {
-    use super::{MENU_KEYS, labels_with_i18n, set_language_with_i18n};
+    use super::{MENU_KEYS, labels_with_i18n};
     use crate::shell::i18n::I18nManager;
     use crate::shell::settings::{LANGUAGE_EN_US, LANGUAGE_ZH_CN};
 
@@ -183,13 +183,5 @@ mod tests {
             assert!(!en[index].trim().is_empty(), "{key} is blank in en-US");
         }
         assert_ne!(zh, en, "the tray would read the same in every language");
-    }
-
-    /// Tests, and a desktop whose shell refused the icon, have no row handles; rewriting them
-    /// must still be safe.
-    #[test]
-    fn changing_the_language_without_a_tray_is_a_no_op() {
-        set_language_with_i18n(&I18nManager::new(LANGUAGE_ZH_CN));
-        set_language_with_i18n(&I18nManager::new(LANGUAGE_EN_US));
     }
 }

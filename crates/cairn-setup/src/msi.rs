@@ -539,12 +539,6 @@ mod tests {
     }
 
     #[test]
-    fn a_reboot_initiated_result_is_a_success_with_restart() {
-        let success = finish(1641, &PathBuf::from("uninstall.log")).expect("reboot initiated");
-        assert!(success.restart_required);
-    }
-
-    #[test]
     fn orphan_cleanup_creates_the_log_even_without_warnings() {
         let log = unique_log("orphan-success");
         let session = super::start_cleanup(|| Ok(Vec::new()), log.clone());
@@ -602,17 +596,17 @@ mod tests {
     }
 
     #[test]
-    fn installer_exit_codes_map_to_user_facing_failures() {
+    fn installer_exit_codes_map_to_user_facing_outcomes_and_preserve_log_path() {
+        let reboot = finish(1641, &PathBuf::from("uninstall.log")).expect("reboot initiated");
+        assert!(reboot.restart_required);
+
         assert_eq!(FailureKind::from_code(1602), FailureKind::Cancelled);
         assert_eq!(FailureKind::from_code(1618), FailureKind::Busy);
         assert_eq!(FailureKind::from_code(1620), FailureKind::InvalidPackage);
         assert_eq!(FailureKind::from_code(1605), FailureKind::NotInstalled);
         assert_eq!(FailureKind::from_code(1603), FailureKind::Fatal);
         assert_eq!(FailureKind::from_code(1234), FailureKind::Other(1234));
-    }
 
-    #[test]
-    fn a_failure_keeps_the_log_path_it_was_written_to() {
         let failure = MsiFailure::new(1603, PathBuf::from(r"C:\Temp\cairn.log"));
         assert_eq!(failure.kind, FailureKind::Fatal);
         assert_eq!(failure.log, PathBuf::from(r"C:\Temp\cairn.log"));

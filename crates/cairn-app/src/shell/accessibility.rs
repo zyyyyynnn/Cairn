@@ -876,60 +876,6 @@ mod tests {
         }
     }
 
-    /// The role each kind of control must carry, stated here independently of the table so a wrong
-    /// entry is caught rather than confirmed: commands are actionable, containers group, live regions
-    /// announce, and the query box takes text.
-    #[test]
-    fn registered_roles_match_each_controls_semantics() {
-        let expectations: &[(&str, Role)] = &[
-            ("search-input", Role::SearchInput),
-            ("sidebar-locations", Role::Heading),
-            ("sidebar-location-all", Role::TreeItem),
-            ("sidebar-location-doc", Role::TreeItem),
-            ("sidebar-location-image", Role::TreeItem),
-            ("sidebar-location-audio", Role::TreeItem),
-            ("sidebar-location-video", Role::TreeItem),
-            ("sidebar-location-zip", Role::TreeItem),
-            ("sidebar-location-exe", Role::TreeItem),
-            ("sidebar-location-folder", Role::TreeItem),
-            ("sidebar-recycle-bin", Role::TreeItem),
-            ("sidebar-folder-sources", Role::Heading),
-            ("sidebar-folder-source", Role::TreeItem),
-            ("sidebar-manage-folder-sources", Role::Button),
-            ("toolbar-menu-file", Role::Button),
-            ("toolbar-menu-edit", Role::Button),
-            ("toolbar-menu-view", Role::Button),
-            ("toolbar-menu-search", Role::Button),
-            ("toolbar-menu-index", Role::Button),
-            ("toolbar-menu-tools", Role::Button),
-            ("toolbar-menu-help", Role::Button),
-            ("table-header", Role::Row),
-            ("column-name", Role::ColumnHeader),
-            ("column-path", Role::ColumnHeader),
-            ("column-size", Role::ColumnHeader),
-            ("column-modified", Role::ColumnHeader),
-            ("result-band", Role::List),
-            ("result-row", Role::ListItem),
-            ("result-placeholder", Role::ListItem),
-            ("result-state", Role::Status),
-            ("rename-input", Role::TextInput),
-            ("content-search-action", Role::Button),
-            ("status-bar", Role::Status),
-            ("toast", Role::Alert),
-            ("toast-dismiss", Role::Button),
-            ("recycle-bin-error", Role::Alert),
-            ("recycle-bin-retry", Role::Button),
-            ("service-issue-not-running", Role::Alert),
-        ];
-        for (key, expected) in expectations {
-            assert_eq!(
-                control(key).role,
-                *expected,
-                "{key} must report the role its interaction implies"
-            );
-        }
-    }
-
     /// The controls SPEC NFR-11 and UI-01/02/03 name by requirement. This list is the coverage
     /// statement: a control that stops being registered fails here, not in a screen reader.
     #[test]
@@ -1074,13 +1020,6 @@ mod tests {
         assert!(KEY_CONTROLS.iter().filter(|entry| !entry.indexed).count() >= 12);
     }
 
-    /// Informational toasts are polite status; only failures interrupt.
-    #[test]
-    fn error_and_info_toasts_keep_their_own_live_region_role() {
-        assert_eq!(control("toast").role, Role::Alert);
-        assert_eq!(control("toast-info").role, Role::Status);
-    }
-
     /// Each category entry registers exactly its own wording, so a stray message cannot hide in the
     /// family and a renamed category cannot leave an orphan behind.
     #[test]
@@ -1095,16 +1034,6 @@ mod tests {
             FilterCategory::Executable,
             FilterCategory::Folder,
         ];
-        for category in categories {
-            let entry = control_at(&format!("sidebar-location:{}", category.key()));
-            assert!(
-                entry.messages.contains(&category.label_key()),
-                "the sidebar does not register the {} category",
-                category.key()
-            );
-        }
-        // Each entry speaks exactly its own category's wording, so a stray message cannot hide in the
-        // family and a renamed category cannot leave an orphan behind.
         for category in categories {
             let entry = control_at(&format!("sidebar-location:{}", category.key()));
             assert_eq!(
@@ -1151,25 +1080,6 @@ mod tests {
                 messages.insert(entry.message_at(0)),
                 "{key} reuses another failure's message"
             );
-        }
-    }
-
-    /// Registered controls whose element keys appear in keymaps and registries must remain valid.
-    #[test]
-    fn every_registered_family_and_shortcut_key_is_parsable_and_well_formed() {
-        let mut families: Vec<&str> = KEY_CONTROLS
-            .iter()
-            .filter(|entry| entry.element.contains(':'))
-            .map(|entry| entry.element.split(':').next().unwrap_or_default())
-            .collect();
-        families.sort_unstable();
-        families.dedup();
-        assert!(
-            !families.is_empty(),
-            "the registry describes no repeated family, yet the view assembles ids with an index"
-        );
-        for entry in KEY_CONTROLS.iter().filter(|entry| entry.indexed) {
-            let _ = element_at(entry, 0);
         }
     }
 

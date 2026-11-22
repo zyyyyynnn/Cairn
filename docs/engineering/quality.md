@@ -21,11 +21,11 @@
 1. `cargo fmt --all --check`（遵循根目录 `rustfmt.toml`）
 2. `cargo clippy --workspace --all-targets -- -D warnings`（继承根目录 `[workspace.lints]`，含 `unsafe_op_in_unsafe_fn = "deny"`、`elided_lifetimes_in_paths = "warn"`、`clippy::undocumented_unsafe_blocks = "deny"`、`clippy::missing_safety_doc = "deny"`、`clippy::await_holding_lock = "deny"`、`clippy::uninlined_format_args = "warn"`、`clippy::redundant_closure_for_method_calls = "warn"`、`clippy::unnested_or_patterns = "warn"`、`clippy::manual_let_else = "warn"` 与 `rustdoc` 断链检查，零警告）
 3. `cargo doc --workspace --no-deps`（`RUSTDOCFLAGS=-D warnings` 零警告）
-4. `cargo run -p xtask -- check`（统一执行 `check-i18n`、`check-docs`、`check-size` 与 `check-hygiene`，覆盖本地化对齐、文档相对链接、2000 行上限、`[workspace.lints]` 继承、纯安全 crate 的 `#![forbid(unsafe_code)]`、`#[ignore]` 登记一致性及全仓非调研文档/注释/文案规范）
+4. `cargo run -p xtask -- check`（CI 的 `Repository Gates` 使用 `--no-default-features` 在 `ubuntu-latest` 上统一执行 `check-i18n`、`check-docs`、`check-size` 与 `check-hygiene`，覆盖本地化对齐、文档相对链接、2000 行上限、`[workspace.lints]` 继承、纯安全 crate 的 `#![forbid(unsafe_code)]`、`#[ignore]` 登记一致性及全仓非调研文档/注释/文案规范）
 5. `cargo deny check`（许可证、安全漏洞与 yanked 检查；仓库已提供 `deny.toml`）
-6. `cargo run --release -p xtask -- bench-query --check`（CI `Test / Tooling` 执行全账本内存与查询延迟回归门禁）
+6. `cargo run --release -p xtask -- bench-query --check`（CI `Release / Engine` 在 release 编译后直接运行同机 `CairnXtask.exe bench-query --check`，执行全账本内存与查询延迟回归门禁）
 
-纯文档变更跳过编译与测试重作业，仍执行 `check-docs` 与 `check-hygiene`，`Dependency Policy`、`Domain & System Test Suite` 与 `Installer Package` 以 no-op 通过。代码变更必须通过全部必需门禁，`Installer Package` 在 Release 构建与 `Test / Tooling` 完成后执行。
+纯文档变更仅在 `ubuntu-latest` 执行 `check-docs` 与 `check-hygiene`（`--docs-only`），跳过所有 Windows 编译、测试与发布作业，`Code Quality & Static Analysis`、`Dependency Policy`、`Domain & System Test Suite` 与 `Installer Package` 均以最小开销通过。代码变更必须通过全部必需门禁，`Installer Package` 在 Release 构建与 `Test / Engine & Tooling` 完成后执行。
 
 `deny.toml` 只针对 `x86_64-pc-windows-msvc`；许可证白名单与 GPUI/font 栈的 unmaintained 例外均有理由记录。漏洞与 yanked 不设全局忽略，新增 ignore 必须附上游依据。
 

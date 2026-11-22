@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::PRODUCT_FILES;
 use crate::registry::{read_hklm_string, subkeys, wide};
 use cairn_protocol::message::SERVICE_NAME;
 
@@ -1106,15 +1107,6 @@ if ([System.IO.Directory]::Exists($d)) { try { [System.IO.Directory]::Delete($d,
         .map(|_| ())
         .map_err(|error| error.to_string())
 }
-
-pub const PRODUCT_FILES: [&str; 6] = [
-    "Cairn.exe",
-    "CairnService.exe",
-    "CairnCli.exe",
-    "CairnWorker.exe",
-    "CairnSetup.exe",
-    "CairnUninstall.exe",
-];
 
 #[cfg(test)]
 mod tests {
