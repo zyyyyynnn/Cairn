@@ -185,10 +185,9 @@ jobs:
           }
 
           function Invoke-IgnoredTest {
-            param([string]$Exe, [string]$Filter, [switch]$Exact)
-            $args = @($Filter, '--ignored', '--nocapture')
-            if ($Exact) { $args += '--exact' }
-            $output = & $Exe @args 2>&1
+            param([string]$Exe, [string]$Filter)
+            $testArgs = @($Filter, '--ignored', '--nocapture', '--exact')
+            $output = & $Exe @testArgs 2>&1
             $output | Out-Host
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             if (-not (($output -join "`n") -match 'test result: ok\. 1 passed; 0 failed;')) {
@@ -198,15 +197,16 @@ jobs:
 
           $serviceLibTest = $artifacts | Where-Object { $_.target.name -eq 'cairn_service' } | Select-Object -Last 1
           if (-not $serviceLibTest) { throw "The cairn_service lib test binary was not produced." }
-          Invoke-IgnoredTest -Exe $serviceLibTest.executable -Filter 'sync_engine::content_pipeline::tests::a_full_backfill_reaches_ready_and_indexes_existing_files' -Exact
+          Invoke-IgnoredTest -Exe $serviceLibTest.executable -Filter 'sync_engine::content_pipeline::tests::a_full_backfill_reaches_ready_and_indexes_existing_files'
 
           $platformSeamTest = $artifacts | Where-Object { $_.target.name -eq 'platform_seam' } | Select-Object -Last 1
           if (-not $platformSeamTest) { throw "The platform_seam integration test binary was not produced." }
-          Invoke-IgnoredTest -Exe $platformSeamTest.executable -Filter 'property_index_extracts_through_real_worker_and_recovers_from_corrupt_files' -Exact
+          Invoke-IgnoredTest -Exe $platformSeamTest.executable -Filter 'property_index_extracts_through_real_worker_and_recovers_from_corrupt_files'
 
           $packageTest = $artifacts | Where-Object { $_.target.name -eq 'xtask' } | Select-Object -Last 1
           if (-not $packageTest) { throw "The installer test binary was not produced." }
           $tests = & $packageTest.executable --list
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if (-not ($tests -match 'real_package_builds_msi_and_setup')) {
             throw "The installer test binary does not carry the package test."
           }
@@ -344,13 +344,18 @@ jobs:
   package:
     name: Installer Package
     needs: [changes, release_engine, release_desktop, test-engine]
-    if: always() && (needs.changes.outputs.docs_only == 'true' || (needs.release_engine.result == 'success' && needs.release_desktop.result == 'success' && needs.test-engine.result == 'success'))
-    runs-on: ${{ needs.changes.outputs.docs_only == 'true' && 'ubuntu-latest' || 'windows-latest' }}
+    if: always()
+    runs-on: ${{ (needs.changes.outputs.docs_only == 'true' || needs.release_engine.result != 'success' || needs.release_desktop.result != 'success' || needs.test-engine.result != 'success') && 'ubuntu-latest' || 'windows-latest' }}
     timeout-minutes: 20
     steps:
       - name: Documentation-only change
         if: needs.changes.outputs.docs_only == 'true'
         run: echo "Documentation-only change; installer packaging is not required."
+      - name: Verify upstream build artifacts
+        if: needs.changes.outputs.docs_only != 'true' && (needs.release_engine.result != 'success' || needs.release_desktop.result != 'success' || needs.test-engine.result != 'success')
+        run: |
+          echo "At least one release or engine test job did not succeed."
+          exit 1
       - name: Checkout repository
         if: needs.changes.outputs.docs_only != 'true'
         uses: actions/checkout@v7

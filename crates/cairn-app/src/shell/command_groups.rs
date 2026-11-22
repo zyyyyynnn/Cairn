@@ -721,6 +721,55 @@ mod tests {
         assert_eq!(command.shortcut(), Some("escape"));
     }
 
+    #[test]
+    fn action_dispatch_and_radio_choice_contracts_hold() {
+        for command in all_commands() {
+            let is_action_variant = matches!(
+                command,
+                GroupCommand::OpenSelected
+                    | GroupCommand::RevealLocation
+                    | GroupCommand::CopyPaths
+                    | GroupCommand::CopyNames
+                    | GroupCommand::UndoQueryText
+                    | GroupCommand::RedoQueryText
+                    | GroupCommand::CutQueryText
+                    | GroupCommand::PasteQueryText
+                    | GroupCommand::ShowProperties
+                    | GroupCommand::DeleteSelected
+                    | GroupCommand::RenameSelected
+                    | GroupCommand::RestoreSelected
+                    | GroupCommand::RestoreAll
+                    | GroupCommand::SelectAll
+                    | GroupCommand::ToggleCase
+                    | GroupCommand::ToggleWholeWord
+                    | GroupCommand::ToggleMatchPath
+                    | GroupCommand::ToggleRegex
+            );
+            assert_eq!(
+                command.action().is_some(),
+                is_action_variant,
+                "{command:?} drifted between GroupCommand::action() and menu_actions dispatch"
+            );
+        }
+
+        assert!(GroupCommand::SortBy(SortColumn::Name).is_radio_choice());
+        assert!(GroupCommand::SetTheme(crate::shell::settings::THEME_SYSTEM).is_radio_choice());
+        assert!(GroupCommand::SetZoom(ZoomPreset::Standard).is_radio_choice());
+        assert!(
+            GroupCommand::SetLanguage(crate::shell::settings::LANGUAGE_SYSTEM).is_radio_choice()
+        );
+        for non_radio in [
+            GroupCommand::ReverseOrder,
+            GroupCommand::ToggleColumn(crate::table::model::TableColumn::Path),
+            GroupCommand::ToggleCase,
+            GroupCommand::ToggleAutostart,
+            GroupCommand::ToggleContentSearch,
+            GroupCommand::TogglePropertyIndex,
+        ] {
+            assert!(!non_radio.is_radio_choice(), "{non_radio:?}");
+        }
+    }
+
     /// Two menus on one key would open whichever the keymap reaches last, so the mnemonic table has
     /// to stay one-to-one, and every mnemonic has to parse as a keystroke the keymap can bind.
     #[test]

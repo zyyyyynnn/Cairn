@@ -27,7 +27,7 @@
 
 纯文档变更仅在 `ubuntu-latest` 执行 `check-docs` 与 `check-hygiene`（`--docs-only`），跳过所有 Windows 编译、测试与发布作业，`Code Quality & Static Analysis`、`Dependency Policy`、`Domain & System Test Suite` 与 `Installer Package` 均以最小开销通过。代码变更必须通过全部必需门禁，`Installer Package` 在 Release 构建与 `Test / Engine & Tooling` 完成后执行。
 
-`deny.toml` 只针对 `x86_64-pc-windows-msvc`；许可证白名单与 GPUI/font 栈的 unmaintained 例外均有理由记录。漏洞与 yanked 不设全局忽略，新增 ignore 必须附上游依据。
+`deny.toml` 只针对 `x86_64-pc-windows-msvc`；许可证白名单与 GPUI 栈的 unmaintained 例外均有理由记录。漏洞与 yanked 不设全局忽略，新增 ignore 必须附上游依据。
 
 ### 1.3 中文输入法（IME）验收清单
 对微软拼音、搜狗拼音、微信输入法分别执行以下 6 项标准用例：

@@ -85,7 +85,7 @@ cargo deny check
 cargo run -p xtask -- check
 ```
 
-需要外部二进制、独立网络或提权前置条件的 `#[ignore]` 用例由 [`docs/engineering/testing.md`](docs/engineering/testing.md) 统一登记并由 `xtask check-hygiene` 校验同步；内容回填与扩展属性 Worker 端到端用例由 CI 的 `Test / Backfill` 作业执行。
+需要外部二进制、独立网络或提权前置条件的 `#[ignore]` 用例由 [`docs/engineering/testing.md`](docs/engineering/testing.md) 统一登记并由 `xtask check-hygiene` 校验同步；内容回填与扩展属性 Worker 端到端用例由 CI 的 `Test / Engine & Tooling` 作业执行。
 
 ## 仓库结构
 

@@ -687,9 +687,9 @@ mod tests {
     use super::{
         DARK_PALETTE, INK_CONTRAST_FLOOR, LIGHT_PALETTE, MAX_ZOOM, MIN_ZOOM, ModePalette,
         NEUTRAL_RAMP, RING_CONTRAST_FLOOR, SURFACE_CONTRAST_FLOOR, apply_danger_button_palette,
-        apply_unified_interaction_fill, clamp_zoom, contrast_ratio, enforce_contrast_floor, gray,
-        is_neutral_ramp_step, lightness_step, mode_palette, oklch, perceptual_distance,
-        relative_luminance, repair_ink_contrast,
+        apply_unified_interaction_fill, clamp_zoom, contrast_ratio, dialog_surface,
+        enforce_contrast_floor, gray, is_neutral_ramp_step, lightness_step, mode_palette, oklch,
+        overlay_color, perceptual_distance, relative_luminance, repair_ink_contrast,
     };
     use gpui_kit::component::{Theme, ThemeMode};
     use gpui_kit::gpui::Hsla;
@@ -951,6 +951,20 @@ mod tests {
         let active = relative_luminance(light.tokens.button_secondary_active.color);
         assert!(hover < rest);
         assert!(active < hover);
+    }
+
+    #[test]
+    fn dialog_surface_and_scrim_separate_modals_from_page() {
+        let light = product_theme(false);
+        let dark = product_theme(true);
+        assert_eq!(dialog_surface(&light), light.background);
+        assert_eq!(dialog_surface(&dark), dark.title_bar);
+        assert_ne!(dialog_surface(&dark), dark.background);
+        assert_ne!(dark.tokens.button_secondary.color, dialog_surface(&dark));
+
+        let light_scrim = overlay_color(false);
+        let dark_scrim = overlay_color(true);
+        assert!(light_scrim.a > 0.0 && light_scrim.a < dark_scrim.a && dark_scrim.a < 1.0);
     }
 
     #[test]

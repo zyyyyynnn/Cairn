@@ -571,7 +571,8 @@ fn result_text(text: &str, highlights: &[(usize, usize)], tokens: &ShellTokens) 
 
 #[cfg(test)]
 mod tests {
-    use super::result_row_icon;
+    use super::{BIN_COMMANDS, RESULT_COMMANDS, result_row_icon};
+    use crate::shell::command_groups::GroupCommand;
     use gpui_kit::assets::IconName as AssetIconName;
 
     #[test]
@@ -621,6 +622,12 @@ mod tests {
             result_row_icon("CMakeLists.txt", "txt", false),
             AssetIconName::FileCode
         );
+    }
+
+    #[test]
+    fn the_result_menu_offers_in_place_rename_but_the_bin_does_not() {
+        assert!(RESULT_COMMANDS.contains(&GroupCommand::RenameSelected));
+        assert!(!BIN_COMMANDS.contains(&GroupCommand::RenameSelected));
     }
 
     #[test]

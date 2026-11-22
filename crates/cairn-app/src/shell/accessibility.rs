@@ -876,6 +876,29 @@ mod tests {
         }
     }
 
+    /// Semantic roles must stay distinct across live-region priority levels and interactive surfaces.
+    #[test]
+    fn key_control_roles_match_interaction_semantics() {
+        let expectations = [
+            ("toast", Role::Alert),
+            ("toast-info", Role::Status),
+            ("search-input", Role::SearchInput),
+            ("rename-input", Role::TextInput),
+            ("result-band", Role::List),
+            ("result-row", Role::ListItem),
+            ("column-name", Role::ColumnHeader),
+            ("table-header", Role::Row),
+            ("status-bar", Role::Status),
+        ];
+        for (key, expected) in expectations {
+            assert_eq!(
+                control(key).role,
+                expected,
+                "{key} must report the role its interaction implies"
+            );
+        }
+    }
+
     /// The controls SPEC NFR-11 and UI-01/02/03 name by requirement. This list is the coverage
     /// statement: a control that stops being registered fails here, not in a screen reader.
     #[test]

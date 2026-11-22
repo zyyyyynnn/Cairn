@@ -62,7 +62,7 @@
 | `cairn-app` `a_deleted_file_lists_and_restores_through_the_shell` | 手工验证：经 Shell 在真实回收站创建并恢复一个探针文件。 | 仅在改动 Shell 管道时执行 `cargo test -p cairn-app a_deleted_file_lists_and_restores_through_the_shell -- --ignored`；探针限定为临时目录中的 `cairn-bin-round-trip.txt`，不得操作其他回收站项。 |
 | `cairn-app` `the_update_check_reaches_the_release_api` | 需要访问 GitHub releases API 的真实网络；CI 不保证出网。 | 在网络可用时执行 `cargo test -p cairn-app the_update_check_reaches_the_release_api -- --ignored`；HTTP/TLS 依赖升级后用它确认请求能穿过 TLS 后端与系统代理。 |
 | `cairn-setup` `staging_root_is_locked_to_administrators` | 需要管理员权限对安装包暂存目录写入 `SYSTEM` 与 `Administrators` 受保护 DACL。 | 提权后执行 `cargo test -p cairn-setup staging_root_is_locked_to_administrators -- --ignored`。 |
-| `xtask` `real_package_builds_msi_and_setup` | 需要 WiX 5、`mt.exe` 与 `target/release` 下的发布二进制。 | CI `Installer Package` 作业用 `package-test.exe real_package_builds_msi_and_setup --ignored --nocapture` 执行；本地构建 release 资产后执行 `cargo test -p xtask real_package_builds_msi_and_setup -- --ignored`。 |
+| `xtask` `real_package_builds_msi_and_setup` | 需要 WiX 5、`mt.exe` 与 `target/release` 下的发布二进制。 | CI `Installer Package` 作业用 `package-test.exe package::tests::real_package_builds_msi_and_setup --ignored --nocapture --exact` 执行；本地构建 release 资产后执行 `cargo test -p xtask real_package_builds_msi_and_setup -- --ignored`。 |
 
 ## CI 门禁
 
