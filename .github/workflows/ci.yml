@@ -60,13 +60,6 @@ jobs:
         uses: actions/checkout@v7
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ubuntu-xtask-gates
-          add-job-id-key: false
-          cache-bin: false
-          cache-workspace-crates: false
       - name: Run repository gates
         run: |
           if [[ "${{ needs.changes.outputs.docs_only }}" == "true" ]]; then
