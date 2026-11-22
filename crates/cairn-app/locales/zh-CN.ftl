@@ -66,7 +66,7 @@ col_original_location = 原位置
 col_size = 大小
 col_modified = 修改日期
 col_deleted = 删除日期
-col_created = 创建时间
+col_created = 创建日期
 col_length = 时长
 col_author = 作者
 col_tags = 标签
@@ -75,7 +75,7 @@ col_framerate = 帧速率
 menu_columns = 显示列
 col_ext = 扩展名
 
-# 溢出菜单里的条目：结果、查询、索引三段各自成组。
+# 编辑与排序菜单条目。
 query_undo = 撤销
 query_redo = 重做
 query_cut = 剪切
@@ -148,14 +148,14 @@ service_timeout_title = 后台服务未响应，请重试
 service_not_installed_title = 后台服务未安装，重新运行安装程序
 service_incompatible_title = 后台服务版本不兼容，请在帮助菜单检查更新并重新安装
 service_unauthorized_title = 当前账户无权使用后台服务，改用授权账户
-# 故障说明都承诺"再试一次"，所以承诺要有一个指针和键盘都能按的按钮。
+# 可恢复连接故障的同行重试按钮（指针与键盘均可达）。
 service_probe_label = 正在连接后台服务
 service_retry_button = 重试连接
 # 启动服务是唯一的运行期提权动作，只在用户点击这个明确按钮时发生。
 service_start_button = 启动后台服务
 
 # 设置项位于顶栏的“查看”和“工具”菜单里（SET-01）。
-# 选择即时生效；菜单项的勾选状态就是当前值，不另设设置弹窗。
+# 选择即时生效；单选类条目以圆点、布尔开关以勾选标识当前值。
 settings_theme = 主题
 settings_theme_system = 系统
 settings_theme_light = 浅色
@@ -172,18 +172,16 @@ settings_zoom_relaxed = 宽松
 settings_autostart = 开机自启
 menu_sort = 排序
 menu_check_updates = 检查更新
-update_checking_title = 正在检查更新
+menu_download_and_install = 下载并安装
 update_up_to_date_title = Cairn 已是最新版本
 update_up_to_date_body = 当前最新版本为 { $version }。
 update_no_releases_body = 尚无已发布的更新。
 update_available_title = Cairn 有可用更新
-update_available_body = 新版本 { $version }，当前版本为 { $current }。安装完成后 Cairn 会重启。
-update_download_action = 更新
+update_available_body = 新版本 { $version }，可在“帮助 > 下载并安装”中安装。
 update_check_failed_title = 无法检查更新
 update_check_failed_body = 检查网络连接后重试。
 update_incomplete_title = 更新包不完整
 update_incomplete_body = 发布中缺少安装包或校验文件。稍后重试。
-update_retry = 重试
 update_installing_title = 正在更新 Cairn
 update_installing_body = 正在下载、校验并安装更新。完成后 Cairn 会重启。
 update_verify_failed_title = 无法校验更新
@@ -226,7 +224,6 @@ status_refreshing = 正在刷新
 status_refresh = 刷新
 toast_status = 通知
 toast_dismiss = 关闭通知
-toast_retry = 重试
 toast_accessible_name = { $title }。{ $message }
 bin_error_access_denied = 拒绝访问；检查项目权限后重试
 bin_error_read_only = 原位置为只读；清除只读属性后重试
@@ -300,7 +297,6 @@ journal_dialog_status_loading = 正在读取变更日志
 journal_dialog_status_off = 记录已关闭
 journal_dialog_status_summary = 已记录 { $count } 条（{ $size }）
 journal_dialog_refresh = 刷新
-journal_dialog_close = 关闭
 journal_dialog_col_time = 时间
 journal_dialog_col_kind = 类型
 journal_dialog_col_path = 路径
@@ -320,12 +316,12 @@ toast_rescan_source_started_body = 后台服务正在重新扫描 { $source }。
 toast_rescan_failed_title = 无法启动索引扫描
 toast_rescan_failed_body = 无法启动索引扫描。请稍后重试。
 folder_sources_title = 文件夹源
-folder_sources_path_placeholder = 输入文件夹路径
+folder_sources_path_label = 文件夹路径
+folder_sources_path_placeholder = C:\Projects
 folder_sources_add = 添加
 folder_sources_remove = 移除
 folder_sources_rescan = 重新扫描
-folder_sources_empty = 暂无文件夹源。
-folder_sources_close = 关闭
+folder_sources_empty = 暂无文件夹源
 toast_folder_source_add_failed_title = 无法添加文件夹源
 toast_folder_source_add_failed_body = 请确认路径存在且后台服务可读取，并确认未达到文件夹源上限。
 toast_folder_source_remove_failed_title = 无法移除文件夹源

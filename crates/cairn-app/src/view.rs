@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! The main window's shell: title bar, locations sidebar, search band, command bar,
+//! The main window's shell: title bar, locations sidebar, search band,
 //! result table and status line.
 //!
 //! This module owns *layout and presentation* only. Every interaction hands the request to an owner
@@ -10,12 +10,12 @@
 //! dropdown item, a table heading, a sidebar row and a keystroke cannot drift apart (Coding Guides:
 //! *Events, actions, and focus*).
 //!
-//! Regions come from GPUI Component wherever the component fits the task: `TitleBar`, `Sidebar`,
-//! `Toolbar`, `StatusBar` and `PopupMenu` own their geometry, their interaction states
-//! and their keyboard model. Two regions stay drawn here, for reasons recorded at each one: the
-//! query box, because the platform IME drives it through `impl EntityInputHandler for CairnApp`
-//! (SPEC SM-3), and the result band, because the QRY-07 paging contract needs rows the service has
-//! not delivered yet to still hold their place on the scrollbar.
+//! Controls (`Button`, `PopupMenu`, `Spinner`) come from GPUI Component where the component fits
+//! the task, owning their interaction states and keyboard model. Two regions stay drawn here, for
+//! reasons recorded at each one: the query box, because the platform IME drives it through
+//! `impl EntityInputHandler for CairnApp` (SPEC SM-3), and the result band, because the QRY-07
+//! paging contract needs rows the service has not delivered yet to still hold their place on the
+//! scrollbar.
 
 use crate::app::{CairnApp, element_id, layout};
 use crate::shell::accessibility::{self, ControlElement, KeyControl};
@@ -24,6 +24,7 @@ use crate::shell::command_groups::{GroupCommand, MenuGroup, menu_groups};
 use crate::shell::commands::{self, ToggleSidebar, WINDOW_CONTEXT, WINDOW_CONTROL_CONTEXT};
 use crate::shell::theme::{self, ShellTokens};
 use crate::shell::window_resize::{SETTLE_POLL, WindowResizeTracker};
+use gpui_kit::assets::IconName as AssetIconName;
 use gpui_kit::base::Disableable;
 use gpui_kit::base::motion::{Transition, transition_with_status};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -143,10 +144,19 @@ pub struct MenuEntry {
     pub hint: Option<Box<dyn Action>>,
     /// The nested menu a submenu row opens. The entity is built with the bar's menu.
     pub submenu: Option<Entity<PopupMenu>>,
-    /// `true` while an asynchronous command owns this row, so the row draws a loading icon.
-    pub loading: bool,
+    /// Trailing status or action icon on the row (`Loading` while busy, `Download` when ready).
+    pub trailing: MenuTrailing,
     /// `true` on the first row of a section after the first, where one separator belongs.
     pub separates: bool,
+}
+
+/// Trailing indicator shown on the right edge of a menu row.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MenuTrailing {
+    #[default]
+    None,
+    Loading,
+    Download,
 }
 
 /// Builds one group's menu. Rows that carry an Action dispatch it into `action_context`, the query
@@ -164,19 +174,31 @@ pub fn build_menu(
             menu = menu.separator();
         }
         let label = entry.label.clone();
-        menu = if entry.loading {
+        menu = if entry.trailing != MenuTrailing::None {
             let row_label = label.clone();
             let entity = view.clone();
-            let command = entry.command.expect("a loading row owns a command");
+            let trailing = entry.trailing;
+            let command = entry.command.expect("a trailing row owns a command");
             menu.item(
                 PopupMenuItem::element(move |_, _| {
+                    let indicator = match trailing {
+                        MenuTrailing::Loading => Spinner::new()
+                            .icon(IconName::LoaderCircle)
+                            .xsmall()
+                            .into_any_element(),
+                        MenuTrailing::Download => Icon::new(AssetIconName::Download)
+                            .xsmall()
+                            .into_any_element(),
+                        MenuTrailing::None => unreachable!(),
+                    };
                     h_flex()
                         .w_full()
                         .flex_1()
                         .items_center()
                         .justify_between()
+                        .gap_2()
                         .child(row_label.clone())
-                        .child(Spinner::new().icon(IconName::LoaderCircle).xsmall())
+                        .child(indicator)
                 })
                 .disabled(entry.disabled)
                 .on_click(move |_, window, cx| {
@@ -343,8 +365,8 @@ fn rounded_panel_corners(radius: Pixels, color: Hsla) -> impl IntoElement {
     .inset_0()
 }
 
-/// The query box and the command bar act through the same window entity and share its focus state,
-/// so the content column is handed one bundle instead of three parameters that never separate.
+/// The query band acts through the window entity and shares its focus state, so the content column
+/// is handed one bundle instead of three parameters that never separate.
 struct QueryBand {
     is_query_focused: bool,
     search_focus: FocusHandle,

@@ -63,9 +63,9 @@ quick-xml = "0.42"
 lopdf = { version = "0.47", default-features = false }
 
 # GUI & Desktop
-# `component` carries the shell this app is built from (Sidebar, Toolbar, Table, Menu, StatusBar,
-# theme tokens). gpui-kit 0.10 owns the matching gpui-base/gpui-component versions; the application
-# does not list them directly.
+# `component` carries the shell controls (Sidebar, Menu, Dialog, Input, StatusBar, theme tokens).
+# gpui-kit 0.10 owns the matching gpui-base/gpui-component versions; the application does not list
+# them directly.
 gpui-kit = { version = "0.10.0", default-features = false, features = ["assets", "component"] }
 tray-icon = { version = "0.26.1", default-features = false }
 global-hotkey = "0.10"
@@ -119,4 +119,8 @@ large_enum_variant = "deny"
 dbg_macro = "deny"
 todo = "deny"
 unimplemented = "deny"
+uninlined_format_args = "warn"
+redundant_closure_for_method_calls = "warn"
+unnested_or_patterns = "warn"
+manual_let_else = "warn"
 

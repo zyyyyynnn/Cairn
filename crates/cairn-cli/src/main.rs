@@ -77,7 +77,7 @@ enum CliCommand {
         /// Disable index journal recording
         #[arg(long)]
         disable: bool,
-        /// Write the journal window after `after_seq` to a JSON file (all pages)
+        /// Write the journal window after the given sequence number to a JSON file (all pages)
         #[arg(long, value_name = "PATH", conflicts_with_all = ["enable", "disable", "json"])]
         export: Option<PathBuf>,
     },
@@ -109,7 +109,7 @@ struct CliArgs {
     #[arg(short, long, default_value_t = 100)]
     max: usize,
 
-    /// Comma-separated sort clauses, e.g. `-size,+name` or `modified-desc`
+    /// Comma-separated sort clauses, e.g. -size,+name or modified-desc
     #[arg(
         short,
         long,

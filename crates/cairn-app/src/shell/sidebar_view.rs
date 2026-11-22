@@ -407,9 +407,8 @@ impl CairnApp {
             cx,
         );
 
-        // 文件夹源 is the only source section left after the drive rows retired. It exists only
-        // while a folder source is registered; its rows scope the current query, and the manager
-        // entry at the end owns add/rescan/remove.
+        // 文件夹源 appears only while a folder source is registered; its rows scope the current
+        // query, and the manager entry at the end owns add/rescan/remove.
         let folder_sources: Vec<_> = folder_source_summaries(&self.service.sources).collect();
         let folder_section = if folder_sources.is_empty() {
             None
@@ -496,8 +495,8 @@ impl CairnApp {
             )
         };
 
-        // The drive rows are gone, but a non-synced or offline volume still has to be visible.
-        // One compact warning line carries the worst state and how many other volumes are behind.
+        // Surface non-synced or offline volumes in one compact warning line carrying the worst
+        // state and the count of remaining lagging volumes.
         let unsynced: Vec<_> = self
             .service
             .status

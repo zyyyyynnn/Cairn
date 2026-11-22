@@ -15,12 +15,12 @@ use cairn_protocol::status::{IndexJournalEntry, IndexJournalStatus, JournalChang
 use fluent_bundle::FluentArgs;
 use gpui_kit::assets::IconName as AssetIconName;
 use gpui_kit::base::Disableable;
-use gpui_kit::component::button::Button;
-use gpui_kit::component::dialog::{DialogClose, DialogEntrance, DialogFooter};
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::dialog::DialogEntrance;
+use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, WindowExt as _, h_flex, v_flex};
-use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::*;
 
 /// Key for the concise change-type label rendered beside each journal entry.
@@ -82,8 +82,12 @@ fn render_index_journal_dialog(
     view: &Entity<CairnApp>,
     dialog: gpui_kit::component::dialog::Dialog,
     window: &mut Window,
-    cx: &App,
+    cx: &mut App,
 ) -> gpui_kit::component::dialog::Dialog {
+    let scroll_handle = window
+        .use_keyed_state("index-journal-scroll", cx, |_, _| ScrollHandle::new())
+        .read(cx)
+        .clone();
     let app = view.read(cx);
     let tokens = ShellTokens::current(cx);
     let surface = cairn_ui::theme::dialog_surface(cx.theme());
@@ -105,7 +109,7 @@ fn render_index_journal_dialog(
     let switch_label = app.i18n.get_text("journal_dialog_record_toggle");
     let summary = journal_summary_text(&app.i18n, connected, &status, loading, error_text);
     let refresh_label = app.i18n.get_text("journal_dialog_refresh");
-    let close_label = app.i18n.get_text("journal_dialog_close");
+    let close_label = app.i18n.get_text("window_close");
     let col_time = app.i18n.get_text("journal_dialog_col_time");
     let col_kind = app.i18n.get_text("journal_dialog_col_kind");
     let col_path = app.i18n.get_text("journal_dialog_col_path");
@@ -115,57 +119,29 @@ fn render_index_journal_dialog(
     let empty_text = app.i18n.get_text("journal_dialog_empty");
     let error_body = app.i18n.get_text("journal_dialog_error_body");
 
-    let switch_view = view.clone();
-    let refresh_view = view.clone();
-
-    let controls = h_flex()
+    let title_row = render_journal_title_row(
+        view,
+        JournalTitleRow {
+            title_text,
+            switch_label,
+            switch_checked,
+            switch_disabled,
+            refresh_label,
+            close_label,
+            refresh_disabled: !connected || loading,
+            refresh_loading: loading,
+        },
+        window,
+    );
+    let status_line = h_flex()
         .w_full()
+        .h(rems(layout::ROW_HEIGHT))
         .items_center()
-        .justify_between()
-        .gap(rems(layout::SPACE_8))
-        .child(
-            h_flex()
-                .min_w_0()
-                .flex_1()
-                .items_center()
-                .gap(rems(layout::SPACE_12))
-                .child(
-                    Switch::new("index-journal-recording-switch")
-                        .small()
-                        .checked(switch_checked)
-                        .disabled(switch_disabled)
-                        .label(switch_label)
-                        .on_change(move |enabled, _, cx| {
-                            switch_view.update(cx, |this, cx| {
-                                this.set_index_journal_enabled(*enabled, cx);
-                            });
-                        }),
-                )
-                .child(
-                    div()
-                        .min_w_0()
-                        .flex_1()
-                        .truncate()
-                        .text_sm()
-                        .text_color(tokens.muted_foreground)
-                        .child(summary),
-                ),
-        )
-        .child(
-            Button::new("index-journal-refresh")
-                .outline()
-                .small()
-                .icon(AssetIconName::RefreshCw)
-                .loading_icon(AssetIconName::LoaderCircle)
-                .label(refresh_label)
-                .disabled(!connected || loading)
-                .loading(loading)
-                .on_click(move |_, _, cx| {
-                    refresh_view.update(cx, |this, cx| {
-                        this.refresh_index_journal_dialog(cx);
-                    });
-                }),
-        );
+        .px(rems(layout::SPACE_8))
+        .text_sm()
+        .font_features(tabular_figures())
+        .text_color(tokens.muted_foreground)
+        .child(summary);
 
     let list_body = if !connected {
         empty_panel(unavailable_text, &tokens)
@@ -193,13 +169,18 @@ fn render_index_journal_dialog(
     } else if entries.is_empty() {
         empty_panel(empty_text, &tokens)
     } else {
+        let columns = JournalColumns {
+            time: &col_time,
+            kind: &col_kind,
+            path: &col_path,
+        };
+        let list_height = (rem * (entries.len() as f32 * layout::ROW_HEIGHT)).min(list_max_height);
         let rows = render_journal_rows(
             &entries,
             &app.i18n,
-            &col_time,
-            &col_kind,
-            &col_path,
-            list_max_height,
+            &columns,
+            list_height,
+            &scroll_handle,
             &tokens,
         );
         rows.into_any_element()
@@ -212,30 +193,112 @@ fn render_index_journal_dialog(
         .border_color(tokens.border)
         .bg(tokens.background)
         .overflow_hidden()
-        .child(list_body);
+        .child(list_body)
+        .child(status_line);
 
     let content = v_flex()
         .w_full()
-        .gap(rems(layout::SPACE_12))
-        .child(controls)
+        .pt(rems(layout::SPACE_8))
         .child(surface_box);
 
     dialog
-        .width(rem * layout::DIALOG_WIDTH)
+        .width(rem * layout::DIALOG_WIDE_WIDTH)
         .centered()
         .bg(surface)
         .entrance(DialogEntrance::FadeSlide)
-        .title(dialogs::title(title_text, window))
+        .close_button(false)
+        .title(title_row)
         .child(content)
-        .footer(
-            DialogFooter::new().child(
-                DialogClose::new().child(
-                    Button::new("index-journal-close")
-                        .outline()
-                        .label(close_label),
-                ),
-            ),
+}
+
+struct JournalTitleRow {
+    title_text: String,
+    switch_label: String,
+    switch_checked: bool,
+    switch_disabled: bool,
+    refresh_label: String,
+    close_label: String,
+    refresh_disabled: bool,
+    refresh_loading: bool,
+}
+
+fn render_journal_title_row(
+    view: &Entity<CairnApp>,
+    props: JournalTitleRow,
+    window: &Window,
+) -> AnyElement {
+    let JournalTitleRow {
+        title_text,
+        switch_label,
+        switch_checked,
+        switch_disabled,
+        refresh_label,
+        close_label,
+        refresh_disabled,
+        refresh_loading,
+    } = props;
+    let switch_view = view.clone();
+    let refresh_view = view.clone();
+
+    let leading = h_flex()
+        .items_center()
+        .gap(rems(layout::SPACE_8))
+        .child(dialogs::title(title_text, window))
+        .child(
+            Switch::new("index-journal-recording-switch")
+                .small()
+                .checked(switch_checked)
+                .disabled(switch_disabled)
+                .accessibility_label(switch_label.clone())
+                .tooltip(switch_label)
+                .on_change(move |enabled, _, cx| {
+                    switch_view.update(cx, |this, cx| {
+                        this.set_index_journal_enabled(*enabled, cx);
+                    });
+                }),
         )
+        .child(
+            Button::new("index-journal-refresh")
+                .ghost()
+                .small()
+                .icon(AssetIconName::RefreshCw)
+                .loading_icon(AssetIconName::LoaderCircle)
+                .accessibility_label(refresh_label.clone())
+                .tooltip(refresh_label)
+                .disabled(refresh_disabled)
+                .loading(refresh_loading)
+                .on_click(move |_, _, cx| {
+                    refresh_view.update(cx, |this, cx| {
+                        this.refresh_index_journal_dialog(cx);
+                    });
+                }),
+        );
+    #[cfg(test)]
+    let leading = leading.on_children_prepainted(|bounds, _, _| {
+        tests::record_journal_header_leading_bounds(bounds);
+    });
+
+    let row = h_flex()
+        .w_full()
+        .pl(rems(layout::SPACE_8))
+        .items_center()
+        .justify_between()
+        .gap(rems(layout::SPACE_8))
+        .child(leading)
+        .child(
+            Button::new("index-journal-close")
+                .ghost()
+                .small()
+                .icon(AssetIconName::X)
+                .accessibility_label(close_label.clone())
+                .tooltip(close_label)
+                .on_click(|_, window, cx| window.close_dialog(cx)),
+        );
+    #[cfg(test)]
+    let row = row.on_children_prepainted(|bounds, _, _| {
+        tests::record_journal_header_row_bounds(bounds);
+    });
+    row.into_any_element()
 }
 
 fn empty_panel(message: String, tokens: &ShellTokens) -> AnyElement {
@@ -253,23 +316,92 @@ fn empty_panel(message: String, tokens: &ShellTokens) -> AnyElement {
         .into_any_element()
 }
 
+fn render_journal_row(
+    ix: usize,
+    entry: &IndexJournalEntry,
+    i18n: &I18nManager,
+    time_col_w: Rems,
+    kind_col_w: Rems,
+    tokens: &ShellTokens,
+) -> AnyElement {
+    let timestamp = format_timestamp(entry.timestamp_ts);
+    let kind_label = i18n.get_text(change_kind_label_key(entry.kind));
+    let old_path_line = entry.old_path.as_ref().map(|old| {
+        let mut args = FluentArgs::new();
+        args.set("path", old.as_str());
+        i18n.get_text_with_args("journal_dialog_renamed_from", &args)
+    });
+    let tooltip = match &old_path_line {
+        Some(old) => format!("{}\n{}", entry.path, old),
+        None => entry.path.clone(),
+    };
+
+    h_flex()
+        .id(("index-journal-row", ix))
+        .w_full()
+        .h(rems(layout::ROW_HEIGHT))
+        .flex_shrink_0()
+        .items_center()
+        .gap(rems(layout::SPACE_8))
+        .px(rems(layout::SPACE_8))
+        .border_b(HAIRLINE)
+        .border_color(tokens.border)
+        .hover(|this| this.bg(tokens.row_hover))
+        .child(
+            div()
+                .w(time_col_w)
+                .flex_shrink_0()
+                .font_features(tabular_figures())
+                .text_sm()
+                .text_color(tokens.muted_foreground)
+                .child(timestamp),
+        )
+        .child(
+            div()
+                .w(kind_col_w)
+                .flex_shrink_0()
+                .text_sm()
+                .text_color(tokens.foreground)
+                .child(kind_label),
+        )
+        .child(
+            div()
+                .id(("index-journal-path", ix))
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_sm()
+                .text_color(tokens.foreground)
+                .tooltip(crate::shell::tooltip::text(tooltip))
+                .child(entry.path.clone()),
+        )
+        .into_any_element()
+}
+
+struct JournalColumns<'a> {
+    time: &'a str,
+    kind: &'a str,
+    path: &'a str,
+}
+
 fn render_journal_rows(
     entries: &[IndexJournalEntry],
     i18n: &I18nManager,
-    col_time: &str,
-    col_kind: &str,
-    col_path: &str,
-    list_max_height: Pixels,
+    columns: &JournalColumns<'_>,
+    list_height: Pixels,
+    scroll_handle: &ScrollHandle,
     tokens: &ShellTokens,
 ) -> impl IntoElement {
     let time_col_w = rems(8.75);
     let kind_col_w = rems(6.0);
 
-    let header = v_flex()
+    let header = h_flex()
         .w_full()
+        .flex_shrink_0()
+        .h(rems(layout::ROW_HEIGHT))
+        .items_center()
+        .gap(rems(layout::SPACE_8))
         .px(rems(layout::SPACE_8))
-        .py(rems(layout::SPACE_4))
-        .gap(rems(layout::SPACE_4))
         .bg(tokens.table_head)
         .border_b(HAIRLINE)
         .border_color(tokens.border)
@@ -277,105 +409,105 @@ fn render_journal_rows(
         .font_weight(FontWeight::MEDIUM)
         .text_color(tokens.table_head_foreground)
         .child(
-            h_flex()
-                .gap(rems(layout::SPACE_8))
-                .items_center()
-                .child(
-                    div()
-                        .w(time_col_w)
-                        .flex_shrink_0()
-                        .child(col_time.to_string()),
-                )
-                .child(
-                    div()
-                        .w(kind_col_w)
-                        .flex_shrink_0()
-                        .child(col_kind.to_string()),
-                ),
+            div()
+                .w(time_col_w)
+                .flex_shrink_0()
+                .child(columns.time.to_string()),
         )
-        .child(div().w_full().child(col_path.to_string()));
+        .child(
+            div()
+                .w(kind_col_w)
+                .flex_shrink_0()
+                .child(columns.kind.to_string()),
+        )
+        .child(div().flex_1().min_w_0().child(columns.path.to_string()));
 
-    let scroll_list = v_flex()
+    let scroll_list = v_flex();
+    #[cfg(test)]
+    let scroll_list = scroll_list.on_children_prepainted(|bounds, _, _| {
+        tests::record_journal_row_bounds(bounds);
+    });
+    let scroll_list = scroll_list
         .id("index-journal-entries")
         .w_full()
-        .max_h(list_max_height)
+        .h(list_height)
         .overflow_y_scroll()
+        .track_scroll(scroll_handle)
         .children(entries.iter().enumerate().map(|(ix, entry)| {
-            let timestamp = format_timestamp(entry.timestamp_ts);
-            let kind_label = i18n.get_text(change_kind_label_key(entry.kind));
-            let old_path_line = entry.old_path.as_ref().map(|old| {
-                let mut args = FluentArgs::new();
-                args.set("path", old.as_str());
-                i18n.get_text_with_args("journal_dialog_renamed_from", &args)
-            });
-
-            v_flex()
-                .id(("index-journal-row", ix))
-                .w_full()
-                .min_h(rems(layout::ROW_HEIGHT))
-                .px(rems(layout::SPACE_8))
-                .py(rems(layout::TIGHT_LEAD))
-                .gap(rems(layout::SPACE_4))
-                .items_start()
-                .border_b(HAIRLINE)
-                .border_color(tokens.border)
-                .hover(|this| this.bg(tokens.row_hover))
-                .child(
-                    h_flex()
-                        .w_full()
-                        .gap(rems(layout::SPACE_8))
-                        .items_center()
-                        .child(
-                            div()
-                                .w(time_col_w)
-                                .flex_shrink_0()
-                                .font_features(tabular_figures())
-                                .text_sm()
-                                .text_color(tokens.muted_foreground)
-                                .child(timestamp),
-                        )
-                        .child(
-                            div()
-                                .w(kind_col_w)
-                                .flex_shrink_0()
-                                .text_sm()
-                                .text_color(tokens.foreground)
-                                .child(kind_label),
-                        ),
-                )
-                .child(
-                    v_flex()
-                        .w_full()
-                        .gap(rems(layout::SPACE_4))
-                        .child(
-                            div()
-                                .w_full()
-                                .whitespace_normal()
-                                .text_sm()
-                                .text_color(tokens.foreground)
-                                .child(entry.path.clone()),
-                        )
-                        .when_some(old_path_line, |this, old| {
-                            this.child(
-                                div()
-                                    .w_full()
-                                    .whitespace_normal()
-                                    .text_sm()
-                                    .text_color(tokens.muted_foreground)
-                                    .child(old),
-                            )
-                        }),
-                )
+            render_journal_row(ix, entry, i18n, time_col_w, kind_col_w, tokens)
         }));
 
-    v_flex().w_full().child(header).child(scroll_list)
+    let scroller = h_flex()
+        .w_full()
+        .items_stretch()
+        .child(scroll_list.flex_1().min_w_0())
+        .child(
+            div()
+                .flex_shrink_0()
+                .w(Scrollbar::width())
+                .h(list_height)
+                .border_l(HAIRLINE)
+                .border_color(tokens.border)
+                .child(
+                    Scrollbar::vertical(scroll_handle)
+                        .id("index-journal-scrollbar")
+                        .mode(ScrollbarMode::Always)
+                        .viewport_from_layout(),
+                ),
+        );
+
+    v_flex().w_full().child(header).child(scroller)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{change_kind_label_key, journal_summary_text};
+    use super::{change_kind_label_key, journal_summary_text, render_journal_row};
+    use crate::app::{CairnApp, layout};
     use crate::shell::i18n::I18nManager;
-    use cairn_protocol::status::{IndexJournalStatus, JournalChangeKind};
+    use crate::shell::theme::ShellTokens;
+    use cairn_protocol::message::SourceId;
+    use cairn_protocol::status::{IndexJournalEntry, IndexJournalStatus, JournalChangeKind};
+    use gpui_kit::component::v_flex;
+    use gpui_kit::gpui::{
+        AppContext as _, Bounds, Context, IntoElement, ParentElement as _, Pixels, Render, Styled,
+        Window, div, px, rems,
+    };
+    use std::cell::RefCell;
+
+    thread_local! {
+        static LAST_JOURNAL_ROW_BOUNDS: RefCell<Vec<Bounds<Pixels>>> = const { RefCell::new(Vec::new()) };
+        static LAST_HEADER_ROW_BOUNDS: RefCell<Vec<Bounds<Pixels>>> = const { RefCell::new(Vec::new()) };
+        static LAST_HEADER_LEADING_BOUNDS: RefCell<Vec<Bounds<Pixels>>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(super) fn record_journal_row_bounds(bounds: Vec<Bounds<Pixels>>) {
+        LAST_JOURNAL_ROW_BOUNDS.with(|slot| {
+            *slot.borrow_mut() = bounds;
+        });
+    }
+
+    fn take_journal_row_bounds() -> Vec<Bounds<Pixels>> {
+        LAST_JOURNAL_ROW_BOUNDS.with(|slot| std::mem::take(&mut *slot.borrow_mut()))
+    }
+
+    pub(super) fn record_journal_header_row_bounds(bounds: Vec<Bounds<Pixels>>) {
+        LAST_HEADER_ROW_BOUNDS.with(|slot| {
+            *slot.borrow_mut() = bounds;
+        });
+    }
+
+    pub(super) fn record_journal_header_leading_bounds(bounds: Vec<Bounds<Pixels>>) {
+        LAST_HEADER_LEADING_BOUNDS.with(|slot| {
+            *slot.borrow_mut() = bounds;
+        });
+    }
+
+    fn take_journal_header_bounds() -> (Vec<Bounds<Pixels>>, Vec<Bounds<Pixels>>) {
+        (
+            LAST_HEADER_ROW_BOUNDS.with(|slot| std::mem::take(&mut *slot.borrow_mut())),
+            LAST_HEADER_LEADING_BOUNDS.with(|slot| std::mem::take(&mut *slot.borrow_mut())),
+        )
+    }
 
     #[test]
     fn change_kind_labels_resolve_without_mid_dots_in_both_locales() {
@@ -428,5 +560,221 @@ mod tests {
         let ready = journal_summary_text(&i18n, true, &on, false, None);
         assert!(ready.contains("12"), "expected entry count in {ready}");
         assert!(!ready.contains('·'));
+    }
+
+    struct JournalRowsHarness {
+        entries: Vec<IndexJournalEntry>,
+        i18n: I18nManager,
+    }
+
+    impl Render for JournalRowsHarness {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+            window.set_rem_size(gpui_kit::gpui::px(crate::shell::theme::BASE_FONT_PX));
+            let rem = window.rem_size();
+            let tokens = ShellTokens::current(cx);
+            let rows = v_flex().w_full().on_children_prepainted(|bounds, _, _| {
+                record_journal_row_bounds(bounds);
+            });
+            div()
+                .w(rem * layout::DIALOG_WIDE_WIDTH)
+                .child(
+                    rows.children(self.entries.iter().enumerate().map(|(ix, entry)| {
+                        render_journal_row(ix, entry, &self.i18n, rems(8.75), rems(6.0), &tokens)
+                    })),
+                )
+        }
+    }
+
+    #[test]
+    fn journal_rows_keep_a_uniform_height_without_overlapping() {
+        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
+            gpui_kit::init(cx);
+            let entries: Vec<IndexJournalEntry> = (0..20)
+                .map(|ix| IndexJournalEntry {
+                    seq: (ix + 1) as u64,
+                    timestamp_ts: 1_760_000_000 + ix as i64,
+                    source_id: SourceId(1),
+                    kind: if ix == 0 {
+                        JournalChangeKind::Renamed
+                    } else {
+                        JournalChangeKind::Modified
+                    },
+                    path: format!(
+                        r"C:\Users\Administrator\Documents\Workspace\Cairn\crates\cairn-service\src\indexer\journal\deeply_nested_module_{ix:02}\very_long_filename_that_wraps_across_multiple_lines_in_narrow_dialog_{ix:02}.rs"
+                    ),
+                    old_path: (ix == 0).then(|| {
+                        r"C:\Users\Administrator\Documents\Workspace\Cairn\crates\cairn-service\src\indexer\journal\deeply_nested_module_00\previous_very_long_filename_before_rename_operation_00.rs"
+                            .to_string()
+                    }),
+                    frn: 100 + ix as u64,
+                })
+                .collect();
+
+            let (handle, app) = gpui_kit::open_window(
+                gpui_kit::gpui::WindowOptions {
+                    show: false,
+                    focus: false,
+                    ..gpui_kit::gpui::WindowOptions::default()
+                },
+                cx,
+                |window, cx| cx.new(|cx| CairnApp::new(window, cx)),
+            )
+            .expect("test window opens");
+
+            let entries_for_dialog = entries.clone();
+            handle
+                .update(cx, |_, window, cx| {
+                    app.update(cx, |this, cx| {
+                        this.open_index_journal_dialog(window, cx);
+                        this.service.connection.mark_connected();
+                        this.service.journal.finish_load(IndexJournalStatus {
+                            enabled: true,
+                            entry_count: entries_for_dialog.len(),
+                            resident_bytes: 475_648,
+                            max_entries: 2_000,
+                            max_bytes: 1_048_576,
+                            oldest_seq: 1,
+                            newest_seq: entries_for_dialog.len() as u64,
+                        });
+                        this.service.journal_entries.finish_load(entries_for_dialog);
+                        cx.notify();
+                    });
+                    window.draw(cx).clear(cx);
+                })
+                .expect("dialog window draw succeeds");
+
+            let (harness_handle, _harness) = gpui_kit::open_window(
+                gpui_kit::gpui::WindowOptions {
+                    show: false,
+                    focus: false,
+                    ..gpui_kit::gpui::WindowOptions::default()
+                },
+                cx,
+                |_, cx| {
+                    cx.new(|_| JournalRowsHarness {
+                        entries,
+                        i18n: I18nManager::new("zh-CN"),
+                    })
+                },
+            )
+            .expect("harness window opens");
+
+            harness_handle
+                .update(cx, |_, window, cx| {
+                    take_journal_row_bounds();
+                    window.draw(cx).clear(cx);
+                    let row_bounds = take_journal_row_bounds();
+                    assert_eq!(row_bounds.len(), 20, "all 20 journal rows must be laid out");
+
+                    let expected_row_height = window.rem_size() * layout::ROW_HEIGHT;
+                    let subpixel_epsilon = gpui_kit::gpui::px(0.01);
+                    for (ix, bounds) in row_bounds.iter().enumerate() {
+                        assert!(
+                            (bounds.size.height - expected_row_height).abs()
+                                <= subpixel_epsilon,
+                            "row {ix} height ({:?}) must equal the uniform row height ({:?})",
+                            bounds.size.height,
+                            expected_row_height
+                        );
+                    }
+                    for (ix, pair) in row_bounds.windows(2).enumerate() {
+                        assert!(
+                            pair[1].top() + subpixel_epsilon >= pair[0].bottom(),
+                            "row {} top ({:?}) must not overlap row {} bottom ({:?})",
+                            ix + 1,
+                            pair[1].top(),
+                            ix,
+                            pair[0].bottom()
+                        );
+                    }
+                })
+                .expect("harness draw succeeds");
+            cx.quit();
+        });
+    }
+
+    #[test]
+    fn journal_header_keeps_title_switch_refresh_and_close_on_one_center_line() {
+        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
+            gpui_kit::init(cx);
+            let entries = vec![IndexJournalEntry {
+                seq: 1,
+                timestamp_ts: 1_760_000_000,
+                source_id: SourceId(1),
+                kind: JournalChangeKind::Modified,
+                path: r"C:\Users\Administrator\Documents\report.txt".to_string(),
+                old_path: None,
+                frn: 100,
+            }];
+
+            let (handle, app) = gpui_kit::open_window(
+                gpui_kit::gpui::WindowOptions {
+                    show: false,
+                    focus: false,
+                    ..gpui_kit::gpui::WindowOptions::default()
+                },
+                cx,
+                |window, cx| cx.new(|cx| CairnApp::new(window, cx)),
+            )
+            .expect("test window opens");
+
+            handle
+                .update(cx, |_, window, cx| {
+                    app.update(cx, |this, cx| {
+                        this.open_index_journal_dialog(window, cx);
+                        this.service.connection.mark_connected();
+                        this.service.journal.finish_load(IndexJournalStatus {
+                            enabled: true,
+                            entry_count: entries.len(),
+                            resident_bytes: 1024,
+                            max_entries: 2_000,
+                            max_bytes: 1_048_576,
+                            oldest_seq: 1,
+                            newest_seq: 1,
+                        });
+                        this.service.journal_entries.finish_load(entries);
+                        cx.notify();
+                    });
+                    take_journal_header_bounds();
+                    window.draw(cx).clear(cx);
+                    let (row, leading) = take_journal_header_bounds();
+
+                    assert_eq!(
+                        row.len(),
+                        2,
+                        "header must place the leading group and the close control in one row"
+                    );
+                    assert_eq!(
+                        leading.len(),
+                        3,
+                        "leading group must hold title, switch and refresh"
+                    );
+
+                    let tolerance = px(1.0);
+                    let cluster_center = leading[0].center().y;
+                    for (ix, bounds) in leading.iter().enumerate() {
+                        assert!(
+                            (bounds.center().y - cluster_center).abs() <= tolerance,
+                            "leading element {ix} center ({:?}) must share the title center ({:?})",
+                            bounds.center().y,
+                            cluster_center
+                        );
+                    }
+                    assert!(
+                        (row[1].center().y - cluster_center).abs() <= tolerance,
+                        "close control center ({:?}) must share the title center ({:?})",
+                        row[1].center().y,
+                        cluster_center
+                    );
+                    assert!(leading[0].right() <= leading[1].left());
+                    assert!(leading[1].right() <= leading[2].left());
+                    assert!(
+                        row[1].left() > leading[2].right(),
+                        "close control must trail the leading group"
+                    );
+                })
+                .expect("dialog draw succeeds");
+            cx.quit();
+        });
     }
 }

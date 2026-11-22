@@ -152,7 +152,7 @@ impl SortColumnLabel for SortColumn {
     }
 }
 
-/// Optional columns revealed on demand in index queries (hidden in local Recycle Bin / block views).
+/// Optional columns revealed on demand in index queries (hidden in the Recycle Bin).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum OptionalColumn {
     DateCreated,
@@ -462,7 +462,6 @@ impl TableState {
             self.rows = VecDeque::from(page);
             self.rows_offset = offset;
         } else if offset <= current_start && offset + page.len() >= current_start {
-            // Overlapping or exact prepend when scrolling backwards
             let overlap = (offset + page.len()) - current_start;
             let take_len = page.len() - overlap.min(page.len());
             if take_len > 0 {
@@ -477,7 +476,6 @@ impl TableState {
                 self.empty_page_offsets.retain(|&off| off <= max_offset);
             }
         } else if offset <= current_end && offset + page.len() >= current_end {
-            // Overlapping or exact append when scrolling forwards
             let overlap = current_end - offset;
             if overlap < page.len() {
                 self.rows.extend(page.into_iter().skip(overlap));
@@ -490,9 +488,7 @@ impl TableState {
                 self.empty_page_offsets.retain(|&off| off >= min_offset);
             }
         } else if offset >= current_start && offset + page.len() <= current_end {
-            // The received page is already completely contained within loaded_range - no op!
         } else {
-            // Disjoint page jump (e.g. scrollbar jump to far position)
             let mut page = page;
             if page.len() > MAX_LOADED_ROWS {
                 page.truncate(MAX_LOADED_ROWS);
@@ -1085,15 +1081,12 @@ mod tests {
     fn lru_eviction_prunes_empty_page_offsets() {
         let mut table = table(0, 10_000);
 
-        // Prepend scrolling: loaded range starts at 1000..3000
         table.apply_page(1000, (1000..3000).map(|i| row(&format!("f{i}"))).collect());
         assert_eq!(table.loaded_range(), 1000..3000);
 
-        // Empty page recorded at 4000
         table.apply_page(4000, Vec::new());
         assert!(table.empty_page_offsets.contains(&4000));
 
-        // Prepend another 200 rows at 800: window becomes 800..2800 (3000 truncated)
         table.apply_page(800, (800..1000).map(|i| row(&format!("f{i}"))).collect());
         assert_eq!(table.loaded_range(), 800..2800);
         assert!(
@@ -1101,11 +1094,9 @@ mod tests {
             "offsets beyond the truncated tail must be pruned"
         );
 
-        // Record an empty page at 500 (before head)
         table.apply_page(500, Vec::new());
         assert!(table.empty_page_offsets.contains(&500));
 
-        // Append 200 rows at 2800: window expands to 3000, drains 200 rows from head to 1000..3000
         table.apply_page(2800, (2800..3000).map(|i| row(&format!("f{i}"))).collect());
         assert_eq!(table.loaded_range(), 1000..3000);
         assert!(
@@ -1117,21 +1108,17 @@ mod tests {
     #[test]
     fn non_empty_page_clears_prior_empty_page_offset() {
         let mut table = table(0, 10_000);
-        // Initially offset 400 answers with empty
         table.apply_page(400, Vec::new());
         assert!(table.empty_page_offsets.contains(&400));
         assert_eq!(table.page_request(400..600, PAGE), None);
 
-        // Later offset 400 returns valid rows
         table.apply_page(400, (400..600).map(|i| row(&format!("f{i}"))).collect());
         assert!(
             !table.empty_page_offsets.contains(&400),
             "landing non-empty rows must remove offset from empty_page_offsets"
         );
 
-        // Disjoint jump far away
         table.apply_page(5000, (5000..5200).map(|i| row(&format!("f{i}"))).collect());
-        // Requesting 400..600 again should succeed
         assert_eq!(table.page_request(400..600, PAGE), Some((400, PAGE)));
     }
 
@@ -1652,31 +1639,26 @@ mod tests {
     #[test]
     fn test_apply_page_bidirectional_and_overlapping() {
         let mut table = TableState::default();
-        // Initial page: 100..200
         let page1 = (100..200).map(|i| row(&format!("f{i}"))).collect();
         table.apply_page(100, page1);
         assert_eq!(table.loaded_range(), 100..200);
 
-        // Overlapping append: 180..250 (overlap 180..200, adds 200..250)
         let page2 = (180..250).map(|i| row(&format!("f{i}"))).collect();
         table.apply_page(180, page2);
         assert_eq!(table.loaded_range(), 100..250);
         assert_eq!(table.row(100).unwrap().name, "f100");
         assert_eq!(table.row(249).unwrap().name, "f249");
 
-        // Overlapping prepend: 50..120 (overlap 100..120, prepends 50..100)
         let page3 = (50..120).map(|i| row(&format!("f{i}"))).collect();
         table.apply_page(50, page3);
         assert_eq!(table.loaded_range(), 50..250);
         assert_eq!(table.row(50).unwrap().name, "f50");
         assert_eq!(table.row(249).unwrap().name, "f249");
 
-        // Contained subset page: 80..150 (completely contained in 50..250, no-op)
         let page4 = (80..150).map(|i| row(&format!("f{i}"))).collect();
         table.apply_page(80, page4);
         assert_eq!(table.loaded_range(), 50..250);
 
-        // Disjoint far jump: 1000..1050
         let page5 = (1000..1050).map(|i| row(&format!("f{i}"))).collect();
         table.apply_page(1000, page5);
         assert_eq!(table.loaded_range(), 1000..1050);

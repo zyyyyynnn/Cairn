@@ -316,7 +316,7 @@ impl PresortedCache {
         dates: bool,
     ) {
         let affects = match self.column {
-            Some(SortColumn::Name) | Some(SortColumn::Path) => names,
+            Some(SortColumn::Name | SortColumn::Path) => names,
             Some(SortColumn::Size) => sizes,
             Some(SortColumn::DateModified) => dates,
             _ => false,

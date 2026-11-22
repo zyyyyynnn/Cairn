@@ -758,7 +758,6 @@ mod tests {
         let f = DateFilter::parse("today");
         assert!(f.is_some());
 
-        // Relative durations
         assert!(DateFilter::parse("2years").is_some());
         assert!(DateFilter::parse("3months").is_some());
         assert!(DateFilter::parse("4weeks").is_some());
@@ -767,7 +766,6 @@ mod tests {
         assert!(DateFilter::parse("10minutes").is_some());
         assert!(DateFilter::parse("30seconds").is_some());
 
-        // Date formats
         let f_my = DateFilter::parse("07/2026").unwrap();
         let ts_july = ymd_to_timestamp(2026, 7, 15);
         let ts_aug = ymd_to_timestamp(2026, 8, 15);
@@ -780,18 +778,15 @@ mod tests {
         assert!(f_yymmdd.matches(ts_target));
         assert!(!f_yymmdd.matches(ts_other));
 
-        // Month and Weekday constants
         assert!(DateFilter::parse("january").is_some());
         assert!(DateFilter::parse("december").is_some());
         assert!(DateFilter::parse("monday").is_some());
         assert!(DateFilter::parse("friday").is_some());
 
-        // mtd, ytd, qtd
         assert!(DateFilter::parse("mtd").is_some());
         assert!(DateFilter::parse("ytd").is_some());
         assert!(DateFilter::parse("qtd").is_some());
 
-        // Operators
         let f_gte = DateFilter::parse(">=07/2026").unwrap();
         assert!(f_gte.matches(ymd_to_timestamp(2026, 7, 1)));
         assert!(f_gte.matches(ymd_to_timestamp(2026, 8, 1)));

@@ -2,9 +2,9 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Result table rows, cells, placeholders, virtual painting window, and row context menu.
+//! Result table rows, cells, placeholders, virtual painting window, and row command lists.
 
-use crate::app::{CairnApp, element_id, join_row_path, layout, split_name_highlights};
+use crate::app::{CairnApp, join_row_path, layout, split_name_highlights};
 use crate::shell::accessibility;
 use crate::shell::command_groups::GroupCommand;
 use crate::shell::file_icon::file_kind_icon;
@@ -17,16 +17,13 @@ use cairn_core::format_size_bytes;
 use cairn_protocol::message::FileRowData;
 use gpui_kit::assets::IconName as AssetIconName;
 use gpui_kit::component::input::Input;
-use gpui_kit::component::menu::ContextMenuExt;
 use gpui_kit::component::{Icon, Sizable as _};
 use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::*;
 use std::ops::Range;
-use std::rc::Rc;
 
 const PLACEHOLDER_BAR_HEIGHT: f32 = 0.75;
 const PLACEHOLDER_DATE_WIDTH: f32 = 7.0;
-const CONTEXT_MENU_MIN_WIDTH: f32 = 12.0;
 
 pub(super) struct PaintedRows {
     pub range: Range<usize>,
@@ -156,7 +153,6 @@ impl CairnApp {
         let is_selected = self.results.table.selected_indices.contains(&ix);
         let is_focused = self.results.table.focused_idx == Some(ix);
         let full_path = join_row_path(&row.path, &row.name);
-        let i18n = Rc::clone(&self.i18n);
 
         let snippets = crate::table::snippets::prepare_snippets(&row.snippets);
         let aria_snippets = (!snippets.is_empty()).then(|| snippets.join(" "));
@@ -251,42 +247,7 @@ impl CairnApp {
         if is_focused {
             row_el = row_el.aria_active_descendant();
         }
-        if !band.interactive {
-            return row_el.into_any_element();
-        }
-        let in_bin = self.recycle_bin.is_open();
-        let commands = if in_bin {
-            BIN_COMMANDS
-        } else {
-            RESULT_COMMANDS
-        };
-        let app = cx.entity();
-        row_el
-            .context_menu(move |menu, window, cx| {
-                let mut menu = menu.min_w(window.rem_size() * CONTEXT_MENU_MIN_WIDTH);
-                let rename_available = app.read(cx).rename_target_ix().is_some();
-                for (ix, command) in commands.iter().enumerate() {
-                    if ix > 0
-                        && matches!(
-                            command,
-                            GroupCommand::DeleteSelected | GroupCommand::ShowProperties
-                        )
-                    {
-                        menu = menu.separator();
-                    }
-                    let label = i18n.get_text(command.label_key_in(in_bin));
-                    let action = command
-                        .action()
-                        .expect("a result command is an Action the root already handles");
-                    menu = if *command == GroupCommand::RenameSelected {
-                        menu.menu_with_disabled(label, action, !rename_available)
-                    } else {
-                        menu.menu(label, action)
-                    };
-                }
-                menu
-            })
-            .into_any_element()
+        row_el.into_any_element()
     }
 
     fn render_name_cell(
@@ -309,7 +270,6 @@ impl CairnApp {
             .draft
             .as_ref()
             .is_some_and(|draft| draft.path == full_path);
-        let tooltip = SharedString::from(row.name.as_str());
         let extension = if self.recycle_bin.is_open() {
             self.recycle_bin
                 .icon_extension(crate::shell::recycle_bin::bin_icon_key(
@@ -325,7 +285,7 @@ impl CairnApp {
         };
 
         let cell = div()
-            .id(element_id("result-name", full_path))
+            .id(("result-name", ix))
             .lane_grow(self.results.column_widths.name)
             .min_w(rems(layout::NAME_MIN_COLUMN))
             .pl(rems(layout::CONTENT_INSET - layout::SPACE_4))
@@ -333,10 +293,11 @@ impl CairnApp {
             .flex()
             .items_center()
             .gap(rems(layout::INNER_SPACING));
-        let cell = if renaming {
-            cell
-        } else {
+        let cell = if band.interactive && !renaming {
+            let tooltip = SharedString::from(row.name.as_str());
             cell.tooltip(crate::shell::tooltip::text(tooltip))
+        } else {
+            cell
         };
         let cell = cell.child(
             Icon::new(result_row_icon(&row.name, extension, row.is_dir))
@@ -376,11 +337,12 @@ impl CairnApp {
     }
 
     fn render_path_cell(&self, ctx: &RowRender<'_>) -> Stateful<Div> {
-        let tooltip = SharedString::from(ctx.row.path.as_str());
-
         div()
-            .id(element_id("result-path", ctx.full_path))
-            .tooltip(crate::shell::tooltip::text(tooltip))
+            .id(("result-path", ctx.ix))
+            .when(ctx.band.interactive, |this| {
+                let tooltip = SharedString::from(ctx.row.path.as_str());
+                this.tooltip(crate::shell::tooltip::text(tooltip))
+            })
             .lane_grow(self.results.column_widths.path)
             .min_w(rems(layout::PATH_MIN_COLUMN))
             .px(rems(layout::INNER_SPACING))
@@ -458,6 +420,7 @@ impl CairnApp {
 
         let mut row_el = accessibility::element_at(control, ix)
             .aria_label(message)
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
             .h(row_height)
             .flex()
             .items_center()

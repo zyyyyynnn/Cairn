@@ -15,7 +15,6 @@ use crate::shell::os::{
     BinOperationError, RecycleBinItem, delete_permanently_from_recycle_bin, delete_to_recycle_bin,
     empty_recycle_bin, restore_from_recycle_bin,
 };
-use crate::shell::recycle_bin::BinRetry;
 use fluent_bundle::FluentArgs;
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::button::ButtonVariant;
@@ -177,12 +176,10 @@ impl CairnApp {
             .iter()
             .map(|item| (item.identity_key(), item.name.clone()))
             .collect();
-        let retry = BinRetry::DeletePermanently(items.clone());
         self.spawn_bin_write(
             "recycle_bin_delete_failed",
             names,
             false,
-            retry,
             move |owner| {
                 let outcome = delete_permanently_from_recycle_bin(&items, owner);
                 let listing = crate::shell::os::list_recycle_bin();
@@ -252,7 +249,6 @@ impl CairnApp {
         title_key: &'static str,
         fallback_names: Vec<String>,
         reset_scroll: bool,
-        retry: BinRetry,
         task: F,
         cx: &mut Context<'_, Self>,
     ) where
@@ -287,13 +283,7 @@ impl CairnApp {
                 if let Err(failure) = outcome
                     && !failure.is_cancelled()
                 {
-                    this.notify_bin_operation_error(
-                        title_key,
-                        &fallback_names,
-                        &failure,
-                        retry.clone(),
-                        cx,
-                    );
+                    this.notify_bin_operation_error(title_key, &fallback_names, &failure, cx);
                 }
                 cx.notify();
             });
@@ -316,8 +306,7 @@ impl CairnApp {
         self.restore_bin_items(items, cx);
     }
 
-    /// Restores an explicit set of bin items. The selection path and the retry path share this
-    /// implementation so the retry always targets the same identities the failed batch covered.
+    /// Restores an explicit set of bin items.
     pub(crate) fn restore_bin_items(
         &mut self,
         items: Vec<std::sync::Arc<RecycleBinItem>>,
@@ -331,12 +320,10 @@ impl CairnApp {
             .iter()
             .map(|item| (item.identity_key(), item.name.clone()))
             .collect();
-        let retry = BinRetry::RestoreItems(items.clone());
         self.spawn_bin_write(
             "recycle_bin_restore_failed",
             names,
             false,
-            retry,
             move |owner| {
                 let outcome = restore_from_recycle_bin(&items, owner);
                 let listing = crate::shell::os::list_recycle_bin();
@@ -444,7 +431,6 @@ impl CairnApp {
             "recycle_bin_empty_failed",
             Vec::new(),
             true,
-            BinRetry::EmptyBin,
             |owner| {
                 let outcome = empty_recycle_bin(owner);
                 let listing = crate::shell::os::list_recycle_bin();
@@ -472,7 +458,6 @@ impl CairnApp {
             })
             .collect();
         let task_paths = paths.clone();
-        let retry_paths = paths.clone();
         let task_names = names.clone();
         let owner = crate::shell::os::active_window_handle();
         self.delete_in_flight = true;
@@ -512,13 +497,7 @@ impl CairnApp {
                     if let Err(failure) = &outcome
                         && !failure.is_cancelled()
                     {
-                        this.notify_bin_operation_error(
-                            "delete_failed_title",
-                            &names,
-                            failure,
-                            BinRetry::DeletePaths(retry_paths.clone()),
-                            cx,
-                        );
+                        this.notify_bin_operation_error("delete_failed_title", &names, failure, cx);
                     }
                     this.request_result_set(ResultSetChange::Replace, cx);
                 }

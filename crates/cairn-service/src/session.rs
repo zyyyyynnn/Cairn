@@ -568,26 +568,11 @@ mod tests {
         rules: &[String],
     ) -> (AllFilesView, HashMap<char, VolumeIndex>) {
         volume.ensure_presorted_column(sort_by);
-        let generation = volume.generation();
-        let presorted_version = volume.presorted_version();
         let drive_letter = volume.drive_letter;
         let volumes = HashMap::from([(drive_letter, volume)]);
-        let exclusion_epoch = volumes[&drive_letter].exclusion_epoch();
         let exclusions = crate::sync_engine::path_exclusions::PathExclusions::new(&volumes, rules);
-        let source_id = SourceId::for_drive(drive_letter).unwrap();
-        (
-            AllFilesView {
-                source_id,
-                drive_letter,
-                sort_by,
-                sort_asc,
-                generation,
-                presorted_version,
-                exclusion_epoch,
-                exclusions,
-            },
-            volumes,
-        )
+        let view = AllFilesView::for_volume(&volumes[&drive_letter], sort_by, sort_asc, exclusions);
+        (view, volumes)
     }
 
     /// The default view retains no row list: it pages the volume's presorted order, and the
@@ -775,11 +760,9 @@ mod tests {
         clock.advance(Duration::from_millis(20));
         let s2 = create_items(&sessions, owner(7), vec![item(generation)]);
 
-        // Access s1, making s2 the least recently accessed
         clock.advance(Duration::from_millis(20));
         assert!(get_rows(&sessions, s1, 0, 10, &volumes).is_ok());
 
-        // Create s3: capacity is 2, so s2 should be evicted because s1 was accessed more recently
         let s3 = create_items(&sessions, owner(7), vec![item(generation)]);
 
         assert!(get_rows(&sessions, s1, 0, 10, &volumes).is_ok());
@@ -868,12 +851,10 @@ mod tests {
         let q1 = sessions.begin_query(&owner, 1);
         assert!(!q1.is_cancelled());
 
-        // Starting query 2 preemptively cancels query 1.
         let q2 = sessions.begin_query(&owner, 2);
         assert!(q1.is_cancelled());
         assert!(!q2.is_cancelled());
 
-        // Cancel(2) from the same client cancels query 2.
         sessions.cancel_query(&owner, 2);
         assert!(q2.is_cancelled());
         sessions.finish_query(&owner, 2);
@@ -1056,5 +1037,193 @@ mod tests {
             ),
             Err(RowsError::Stale { source_id })
         );
+    }
+
+    fn populated_volume(
+        count: usize,
+        excluded_dir_items: usize,
+        delete_every: usize,
+    ) -> VolumeIndex {
+        let mut items = Vec::with_capacity(count + excluded_dir_items + 2);
+        items.push(ExtractedItem {
+            frn: 1,
+            parent_frn: 0,
+            name: "$Recycle.Bin".to_string(),
+            is_dir: true,
+            size: 0,
+            created_ts: 0,
+            modified_ts: 0,
+            flags: 0,
+            is_reparse_point: false,
+        });
+        items.push(ExtractedItem {
+            frn: 2,
+            parent_frn: 0,
+            name: "skip_full".to_string(),
+            is_dir: true,
+            size: 0,
+            created_ts: 0,
+            modified_ts: 0,
+            flags: 0,
+            is_reparse_point: false,
+        });
+        for i in 0..excluded_dir_items {
+            items.push(ExtractedItem {
+                frn: 100 + i as u64,
+                parent_frn: 1,
+                name: format!("b_trash_{i:05}.tmp"),
+                is_dir: false,
+                size: 5,
+                created_ts: 0,
+                modified_ts: 0,
+                flags: 0,
+                is_reparse_point: false,
+            });
+        }
+        let base_frn = 10_000u64;
+        for i in 0..count {
+            let parent_frn = if i % 19 == 0 { 2 } else { 0 };
+            items.push(ExtractedItem {
+                frn: base_frn + i as u64,
+                parent_frn,
+                name: format!("file_{i:06}.txt"),
+                is_dir: false,
+                size: (i as u64) + 1,
+                created_ts: 0,
+                modified_ts: 0,
+                flags: 0,
+                is_reparse_point: false,
+            });
+        }
+
+        let mut vol = VolumeIndex::new('C');
+        vol.ingest_items(items);
+        if delete_every > 0 {
+            let deletions: Vec<UsnChange> = (0..count)
+                .filter(|i| i % delete_every == 0)
+                .map(|i| UsnChange::Deleted {
+                    frn: base_frn + i as u64,
+                })
+                .collect();
+            vol.apply_usn_changes(deletions);
+        }
+        vol
+    }
+
+    #[test]
+    fn all_files_view_prefix_paging_matches_full_scan_across_block_boundaries() {
+        let sessions = SessionManager::default();
+        let props = PropertySideTables::disabled();
+        let folders = HashMap::new();
+
+        let scenarios = [
+            (0usize, vec![]),
+            (0usize, vec!["$Recycle.Bin".to_string()]),
+            (37usize, vec!["$Recycle.Bin".to_string()]),
+            (53usize, vec![r"C:\skip_full".to_string()]),
+        ];
+        for (delete_every, rules) in &scenarios {
+            let delete_every = *delete_every;
+            for sort_asc in [true, false] {
+                let vol = populated_volume(3_500, 400, delete_every);
+                let (view, volumes) =
+                    all_files_view(vol, cairn_core::sort::SortColumn::Name, sort_asc, rules);
+                let reference: Vec<String> = {
+                    let mut names = Vec::new();
+                    assert!(view.visit_visible(&volumes[&'C'], 0, usize::MAX, |idx| {
+                        let rec = &volumes[&'C'].records()[idx as usize];
+                        names.push(
+                            volumes[&'C']
+                                .arena()
+                                .get_name(rec.name_offset, rec.name_len)
+                                .to_string(),
+                        );
+                    }));
+                    names
+                };
+
+                let session_id = sessions.create_session(
+                    owner(12),
+                    MatchSet::AllFiles(view),
+                    &[],
+                    HashMap::new(),
+                );
+                let tables = SourceTables {
+                    volumes: &volumes,
+                    folders: &folders,
+                    properties: &props,
+                };
+
+                let total = reference.len();
+                let offsets = [
+                    0,
+                    1,
+                    1023,
+                    1024,
+                    1025,
+                    2047,
+                    2048,
+                    2049,
+                    total.saturating_sub(250),
+                    total.saturating_sub(1),
+                    total,
+                    total + 500,
+                ];
+                let limits = [0, 1, 17, 200, 1_500];
+                for &offset in &offsets {
+                    for &limit in &limits {
+                        let page = sessions
+                            .get_rows_multi_unchecked(session_id, offset, limit, &tables)
+                            .expect("page should succeed");
+                        let actual: Vec<&str> = page.iter().map(|row| row.name.as_str()).collect();
+                        let expected: Vec<&str> = if offset >= total {
+                            Vec::new()
+                        } else {
+                            let end = offset.saturating_add(limit).min(total);
+                            reference[offset..end].iter().map(String::as_str).collect()
+                        };
+                        assert_eq!(
+                            actual, expected,
+                            "mismatch for delete_every={delete_every} rules={rules:?} sort_asc={sort_asc} offset={offset} limit={limit}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn all_files_view_deep_offset_paging_serves_large_volumes() {
+        let sessions = SessionManager::default();
+        let props = PropertySideTables::disabled();
+        let folders = HashMap::new();
+        let rules = vec!["$Recycle.Bin".to_string()];
+
+        for sort_asc in [true, false] {
+            let vol = populated_volume(120_000, 2_000, 0);
+            let (view, volumes) =
+                all_files_view(vol, cairn_core::sort::SortColumn::Name, sort_asc, &rules);
+            let session_id =
+                sessions.create_session(owner(13), MatchSet::AllFiles(view), &[], HashMap::new());
+            let tables = SourceTables {
+                volumes: &volumes,
+                folders: &folders,
+                properties: &props,
+            };
+
+            let started = std::time::Instant::now();
+            for step in 0..50usize {
+                let offset = 50_000 + step * 1_200;
+                let page = sessions
+                    .get_rows_multi_unchecked(session_id, offset, 200, &tables)
+                    .expect("deep page");
+                assert_eq!(page.len(), 200);
+            }
+            let elapsed = started.elapsed();
+            assert!(
+                elapsed < Duration::from_secs(5),
+                "50 deep pages took unexpectedly long: {elapsed:?}"
+            );
+        }
     }
 }

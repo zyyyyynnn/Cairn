@@ -65,11 +65,11 @@ flowchart TD
 - **定长文件记录（`FileRecord`，紧凑对齐，48 字节）**：
   包含 64 位文件引用号（FRN）、父目录下标 `parent_idx`、名称池偏移与长度、扩展名相对偏移、卷标识、DOS 属性与目录标记位、64 位大小、修改与创建时间戳。文件的大小是自身逻辑大小；目录的大小是索引内后代文件逻辑大小之和，随 USN 变更沿父链增量维护，因此表格显示、排序与 `size:` 过滤共用同一值。完整路径按需沿父链回溯解析，内存中仅存储分段文件名与父目录引用。
 - **连续名称池（`NamePool` Arena）**：
-  所有 UTF-8 文件名紧凑连续写入单一字节向量 `Vec<u8>`，并同步维护 Unicode 大小写折叠副本 `folded_arena`，逐条名称不再单独分配。
+  所有 UTF-8 文件名紧凑连续写入单一字节向量 `Vec<u8>`，并同步维护 Unicode 大小写折叠副本 `folded_arena`，避免逐条名称单独分配。
 - **路径按需拼接与缓存**：
   仅在匹配带路径查询或客户端拉取分页数据时，沿 `parent_idx` 回溯祖先链即时拼接路径，辅以目录级路径缓存（`DirectoryPathCache`）实现 $O(1)$ 均摊开销。
 - **预排序加速索引**：
-  为名称、大小、时间等排序列分别维护一个仅占 4 字节的下标排列向量 `Vec<u32>`，大幅削减交互排序的瞬时 CPU 消耗。
+  每卷通过 `PresortedCache` 按需懒构建并最多常驻 **1 个**当前活跃排序列（名称 / 路径 / 大小 / 修改时间，每条仅占 4 字节 `u32` 下标），切换排序列时释放旧列；少量 USN 增量变化通过归并补丁吸收，脏比超过 25% 时整列重建。全量全卷视图（`AllFilesView`）在深翻页时借助懒构建的 1,024 槽位块前缀计数（`OnceLock<Box<[u32]>>`）以 $O(\log(N/B) + B)$ 定位视口页，避免从头线性扫描。
 
 ### 1.4 USN 增量同步与故障自愈状态机
 - 每卷在持久化缓存头中记录 `(volume_serial_number, usn_journal_id, next_usn)`。
@@ -88,7 +88,7 @@ flowchart TD
 - 协议版本由 `cairn-protocol` 的显式 `PROTOCOL_VERSION` 定义，与产品版本解耦，只在帧负载布局或消息语义变化时递增；连接必须先完成 `Hello` 握手，协议版本不一致时拒绝请求。
 - 帧格式：`[u32: 负载长度][u16: 协议版本][postcard 序列化二进制内容]`。
 - 响应封套：所有服务端响应必须包裹 `Envelope<T>`，强制携带各卷实时状态列表（`VolumeStatusSummary`），确保客户端 UI 每一帧都能明确掌握数据同步状态。
-- 请求包含：`Hello`、`Query`、`Cancel`、`GetRows`、`ReloadConfig`、`ClearContentIndex` 等。
+- 请求包含：`Hello`、`Query`、`Cancel`、`GetRows`、`GetStatus`、`Rescan`、`GetConfig`、`SetConfig`、`ReloadConfig`、`GetContentIndexStatus`、`CancelContentIndex`、`ClearContentIndex`、`GetSources`、`AddFolderSource`、`RemoveFolderSource`、`RescanSource`、`GetPropertyIndexStatus`、`SetPropertyIndexEnabled`、`GetIndexJournal`、`SetIndexJournalEnabled`。
 
 ### 1.7 Windows 中文输入法（IME）四大缺陷根治机制
 1. **防重复上屏与丢字**：在 `EntityInputHandler` 中精确区分 `WM_IME_COMPOSITION` 组合态与最终 `WM_CHAR` 提交，上屏后即时清空 `marked_range` 并拦截同一按键周期的冗余字符。

@@ -5,7 +5,7 @@
 //! The Everything-style menu bar the title bar owns (UI-01, UI-03).
 //!
 //! Seven top-level menus sit on the same row as the brand: 文件, 编辑, 查看, 搜索, 索引, 工具 and 帮助.
-//! Every command a toolbar, a shortcut or the result context menu can run is listed here once, so
+//! Every command a title-bar menu, a shortcut or the result context menu can run is listed here once, so
 //! the menu item and the keyboard binding cannot disagree about what a command is.
 //!
 //! This module holds no behaviour and no translated text. A [`GroupCommand`] names a window
@@ -223,8 +223,8 @@ pub enum GroupCommand {
     TogglePropertyIndex,
     PropertyIndexStatus,
     PropertyIndexUsage,
-    /// Checks the latest stable release, downloads and verifies the installer, then hands the
-    /// verified installer to the elevated setup flow.
+    /// Checks the latest stable release when idle, or downloads, verifies, and launches the
+    /// elevated installer when an update is available.
     CheckForUpdates,
     About,
 }

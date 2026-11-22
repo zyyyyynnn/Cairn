@@ -11,22 +11,11 @@
 
 use crate::app::{CairnApp, layout};
 use crate::shell::os::{BinErrorKind, RecycleBinItem};
-use crate::shell::toast::ToastAction;
 use crate::table::model::SortColumn;
 use cairn_protocol::message::FileRowData;
 use gpui_kit::gpui::{Context, Pixels, Point, Window, px};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-
-/// What the failure toast's Retry action should run again. The failed set is captured here so a
-/// retry does not silently target whatever happens to be selected later.
-#[derive(Clone, Debug)]
-pub(crate) enum BinRetry {
-    DeletePaths(Vec<String>),
-    DeletePermanently(Vec<Arc<RecycleBinItem>>),
-    RestoreItems(Vec<Arc<RecycleBinItem>>),
-    EmptyBin,
-}
 
 enum BinStage {
     Loading,
@@ -737,7 +726,6 @@ impl CairnApp {
         title_key: &str,
         fallback_names: &[String],
         failure: &crate::shell::os::BinOperationError,
-        retry: BinRetry,
         cx: &mut Context<'_, Self>,
     ) {
         if failure.is_cancelled() {
@@ -760,21 +748,7 @@ impl CairnApp {
             args.set("items", item_names_summary(&self.i18n, item_names));
             self.i18n.get_text_with_args("bin_error_items", &args)
         };
-        let label = self.i18n.get_text("toast_retry");
-        let action = ToastAction::new(label, move |this, window, cx| {
-            this.run_bin_retry(retry.clone(), cx);
-            this.query.search_focus.focus(window, cx);
-        });
-        self.show_error_toast_with_action(title, message, action, cx);
-    }
-
-    fn run_bin_retry(&mut self, retry: BinRetry, cx: &mut Context<'_, Self>) {
-        match retry {
-            BinRetry::DeletePaths(paths) => self.delete_paths(paths, cx),
-            BinRetry::DeletePermanently(items) => self.delete_bin_items_permanently(items, cx),
-            BinRetry::RestoreItems(items) => self.restore_bin_items(items, cx),
-            BinRetry::EmptyBin => self.execute_empty_bin(cx),
-        }
+        self.show_error_toast(title, message, cx);
     }
 
     fn shell_reason_text(&self, failure: &crate::shell::os::BinOperationError) -> String {

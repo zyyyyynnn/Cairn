@@ -195,11 +195,13 @@ impl CairnApp {
 
         // Opt-in acceptance trace (`CAIRN_PERF_LOG`): the visible summary and the loading state,
         // never a hidden animated value.
-        crate::shell::perf::mark(&format!(
-            "status frame summary={summary_aria:?} bytes={} summary_loading={summary_loading} icon_loading={icon_loading} view={view_name} qid={}",
-            self.service.status.objects_bytes(),
-            self.query.query_id(),
-        ));
+        if crate::shell::perf::enabled() {
+            crate::shell::perf::mark(&format!(
+                "status frame summary={summary_aria:?} bytes={} summary_loading={summary_loading} icon_loading={icon_loading} view={view_name} qid={}",
+                self.service.status.objects_bytes(),
+                self.query.query_id(),
+            ));
+        }
 
         let aria_summary: SharedString = summary_aria.map_or_else(
             || {

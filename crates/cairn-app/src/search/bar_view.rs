@@ -39,7 +39,7 @@ impl CairnApp {
             // The box's outer margins are symmetric: the same tight lead on both sides.
             .pr(rems(layout::SEARCH_BAND_LEAD))
             // The search band is part of the window frame, so the title bar and the query row
-            // read as one toolbar instead of a bright strip between two gray bands.
+            // read as one continuous chrome region instead of a bright strip between two gray bands.
             .bg(tokens.chrome)
             .child(self.render_query_box(tokens, is_focused, focus_handle, view, window, cx))
     }

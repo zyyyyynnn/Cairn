@@ -15,7 +15,6 @@ use crate::service::elevation::{
 };
 use crate::service::ipc_tasks::get_tokio_runtime;
 use crate::shell::command_groups::MenuGroup;
-use crate::shell::toast::ToastAction;
 use fluent_bundle::FluentArgs;
 use gpui_kit::gpui::*;
 use semver::Version;
@@ -57,10 +56,29 @@ struct GitHubAsset {
 }
 
 #[derive(Clone, Debug)]
-struct ReleaseInfo {
-    version: String,
-    setup_url: String,
-    sums_url: String,
+pub(crate) struct ReleaseInfo {
+    pub(crate) version: String,
+    pub(crate) setup_url: String,
+    pub(crate) sums_url: String,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) enum UpdateState {
+    #[default]
+    Idle,
+    Checking,
+    Available(ReleaseInfo),
+    Downloading(ReleaseInfo),
+}
+
+impl UpdateState {
+    pub(crate) fn is_checking(&self) -> bool {
+        matches!(self, Self::Checking)
+    }
+
+    pub(crate) fn is_busy(&self) -> bool {
+        matches!(self, Self::Checking | Self::Downloading(_))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -319,11 +337,14 @@ impl CairnApp {
     }
 
     pub(crate) fn start_update_check(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        self.start_update_check_with_menu(window, cx, true);
-    }
-
-    fn start_update_check_from_toast(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        self.start_update_check_with_menu(window, cx, false);
+        match &self.update_state {
+            UpdateState::Idle => self.start_update_check_with_menu(window, cx, true),
+            UpdateState::Available(release) => {
+                let release = release.clone();
+                self.start_update_download(window, cx, release);
+            }
+            UpdateState::Checking | UpdateState::Downloading(_) => {}
+        }
     }
 
     fn start_update_check_with_menu(
@@ -355,27 +376,26 @@ impl CairnApp {
         .detach();
     }
 
-    /// Moves the shell into the checking state. A check started from the Help menu reopens it after
-    /// the click that started it: the popup dismisses itself on activation, so the row that carries
-    /// the spinner has to be shown again. A retry from a toast keeps the menu closed. Returns
-    /// `false` when a check is already in flight.
+    /// Moves the shell into the checking state. The Help menu reopens after the click that started
+    /// it: the popup dismisses itself on activation, so the row that carries the spinner has to be
+    /// shown again. Returns `false` when the updater is not idle.
     fn begin_update_check(
         &mut self,
         window: &mut Window,
         cx: &mut Context<'_, Self>,
         reopen_help: bool,
     ) -> bool {
-        if self.is_checking_update {
+        if !matches!(self.update_state, UpdateState::Idle) {
             return false;
         }
-        self.is_checking_update = true;
+        self.update_state = UpdateState::Checking;
         cx.notify();
 
         if reopen_help {
             let menu_view = cx.entity();
             window.defer(cx, move |window, cx| {
                 menu_view.update(cx, |this, cx| {
-                    if this.is_checking_update {
+                    if this.update_state.is_checking() {
                         this.show_group(MenuGroup::Help, window, cx);
                     }
                 });
@@ -390,7 +410,6 @@ impl CairnApp {
         cx: &mut Context<'_, Self>,
         result: Result<Option<ReleaseInfo>, UpdateError>,
     ) {
-        self.is_checking_update = false;
         if self
             .open_group_menu
             .as_ref()
@@ -401,49 +420,37 @@ impl CairnApp {
                 self.query.search_focus.focus(window, cx);
             }
         }
-        cx.notify();
         match result {
             Err(UpdateError::Incomplete) => {
+                self.update_state = UpdateState::Idle;
                 let title = self.i18n.get_text("update_incomplete_title");
                 let body = self.i18n.get_text("update_incomplete_body");
-                let retry =
-                    ToastAction::new(self.i18n.get_text("update_retry"), |this, window, cx| {
-                        this.start_update_check_from_toast(window, cx);
-                    });
-                self.show_error_toast_with_action(title, body, retry, cx);
+                self.show_error_toast(title, body, cx);
             }
             Err(_) => {
+                self.update_state = UpdateState::Idle;
                 let title = self.i18n.get_text("update_check_failed_title");
                 let body = self.i18n.get_text("update_check_failed_body");
-                let retry =
-                    ToastAction::new(self.i18n.get_text("update_retry"), |this, window, cx| {
-                        this.start_update_check_from_toast(window, cx);
-                    });
-                self.show_error_toast_with_action(title, body, retry, cx);
+                self.show_error_toast(title, body, cx);
             }
             Ok(None) => {
+                self.update_state = UpdateState::Idle;
                 let title = self.i18n.get_text("update_up_to_date_title");
                 let body = self.i18n.get_text("update_no_releases_body");
                 self.show_info_toast(title, body, cx);
             }
             Ok(Some(release)) if is_newer(&release.version, &current_version()) => {
                 let title = self.i18n.get_text("update_available_title");
-                let current = current_version();
-                let mut body_args = version_args(&release.version);
-                body_args.set("current", current.as_str());
+                let body_args = version_args(&release.version);
                 let body = self
                     .i18n
                     .get_text_with_args("update_available_body", &body_args);
-                let action_label = self.i18n.get_text("update_download_action");
-                let action = ToastAction::labeled(action_label, move |this, window, cx| {
-                    this.start_update_download(window, cx, release.clone());
-                });
-                self.show_info_toast_with_action(title, body, action, cx);
+                self.update_state = UpdateState::Available(release);
+                self.show_info_toast(title, body, cx);
             }
             Ok(Some(release)) => {
-                let current = current_version();
-                let mut args = version_args(&release.version);
-                args.set("current", current.as_str());
+                self.update_state = UpdateState::Idle;
+                let args = version_args(&release.version);
                 let title = self.i18n.get_text("update_up_to_date_title");
                 let body = self
                     .i18n
@@ -451,6 +458,7 @@ impl CairnApp {
                 self.show_info_toast(title, body, cx);
             }
         }
+        cx.notify();
     }
 
     fn start_update_download(
@@ -459,6 +467,8 @@ impl CairnApp {
         cx: &mut Context<'_, Self>,
         release: ReleaseInfo,
     ) {
+        let task_release = release.clone();
+        self.update_state = UpdateState::Downloading(release);
         let title = self.i18n.get_text("update_installing_title");
         let body = self.i18n.get_text("update_installing_body");
         self.show_persistent_info_toast(title, body, cx);
@@ -466,7 +476,6 @@ impl CairnApp {
         let handle = window.window_handle();
         let view = cx.entity().downgrade();
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let task_release = release.clone();
         get_tokio_runtime().spawn(async move {
             let _ = tx.send(download_and_verify(&task_release).await);
         });
@@ -475,7 +484,7 @@ impl CairnApp {
             let _ = cx.update_window(handle, |_, _window, cx| {
                 if let Some(view) = view.upgrade() {
                     view.update(cx, |this, cx| {
-                        this.finish_update_download(cx, release.clone(), result);
+                        this.finish_update_download(cx, result);
                     });
                 }
             });
@@ -486,20 +495,24 @@ impl CairnApp {
     fn finish_update_download(
         &mut self,
         cx: &mut Context<'_, Self>,
-        release: ReleaseInfo,
         result: Result<(PathBuf, String), UpdateError>,
     ) {
+        let UpdateState::Downloading(release) = std::mem::take(&mut self.update_state) else {
+            return;
+        };
         match result {
             Ok((path, expected)) => self.install_downloaded(cx, release, path, expected),
             Err(UpdateError::Verify) => {
+                self.update_state = UpdateState::Available(release);
                 let title = self.i18n.get_text("update_verify_failed_title");
                 let body = self.i18n.get_text("update_verify_failed_body");
-                self.show_download_retry_toast(title, body, release, cx);
+                self.show_error_toast(title, body, cx);
             }
             Err(_) => {
+                self.update_state = UpdateState::Available(release);
                 let title = self.i18n.get_text("update_download_failed_title");
                 let body = self.i18n.get_text("update_download_failed_body");
-                self.show_download_retry_toast(title, body, release, cx);
+                self.show_error_toast(title, body, cx);
             }
         }
     }
@@ -516,68 +529,38 @@ impl CairnApp {
             Err(error) => {
                 tracing::warn!("downloaded installer changed after verification: {error}");
                 let _ = std::fs::remove_file(&path);
+                self.update_state = UpdateState::Available(release);
                 let title = self.i18n.get_text("update_verify_failed_title");
                 let body = self.i18n.get_text("update_verify_failed_body");
-                self.show_download_retry_toast(title, body, release, cx);
+                self.show_error_toast(title, body, cx);
                 return;
             }
         };
         write_pending_version(&release.version);
         match launch_elevated_installer(&path, &expected_sha256) {
             Ok(()) => {
+                self.update_state = UpdateState::Idle;
                 drop(installer);
                 std::process::exit(0);
             }
             Err(ElevationError::Cancelled) => {
                 drop(installer);
                 remove_pending_version();
+                self.update_state = UpdateState::Available(release);
                 let title = self.i18n.get_text("update_cancelled_title");
                 let body = self.i18n.get_text("update_cancelled_body");
-                let retry =
-                    ToastAction::labeled(self.i18n.get_text("update_retry"), move |this, _, cx| {
-                        this.install_downloaded(
-                            cx,
-                            release.clone(),
-                            path.clone(),
-                            expected_sha256.clone(),
-                        );
-                    });
-                self.show_info_toast_with_action(title, body, retry, cx);
+                self.show_info_toast(title, body, cx);
             }
             Err(ElevationError::Failed { message, .. }) => {
                 tracing::warn!("update installer could not start: {message}");
                 drop(installer);
                 remove_pending_version();
+                self.update_state = UpdateState::Available(release);
                 let title = self.i18n.get_text("update_install_failed_title");
                 let body = self.i18n.get_text("update_install_failed_body");
-                let retry =
-                    ToastAction::new(self.i18n.get_text("update_retry"), move |this, _, cx| {
-                        this.install_downloaded(
-                            cx,
-                            release.clone(),
-                            path.clone(),
-                            expected_sha256.clone(),
-                        );
-                    });
-                self.show_error_toast_with_action(title, body, retry, cx);
+                self.show_error_toast(title, body, cx);
             }
         }
-    }
-
-    fn show_download_retry_toast(
-        &mut self,
-        title: String,
-        body: String,
-        release: ReleaseInfo,
-        cx: &mut Context<'_, Self>,
-    ) {
-        let retry = ToastAction::new(
-            self.i18n.get_text("update_retry"),
-            move |this, window, cx| {
-                this.start_update_download(window, cx, release.clone());
-            },
-        );
-        self.show_error_toast_with_action(title, body, retry, cx);
     }
 }
 
@@ -620,10 +603,8 @@ mod tests {
 
             let mut args = FluentArgs::new();
             args.set("version", "9.9.9");
-            args.set("current", "0.1.0");
             let body = i18n.get_text_with_args("update_available_body", &args);
             assert!(body.contains("9.9.9"), "{language}: {body}");
-            assert!(body.contains("0.1.0"), "{language}: {body}");
         }
     }
 
@@ -694,7 +675,7 @@ mod tests {
     }
 
     /// A manual check reports its progress in the Help menu row, not by taking the toast slot:
-    /// the row already renders a spinner while `is_checking_update` is set.
+    /// the row already renders a spinner while [`UpdateState::Checking`] is active.
     #[test]
     fn starting_a_check_keeps_the_help_row_loading_instead_of_announcing_a_toast() {
         use crate::shell::command_groups::MenuGroup;
@@ -715,7 +696,7 @@ mod tests {
                         this.dismiss_toast(cx);
                         this.show_group(MenuGroup::Help, window, cx);
                         this.start_update_check(window, cx);
-                        assert!(this.is_checking_update);
+                        assert!(this.update_state.is_checking());
                         assert!(
                             this.toast.is_none(),
                             "the checking phase belongs to the Help menu row"

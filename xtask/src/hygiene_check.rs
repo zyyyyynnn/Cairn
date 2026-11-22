@@ -60,6 +60,7 @@ pub fn check_hygiene(workspace: &Path) -> Result<(), String> {
 }
 
 const WORKSPACE_EDITION: &str = "2024";
+const WORKSPACE_RESOLVER: &str = "3";
 
 const REQUIRED_RUST_LINTS: &[(&str, &str)] = &[
     ("unsafe_op_in_unsafe_fn", "deny"),
@@ -78,6 +79,10 @@ const REQUIRED_CLIPPY_LINTS: &[(&str, &str)] = &[
     ("dbg_macro", "deny"),
     ("todo", "deny"),
     ("unimplemented", "deny"),
+    ("uninlined_format_args", "warn"),
+    ("redundant_closure_for_method_calls", "warn"),
+    ("unnested_or_patterns", "warn"),
+    ("manual_let_else", "warn"),
 ];
 
 fn check_workspace_lints(workspace: &Path, violations: &mut Vec<String>) -> Result<usize, String> {
@@ -94,6 +99,20 @@ fn check_workspace_lints(workspace: &Path, violations: &mut Vec<String>) -> Resu
         .as_ref()
         .and_then(|doc| doc.get("workspace"))
         .and_then(toml::Value::as_table);
+
+    let root_resolver = workspace_table
+        .and_then(|ws| ws.get("resolver"))
+        .and_then(toml::Value::as_str);
+
+    match root_resolver {
+        Some(resolver) if resolver == WORKSPACE_RESOLVER => {}
+        Some(resolver) => violations.push(format!(
+            "Cargo.toml: [workspace].resolver is `{resolver}`, expected `{WORKSPACE_RESOLVER}`"
+        )),
+        None => {
+            violations.push("Cargo.toml: missing string `[workspace].resolver`".to_string());
+        }
+    }
 
     let root_edition = workspace_table
         .and_then(|ws| ws.get("package"))
@@ -129,7 +148,10 @@ fn check_workspace_lints(workspace: &Path, violations: &mut Vec<String>) -> Resu
             continue;
         };
         for &(key, expected_level) in required {
-            match section_table.get(key).and_then(toml::Value::as_str) {
+            let level = Some(section_table)
+                .and_then(|t| t.get(key))
+                .and_then(|v| v.as_str().or_else(|| v.as_table()?.get("level")?.as_str()));
+            match level {
                 Some(level) if level == expected_level => {}
                 Some(level) => violations.push(format!(
                     "Cargo.toml: [workspace.lints.{section}].{key} is `{level}`, expected `{expected_level}`"
@@ -268,6 +290,13 @@ fn check_sources(
             {
                 violations.push(format!(
                     "{rel}:{line_no}: forbidden clippy suppression `{trimmed}`"
+                ));
+            }
+            if trimmed.contains(concat!("core::prelude::", "rust_"))
+                || trimmed.contains(concat!("std::prelude::", "rust_"))
+            {
+                violations.push(format!(
+                    "{rel}:{line_no}: forbidden edition-tied prelude import `{trimmed}`"
                 ));
             }
             if !(trimmed.starts_with("#[") && trimmed.contains("ignore")) {
@@ -927,7 +956,7 @@ mod tests {
 
         fs::write(
             root.join("Cargo.toml"),
-            "[workspace.package]\nedition = \"2024\"\n[workspace.lints.rust]\nunsafe_op_in_unsafe_fn = \"deny\"\nelided_lifetimes_in_paths = \"warn\"\n[workspace.lints.rustdoc]\nbroken_intra_doc_links = \"deny\"\nprivate_intra_doc_links = \"deny\"\n[workspace.lints.clippy]\nundocumented_unsafe_blocks = \"deny\"\nmissing_safety_doc = \"deny\"\nawait_holding_lock = \"deny\"\ntoo_many_arguments = \"deny\"\nlarge_enum_variant = \"deny\"\ndbg_macro = \"deny\"\ntodo = \"deny\"\nunimplemented = \"deny\"\n",
+            "[workspace]\nresolver = \"3\"\n[workspace.package]\nedition = \"2024\"\n[workspace.lints.rust]\nunsafe_op_in_unsafe_fn = \"deny\"\nelided_lifetimes_in_paths = \"warn\"\n[workspace.lints.rustdoc]\nbroken_intra_doc_links = \"deny\"\nprivate_intra_doc_links = \"deny\"\n[workspace.lints.clippy]\nundocumented_unsafe_blocks = \"deny\"\nmissing_safety_doc = \"deny\"\nawait_holding_lock = \"deny\"\ntoo_many_arguments = \"deny\"\nlarge_enum_variant = \"deny\"\ndbg_macro = \"deny\"\ntodo = \"deny\"\nunimplemented = \"deny\"\nuninlined_format_args = \"warn\"\nredundant_closure_for_method_calls = \"warn\"\nunnested_or_patterns = \"warn\"\nmanual_let_else = \"warn\"\n",
         )
         .expect("root cargo");
         fs::write(root.join("rustfmt.toml"), "edition = \"2024\"\n").expect("rustfmt");
@@ -1102,13 +1131,64 @@ mod tests {
         seed_valid_workspace(temp.path());
         fs::write(
             temp.path().join("Cargo.toml"),
-            "[workspace.package]\nedition = \"2024\"\n[workspace.lints.rust]\nunsafe_op_in_unsafe_fn = \"deny\"\n[workspace.lints.rustdoc]\nbroken_intra_doc_links = \"deny\"\nprivate_intra_doc_links = \"deny\"\n[workspace.lints.clippy]\nundocumented_unsafe_blocks = \"deny\"\nmissing_safety_doc = \"deny\"\nawait_holding_lock = \"deny\"\ntoo_many_arguments = \"deny\"\nlarge_enum_variant = \"deny\"\ndbg_macro = \"deny\"\ntodo = \"deny\"\nunimplemented = \"deny\"\n",
+            "[workspace]\nresolver = \"3\"\n[workspace.package]\nedition = \"2024\"\n[workspace.lints.rust]\nunsafe_op_in_unsafe_fn = \"deny\"\n[workspace.lints.rustdoc]\nbroken_intra_doc_links = \"deny\"\nprivate_intra_doc_links = \"deny\"\n[workspace.lints.clippy]\nundocumented_unsafe_blocks = \"deny\"\nmissing_safety_doc = \"deny\"\nawait_holding_lock = \"deny\"\ntoo_many_arguments = \"deny\"\nlarge_enum_variant = \"deny\"\ndbg_macro = \"deny\"\ntodo = \"deny\"\nunimplemented = \"deny\"\nuninlined_format_args = \"warn\"\nredundant_closure_for_method_calls = \"warn\"\nunnested_or_patterns = \"warn\"\n",
         )
         .expect("root cargo");
 
         let err =
             check_hygiene(temp.path()).expect_err("missing elided_lifetimes_in_paths must fail");
         assert!(err.contains("elided_lifetimes_in_paths"), "{err}");
+        assert!(err.contains("manual_let_else"), "{err}");
+    }
+
+    #[test]
+    fn edition_tied_prelude_import_and_resolver_drift_fail() {
+        for import in [
+            concat!("use core::prelude::", "rust_2024::test;\n"),
+            concat!("use std::prelude::", "rust_2021::test;\n"),
+        ] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            seed_valid_workspace(temp.path());
+            fs::write(temp.path().join("crates/demo/src/prelude_leak.rs"), import)
+                .expect("write prelude leak");
+            let err = check_hygiene(temp.path()).expect_err("edition prelude import must fail");
+            assert!(
+                err.contains("forbidden edition-tied prelude import"),
+                "{err}"
+            );
+        }
+
+        let temp_drift = tempfile::tempdir().expect("tempdir");
+        seed_valid_workspace(temp_drift.path());
+        let drifted = fs::read_to_string(temp_drift.path().join("Cargo.toml"))
+            .expect("read root cargo")
+            .replace("resolver = \"3\"", "resolver = \"2\"");
+        fs::write(temp_drift.path().join("Cargo.toml"), drifted).expect("write drifted cargo");
+        let err = check_hygiene(temp_drift.path()).expect_err("resolver drift must fail");
+        assert!(err.contains("[workspace].resolver"), "{err}");
+
+        let temp_missing = tempfile::tempdir().expect("tempdir");
+        seed_valid_workspace(temp_missing.path());
+        let missing = fs::read_to_string(temp_missing.path().join("Cargo.toml"))
+            .expect("read root cargo")
+            .replace("resolver = \"3\"\n", "");
+        fs::write(temp_missing.path().join("Cargo.toml"), &missing).expect("write missing cargo");
+        let err = check_hygiene(temp_missing.path()).expect_err("missing resolver must fail");
+        assert!(
+            err.contains("missing string `[workspace].resolver`"),
+            "{err}"
+        );
+
+        let temp_inline = tempfile::tempdir().expect("tempdir");
+        seed_valid_workspace(temp_inline.path());
+        let inline_lint = fs::read_to_string(temp_inline.path().join("Cargo.toml"))
+            .expect("read root cargo")
+            .replace(
+                "elided_lifetimes_in_paths = \"warn\"",
+                "elided_lifetimes_in_paths = { level = \"warn\", priority = -1 }",
+            );
+        fs::write(temp_inline.path().join("Cargo.toml"), inline_lint).expect("write inline lint");
+        check_hygiene(temp_inline.path()).expect("inline lint table with level must pass");
     }
 
     #[test]

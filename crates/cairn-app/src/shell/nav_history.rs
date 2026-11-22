@@ -30,7 +30,7 @@ impl CairnApp {
 
     pub fn can_go_forward(&self) -> bool {
         // A location step has no forward meaning until it is left. Keeping the
-        // toolbar Forward disabled prevents an action that would advance the
+        // navigation Forward button disabled prevents an action that would advance the
         // query history while the bin stays on screen.
         if self.recycle_bin.is_open() {
             return false;

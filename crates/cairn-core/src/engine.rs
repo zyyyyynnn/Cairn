@@ -1124,13 +1124,11 @@ mod tests {
         assert!(glob_match("cairn_*", "cairn_core", false));
         assert!(!glob_match("*.txt", "main.rs", false));
 
-        // Test Unicode character ? matching
         assert!(glob_match("?", "中", false));
         assert!(glob_match("??", "中国", false));
         assert!(!glob_match("?", "中国", false));
         assert!(glob_match("文?.*", "文件.docx", false));
 
-        // Test * does not cross backslash, ** crosses backslash
         assert!(!glob_match("*.rs", r"C:\dir\main.rs", false));
         assert!(glob_match(r"**\*.rs", r"C:\dir\main.rs", false));
         assert!(glob_match(r"C:\*\main.rs", r"C:\dir\main.rs", false));
@@ -1391,7 +1389,6 @@ mod tests {
         let m2 = execute_query(&records, &pool, &path_cache, 'C', &q_pref2, &cancel);
         assert_eq!(m2, vec![0]);
 
-        // Middle of word should NOT match prefix:
         let q_pref_mid = parse_query("prefix:air");
         let m_mid = execute_query(&records, &pool, &path_cache, 'C', &q_pref_mid, &cancel);
         assert_eq!(m_mid.len(), 0);
@@ -1404,7 +1401,6 @@ mod tests {
         let s2 = execute_query(&records, &pool, &path_cache, 'C', &q_suff2, &cancel);
         assert_eq!(s2, vec![0]);
 
-        // Middle of word should NOT match suffix:
         let q_suff_mid = parse_query("suffix:ai");
         let s_mid = execute_query(&records, &pool, &path_cache, 'C', &q_suff_mid, &cancel);
         assert_eq!(s_mid.len(), 0);

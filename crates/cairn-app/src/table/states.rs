@@ -196,9 +196,11 @@ impl CairnApp {
         };
         let message = self.i18n.get_text(message_key);
         let action = match notice {
-            Some(ContentQueryNotice::Disabled)
-            | Some(ContentQueryNotice::Error)
-            | Some(ContentQueryNotice::Unreadable) => {
+            Some(
+                ContentQueryNotice::Disabled
+                | ContentQueryNotice::Error
+                | ContentQueryNotice::Unreadable,
+            ) => {
                 let label_key = match notice {
                     Some(ContentQueryNotice::Disabled) => "index_enable_action",
                     Some(ContentQueryNotice::Error) => "menu_content_search_retry",
@@ -227,9 +229,7 @@ impl CairnApp {
                         .into_any_element(),
                 )
             }
-            Some(ContentQueryNotice::Loading) | Some(ContentQueryNotice::Backfilling) | None => {
-                None
-            }
+            Some(ContentQueryNotice::Loading | ContentQueryNotice::Backfilling) | None => None,
         };
         render_state_band(tokens, control, message, icon, action)
     }

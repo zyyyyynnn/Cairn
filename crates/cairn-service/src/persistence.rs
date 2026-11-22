@@ -365,7 +365,6 @@ fn atomic_replace_file(src: &Path, dst: &Path) -> Result<(), std::io::Error> {
             )
         };
         if res.is_err() {
-            // Fall back to remove + rename if needed
             let _ = fs::remove_file(dst);
             fs::rename(src, dst)?;
         }

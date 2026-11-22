@@ -812,12 +812,14 @@ fn parse_core_properties_xml(xml: &str) -> RecordPropertyData {
                 }
             }
             Ok(Event::Text(text)) if current.is_some() => {
-                let piece = match text.into_inner() {
-                    std::borrow::Cow::Borrowed(s) => {
-                        quick_xml::escape::unescape(s).unwrap_or(std::borrow::Cow::Borrowed(s))
-                    }
-                    owned @ std::borrow::Cow::Owned(_) => owned,
-                };
+                let piece = text.into_inner();
+                match &mut pending {
+                    None => pending = Some(piece),
+                    Some(acc) => acc.to_mut().push_str(&piece),
+                }
+            }
+            Ok(Event::CData(cdata)) if current.is_some() => {
+                let piece = cdata.into_inner();
                 match &mut pending {
                     None => pending = Some(piece),
                     Some(acc) => acc.to_mut().push_str(&piece),
@@ -829,27 +831,16 @@ fn parse_core_properties_xml(xml: &str) -> RecordPropertyData {
                         None => pending = Some(std::borrow::Cow::Owned(ch.to_string())),
                         Some(acc) => acc.to_mut().push(ch),
                     }
-                } else if let Some(resolved) = match entity.as_ref() {
-                    "amp" => Some("&"),
-                    "lt" => Some("<"),
-                    "gt" => Some(">"),
-                    "apos" => Some("'"),
-                    "quot" => Some("\""),
-                    _ => None,
-                } {
+                } else if let Some(resolved) =
+                    quick_xml::escape::resolve_xml_entity(entity.as_ref())
+                {
                     match &mut pending {
                         None => pending = Some(std::borrow::Cow::Borrowed(resolved)),
                         Some(acc) => acc.to_mut().push_str(resolved),
                     }
                 }
             }
-            Ok(Event::Eof) => {
-                if let (Some(field), Some(raw)) = (current.take(), pending.take()) {
-                    commit_field(field, &raw);
-                }
-                break;
-            }
-            Err(_) => break,
+            Ok(Event::Eof) | Err(_) => break,
             _ => {}
         }
     }
@@ -923,11 +914,28 @@ mod tests {
   <dc:description>{padding}</dc:description>
 </cp:coreProperties>"#
         );
-        let zip_bytes = build_office_zip(
+        let mut zip_bytes = build_office_zip(
             "docProps/core.xml",
             xml.as_bytes(),
             zip::CompressionMethod::Deflated,
         );
+        assert_eq!(parse_properties_from_bytes("docx", &zip_bytes), None);
+
+        let expected_size = (xml.len() as u32).to_le_bytes();
+        let spoofed_size = 128u32.to_le_bytes();
+        let lfh = zip_bytes
+            .windows(4)
+            .position(|w| w == [0x50, 0x4B, 0x03, 0x04])
+            .expect("local file header");
+        let cdh = zip_bytes
+            .windows(4)
+            .position(|w| w == [0x50, 0x4B, 0x01, 0x02])
+            .expect("central directory header");
+        assert_eq!(&zip_bytes[lfh + 22..lfh + 26], &expected_size);
+        assert_eq!(&zip_bytes[cdh + 24..cdh + 28], &expected_size);
+        zip_bytes[lfh + 22..lfh + 26].copy_from_slice(&spoofed_size);
+        zip_bytes[cdh + 24..cdh + 28].copy_from_slice(&spoofed_size);
+
         assert_eq!(parse_properties_from_bytes("docx", &zip_bytes), None);
     }
 
@@ -978,5 +986,17 @@ mod tests {
         );
         assert_eq!(parsed.author.as_deref(), Some("A & B"));
         assert_eq!(parsed.tags.as_deref(), Some("one, two"));
+
+        let cdata = parse_core_properties_xml(
+            r#"<cp:coreProperties><dc:creator><![CDATA[Carol & Dave]]></dc:creator><cp:keywords><![CDATA[rust, xml]]></cp:keywords></cp:coreProperties>"#,
+        );
+        assert_eq!(cdata.author.as_deref(), Some("Carol & Dave"));
+        assert_eq!(cdata.tags.as_deref(), Some("rust, xml"));
+
+        let unclosed = parse_core_properties_xml(
+            r#"<cp:coreProperties><dc:creator>Alice</dc:creator><cp:keywords>truncated"#,
+        );
+        assert_eq!(unclosed.author.as_deref(), Some("Alice"));
+        assert_eq!(unclosed.tags, None);
     }
 }

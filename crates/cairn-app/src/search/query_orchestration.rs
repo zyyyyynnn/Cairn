@@ -242,6 +242,19 @@ fn rows_page_ready(
     service_connected && !searching && !probing && !fetching_more && has_session
 }
 
+/// Decides whether the UI needs an immediate redraw after `arrived` lands, or can wait for the
+/// follow-up request already dispatched for a newer `visible` viewport.
+fn should_notify_after_page(
+    arrived: Range<usize>,
+    visible: &Range<usize>,
+    follow_up_started: bool,
+) -> bool {
+    if !follow_up_started || arrived.is_empty() {
+        return true;
+    }
+    arrived.start < visible.end && arrived.end > visible.start
+}
+
 impl CairnApp {
     /// `true` when there is something the service can answer: typed text, a
     /// file-type filter, or a folder-source scope. An empty box with a scope still
@@ -301,7 +314,7 @@ impl CairnApp {
         else {
             return;
         };
-        self.fetch_rows(offset, limit, cx);
+        self.fetch_rows(offset, limit, row_height, cx);
     }
 
     /// `true` when this frame shows rows the fetched window does not hold and no page is in flight.
@@ -719,7 +732,13 @@ impl CairnApp {
     }
 
     /// Fetches one `(offset, limit)` window of the active session and installs it.
-    pub fn fetch_rows(&mut self, offset: usize, limit: usize, cx: &mut Context<'_, Self>) {
+    pub fn fetch_rows(
+        &mut self,
+        offset: usize,
+        limit: usize,
+        row_height: Pixels,
+        cx: &mut Context<'_, Self>,
+    ) {
         let Some(session_id) = self.query.active_session_id else {
             return;
         };
@@ -753,7 +772,28 @@ impl CairnApp {
                 match res {
                     Ok(Ok(envelope)) => match envelope.payload {
                         cairn_protocol::message::ResponsePayload::RowsResult { rows, .. } => {
+                            let arrived_end = offset.saturating_add(rows.len());
+                            let arrived_empty = rows.is_empty();
                             this.results.table.apply_page(offset, rows);
+                            this.results
+                                .table
+                                .set_scroll_top(this.scrolled_pixels(), f32::from(row_height));
+                            let current_visible = this.visible_rows(row_height);
+                            let follow_up_started = if !arrived_empty
+                                && this.needs_visible_rows_page(current_visible.clone())
+                            {
+                                this.ensure_visible_rows_loaded(row_height, cx);
+                                this.query.is_fetching_more
+                            } else {
+                                false
+                            };
+                            if !should_notify_after_page(
+                                offset..arrived_end,
+                                &current_visible,
+                                follow_up_started,
+                            ) {
+                                return;
+                            }
                         }
                         cairn_protocol::message::ResponsePayload::Error { code, .. }
                             if rows_error_requires_refresh(code) =>
@@ -1191,5 +1231,13 @@ mod tests {
                 },
             );
         });
+    }
+
+    #[test]
+    fn stale_disjoint_page_with_follow_up_skips_redundant_notify() {
+        assert!(!should_notify_after_page(100..300, &(500..520), true));
+        assert!(should_notify_after_page(100..300, &(290..310), true));
+        assert!(should_notify_after_page(100..300, &(500..520), false));
+        assert!(should_notify_after_page(100..100, &(500..520), true));
     }
 }

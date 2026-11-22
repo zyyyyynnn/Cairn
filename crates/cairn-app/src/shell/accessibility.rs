@@ -31,7 +31,7 @@ pub struct KeyControl {
     /// Element id the view gives the control, exactly as GPUI sees it. Members of a repeated family
     /// record the id the view assembles, and state variants of one control share an id.
     pub element: &'static str,
-    /// `true` when the view pairs [`element`](KeyControl::element) with a row or capsule index.
+    /// `true` when the view pairs [`element`](KeyControl::element) with a row or source index.
     pub indexed: bool,
     /// AccessKit role the view must report. Never [`Role::Unknown`]: an unclassified role is not an
     /// accessible one.
@@ -134,9 +134,9 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         named_by: "",
         requirement: "UI-01",
     },
-    // The section heading is the view's own element. The rows are `SidebarMenuItem`s, which report
-    // `Role::TreeItem` themselves; the registry still names each one, by the model key the view
-    // assembles into its element id, so a category cannot gain a sidebar row without a message.
+    // The section heading is the view's own element. Custom sidebar rows report `Role::TreeItem`
+    // on their focus wrapper, and the registry names each one by the model key assembled into its
+    // element id so a category cannot gain a sidebar row without a message.
     KeyControl {
         key: "sidebar-locations",
         element: "sidebar-locations",
@@ -598,10 +598,8 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         named_by: "",
         requirement: "SVC-03, SVC-04",
     },
-    // The recovery control every one of those three alerts shows under its own sentence. The failure
-    // messages promise an action ("start the service, then try again"), so the promise needs a button
-    // a pointer and a keyboard can both reach; the band's alert element names the condition, and this
-    // one names what clicking does.
+    // Inline recovery control shown beside recoverable service alerts (`not_running` / `timeout`),
+    // paired with the band's alert element so pointer and keyboard can both trigger a retry.
     KeyControl {
         key: "service-retry-button",
         element: "service-retry-button",
@@ -655,15 +653,6 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         indexed: false,
         role: Role::Button,
         messages: &["toast_dismiss"],
-        named_by: "",
-        requirement: "UI-03",
-    },
-    KeyControl {
-        key: "toast-retry",
-        element: "toast-retry",
-        indexed: false,
-        role: Role::Button,
-        messages: &["toast_retry"],
         named_by: "",
         requirement: "UI-03",
     },
@@ -740,7 +729,7 @@ pub fn component_name(control: &KeyControl, i18n: &I18nManager) -> String {
 }
 
 /// [`element`] for a control the view repeats inside one parent, where GPUI needs the registered id
-/// paired with the row or capsule index.
+/// paired with the row or source index.
 pub fn element_at(control: &KeyControl, index: usize) -> ControlElement {
     div()
         .id((control.element, index))
@@ -928,7 +917,6 @@ mod tests {
             ("status-bar", Role::Status),
             ("toast", Role::Alert),
             ("toast-dismiss", Role::Button),
-            ("toast-retry", Role::Button),
             ("recycle-bin-error", Role::Alert),
             ("recycle-bin-retry", Role::Button),
             ("service-issue-not-running", Role::Alert),
@@ -977,7 +965,7 @@ mod tests {
             );
         }
 
-        // Every dropdown the toolbar owns is a registered trigger, named by the group it opens.
+        // Every top-bar menu dropdown is a registered trigger, named by the group it opens.
         for spec in menu_groups() {
             let element = format!("toolbar-menu:{}", spec.group.key());
             let entry = KEY_CONTROLS

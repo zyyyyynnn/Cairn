@@ -7,7 +7,7 @@
 
 use super::folder_source::FolderSource;
 use super::path_exclusions::PathExclusions;
-use super::volume_index::BitSet;
+use super::volume_index::{BitSet, SUBTREE_EXCLUDED};
 use super::{MultiVolumeEngine, VolumeIndex};
 use cairn_content::{CONTENT_RESULT_TOP_K, ContentSearcher};
 use cairn_core::FileRecord;
@@ -27,7 +27,9 @@ use cairn_core::syntax::{QueryDefaults, QueryExpr, parse_query_with};
 use rayon::prelude::*;
 use rayon::slice::ParallelSliceMut;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+
+const ALL_FILES_PREFIX_BLOCK_SIZE: usize = 1024;
 
 /// One match the engine found: a record of one indexed source, observed at that source's table
 /// generation.
@@ -55,6 +57,9 @@ pub struct AllFilesView {
     pub(crate) presorted_version: u64,
     pub(crate) exclusion_epoch: u64,
     pub(crate) exclusions: PathExclusions,
+    /// Cumulative visible-record count at every `ALL_FILES_PREFIX_BLOCK_SIZE` boundary in
+    /// ascending `column` order. Built lazily on deep pagination for O(log(N/B) + B) seeking.
+    block_prefix: OnceLock<Box<[u32]>>,
 }
 
 /// Complete output of one multi-source search.
@@ -86,7 +91,95 @@ impl SearchOutcome {
     }
 }
 
+#[derive(Clone, Copy)]
+enum VisibilityFilter<'a> {
+    None,
+    TombstonesOnly(&'a [FileRecord]),
+    Segment {
+        states: &'a [u8],
+        records: Option<&'a [FileRecord]>,
+    },
+    Full {
+        exclusions: &'a PathExclusions,
+        volume: &'a VolumeIndex,
+        records: Option<&'a [FileRecord]>,
+    },
+}
+
+impl<'a> VisibilityFilter<'a> {
+    fn new(view: &'a AllFilesView, volume: &'a VolumeIndex) -> Self {
+        let records = volume.has_tombstones().then_some(volume.records());
+        if view.exclusions.is_empty() {
+            return match records {
+                Some(records) => Self::TombstonesOnly(records),
+                None => Self::None,
+            };
+        }
+        if view.exclusions.uses_segment_table() {
+            if let Some(states) = view.exclusions.drive_states(volume.drive_letter) {
+                return Self::Segment { states, records };
+            }
+            return match records {
+                Some(records) => Self::TombstonesOnly(records),
+                None => Self::None,
+            };
+        }
+        Self::Full {
+            exclusions: &view.exclusions,
+            volume,
+            records,
+        }
+    }
+
+    #[inline(always)]
+    fn is_visible(self, idx: u32) -> bool {
+        match self {
+            Self::None => true,
+            Self::TombstonesOnly(records) => !records[idx as usize].is_tombstone(),
+            Self::Segment { states, records } => {
+                if states.get(idx as usize).copied() == Some(SUBTREE_EXCLUDED) {
+                    return false;
+                }
+                records.is_none_or(|recs| !recs[idx as usize].is_tombstone())
+            }
+            Self::Full {
+                exclusions,
+                volume,
+                records,
+            } => {
+                if let Some(recs) = records
+                    && recs[idx as usize].is_tombstone()
+                {
+                    return false;
+                }
+                !exclusions.excludes(volume, idx)
+            }
+        }
+    }
+}
+
 impl AllFilesView {
+    pub(crate) fn for_volume(
+        volume: &VolumeIndex,
+        sort_by: SortColumn,
+        sort_asc: bool,
+        exclusions: PathExclusions,
+    ) -> Self {
+        let source_id =
+            SourceId::for_drive(volume.drive_letter).expect("NTFS drive letter maps to a SourceId");
+        Self {
+            source_id,
+            drive_letter: volume.drive_letter,
+            sort_by,
+            sort_asc,
+            generation: volume.generation(),
+            presorted_version: volume.presorted_version(),
+            exclusion_epoch: volume.exclusion_epoch(),
+            exclusions,
+            block_prefix: OnceLock::new(),
+        }
+    }
+
     pub(crate) fn visit_visible(
         &self,
         volume: &VolumeIndex,
@@ -114,6 +207,23 @@ impl AllFilesView {
         let Some(column) = volume.presorted_order_snapshot(self.sort_by) else {
             return false;
         };
+        if limit == 0 {
+            return true;
+        }
+
+        let filter = VisibilityFilter::new(self, volume);
+        if matches!(filter, VisibilityFilter::None) {
+            return visit_unfiltered_slice(column, self.sort_asc, offset, limit, stop, visit);
+        }
+
+        if limit < usize::MAX
+            && (offset >= ALL_FILES_PREFIX_BLOCK_SIZE || self.block_prefix.get().is_some())
+        {
+            let prefix = self.prefix_counts(column, filter);
+            visit_with_prefix(column, prefix, self.sort_asc, filter, offset, limit, visit);
+            return true;
+        }
+
         let end = offset.saturating_add(limit);
         let mut visible = 0usize;
         let mut stopped = false;
@@ -125,8 +235,7 @@ impl AllFilesView {
             if *visible >= end {
                 return true;
             }
-            let record = &volume.records()[idx as usize];
-            if record.is_tombstone() || self.exclusions.excludes(volume, idx) {
+            if !filter.is_visible(idx) {
                 return false;
             }
             if *visible >= offset {
@@ -149,6 +258,158 @@ impl AllFilesView {
             }
         }
         !stopped
+    }
+
+    fn prefix_counts(&self, column: &[u32], filter: VisibilityFilter<'_>) -> &[u32] {
+        self.block_prefix.get_or_init(|| {
+            let block_counts: Vec<u32> = column
+                .par_chunks(ALL_FILES_PREFIX_BLOCK_SIZE)
+                .map(|chunk| chunk.iter().filter(|&&idx| filter.is_visible(idx)).count() as u32)
+                .collect();
+            let mut prefix = Vec::with_capacity(block_counts.len() + 1);
+            prefix.push(0);
+            let mut acc = 0u32;
+            for count in block_counts {
+                acc = acc.saturating_add(count);
+                prefix.push(acc);
+            }
+            prefix.into_boxed_slice()
+        })
+    }
+}
+
+fn visit_unfiltered_slice(
+    column: &[u32],
+    sort_asc: bool,
+    offset: usize,
+    limit: usize,
+    stop: impl Fn() -> bool,
+    mut visit: impl FnMut(u32),
+) -> bool {
+    let len = column.len();
+    if offset >= len {
+        return true;
+    }
+    let end = offset.saturating_add(limit).min(len);
+    if sort_asc {
+        for (i, &idx) in column[offset..end].iter().enumerate() {
+            if i & 0xFFF == 0 && stop() {
+                return false;
+            }
+            visit(idx);
+        }
+    } else {
+        let rev_start = len - end;
+        let rev_end = len - offset;
+        for (i, &idx) in column[rev_start..rev_end].iter().rev().enumerate() {
+            if i & 0xFFF == 0 && stop() {
+                return false;
+            }
+            visit(idx);
+        }
+    }
+    true
+}
+
+fn visit_with_prefix(
+    column: &[u32],
+    prefix: &[u32],
+    sort_asc: bool,
+    filter: VisibilityFilter<'_>,
+    offset: usize,
+    limit: usize,
+    mut visit: impl FnMut(u32),
+) {
+    let total_visible = *prefix.last().unwrap_or(&0) as usize;
+    if offset >= total_visible || limit == 0 {
+        return;
+    }
+    let take_count = limit.min(total_visible - offset);
+    let num_blocks = prefix.len().saturating_sub(1);
+    if num_blocks == 0 {
+        return;
+    }
+
+    if sort_asc {
+        let end = offset + take_count;
+        let mut cursor = offset;
+        let mut block_idx = prefix.partition_point(|&c| (c as usize) <= offset) - 1;
+        while cursor < end && block_idx < num_blocks {
+            let block_start = prefix[block_idx] as usize;
+            let block_end = prefix[block_idx + 1] as usize;
+            if block_start < block_end {
+                let elem_start = block_idx * ALL_FILES_PREFIX_BLOCK_SIZE;
+                let elem_end = (elem_start + ALL_FILES_PREFIX_BLOCK_SIZE).min(column.len());
+                let block_slice = &column[elem_start..elem_end];
+                if block_end - block_start == block_slice.len() {
+                    let skip = cursor - block_start;
+                    let take = (end - cursor).min(block_slice.len() - skip);
+                    for &idx in &block_slice[skip..skip + take] {
+                        visit(idx);
+                    }
+                    cursor += take;
+                } else {
+                    let mut rank = block_start;
+                    for &idx in block_slice {
+                        if !filter.is_visible(idx) {
+                            continue;
+                        }
+                        if rank >= cursor {
+                            visit(idx);
+                            cursor += 1;
+                            if cursor >= end {
+                                break;
+                            }
+                        }
+                        rank += 1;
+                    }
+                }
+            }
+            block_idx += 1;
+        }
+        return;
+    }
+
+    let mut remaining = take_count;
+    let mut cursor_end = total_visible - offset;
+    let mut block_idx = prefix.partition_point(|&c| (c as usize) < cursor_end) - 1;
+    while remaining > 0 {
+        let block_start = prefix[block_idx] as usize;
+        let block_end = prefix[block_idx + 1] as usize;
+        if block_start < block_end {
+            let elem_start = block_idx * ALL_FILES_PREFIX_BLOCK_SIZE;
+            let elem_end = (elem_start + ALL_FILES_PREFIX_BLOCK_SIZE).min(column.len());
+            let block_slice = &column[elem_start..elem_end];
+            if block_end - block_start == block_slice.len() {
+                let take_end = cursor_end - block_start;
+                let take = remaining.min(take_end);
+                for &idx in block_slice[take_end - take..take_end].iter().rev() {
+                    visit(idx);
+                }
+                remaining -= take;
+                cursor_end -= take;
+            } else {
+                let mut rank = block_end;
+                for &idx in block_slice.iter().rev() {
+                    if !filter.is_visible(idx) {
+                        continue;
+                    }
+                    rank -= 1;
+                    if rank < cursor_end {
+                        visit(idx);
+                        remaining -= 1;
+                        cursor_end -= 1;
+                        if remaining == 0 {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if block_idx == 0 {
+            break;
+        }
+        block_idx -= 1;
     }
 }
 
@@ -442,53 +703,60 @@ impl MultiVolumeEngine {
         degraded: Option<QueryDegradedReason>,
     ) -> SearchOutcome {
         let primary = applied_sort.primary();
-        let source_id =
-            SourceId::for_drive(volume.drive_letter).expect("NTFS drive letter maps to a SourceId");
-        let view = AllFilesView {
-            source_id,
-            drive_letter: volume.drive_letter,
-            sort_by: primary.column,
-            sort_asc: primary.direction == SortDirection::Ascending,
-            generation: volume.generation(),
-            presorted_version: volume.presorted_version(),
-            exclusion_epoch: volume.exclusion_epoch(),
+        let view = AllFilesView::for_volume(
+            volume,
+            primary.column,
+            primary.direction == SortDirection::Ascending,
             exclusions,
-        };
+        );
         let (total, view_bytes) = if view.exclusions.is_empty() {
             (volume.live_count() as usize, volume.live_file_bytes())
         } else if view.exclusions.uses_segment_table() {
+            let states = view.exclusions.drive_states(volume.drive_letter);
+            let records = volume.records();
             let mut total = 0usize;
             let mut root_size = None;
             let mut top_level_bytes = 0u64;
-            if !view.visit_visible_until(
-                volume,
-                0,
-                usize::MAX,
-                || cancel.is_cancelled(),
-                |idx| {
-                    total += 1;
-                    let record = &volume.records()[idx as usize];
-                    if record.parent_idx == idx {
-                        root_size = Some(record.size);
-                    } else if record.parent_idx == FileRecord::ROOT_PARENT {
-                        top_level_bytes = top_level_bytes.saturating_add(record.size);
-                    }
-                },
-            ) {
-                return SearchOutcome::empty(highlight_terms, applied_sort, degraded);
+            for (idx, record) in records.iter().enumerate() {
+                if idx & 0xFFF == 0 && cancel.is_cancelled() {
+                    return SearchOutcome::empty(highlight_terms, applied_sort, degraded);
+                }
+                if record.is_tombstone()
+                    || states.is_some_and(|table| table.get(idx).copied() == Some(SUBTREE_EXCLUDED))
+                {
+                    continue;
+                }
+                total += 1;
+                if record.parent_idx == idx as u32 {
+                    root_size = Some(record.size);
+                } else if record.parent_idx == FileRecord::ROOT_PARENT {
+                    top_level_bytes = top_level_bytes.saturating_add(record.size);
+                }
             }
             (total, root_size.unwrap_or(top_level_bytes))
         } else {
-            let mut visible = Vec::with_capacity(volume.live_count() as usize);
-            if !view.visit_visible_until(
-                volume,
-                0,
-                usize::MAX,
-                || cancel.is_cancelled(),
-                |idx| visible.push(idx),
-            ) {
+            let Some(column) = volume.presorted_order_snapshot(view.sort_by) else {
                 return SearchOutcome::empty(highlight_terms, applied_sort, degraded);
+            };
+            let filter = VisibilityFilter::new(&view, volume);
+            let mut visible = Vec::with_capacity(volume.live_count() as usize);
+            let mut prefix =
+                Vec::with_capacity(column.len().div_ceil(ALL_FILES_PREFIX_BLOCK_SIZE) + 1);
+            prefix.push(0);
+            let mut acc = 0u32;
+            for chunk in column.chunks(ALL_FILES_PREFIX_BLOCK_SIZE) {
+                if cancel.is_cancelled() {
+                    return SearchOutcome::empty(highlight_terms, applied_sort, degraded);
+                }
+                for &idx in chunk {
+                    if filter.is_visible(idx) {
+                        visible.push(idx);
+                        acc = acc.saturating_add(1);
+                    }
+                }
+                prefix.push(acc);
             }
+            let _ = view.block_prefix.set(prefix.into_boxed_slice());
             (visible.len(), volume.calculate_matched_bytes(&visible))
         };
         SearchOutcome {
@@ -652,8 +920,9 @@ impl MultiVolumeEngine {
                 let generation = src.generation();
 
                 let mut matched = match content_only_plan {
-                    Some(ContentHits::Disjunction(by_source))
-                    | Some(ContentHits::Conjunction(by_source)) => {
+                    Some(
+                        ContentHits::Disjunction(by_source) | ContentHits::Conjunction(by_source),
+                    ) => {
                         let Some(frns) = by_source.get(&sid) else {
                             continue;
                         };

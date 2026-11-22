@@ -603,8 +603,7 @@ impl<'a> QueryParser<'a> {
             }
 
             if temp_pos < self.chars.len() && self.chars[temp_pos] == '|' {
-                self.pos = temp_pos + 1; // consume '|'
-                // skip spaces after '|'
+                self.pos = temp_pos + 1;
                 self.skip_whitespace();
                 let next_term = self.parse_unary();
                 or_terms.push(next_term);

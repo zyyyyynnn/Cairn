@@ -1389,8 +1389,9 @@ mod tests {
 
         match outcome {
             Ok(created) => assert_eq!(created.root, probe),
-            Err(DataDirectoryError::Ownership { .. })
-            | Err(DataDirectoryError::NotRemediated { .. }) => {}
+            Err(
+                DataDirectoryError::Ownership { .. } | DataDirectoryError::NotRemediated { .. },
+            ) => {}
             Err(other) => panic!("unexpected failure: {other}"),
         }
 

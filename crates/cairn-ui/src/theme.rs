@@ -264,11 +264,11 @@ mod gray {
 /// borders.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ModePalette {
-    /// The page: result body, table head and the light dialog.
+    /// The page: result body, table head, and light dialogs and toasts.
     pub content: Hsla,
-    /// Sunken surfaces: cards, toasts and the unfocused search box.
+    /// Sunken surfaces: cards, the unfocused search box, loading/resize covers, and scrollbar tracks.
     pub inset: Hsla,
-    /// Window chrome: title bar, sidebar, status bar and the dark dialog.
+    /// Window chrome: title bar, sidebar, status bar, and dark dialogs and toasts.
     pub frame: Hsla,
     /// Hover, pressed and selected-row fill, and the highlight of a ghost control or menu item.
     /// One step serves both because the component paints this role at half strength over a dark
@@ -1438,8 +1438,7 @@ mod tests {
             }
 
             // The halved composite is what sets the step. The line tier sits one step below it,
-            // and borrowing that step would leave a ghost control's hover under the floor, which is
-            // exactly the state this rule replaced.
+            // so borrowing that step would leave a ghost control's hover under the floor.
             let line_as_control = lightness_step(
                 control_hover_fill(palette.border, palette.frame, dark),
                 palette.frame,

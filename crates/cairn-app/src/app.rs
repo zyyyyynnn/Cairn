@@ -2,12 +2,12 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Cairn main window: the file-manager shell — title bar, locations sidebar, search band, command
-//! bar, virtualized result table and status line.
+//! Cairn main window: the file-manager shell — title bar, locations sidebar, search band,
+//! virtualized result table and status line.
 //!
 //! This module owns the window's *state and behaviour*. The layout itself lives in [`crate::view`],
 //! which reads these fields and hands interactions back to the owner methods below. Keyboard commands
-//! are Actions declared in `crate::commands` and dispatched as Actions against this view's
+//! are Actions declared in `crate::shell::commands` and dispatched as Actions against this view's
 //! `key_context`, which the window root tracks; they therefore reach the owner methods whichever
 //! descendant holds focus.
 //!
@@ -92,9 +92,12 @@ pub mod layout {
     pub const FRAMERATE_COLUMN: f32 = 21.0 * STEP;
     pub const TABLE_SCROLL_STEP_FACTOR: f32 = 0.25;
     pub const MESSAGE_MAX_WIDTH: f32 = 154.0 * STEP;
-    /// Baseline optical correction centering the 24px state icon beside the serif heading line box.
+    /// Baseline optical correction centering the 24px inline action icon beside the state sentence line box.
     pub const STATE_ACTION_OPTICAL_OFFSET: f32 = 1.5 / theme::BASE_FONT_PX;
     pub const DIALOG_WIDTH: f32 = 96.0 * STEP;
+    pub const DIALOG_FORM_WIDTH: f32 = 128.0 * STEP;
+    pub const DIALOG_WIDE_WIDTH: f32 = 220.0 * STEP;
+    pub const DIALOG_LIST_MAX_HEIGHT: f32 = 64.0 * STEP;
     pub const DIALOG_SEAT_HEIGHT: f32 = 32.0 * STEP;
 
     pub const SIDEBAR_WIDTH: f32 = 52.0 * STEP;
@@ -369,9 +372,8 @@ pub struct CairnApp {
     pub toast: Option<crate::shell::toast::ToastState>,
     pub(crate) toast_serial: u64,
     pub table_reveal: TableRevealState,
-    /// True while the GitHub release check is in flight. The Help menu row carries the loading
-    /// icon and the menu is reopened after the click; no separate waiting dialog or toast is opened.
-    pub(crate) is_checking_update: bool,
+    /// In-app update lifecycle rendered on the Help menu's update row.
+    pub(crate) update_state: crate::shell::update::UpdateState,
     /// The live window resize and the cover it owns, judged by this window's own geometry.
     pub(crate) window_resize: crate::shell::window_resize::WindowResizeTracker,
     /// Keeps the bounds observer alive for the window's lifetime.
@@ -421,8 +423,8 @@ impl CairnApp {
         // A tab stop in its own right: the table owns a keyboard path that nothing else answers, so
         // Tab has to be able to reach it (Design Guides Accessibility checklist: "every action is
         // reachable and operable by keyboard"). Where it falls in the walk is decided by paint order
-        // — the query box and the four toolbar triggers come first — and no test pins that index, so
-        // none is claimed here.
+        // — the top bar and query box come first — and no test pins that index, so none is claimed
+        // here.
         let results_focus = cx.focus_handle().tab_stop(true);
 
         // Keep the window key context reachable: if a rendered region disappears and focus is
@@ -465,6 +467,7 @@ impl CairnApp {
         let hotkey_unavailable = hotkey.is_none();
 
         crate::shell::theme::ensure_shell_tokens(cx);
+        cairn_ui::locale::init_layout_direction(cx);
 
         let mut app = Self {
             i18n,
@@ -540,7 +543,7 @@ impl CairnApp {
             toast: None,
             toast_serial: 0,
             table_reveal: TableRevealState::new(),
-            is_checking_update: false,
+            update_state: crate::shell::update::UpdateState::Idle,
             window_resize: Default::default(),
             window_resize_subscription: None,
         };

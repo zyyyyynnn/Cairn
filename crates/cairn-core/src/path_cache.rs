@@ -275,7 +275,6 @@ mod tests {
         let (cmd_off, cmd_len, cmd_ext) = arena.insert("cmd.exe");
 
         let records = vec![
-            // 0: root
             FileRecord {
                 frn: 5,
                 parent_idx: FileRecord::ROOT_PARENT,
@@ -288,7 +287,6 @@ mod tests {
                 modified_ts: 0,
                 created_ts: 0,
             },
-            // 1: Windows
             FileRecord {
                 frn: 100,
                 parent_idx: 0,
@@ -301,7 +299,6 @@ mod tests {
                 modified_ts: 0,
                 created_ts: 0,
             },
-            // 2: System32
             FileRecord {
                 frn: 101,
                 parent_idx: 1,
@@ -314,7 +311,6 @@ mod tests {
                 modified_ts: 0,
                 created_ts: 0,
             },
-            // 3: cmd.exe
             FileRecord {
                 frn: 102,
                 parent_idx: 2,
@@ -355,7 +351,6 @@ mod tests {
         }];
         let arena = NamePool::default();
 
-        // Populate with mock entries up to capacity
         if let Ok(mut write) = cache.cache.write() {
             for i in 0..MAX_DIRECTORY_CACHE_ENTRIES as u32 {
                 write.insert(i, format!("C:\\dir_{i}\\").into());

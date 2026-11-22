@@ -48,6 +48,14 @@ impl PathExclusions {
         self.states.is_some()
     }
 
+    /// Segment-exclusion lookup table for `drive_letter` when segment-table filtering is active.
+    pub(crate) fn drive_states(&self, drive_letter: char) -> Option<&[u8]> {
+        self.states
+            .as_ref()
+            .and_then(|states| states.get(&drive_letter))
+            .map(|table| table.as_slice())
+    }
+
     /// Whether one record of `volume` falls under the rules.
     pub(crate) fn excludes(&self, volume: &VolumeIndex, index: u32) -> bool {
         if let Some(states) = &self.states {

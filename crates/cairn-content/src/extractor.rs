@@ -44,8 +44,6 @@ pub enum ExtractError {
     Io(#[from] std::io::Error),
     #[error("Zip extraction error: {0}")]
     Zip(#[from] zip::result::ZipError),
-    #[error("XML parsing error: {0}")]
-    Xml(#[from] quick_xml::Error),
     #[error("PDF parsing error: {0}")]
     Pdf(String),
     #[error("Unsupported file extension: {0}")]
@@ -163,7 +161,6 @@ impl TextExtractor for OfficeExtractor {
         let mut total_uncompressed = 0usize;
         let max_uncompressed_limit = extractor_input_budget(max_bytes);
         let mut xml_bytes = Vec::new();
-        let mut buf = Vec::new();
 
         for i in 0..archive.len() {
             // A local header that disagrees with the central directory can smuggle a different
@@ -204,22 +201,37 @@ impl TextExtractor for OfficeExtractor {
             }
 
             let mut reader = XmlReader::from_reader(xml_bytes.as_slice());
-            reader.config_mut().trim_text(true);
 
             loop {
-                buf.clear();
-                match reader.read_event_into(&mut buf) {
+                match reader.read_event() {
                     Ok(Event::Text(e)) => {
-                        let text = e.as_ref();
-                        extracted_text.push_str(text);
-                        extracted_text.push(' ');
-                        if extracted_text.len() >= max_bytes {
-                            truncate_to_char_boundary(&mut extracted_text, max_bytes);
-                            return Ok(extracted_text);
+                        extracted_text.push_str(e.as_ref());
+                    }
+                    Ok(Event::CData(e)) => {
+                        extracted_text.push_str(e.as_ref());
+                    }
+                    Ok(Event::GeneralRef(e)) => {
+                        if let Ok(Some(ch)) = e.resolve_char_ref() {
+                            extracted_text.push(ch);
+                        } else if let Some(resolved) =
+                            quick_xml::escape::resolve_xml_entity(e.as_ref())
+                        {
+                            extracted_text.push_str(resolved);
+                        }
+                    }
+                    Ok(Event::End(_) | Event::Empty(_)) => {
+                        if !extracted_text.is_empty()
+                            && !extracted_text.ends_with(char::is_whitespace)
+                        {
+                            extracted_text.push(' ');
                         }
                     }
                     Ok(Event::Eof) | Err(_) => break,
                     _ => {}
+                }
+                if extracted_text.len() >= max_bytes {
+                    truncate_to_char_boundary(&mut extracted_text, max_bytes);
+                    return Ok(extracted_text);
                 }
             }
         }
@@ -385,14 +397,16 @@ mod tests {
             &[
                 (
                     "word/document.xml",
-                    "<w:document><w:body><w:p><w:t>quarterly report</w:t></w:p></w:body></w:document>",
+                    "<w:document><w:body><w:p><w:t>quarterly report</w:t><w:t>R&amp;D</w:t><w:t>don&apos;t</w:t><w:t>A&#x2013;B</w:t><w:t><![CDATA[cdata_token]]></w:t></w:p></w:body></w:document>",
                 ),
                 ("word/media/image1.png", "not xml content"),
             ],
         );
 
         let text = OfficeExtractor.extract(&path, 4096).expect("extract");
-        assert!(text.contains("quarterly report"), "{text}");
+        for expected in ["quarterly report", "R&D", "don't", "A–B", "cdata_token"] {
+            assert!(text.contains(expected), "missing {expected:?} in {text:?}");
+        }
     }
 
     #[test]
@@ -452,7 +466,7 @@ mod tests {
     fn office_extraction_tightens_budget_and_truncates_utf8_safely() {
         let dir = tempfile::tempdir().expect("tempdir");
 
-        // Tightened expansion limit rejects 8x payload (old 10x allowed this through).
+        // Expansion limit rejects an 8x payload.
         let medium_bomb = dir.path().join("medium_bomb.docx");
         let medium_payload = "x".repeat(16 * 1024);
         write_zip(&medium_bomb, &[("word/document.xml", &medium_payload)]);

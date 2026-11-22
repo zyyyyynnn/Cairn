@@ -36,8 +36,8 @@ pub const SMALL_TEXT_SIZE: f32 = 12.25 / BASE_FONT_PX;
 pub const APP_ICON_SIZE: gpui_kit::gpui::Pixels = gpui_kit::gpui::px(20.0);
 
 /// The one control-glyph token: 1rem (14 px at 100%). Title-bar navigation, window captions,
-/// status actions/loading and sidebar rows all read this value; the 20 px app mark and 12 px
-/// legend swatches are the two deliberate exceptions.
+/// status actions/loading and sidebar rows all read this value; the 20 px app mark is the sole
+/// size exception.
 pub const UI_ICON_SIZE: f32 = 1.0;
 
 /// One device pixel: an audited physical exception, not a layout distance.
@@ -204,7 +204,7 @@ fn is_shared_punctuation(ch: char) -> bool {
     )
 }
 
-/// The embedded CJK heading face: Source Han Serif at its regular weight, with the platform UI
+/// The embedded CJK heading face: Noto Serif SC at its regular weight, with the platform UI
 /// sans handling characters outside the embedded common subset.
 pub fn cjk_heading_font() -> Font {
     Font {

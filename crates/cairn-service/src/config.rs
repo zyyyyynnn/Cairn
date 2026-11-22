@@ -174,7 +174,6 @@ mod tests {
         assert!(ServiceConfig::load(&invalid_path).is_err());
         assert!(ServiceConfig::load(&missing_path).is_err());
 
-        // load_or_default falls back gracefully
         let def = ServiceConfig::load_or_default(&missing_path);
         assert!(!def.admin_only_query);
     }

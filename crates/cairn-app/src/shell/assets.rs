@@ -20,6 +20,7 @@ icon_assets!(
         AppWindow,
         Database,
         Disc,
+        Download,
         FileArchive,
         FileBox,
         FileBraces,
@@ -28,7 +29,6 @@ icon_assets!(
         FileImage,
         FileMusic,
         FileSpreadsheet,
-        FileStack,
         FileSymlink,
         FileTerminal,
         FileType,
@@ -74,80 +74,9 @@ impl AssetSource for CairnAssets {
 
 #[cfg(test)]
 mod tests {
-    use super::CairnAssets;
+    use super::{CairnAssets, CairnExtraIcons};
     use gpui_kit::assets::IconName;
     use gpui_kit::gpui::AssetSource as _;
-
-    const USED_ICONS: &[IconName] = &[
-        IconName::AppWindow,
-        IconName::ArrowLeft,
-        IconName::ArrowRight,
-        IconName::ArrowUp,
-        IconName::ChevronDown,
-        IconName::ChevronRight,
-        IconName::ChevronUp,
-        IconName::CircleAlert,
-        IconName::Cpu,
-        IconName::Database,
-        IconName::Disc,
-        IconName::File,
-        IconName::FileArchive,
-        IconName::FileBox,
-        IconName::FileBraces,
-        IconName::FileCode,
-        IconName::FileCog,
-        IconName::FileImage,
-        IconName::FileMusic,
-        IconName::FileSpreadsheet,
-        IconName::FileStack,
-        IconName::FileSymlink,
-        IconName::FileTerminal,
-        IconName::FileText,
-        IconName::FileType,
-        IconName::FileVideoCamera,
-        IconName::Folder,
-        IconName::FolderCog,
-        IconName::FolderX,
-        IconName::HardDrive,
-        IconName::Info,
-        IconName::LayoutDashboard,
-        IconName::LoaderCircle,
-        IconName::Logs,
-        IconName::Palette,
-        IconName::PanelLeftClose,
-        IconName::PanelLeftOpen,
-        IconName::Play,
-        IconName::Presentation,
-        IconName::Recycle,
-        IconName::RefreshCw,
-        IconName::RotateCcw,
-        IconName::RotateCw,
-        IconName::Search,
-        IconName::Timer,
-        IconName::TriangleAlert,
-        IconName::WindowClose,
-        IconName::WindowMaximize,
-        IconName::WindowMinimize,
-        IconName::WindowRestore,
-        IconName::X,
-    ];
-
-    #[test]
-    fn every_cairn_icon_resolves_as_valid_svg() {
-        for &icon in USED_ICONS {
-            let path = icon.path();
-            let bytes = CairnAssets
-                .load(path.as_ref())
-                .unwrap_or_else(|err| panic!("failed to load {icon:?} ({path}): {err}"))
-                .unwrap_or_else(|| panic!("missing icon asset {icon:?} ({path})"));
-            let text = std::str::from_utf8(&bytes)
-                .unwrap_or_else(|err| panic!("non-UTF8 svg for {icon:?}: {err}"));
-            assert!(
-                text.contains("<svg"),
-                "asset {icon:?} ({path}) is not an SVG document"
-            );
-        }
-    }
 
     fn collect_rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
         for entry in std::fs::read_dir(dir).expect("read src dir") {
@@ -166,7 +95,6 @@ mod tests {
         let mut i = 0;
         let mut code = String::with_capacity(source.len());
 
-        // Strip comments, string literals, raw strings, and char literals so only code is scanned.
         while i < bytes.len() {
             if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
                 while i < bytes.len() && bytes[i] != b'\n' {
@@ -333,6 +261,9 @@ mod tests {
 
         let mut referenced = std::collections::BTreeSet::new();
         for file in files {
+            if file.file_name().and_then(|n| n.to_str()) == Some("assets.rs") {
+                continue;
+            }
             let text = std::fs::read_to_string(&file)
                 .unwrap_or_else(|err| panic!("failed to read {}: {err}", file.display()));
             for variant in extract_icon_variants_from_code(&text) {
@@ -345,11 +276,13 @@ mod tests {
             "expected IconName references under {}",
             src_dir.display()
         );
+        let mut referenced_paths = std::collections::BTreeSet::new();
         for (variant, file) in referenced {
             let icon = by_name
                 .get(&variant)
                 .unwrap_or_else(|| panic!("unknown icon variant `{variant}` referenced in {file}"));
             let path = icon.path();
+            referenced_paths.insert(path.to_string());
             let bytes = CairnAssets
                 .load(path.as_ref())
                 .unwrap_or_else(|err| {
@@ -363,6 +296,13 @@ mod tests {
             assert!(
                 text.contains("<svg"),
                 "asset {variant} ({path}) referenced in {file} is not an SVG document"
+            );
+        }
+
+        for extra_path in CairnExtraIcons.list("icons").expect("list extra icons") {
+            assert!(
+                referenced_paths.contains(extra_path.as_ref()),
+                "CairnExtraIcons contains unreferenced icon asset `{extra_path}`"
             );
         }
     }

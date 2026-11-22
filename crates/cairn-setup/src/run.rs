@@ -121,9 +121,11 @@ fn run(launch: Launch) {
 
 #[cfg(test)]
 mod tests {
-    use super::window_title;
+    use super::{SetupAssets, SetupIcons, window_title};
     use crate::i18n::I18n;
     use crate::model::Launch;
+    use gpui_kit::assets::IconName;
+    use gpui_kit::gpui::AssetSource as _;
 
     #[test]
     fn the_native_title_follows_the_interface_language() {
@@ -133,5 +135,74 @@ mod tests {
         let zh = I18n::new("zh-CN");
         assert_eq!(window_title(&zh, Launch::Setup), "Cairn 安装程序");
         assert_eq!(window_title(&zh, Launch::Uninstall), "Cairn 卸载程序");
+    }
+
+    #[test]
+    fn setup_icons_and_view_references_resolve_as_valid_svg() {
+        for path in SetupIcons.list("icons").expect("list setup icons") {
+            let bytes = SetupAssets
+                .load(path.as_ref())
+                .unwrap_or_else(|err| panic!("failed to load {path}: {err}"))
+                .unwrap_or_else(|| panic!("missing icon asset {path}"));
+            let text = std::str::from_utf8(&bytes)
+                .unwrap_or_else(|err| panic!("non-UTF8 svg for {path}: {err}"));
+            assert!(text.contains("<svg"), "{path} is not an SVG document");
+        }
+
+        let by_name: std::collections::HashMap<String, IconName> = IconName::ALL
+            .iter()
+            .copied()
+            .map(|icon| (format!("{icon:?}"), icon))
+            .collect();
+        let view_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/view.rs");
+        let view_src = std::fs::read_to_string(&view_path).expect("read src/view.rs");
+        let mut referenced = std::collections::BTreeSet::new();
+        let mut rest = view_src.as_str();
+        while let Some(pos) = rest.find("IconName::") {
+            let after = &rest[pos + "IconName::".len()..];
+            let ident: String = after
+                .chars()
+                .take_while(char::is_ascii_alphanumeric)
+                .collect();
+            if ident
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_uppercase())
+            {
+                referenced.insert(ident);
+            }
+            rest = after;
+        }
+
+        assert!(
+            !referenced.is_empty(),
+            "expected IconName::* references in {}",
+            view_path.display()
+        );
+        let mut referenced_paths = std::collections::BTreeSet::new();
+        for variant in referenced {
+            let icon = by_name
+                .get(&variant)
+                .unwrap_or_else(|| panic!("unknown icon variant `{variant}` in view.rs"));
+            let path = icon.path();
+            referenced_paths.insert(path.to_string());
+            let bytes = SetupAssets
+                .load(path.as_ref())
+                .unwrap_or_else(|err| panic!("failed to load {variant} ({path}): {err}"))
+                .unwrap_or_else(|| panic!("missing icon asset {variant} ({path})"));
+            let text = std::str::from_utf8(&bytes)
+                .unwrap_or_else(|err| panic!("non-UTF8 svg for {variant}: {err}"));
+            assert!(
+                text.contains("<svg"),
+                "asset {variant} ({path}) is not an SVG document"
+            );
+        }
+
+        for extra_path in SetupIcons.list("icons").expect("list setup icons") {
+            assert!(
+                referenced_paths.contains(extra_path.as_ref()),
+                "SetupIcons contains unreferenced icon asset `{extra_path}`"
+            );
+        }
     }
 }

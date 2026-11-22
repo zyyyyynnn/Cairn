@@ -40,8 +40,10 @@ struct WorkerCli {
     #[arg(short, long)]
     batch: Option<PathBuf>,
 
-    /// JSON Lines deletions produced by the service: one `[volume_id, frn]` pair per line
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "JSON Lines deletions produced by the service: one [volume_id, frn] pair per line"
+    )]
     delete_batch: Option<PathBuf>,
 
     /// Maximum document bytes to extract per file

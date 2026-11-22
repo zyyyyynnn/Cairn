@@ -2,85 +2,33 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! App-owned transient status: one quiet toast in the shell's own visual language.
+//! App-owned transient status toast composed from `ShellTokens`, `dialog_surface`, `Button`,
+//! and shell typography.
 //!
-//! The component library's notification is a generic surface with its own
-//! radius, density, timing and dismissal model. This app already has a dense
-//! 1px/3px system, so the toast is composed from the same `ShellTokens`, `Button`
-//! and `Icon` primitives as the rest of the shell. Informational toasts expire;
-//! failures stay until the person dismisses them because they carry an outcome
-//! that should not disappear before it is read.
+//! Informational and error toasts auto-dismiss after a short timeout, while an active update
+//! installation stays persistent. Each card presents a title, a close button, and a
+//! single-line truncated description with a full-text tooltip.
 
 use crate::app::{CairnApp, layout};
 use crate::shell::accessibility;
-use crate::shell::state_view::icon_action;
-use crate::shell::theme::ShellTokens;
+use crate::shell::theme::{self, ShellTokens};
 use fluent_bundle::FluentArgs;
 use gpui_kit::assets::IconName as AssetIconName;
-use gpui_kit::base::StyledExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{Icon, Sizable as _, h_flex, v_flex};
-use gpui_kit::gpui::prelude::FluentBuilder as _;
+use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::gpui::*;
 use gpui_kit::gpui::{Animation, AnimationExt, ease_out_quint};
-use std::sync::Arc;
 use std::time::Duration;
 
-/// Informational status is allowed to leave on its own; a failure is not.
 const TOAST_INFO_DURATION: Duration = Duration::from_secs(6);
+const TOAST_ERROR_DURATION: Duration = Duration::from_secs(8);
 /// The toast is a reading surface, not a panel: one short measure, independent
 /// of the result columns underneath it.
 const TOAST_WIDTH_REM: f32 = 24.0;
-/// Every toast shares one compact minimum height; a two-line explanation grows the
-/// card instead of leaving a fixed-height gap under it.
-const TOAST_MIN_HEIGHT_REM: f32 = 5.5;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ToastKind {
     Error,
     Info,
-}
-
-type ToastRun = Arc<dyn Fn(&mut CairnApp, &mut Window, &mut Context<'_, CairnApp>)>;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ToastActionStyle {
-    RetryIcon,
-    LabeledButton,
-}
-
-#[derive(Clone)]
-pub(crate) struct ToastAction {
-    label: SharedString,
-    style: ToastActionStyle,
-    run: ToastRun,
-}
-
-impl ToastAction {
-    pub(crate) fn new(
-        label: impl Into<SharedString>,
-        run: impl Fn(&mut CairnApp, &mut Window, &mut Context<'_, CairnApp>) + 'static,
-    ) -> Self {
-        Self {
-            label: label.into(),
-            style: ToastActionStyle::RetryIcon,
-            run: Arc::new(run),
-        }
-    }
-
-    pub(crate) fn labeled(
-        label: impl Into<SharedString>,
-        run: impl Fn(&mut CairnApp, &mut Window, &mut Context<'_, CairnApp>) + 'static,
-    ) -> Self {
-        Self {
-            label: label.into(),
-            style: ToastActionStyle::LabeledButton,
-            run: Arc::new(run),
-        }
-    }
-
-    fn label(&self) -> &SharedString {
-        &self.label
-    }
 }
 
 #[derive(Clone)]
@@ -89,7 +37,6 @@ pub(crate) struct ToastState {
     title: String,
     message: String,
     closing: bool,
-    action: Option<ToastAction>,
 }
 
 impl CairnApp {
@@ -99,31 +46,7 @@ impl CairnApp {
         message: impl Into<String>,
         cx: &mut Context<'_, Self>,
     ) {
-        self.show_toast(
-            ToastKind::Error,
-            title.into(),
-            message.into(),
-            None,
-            false,
-            cx,
-        );
-    }
-
-    pub(crate) fn show_error_toast_with_action(
-        &mut self,
-        title: impl Into<String>,
-        message: impl Into<String>,
-        action: ToastAction,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.show_toast(
-            ToastKind::Error,
-            title.into(),
-            message.into(),
-            Some(action),
-            false,
-            cx,
-        );
+        self.show_toast(ToastKind::Error, title.into(), message.into(), true, cx);
     }
 
     pub(crate) fn show_info_toast(
@@ -132,14 +55,7 @@ impl CairnApp {
         message: impl Into<String>,
         cx: &mut Context<'_, Self>,
     ) {
-        self.show_toast(
-            ToastKind::Info,
-            title.into(),
-            message.into(),
-            None,
-            true,
-            cx,
-        );
+        self.show_toast(ToastKind::Info, title.into(), message.into(), true, cx);
     }
 
     pub(crate) fn show_persistent_info_toast(
@@ -148,31 +64,7 @@ impl CairnApp {
         message: impl Into<String>,
         cx: &mut Context<'_, Self>,
     ) {
-        self.show_toast(
-            ToastKind::Info,
-            title.into(),
-            message.into(),
-            None,
-            false,
-            cx,
-        );
-    }
-
-    pub(crate) fn show_info_toast_with_action(
-        &mut self,
-        title: impl Into<String>,
-        message: impl Into<String>,
-        action: ToastAction,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.show_toast(
-            ToastKind::Info,
-            title.into(),
-            message.into(),
-            Some(action),
-            false,
-            cx,
-        );
+        self.show_toast(ToastKind::Info, title.into(), message.into(), false, cx);
     }
 
     fn show_toast(
@@ -180,7 +72,6 @@ impl CairnApp {
         kind: ToastKind,
         title: String,
         message: String,
-        action: Option<ToastAction>,
         auto_dismiss: bool,
         cx: &mut Context<'_, Self>,
     ) {
@@ -191,20 +82,21 @@ impl CairnApp {
             title,
             message,
             closing: false,
-            action,
         });
 
         // A newer toast replaces this one before its timer fires; the serial
         // makes the stale timer a no-op instead of clearing the newer state.
         if auto_dismiss {
+            let duration = if kind == ToastKind::Error {
+                TOAST_ERROR_DURATION
+            } else {
+                TOAST_INFO_DURATION
+            };
             cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(TOAST_INFO_DURATION).await;
+                cx.background_executor().timer(duration).await;
                 let _ = this.update(cx, |this, cx| {
                     let still_current = this.toast_serial == serial
-                        && this
-                            .toast
-                            .as_ref()
-                            .is_some_and(|toast| toast.kind == ToastKind::Info);
+                        && this.toast.as_ref().is_some_and(|toast| !toast.closing);
                     if still_current {
                         this.begin_toast_exit(serial, cx);
                     }
@@ -213,19 +105,6 @@ impl CairnApp {
             .detach();
         }
         cx.notify();
-    }
-
-    /// Runs the action stored on a failure toast. The toast is cleared first, so the retry either
-    /// reports a fresh failure or the result page replaces it without stale copy. Focus stays with
-    /// the action: a retry that returns to its own surface must not be pulled back to search.
-    pub(crate) fn run_toast_action(
-        &mut self,
-        action: ToastAction,
-        window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.dismiss_toast(cx);
-        (action.run)(self, window, cx);
     }
 
     pub(crate) fn dismiss_toast(&mut self, cx: &mut Context<'_, Self>) {
@@ -291,21 +170,11 @@ impl CairnApp {
         } else {
             accessibility::control("toast-info")
         };
-        let action = toast.action.clone();
         let dismiss = accessibility::control("toast-dismiss");
         let dismiss_label = accessibility::name(dismiss, &self.i18n);
         let serial = self.toast_serial;
         let closing = toast.closing;
-        let icon = if is_error {
-            AssetIconName::CircleAlert
-        } else {
-            AssetIconName::Info
-        };
-        let icon_color = if is_error {
-            tokens.danger
-        } else {
-            tokens.muted_foreground
-        };
+        let surface = cairn_ui::theme::dialog_surface(cx.theme());
         let close = Button::new(dismiss.element)
             .ghost()
             .small()
@@ -336,19 +205,15 @@ impl CairnApp {
             .bottom(bottom)
             .right(rems(layout::CONTENT_INSET))
             .w(rems(TOAST_WIDTH_REM))
-            .min_h(rems(TOAST_MIN_HEIGHT_REM))
             .p(rems(layout::SPACE_12))
             .flex()
             .flex_col()
             .rounded(tokens.radius)
-            .bg(tokens.muted)
+            .bg(surface)
             .border_1()
             .border_color(tokens.border)
+            .shadow_md()
             .child(
-                // One centred content block: the status icon sits on the title
-                // line, the explanation aligns under the title text, and the
-                // recovery icon follows the explanation instead of floating at
-                // the card edge.
                 v_flex()
                     .w_full()
                     .gap(rems(layout::SPACE_4))
@@ -358,17 +223,12 @@ impl CairnApp {
                             .items_center()
                             .gap(rems(layout::INNER_SPACING))
                             .child(
-                                Icon::new(icon)
-                                    .small()
-                                    .flex_shrink_0()
-                                    .text_color(icon_color),
-                            )
-                            .child(
                                 div()
                                     .flex_1()
                                     .min_w_0()
+                                    .truncate()
                                     .text_sm()
-                                    .font_medium()
+                                    .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(tokens.foreground)
                                     .child(toast.title),
                             )
@@ -382,50 +242,16 @@ impl CairnApp {
                             ),
                     )
                     .child(
-                        h_flex()
+                        div()
+                            .id(("toast-message", serial))
                             .w_full()
-                            .items_center()
-                            .gap(rems(layout::SPACE_4))
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .flex_1()
-                                    .text_sm()
-                                    .line_height(relative(1.5))
-                                    .text_color(tokens.muted_foreground)
-                                    .whitespace_normal()
-                                    .child(toast.message),
-                            )
-                            .when_some(action, |this, action| {
-                                let label = action.label().clone();
-                                match action.style {
-                                    ToastActionStyle::RetryIcon => {
-                                        let retry = accessibility::control("toast-retry");
-                                        this.child(
-                                            icon_action(retry, AssetIconName::RotateCcw, label)
-                                                .on_click(cx.listener(
-                                                    move |this, _, window, cx| {
-                                                        this.run_toast_action(
-                                                            action.clone(),
-                                                            window,
-                                                            cx,
-                                                        );
-                                                    },
-                                                )),
-                                        )
-                                    }
-                                    ToastActionStyle::LabeledButton => this.child(
-                                        Button::new("toast-action")
-                                            .outline()
-                                            .small()
-                                            .label(label.clone())
-                                            .accessibility_label(label)
-                                            .on_click(cx.listener(move |this, _, window, cx| {
-                                                this.run_toast_action(action.clone(), window, cx);
-                                            })),
-                                    ),
-                                }
-                            }),
+                            .min_w_0()
+                            .truncate()
+                            .text_size(rems(theme::SMALL_TEXT_SIZE))
+                            .line_height(relative(1.5))
+                            .text_color(tokens.muted_foreground)
+                            .tooltip(crate::shell::tooltip::text(toast.message.clone()))
+                            .child(toast.message),
                     ),
             )
             .with_animation(

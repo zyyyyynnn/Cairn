@@ -1,6 +1,6 @@
 # 贡献指南 / Contributing
 
-Cairn 采用 Rust 与 GPUI 构建 Windows NTFS 文件检索与磁盘分析工具。参与开发与提交变更请遵循以下工程约定与工作流程。
+Cairn 采用 Rust 与 GPUI 构建 Windows 高性能本地文件搜索与索引工作台。参与开发与提交变更请遵循以下工程约定与工作流程。
 
 ---
 

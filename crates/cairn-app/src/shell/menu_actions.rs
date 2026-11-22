@@ -28,7 +28,7 @@ use gpui_kit::component::menu::PopupMenu;
 use gpui_kit::gpui::*;
 use std::rc::Rc;
 
-/// Which search flag a toggle command flips, so the five toggle Actions share one code path.
+/// Which search flag a toggle command flips, so the four toggle Actions share one code path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToggleFlag {
     Case,
@@ -125,7 +125,7 @@ fn rescan_submenu_entries(
             })),
             hint: None,
             submenu: None,
-            loading: false,
+            trailing: view::MenuTrailing::None,
             separates: ix == 0,
         });
     }
@@ -184,11 +184,24 @@ fn menu_entries(
                 }
             };
             let has_submenu = submenu.is_some();
-            let loading = command == GroupCommand::CheckForUpdates && app.is_checking_update;
-            let label = if loading {
-                app.i18n.get_text("update_checking_title")
+            let (label, trailing) = if command == GroupCommand::CheckForUpdates {
+                use crate::shell::update::UpdateState;
+                match &app.update_state {
+                    UpdateState::Idle => (app.command_label(command), view::MenuTrailing::None),
+                    UpdateState::Checking => {
+                        (app.command_label(command), view::MenuTrailing::Loading)
+                    }
+                    UpdateState::Available(_) => (
+                        app.i18n.get_text("menu_download_and_install"),
+                        view::MenuTrailing::Download,
+                    ),
+                    UpdateState::Downloading(_) => (
+                        app.i18n.get_text("menu_download_and_install"),
+                        view::MenuTrailing::Loading,
+                    ),
+                }
             } else {
-                app.command_label(command)
+                (app.command_label(command), view::MenuTrailing::None)
             };
             view::MenuEntry {
                 label: label.into(),
@@ -201,7 +214,7 @@ fn menu_entries(
                 on_select: None,
                 hint: command.hint_action(),
                 submenu,
-                loading,
+                trailing,
                 separates: false,
             }
         })
@@ -906,7 +919,7 @@ impl CairnApp {
             }
             GroupCommand::ClearQuery => !self.can_clear_query(),
             GroupCommand::ToggleColumn(col) => col.is_locked(),
-            GroupCommand::CheckForUpdates => self.is_checking_update,
+            GroupCommand::CheckForUpdates => self.update_state.is_busy(),
             _ => false,
         }
     }
@@ -1507,7 +1520,10 @@ mod visibility_tests {
     }
 
     #[test]
-    fn a_running_update_check_marks_the_help_row_loading() {
+    fn check_updates_menu_row_tracks_all_four_update_states() {
+        use crate::shell::update::{ReleaseInfo, UpdateState};
+        use crate::view::MenuTrailing;
+
         gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
             gpui_kit::init(cx);
             let _ = gpui_kit::open_window(
@@ -1520,16 +1536,52 @@ mod visibility_tests {
                 |window, cx| {
                     let app = cx.new(|cx| CairnApp::new(window, cx));
                     app.update(cx, |this, cx| {
-                        this.is_checking_update = true;
                         let view = cx.entity();
+                        let release = ReleaseInfo {
+                            version: "9.9.9".to_string(),
+                            setup_url: "https://example.invalid/CairnSetup.exe".to_string(),
+                            sums_url: "https://example.invalid/SHA256SUMS.txt".to_string(),
+                        };
+
+                        this.update_state = UpdateState::Idle;
                         let entries =
                             menu_entries(this, &view, &[GroupCommand::CheckForUpdates], window, cx);
-                        assert!(entries[0].loading);
-                        assert!(entries[0].disabled);
                         assert_eq!(
                             entries[0].label.as_ref(),
-                            this.i18n.get_text("update_checking_title")
+                            this.i18n.get_text("menu_check_updates")
                         );
+                        assert_eq!(entries[0].trailing, MenuTrailing::None);
+                        assert!(!entries[0].disabled);
+
+                        this.update_state = UpdateState::Checking;
+                        let entries =
+                            menu_entries(this, &view, &[GroupCommand::CheckForUpdates], window, cx);
+                        assert_eq!(
+                            entries[0].label.as_ref(),
+                            this.i18n.get_text("menu_check_updates")
+                        );
+                        assert_eq!(entries[0].trailing, MenuTrailing::Loading);
+                        assert!(entries[0].disabled);
+
+                        this.update_state = UpdateState::Available(release.clone());
+                        let entries =
+                            menu_entries(this, &view, &[GroupCommand::CheckForUpdates], window, cx);
+                        assert_eq!(
+                            entries[0].label.as_ref(),
+                            this.i18n.get_text("menu_download_and_install")
+                        );
+                        assert_eq!(entries[0].trailing, MenuTrailing::Download);
+                        assert!(!entries[0].disabled);
+
+                        this.update_state = UpdateState::Downloading(release);
+                        let entries =
+                            menu_entries(this, &view, &[GroupCommand::CheckForUpdates], window, cx);
+                        assert_eq!(
+                            entries[0].label.as_ref(),
+                            this.i18n.get_text("menu_download_and_install")
+                        );
+                        assert_eq!(entries[0].trailing, MenuTrailing::Loading);
+                        assert!(entries[0].disabled);
                     });
                     cx.quit();
                     app

@@ -334,7 +334,7 @@ impl SearchInputState {
             && self.marked_range.is_none()
         {
             self.last_committed_text = None;
-            return; // Suppress redundant WM_CHAR
+            return;
         }
 
         let is_paste_or_multi =
@@ -779,10 +779,8 @@ mod tests {
     #[test]
     fn test_rapid_typing_does_not_drop_characters() {
         let mut state = SearchInputState::default();
-        // Typing "look" with fast double "o"
         state.handle_replace_text_in_range(None, "l");
         state.handle_replace_text_in_range(None, "o");
-        // Rapid second 'o' within a few milliseconds
         state.handle_replace_text_in_range(None, "o");
         state.handle_replace_text_in_range(None, "k");
         assert_eq!(
@@ -797,33 +795,27 @@ mod tests {
         state.handle_replace_text_in_range(None, "hello world");
         assert_eq!(state.selection, 11..11);
 
-        // Move left 5 times to position before "world"
         for _ in 0..5 {
             state.move_cursor_left(false);
         }
         assert_eq!(state.selection, 6..6);
 
-        // Backspace should delete space before "world"
         state.delete_backward();
         assert_eq!(state.text, "helloworld");
         assert_eq!(state.selection, 5..5);
 
-        // Delete forward should delete 'w'
         state.delete_forward();
         assert_eq!(state.text, "helloorld");
         assert_eq!(state.selection, 5..5);
 
-        // Home and typing
         state.move_cursor_home(false);
         assert_eq!(state.selection, 0..0);
         state.handle_replace_text_in_range(None, "say ");
         assert_eq!(state.text, "say helloorld");
 
-        // End
         state.move_cursor_end(false);
         assert_eq!(state.selection, state.text.len()..state.text.len());
 
-        // Select all and delete
         state.select_all();
         state.delete_backward();
         assert_eq!(state.text, "");
@@ -836,17 +828,14 @@ mod tests {
         state.handle_replace_text_in_range(None, "测试中文搜索");
         assert_eq!(state.text.len(), 18); // 6 Chinese characters * 3 bytes
 
-        // Move left 2 characters (before "搜索", after "中文")
         state.move_cursor_left(false);
         state.move_cursor_left(false);
         assert_eq!(state.selection, 12..12);
 
-        // Backspace should delete '文' (3 bytes before cursor)
         state.delete_backward();
         assert_eq!(state.text, "测试中搜索");
         assert_eq!(state.selection, 9..9);
 
-        // Forward delete should delete '搜' (3 bytes after cursor)
         state.delete_forward();
         assert_eq!(state.text, "测试中索");
         assert_eq!(state.selection, 9..9);
@@ -884,23 +873,18 @@ mod tests {
         state.handle_replace_text_in_range(None, "cairn ext:rs;toml");
         assert_eq!(state.selection, 17..17);
 
-        // Delete word backward -> deletes "toml"
         state.delete_word_backward();
         assert_eq!(state.text, "cairn ext:rs;");
 
-        // Delete word backward -> deletes ";"
         state.delete_word_backward();
         assert_eq!(state.text, "cairn ext:rs");
 
-        // Delete word backward -> deletes "rs"
         state.delete_word_backward();
         assert_eq!(state.text, "cairn ext:");
 
-        // Undo -> back to "cairn ext:rs"
         assert!(state.undo());
         assert_eq!(state.text, "cairn ext:rs");
 
-        // CJK full-width punctuation and emoji boundaries
         state.clear();
         state.handle_replace_text_in_range(None, "测试，文件！");
         state.delete_word_backward();
@@ -927,52 +911,46 @@ mod tests {
         let mut state = SearchInputState::default();
         state.handle_replace_text_in_range(None, r#"cargo run --release "c:\test path\file.rs""#);
 
-        // Double click on 'c' in "cargo"
         state.select_word_at(0);
         assert_eq!(&state.text[state.selection.clone()], "cargo");
 
-        // Double click on 'g' in "cargo"
         state.select_word_at(3);
         assert_eq!(&state.text[state.selection.clone()], "cargo");
 
-        // Double click on space after "cargo"
         state.select_word_at(5);
         assert_eq!(&state.text[state.selection.clone()], " ");
 
-        // Double click on "--"
         state.select_word_at(10);
         assert_eq!(&state.text[state.selection.clone()], "--");
 
-        // Double click on "release"
         state.select_word_at(13);
         assert_eq!(&state.text[state.selection.clone()], "release");
 
-        // Test with Chinese text
         state.clear();
         state.handle_replace_text_in_range(None, "测试搜索 文件.txt");
-        state.select_word_at(6); // inside "测试搜索"
+        state.select_word_at(6);
         assert_eq!(&state.text[state.selection.clone()], "测试搜索");
 
         // Full-width punctuation and emoji are punctuation/symbols, not alphanumeric words
         state.clear();
         state.handle_replace_text_in_range(None, "测试，文件！");
         // "测试" is 6 bytes (0..6), "，" is 3 bytes (6..9), "文件" is 6 bytes (9..15), "！" is 3 bytes (15..18)
-        state.select_word_at(0); // clicking on "测试"
+        state.select_word_at(0);
         assert_eq!(&state.text[state.selection.clone()], "测试");
 
-        state.select_word_at(6); // clicking on "，"
+        state.select_word_at(6);
         assert_eq!(&state.text[state.selection.clone()], "，");
 
-        state.select_word_at(9); // clicking on "文件"
+        state.select_word_at(9);
         assert_eq!(&state.text[state.selection.clone()], "文件");
 
-        state.select_word_at(15); // clicking on "！"
+        state.select_word_at(15);
         assert_eq!(&state.text[state.selection.clone()], "！");
 
         state.clear();
         state.handle_replace_text_in_range(None, "rust🦀code");
         // "rust" is 4 bytes (0..4), "🦀" is 4 bytes (4..8), "code" is 4 bytes (8..12)
-        state.select_word_at(4); // clicking on "🦀"
+        state.select_word_at(4);
         assert_eq!(&state.text[state.selection.clone()], "🦀");
     }
 
@@ -981,7 +959,6 @@ mod tests {
         let mut state = SearchInputState::default();
         state.handle_replace_text_in_range(None, "abcdef");
 
-        // Backward selection from index 4 to 1 ("bcd")
         state.selection = std::ops::Range { start: 4, end: 1 };
         let (start, end) = state.normalized_selection();
         assert_eq!(start, 1);
@@ -989,34 +966,29 @@ mod tests {
         assert!(state.has_selection());
         assert_eq!(&state.text[start..end], "bcd");
 
-        // Replacement on backward selection: "abcdef" with "bcd" replaced by "XYZ" -> "aXYZef"
         state.handle_replace_text_in_range(None, "XYZ");
         assert_eq!(state.text, "aXYZef");
         assert_eq!(state.selection, 4..4);
 
-        // Backward selection delete_backward
-        state.selection = std::ops::Range { start: 4, end: 1 }; // selects "XYZ"
+        state.selection = std::ops::Range { start: 4, end: 1 };
         state.delete_backward();
         assert_eq!(state.text, "aef");
         assert_eq!(state.selection, 1..1);
 
-        // Backward selection delete_forward
         state.text = "abcdef".to_string();
-        state.selection = std::ops::Range { start: 4, end: 1 }; // selects "bcd"
+        state.selection = std::ops::Range { start: 4, end: 1 };
         state.delete_forward();
         assert_eq!(state.text, "aef");
         assert_eq!(state.selection, 1..1);
 
-        // Word backward deletion on backward selection
         state.text = "hello world test".to_string();
-        state.selection = std::ops::Range { start: 11, end: 6 }; // selects "world"
+        state.selection = std::ops::Range { start: 11, end: 6 };
         state.delete_word_backward();
         assert_eq!(state.text, "hello  test");
         assert_eq!(state.selection, 6..6);
 
-        // Arrow navigation collapsing forward selection
         state.text = "abcdef".to_string();
-        state.selection = 1..4; // selects "bcd"
+        state.selection = 1..4;
         state.move_cursor_left(false);
         assert_eq!(
             state.selection,
@@ -1032,8 +1004,7 @@ mod tests {
             "Right arrow must collapse forward selection to right boundary"
         );
 
-        // Arrow navigation collapsing backward selection
-        state.selection = std::ops::Range { start: 4, end: 1 }; // selects "bcd" backward
+        state.selection = std::ops::Range { start: 4, end: 1 };
         state.move_cursor_left(false);
         assert_eq!(
             state.selection,
@@ -1049,7 +1020,6 @@ mod tests {
             "Right arrow must collapse backward selection to right boundary"
         );
 
-        // Word arrow navigation collapsing backward selection
         state.text = "hello world test".to_string();
         state.selection = std::ops::Range { start: 11, end: 6 };
         state.move_cursor_word_left(false);
@@ -1067,7 +1037,6 @@ mod tests {
             "Word right must collapse backward selection to right boundary"
         );
 
-        // Shift+Home from cursor position preserves anchor
         state.selection = 5..5;
         state.move_cursor_home(true);
         assert_eq!(

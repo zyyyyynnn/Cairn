@@ -5,7 +5,7 @@
 //! Keyboard command vocabulary for the main window (SPEC UI-03).
 //!
 //! Each desktop command is modelled once as a GPUI Action and bound once to its key here. The
-//! window root owns the `on_action` handlers, so a menu item, a capsule button and the keyboard all
+//! window root owns the `on_action` handlers, so a menu item, a chrome button and the keyboard all
 //! reach the same owner method. Handlers therefore fire for *any* focused descendant, not only
 //! when the search box happens to hold focus.
 
@@ -76,11 +76,11 @@ actions!(
         OpenFileMenu,
         /// Open the title-bar 编辑 menu (Alt+E).
         OpenEditMenu,
-        /// Open the title-bar 查看 menu: file type, ordering, theme and zoom (Alt+V).
+        /// Open the title-bar 查看 menu: ordering, visible columns, theme and zoom (Alt+V).
         OpenViewMenu,
         /// Open the title-bar 搜索 menu, the flags that qualify the query (Alt+S).
         OpenSearchMenu,
-        /// Open the title-bar 索引 menu: index journal, rescan, content index and property index (Alt+I).
+        /// Open the title-bar 索引 menu: index journal, folder sources, rescan, content index and property index (Alt+I).
         OpenIndexMenu,
         /// Open the title-bar 工具 menu: language and autostart (Alt+T).
         OpenToolsMenu,
@@ -184,8 +184,9 @@ pub fn key_bindings() -> Vec<KeyBindingEntry> {
         bind("ctrl-b", ToggleWholeWord, WINDOW_CONTEXT),
         bind("ctrl-u", ToggleMatchPath, WINDOW_CONTEXT),
         bind("ctrl-r", ToggleRegex, WINDOW_CONTEXT),
-        // The filter row advertises this shortcut through AccessKit, so the key has to reach the
-        // action: an announced shortcut that dispatches nothing is a false promise to a screen reader.
+        // The sidebar locations section advertises this shortcut through AccessKit, so the key has
+        // to reach the action: an announced shortcut that dispatches nothing is a false promise to
+        // a screen reader.
         bind("alt-p", CycleFilterCategory, WINDOW_CONTEXT),
         // One key per top-level menu in the title bar. Every mnemonic opens the menu whose name it
         // abbreviates, so a keyboard user reaches the same commands a pointer does.
@@ -196,8 +197,8 @@ pub fn key_bindings() -> Vec<KeyBindingEntry> {
         bind("alt-i", OpenIndexMenu, WINDOW_CONTEXT),
         bind("alt-v", OpenViewMenu, WINDOW_CONTEXT),
         bind("alt-h", OpenHelpMenu, WINDOW_CONTEXT),
-        // The properties sheet was only ever in the result context menu; Windows also reaches it
-        // with Alt+Enter, so the command keeps a keyboard path outside the popup.
+        // Alt+Enter opens the system properties sheet directly from the result list alongside the
+        // context and File menus.
         bind("alt-enter", ShowProperties, WINDOW_CONTEXT),
         // Desktop back/forward navigation shortcuts
         bind("alt-left", NavigateBack, WINDOW_CONTEXT),
