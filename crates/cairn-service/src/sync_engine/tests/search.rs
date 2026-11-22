@@ -127,7 +127,7 @@ fn a_folder_match_reports_its_recursive_space_once() {
 #[test]
 fn a_filtered_query_does_not_rebuild_the_whole_volume_sort() {
     let (_temp_dir, engine) = engine_with_sorting_fixture();
-    engine.update_volume('C', |volume| volume.mark_presorted_dirty());
+    engine.update_volume('C', VolumeIndex::mark_presorted_dirty);
 
     let cancel = CancellationToken::new();
     let outcome = engine.execute_search_multi(
@@ -186,7 +186,7 @@ fn test_single_volume_query_sorts_columns_without_presorted_arrays() {
 #[test]
 fn test_single_volume_name_query_falls_back_when_presorted_index_is_empty() {
     let (_temp_dir, engine) = engine_with_sorting_fixture();
-    engine.update_volume('C', |vol| vol.mark_presorted_dirty());
+    engine.update_volume('C', VolumeIndex::mark_presorted_dirty);
 
     assert_eq!(
         result_names(&engine, SortColumn::Name, true),

@@ -11,19 +11,19 @@ use std::sync::mpsc::Receiver;
 
 use cairn_ui::brand::heading_text;
 use cairn_ui::theme::dialog_surface;
-use gpui_kit::component::input::{InputEvent, InputState};
-use gpui_kit::component::{v_flex, ActiveTheme as _, WindowExt as _};
-use gpui_kit::gpui::{
-    div, relative, AppContext as _, Context, Entity, FocusHandle, FontWeight, KeyBinding,
-    ParentElement as _, Styled as _, Subscription, WeakEntity, Window,
-};
 use gpui_kit::Focusable;
+use gpui_kit::component::input::{InputEvent, InputState};
+use gpui_kit::component::{ActiveTheme as _, WindowExt as _, v_flex};
+use gpui_kit::gpui::{
+    AppContext as _, Context, Entity, FocusHandle, FontWeight, KeyBinding, ParentElement as _,
+    Styled as _, Subscription, WeakEntity, Window, div, relative,
+};
 
 use crate::i18n::I18n;
 use crate::installed;
 use crate::model::{
-    default_install_dir, initial_screen, validate_install_path, InstalledProduct, Launch,
-    PathProblem, Screen, Stage,
+    InstalledProduct, Launch, PathProblem, Screen, Stage, default_install_dir, initial_screen,
+    validate_install_path,
 };
 use crate::msi::{self, MsiEvent};
 use crate::payload::PayloadError;
@@ -150,7 +150,7 @@ pub struct SetupApp {
 impl SetupApp {
     pub(crate) fn new(
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
         launch: Launch,
         i18n: I18n,
         preview: Option<Preview>,
@@ -167,14 +167,11 @@ impl SetupApp {
         let legacy_burn = preview.is_none()
             && launch == Launch::Setup
             && !installed::legacy_burn_uninstallers().is_empty();
-        let screen = preview
-            .as_ref()
-            .map(|preview| preview.screen)
-            .unwrap_or_else(|| initial_screen(launch, installed.as_ref(), legacy_burn));
-        let launch = preview
-            .as_ref()
-            .map(|preview| preview.launch)
-            .unwrap_or(launch);
+        let screen = preview.as_ref().map_or_else(
+            || initial_screen(launch, installed.as_ref(), legacy_burn),
+            |preview| preview.screen,
+        );
+        let launch = preview.as_ref().map_or(launch, |preview| preview.launch);
 
         let (path_input, path_change) = if launch == Launch::Setup {
             let initial_dir = installed
@@ -189,12 +186,13 @@ impl SetupApp {
                 &input,
                 window,
                 |this, _input, event: &InputEvent, _window, cx| {
-                    if matches!(event, InputEvent::Change) && this.path_error.is_some() {
-                        if let Some(input) = &this.path_input {
-                            let raw = input.read(cx).value().to_string();
-                            this.path_error = validate_install_path(&raw).err();
-                            cx.notify();
-                        }
+                    if matches!(event, InputEvent::Change)
+                        && this.path_error.is_some()
+                        && let Some(input) = &this.path_input
+                    {
+                        let raw = input.read(cx).value().to_string();
+                        this.path_error = validate_install_path(&raw).err();
+                        cx.notify();
                     }
                 },
             );
@@ -271,8 +269,7 @@ impl SetupApp {
             progress: preview.as_ref().and_then(|preview| preview.progress),
             stage: preview
                 .as_ref()
-                .map(|preview| preview.stage)
-                .unwrap_or(Stage::Preparing),
+                .map_or(Stage::Preparing, |preview| preview.stage),
             log: preview.as_ref().and_then(|preview| preview.log.clone()),
             error,
             notice: None,
@@ -314,7 +311,7 @@ impl SetupApp {
     /// to the machine until the MSI transaction starts, so cancelling and closing are the same
     /// gesture. A page that is running the MSI has no way out: closing the window mid-transaction
     /// would leave the machine half-installed.
-    pub(crate) fn close_window(&mut self, window: &mut Window, _cx: &mut Context<Self>) {
+    pub(crate) fn close_window(&mut self, window: &mut Window, _cx: &mut Context<'_, Self>) {
         if !self.is_busy() {
             window.remove_window();
         }
@@ -323,13 +320,17 @@ impl SetupApp {
     /// The window-level Escape gesture. It is the keyboard way out of a page; the title-bar X is
     /// the pointer way out. A page that is running the MSI refuses both, because closing the
     /// window mid-transaction would leave the machine half-installed.
-    pub(crate) fn on_escape(&mut self, window: &mut Window, _cx: &mut Context<Self>) {
+    pub(crate) fn on_escape(&mut self, window: &mut Window, _cx: &mut Context<'_, Self>) {
         if !self.is_busy() && self.screen.can_cancel() {
             window.remove_window();
         }
     }
 
-    pub(crate) fn continue_from_license(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn continue_from_license(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
         if !self.accepted {
             self.notice = Some("error_license_required");
             self.license_focus.focus(window, cx);
@@ -345,7 +346,7 @@ impl SetupApp {
         cx.notify();
     }
 
-    pub(crate) fn back(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn back(&mut self, cx: &mut Context<'_, Self>) {
         if self.screen == Screen::Location {
             self.screen = Screen::License;
             self.path_error = None;
@@ -353,7 +354,7 @@ impl SetupApp {
         }
     }
 
-    pub(crate) fn set_accepted(&mut self, accepted: bool, cx: &mut Context<Self>) {
+    pub(crate) fn set_accepted(&mut self, accepted: bool, cx: &mut Context<'_, Self>) {
         self.accepted = accepted;
         if accepted {
             self.notice = None;
@@ -361,7 +362,7 @@ impl SetupApp {
         cx.notify();
     }
 
-    pub(crate) fn browse(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn browse(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         if self.is_busy() {
             return;
         }
@@ -379,7 +380,7 @@ impl SetupApp {
         cx.notify();
     }
 
-    fn fail_staging(&mut self, error: std::io::Error, cx: &mut Context<Self>) {
+    fn fail_staging(&mut self, error: std::io::Error, cx: &mut Context<'_, Self>) {
         tracing::warn!("installer staging root is unavailable: {error}");
         self.log = None;
         self.error = Some("error_staging");
@@ -388,7 +389,7 @@ impl SetupApp {
         cx.notify();
     }
 
-    pub(crate) fn start_install(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn start_install(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         if self.launch != Launch::Setup || self.is_busy() {
             return;
         }
@@ -457,7 +458,7 @@ impl SetupApp {
         cx.notify();
     }
 
-    pub(crate) fn start_uninstall(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn start_uninstall(&mut self, cx: &mut Context<'_, Self>) {
         if self.is_busy() {
             return;
         }
@@ -542,7 +543,7 @@ impl SetupApp {
         cx.notify();
     }
 
-    fn start_orphan_uninstall(&mut self, product: InstalledProduct, cx: &mut Context<Self>) {
+    fn start_orphan_uninstall(&mut self, product: InstalledProduct, cx: &mut Context<'_, Self>) {
         let log = match platform::uninstall_log_path() {
             Ok(log) => log,
             Err(error) => {
@@ -592,7 +593,7 @@ impl SetupApp {
     ///
     /// It must not reject a busy screen: the automatic fallback runs from the Done event while the
     /// progress page still owns the busy state, and refusing there would strand the window.
-    pub(crate) fn start_force_cleanup(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn start_force_cleanup(&mut self, cx: &mut Context<'_, Self>) {
         if !force_cleanup_allowed(self.screen) {
             return;
         }
@@ -651,7 +652,7 @@ impl SetupApp {
         cx.notify();
     }
 
-    fn pump(&mut self, events: Receiver<MsiEvent>, cx: &mut Context<Self>) {
+    fn pump(&mut self, events: Receiver<MsiEvent>, cx: &mut Context<'_, Self>) {
         let weak: WeakEntity<Self> = cx.entity().downgrade();
         cx.spawn(async move |_this, cx| {
             let mut events = Some(events);
@@ -681,14 +682,13 @@ impl SetupApp {
             // ended abnormally. A Done handler may have started a second cleanup session; that
             // session owns the busy state, so the completed pump must not clear it.
             if !completed {
-                weak.update(cx, |this, cx| this.handle_msi_channel_closed(cx))
-                    .ok();
+                weak.update(cx, SetupApp::handle_msi_channel_closed).ok();
             }
         })
         .detach();
     }
 
-    fn handle_msi_channel_closed(&mut self, cx: &mut Context<Self>) {
+    fn handle_msi_channel_closed(&mut self, cx: &mut Context<'_, Self>) {
         if !self.is_busy() {
             return;
         }
@@ -701,14 +701,14 @@ impl SetupApp {
         cx.notify();
     }
 
-    fn handle_msi_event(&mut self, event: MsiEvent, cx: &mut Context<Self>) {
+    fn handle_msi_event(&mut self, event: MsiEvent, cx: &mut Context<'_, Self>) {
         match event {
             MsiEvent::Action(action) => {
-                if let Some(stage) = Stage::from_action(&action) {
-                    if stage != self.stage {
-                        self.stage = stage;
-                        cx.notify();
-                    }
+                if let Some(stage) = Stage::from_action(&action)
+                    && stage != self.stage
+                {
+                    self.stage = stage;
+                    cx.notify();
                 }
             }
             MsiEvent::Progress { current, total } => {
@@ -765,7 +765,7 @@ impl SetupApp {
         }
     }
 
-    pub(crate) fn open_installed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_installed(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let Some(dir) = self.install_dir.clone() else {
             self.notice = Some("error_launch");
             cx.notify();
@@ -787,7 +787,7 @@ impl SetupApp {
         }
     }
 
-    pub(crate) fn open_log(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_log(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let Some(log) = self.log.clone() else {
             return;
         };
@@ -804,7 +804,7 @@ impl SetupApp {
         show_text_dialog(window, cx, title, text, TextDialogKind::Log);
     }
 
-    pub(crate) fn view_license(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn view_license(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let title = self.i18n.get("license_title");
         show_text_dialog(
             window,
@@ -815,7 +815,7 @@ impl SetupApp {
         );
     }
 
-    pub(crate) fn retry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn retry(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         if self.is_uninstall() || self.uninstall_attempted {
             self.start_uninstall(cx);
         } else {
@@ -875,7 +875,7 @@ enum TextDialogKind {
 /// already in memory, so opening it never touches a user-readable file or the shell's viewer.
 fn show_text_dialog(
     window: &mut Window,
-    cx: &mut Context<SetupApp>,
+    cx: &mut Context<'_, SetupApp>,
     title: String,
     text: String,
     kind: TextDialogKind,

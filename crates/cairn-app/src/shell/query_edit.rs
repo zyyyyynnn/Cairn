@@ -13,7 +13,12 @@ use crate::shell::menu_actions::copy_lines;
 use gpui_kit::gpui::*;
 
 impl CairnApp {
-    pub fn copy_file_names(&mut self, _: &CopyFileNames, _w: &mut Window, cx: &mut Context<Self>) {
+    pub fn copy_file_names(
+        &mut self,
+        _: &CopyFileNames,
+        _w: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
         let names = self.collect_selected_names();
         copy_lines(&names);
         cx.notify();
@@ -23,7 +28,7 @@ impl CairnApp {
         &mut self,
         _: &CopyTextOrPaths,
         _w: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         self.apply_copy_text_or_paths(cx);
     }
@@ -32,7 +37,7 @@ impl CairnApp {
         &mut self,
         _: &PasteQueryText,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         if self.apply_query_paste(cx) {
             self.query.search_focus.focus(window, cx);
@@ -43,7 +48,7 @@ impl CairnApp {
         &mut self,
         _: &UndoQueryText,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         if self.apply_query_undo(cx) {
             self.query.search_focus.focus(window, cx);
@@ -54,7 +59,7 @@ impl CairnApp {
         &mut self,
         _: &RedoQueryText,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         if self.apply_query_redo(cx) {
             self.query.search_focus.focus(window, cx);
@@ -65,14 +70,14 @@ impl CairnApp {
         &mut self,
         _: &CutQueryText,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         if self.apply_query_cut(cx) {
             self.query.search_focus.focus(window, cx);
         }
     }
 
-    fn apply_copy_text_or_paths(&mut self, cx: &mut Context<Self>) {
+    fn apply_copy_text_or_paths(&mut self, cx: &mut Context<'_, Self>) {
         match self.selected_query_text() {
             Some(text) => copy_lines(&[text]),
             None => copy_lines(&self.collect_selected_paths()),
@@ -80,7 +85,7 @@ impl CairnApp {
         cx.notify();
     }
 
-    fn apply_query_paste(&mut self, cx: &mut Context<Self>) -> bool {
+    fn apply_query_paste(&mut self, cx: &mut Context<'_, Self>) -> bool {
         let Some(text) = crate::shell::os::get_clipboard_text() else {
             return false;
         };
@@ -96,7 +101,7 @@ impl CairnApp {
         true
     }
 
-    fn apply_query_undo(&mut self, cx: &mut Context<Self>) -> bool {
+    fn apply_query_undo(&mut self, cx: &mut Context<'_, Self>) -> bool {
         if !self.query.search_input.undo() {
             return false;
         }
@@ -105,7 +110,7 @@ impl CairnApp {
         true
     }
 
-    fn apply_query_redo(&mut self, cx: &mut Context<Self>) -> bool {
+    fn apply_query_redo(&mut self, cx: &mut Context<'_, Self>) -> bool {
         if !self.query.search_input.redo() {
             return false;
         }
@@ -114,7 +119,7 @@ impl CairnApp {
         true
     }
 
-    fn apply_query_cut(&mut self, cx: &mut Context<Self>) -> bool {
+    fn apply_query_cut(&mut self, cx: &mut Context<'_, Self>) -> bool {
         let Some(text) = self.selected_query_text() else {
             return false;
         };
@@ -135,7 +140,7 @@ impl CairnApp {
         Some(self.query.search_input.text[start..end].to_string())
     }
 
-    pub fn handle_query_edit_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+    pub fn handle_query_edit_key(&mut self, event: &KeyDownEvent, cx: &mut Context<'_, Self>) {
         let key = event.keystroke.key.as_str();
         let shift = event.keystroke.modifiers.shift;
         let ctrl = event.keystroke.modifiers.control;

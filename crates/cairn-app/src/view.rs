@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! The main window's shell: title bar, locations sidebar, search band, command bar,
+//! The main window's shell: title bar, locations sidebar, search band,
 //! result table and status line.
 //!
 //! This module owns *layout and presentation* only. Every interaction hands the request to an owner
@@ -10,27 +10,28 @@
 //! dropdown item, a table heading, a sidebar row and a keystroke cannot drift apart (Coding Guides:
 //! *Events, actions, and focus*).
 //!
-//! Regions come from GPUI Component wherever the component fits the task: `TitleBar`, `Sidebar`,
-//! `Toolbar`, `StatusBar` and `PopupMenu` own their geometry, their interaction states
-//! and their keyboard model. Two regions stay drawn here, for reasons recorded at each one: the
-//! query box, because the platform IME drives it through `impl EntityInputHandler for CairnApp`
-//! (SPEC SM-3), and the result band, because the QRY-07 paging contract needs rows the service has
-//! not delivered yet to still hold their place on the scrollbar.
+//! Controls (`Button`, `PopupMenu`, `Spinner`) come from GPUI Component where the component fits
+//! the task, owning their interaction states and keyboard model. Two regions stay drawn here, for
+//! reasons recorded at each one: the query box, because the platform IME drives it through
+//! `impl EntityInputHandler for CairnApp` (SPEC SM-3), and the result band, because the QRY-07
+//! paging contract needs rows the service has not delivered yet to still hold their place on the
+//! scrollbar.
 
-use crate::app::{element_id, layout, CairnApp};
+use crate::app::{CairnApp, element_id, layout};
 use crate::shell::accessibility::{self, ControlElement, KeyControl};
 use crate::shell::assets::RADIO_DOT_ICON_PATH;
-use crate::shell::command_groups::{menu_groups, GroupCommand, MenuGroup};
+use crate::shell::command_groups::{GroupCommand, MenuGroup, menu_groups};
 use crate::shell::commands::{self, ToggleSidebar, WINDOW_CONTEXT, WINDOW_CONTROL_CONTEXT};
 use crate::shell::theme::{self, ShellTokens};
-use crate::shell::window_resize::{WindowResizeTracker, SETTLE_POLL};
-use gpui_kit::base::motion::{transition_with_status, Transition};
+use crate::shell::window_resize::{SETTLE_POLL, WindowResizeTracker};
+use gpui_kit::assets::IconName as AssetIconName;
 use gpui_kit::base::Disableable;
+use gpui_kit::base::motion::{Transition, transition_with_status};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{
-    h_flex, v_flex, Icon, IconName, InteractiveElementExt as _, Side, Sizable as _,
+    Icon, IconName, InteractiveElementExt as _, Side, Sizable as _, h_flex, v_flex,
 };
 use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::*;
@@ -115,7 +116,7 @@ fn render_window_control(
 static FIRST_ROWS_FRAME: AtomicBool = AtomicBool::new(false);
 
 /// Runtime click handler for dynamically generated submenu rows (for example indexed sources).
-pub type MenuSelectHandler = Rc<dyn Fn(&mut CairnApp, &mut Window, &mut Context<CairnApp>)>;
+pub type MenuSelectHandler = Rc<dyn Fn(&mut CairnApp, &mut Window, &mut Context<'_, CairnApp>)>;
 
 /// One row of a command-group menu, already resolved to what this frame shows.
 ///
@@ -138,15 +139,24 @@ pub struct MenuEntry {
     /// The Action whose key binding draws this row's hint while `command` owns the click.
     ///
     /// A menu row whose key is a broader gesture than the command names it here instead of
-    /// dispatching it: ClearQuery advertises Escape, but clicking must clear now rather than run
+    /// dispatching it: `ClearQuery` advertises Escape, but clicking must clear now rather than run
     /// the dismissal cascade and stop at an open menu or toast.
     pub hint: Option<Box<dyn Action>>,
     /// The nested menu a submenu row opens. The entity is built with the bar's menu.
     pub submenu: Option<Entity<PopupMenu>>,
-    /// `true` while an asynchronous command owns this row, so the row draws a loading icon.
-    pub loading: bool,
+    /// Trailing status or action icon on the row (`Loading` while busy, `Download` when ready).
+    pub trailing: MenuTrailing,
     /// `true` on the first row of a section after the first, where one separator belongs.
     pub separates: bool,
+}
+
+/// Trailing indicator shown on the right edge of a menu row.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MenuTrailing {
+    #[default]
+    None,
+    Loading,
+    Download,
 }
 
 /// Builds one group's menu. Rows that carry an Action dispatch it into `action_context`, the query
@@ -164,19 +174,31 @@ pub fn build_menu(
             menu = menu.separator();
         }
         let label = entry.label.clone();
-        menu = if entry.loading {
+        menu = if entry.trailing != MenuTrailing::None {
             let row_label = label.clone();
             let entity = view.clone();
-            let command = entry.command.expect("a loading row owns a command");
+            let trailing = entry.trailing;
+            let command = entry.command.expect("a trailing row owns a command");
             menu.item(
                 PopupMenuItem::element(move |_, _| {
+                    let indicator = match trailing {
+                        MenuTrailing::Loading => Spinner::new()
+                            .icon(IconName::LoaderCircle)
+                            .xsmall()
+                            .into_any_element(),
+                        MenuTrailing::Download => Icon::new(AssetIconName::Download)
+                            .xsmall()
+                            .into_any_element(),
+                        MenuTrailing::None => unreachable!(),
+                    };
                     h_flex()
                         .w_full()
                         .flex_1()
                         .items_center()
                         .justify_between()
+                        .gap_2()
                         .child(row_label.clone())
-                        .child(Spinner::new().icon(IconName::LoaderCircle).xsmall())
+                        .child(indicator)
                 })
                 .disabled(entry.disabled)
                 .on_click(move |_, window, cx| {
@@ -269,7 +291,7 @@ fn content_panel(tokens: &ShellTokens, child: impl IntoElement, cover: Option<An
         .rounded(tokens.radius)
         .overflow_hidden()
         .child(child)
-        .when_some(cover, |this, cover| this.child(cover))
+        .when_some(cover, gpui_kit::ParentElement::child)
         .child(rounded_panel_corners(tokens.radius, tokens.chrome))
 }
 
@@ -343,8 +365,8 @@ fn rounded_panel_corners(radius: Pixels, color: Hsla) -> impl IntoElement {
     .inset_0()
 }
 
-/// The query box and the command bar act through the same window entity and share its focus state,
-/// so the content column is handed one bundle instead of three parameters that never separate.
+/// The query band acts through the window entity and shares its focus state, so the content column
+/// is handed one bundle instead of three parameters that never separate.
 struct QueryBand {
     is_query_focused: bool,
     search_focus: FocusHandle,
@@ -359,7 +381,7 @@ struct TableBand {
 }
 
 impl Render for CairnApp {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let _perf = crate::shell::perf::scope("render");
         let tokens = ShellTokens::current(cx);
         let row_height = layout::row_height(window);
@@ -495,14 +517,12 @@ impl Render for CairnApp {
             .on_action(cx.listener(Self::open_index_menu))
             .on_action(cx.listener(Self::open_tools_menu))
             .on_action(cx.listener(Self::open_help_menu))
-            .on_action(
-                cx.listener(|this, _: &commands::NavigateBack, window, cx| {
-                    this.go_back(window, cx)
-                }),
-            )
+            .on_action(cx.listener(|this, _: &commands::NavigateBack, window, cx| {
+                this.go_back(window, cx);
+            }))
             .on_action(
                 cx.listener(|this, _: &commands::NavigateForward, window, cx| {
-                    this.go_forward(window, cx)
+                    this.go_forward(window, cx);
                 }),
             )
             .on_action(cx.listener(Self::delete_selected))
@@ -539,7 +559,7 @@ impl Render for CairnApp {
                     .child(content),
             )
             .child(status_line)
-            .when_some(toast, |this, toast| this.child(toast))
+            .when_some(toast, gpui_kit::ParentElement::child)
             .when(self.results.column_drag.is_some(), |this| {
                 let view = drag_paint_view.clone();
                 this.child(
@@ -652,7 +672,7 @@ impl CairnApp {
         view: &Entity<CairnApp>,
         tokens: &ShellTokens,
         rem_size: Pixels,
-    ) -> impl IntoElement {
+    ) -> impl IntoElement + use<> {
         h_flex().items_center().gap(rems(layout::SPACE_4)).children(
             menu_groups()
                 .iter()
@@ -668,7 +688,7 @@ impl CairnApp {
         group: MenuGroup,
         tokens: &ShellTokens,
         rem_size: Pixels,
-    ) -> impl IntoElement {
+    ) -> impl IntoElement + use<> {
         let control = accessibility::control_at(&element_id("toolbar-menu", group.key()));
         let name = self.cached_control_name(control);
         let is_open = self
@@ -768,8 +788,8 @@ impl CairnApp {
         view: Entity<CairnApp>,
         window: &mut Window,
         tokens: &ShellTokens,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+        cx: &mut Context<'_, Self>,
+    ) -> impl IntoElement + use<> {
         let toggle_view = view.clone();
         let back_view = view.clone();
         let forward_view = view.clone();
@@ -910,7 +930,7 @@ impl CairnApp {
                                         Some(WINDOW_CONTEXT),
                                     )
                                     .on_click(move |_, _window, cx| {
-                                        toggle_view.update(cx, |this, cx| this.toggle_sidebar(cx));
+                                        toggle_view.update(cx, Self::toggle_sidebar);
                                     }),
                             ),
                     ),
@@ -985,7 +1005,7 @@ impl CairnApp {
                         window,
                         cx,
                         tokens,
-                        |window| window.remove_window(),
+                        gpui_kit::Window::remove_window,
                     )),
             )
     }
@@ -997,7 +1017,7 @@ impl CairnApp {
     /// the last size change: a timer has to make the settle call. It only ever settles
     /// the generation it was armed for, and the poll ceiling bounds a window whose
     /// geometry never goes quiet.
-    pub(crate) fn watch_window_resize(&mut self, epoch: u64, cx: &mut Context<Self>) {
+    pub(crate) fn watch_window_resize(&mut self, epoch: u64, cx: &mut Context<'_, Self>) {
         cx.spawn(async move |this, cx| {
             for _ in 0..WindowResizeTracker::max_polls() {
                 cx.background_executor().timer(SETTLE_POLL).await;
@@ -1038,7 +1058,7 @@ impl CairnApp {
     fn render_window_resize_cover(
         &self,
         tokens: &ShellTokens,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) -> Option<AnyElement> {
         if self.window_resize.is_covered() {
             return Some(
@@ -1083,8 +1103,8 @@ impl CairnApp {
         band: QueryBand,
         table_band: TableBand,
         window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
         let resize_cover = self.render_window_resize_cover(tokens, cx);
         let QueryBand {
             is_query_focused,

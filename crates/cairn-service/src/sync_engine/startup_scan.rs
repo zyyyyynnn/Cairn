@@ -25,7 +25,7 @@ use crate::persistence;
 const MAX_USN_REPLAY_BACKLOG_BYTES: i64 = 64 * 1024 * 1024;
 
 impl MultiVolumeEngine {
-    /// Rescans every volume running in SnapshotMode (IDX-08) and reports how many were rebuilt.
+    /// Rescans every volume running in `SnapshotMode` (IDX-08) and reports how many were rebuilt.
     pub fn rescan_snapshot_volumes(&self) -> usize {
         let snapshot_drives: Vec<char> = {
             let vols = self.volumes.read().unwrap();
@@ -109,9 +109,8 @@ impl MultiVolumeEngine {
                                 .is_some_and(|ch| ch.eq_ignore_ascii_case(&drive))
                         });
                     let mut lock = self.volumes.write().unwrap();
-                    let vol = match lock.get_mut(&drive) {
-                        Some(vol) => vol,
-                        None => return Err(format!("volume {drive}: is not indexed")),
+                    let Some(vol) = lock.get_mut(&drive) else {
+                        return Err(format!("volume {drive}: is not indexed"));
                     };
                     if let Some(identity) = live_identity {
                         vol.set_identity(identity);
@@ -134,11 +133,11 @@ impl MultiVolumeEngine {
                     Err(format!("live MFT scan for {drive}: failed: {e}"))
                 }
             };
-            if result.is_ok() {
-                if let Some(source_id) = SourceId::for_drive(drive) {
-                    self.property_refresh_handles()
-                        .enqueue_source_and_wake(source_id);
-                }
+            if result.is_ok()
+                && let Some(source_id) = SourceId::for_drive(drive)
+            {
+                self.property_refresh_handles()
+                    .enqueue_source_and_wake(source_id);
             }
             result
         }
@@ -268,14 +267,14 @@ impl MultiVolumeEngine {
                     // The volume is gone (ejected, unmounted): the retained index is stale by
                     // definition, so it must not stay reported as Synced (IDX-07).
                     let mut lock = self.volumes.write().unwrap();
-                    if let Some(vol) = lock.get_mut(&drive) {
-                        if vol.status.state() != VolumeState::Offline {
-                            tracing::info!(
-                                "Volume {} disappeared from the system: marked Offline",
-                                drive
-                            );
-                            vol.status.set(VolumeState::Offline);
-                        }
+                    if let Some(vol) = lock.get_mut(&drive)
+                        && vol.status.state() != VolumeState::Offline
+                    {
+                        tracing::info!(
+                            "Volume {} disappeared from the system: marked Offline",
+                            drive
+                        );
+                        vol.status.set(VolumeState::Offline);
                     }
                     continue;
                 }
@@ -299,15 +298,15 @@ impl MultiVolumeEngine {
                         if is_device_offline_win32_error(code) =>
                     {
                         let mut lock = self.volumes.write().unwrap();
-                        if let Some(vol) = lock.get_mut(&drive) {
-                            if vol.status.state() != VolumeState::Offline {
-                                tracing::info!(
-                                    "Volume {} open failed with Win32 error {:#x}: marked Offline",
-                                    drive,
-                                    code
-                                );
-                                vol.status.set(VolumeState::Offline);
-                            }
+                        if let Some(vol) = lock.get_mut(&drive)
+                            && vol.status.state() != VolumeState::Offline
+                        {
+                            tracing::info!(
+                                "Volume {} open failed with Win32 error {:#x}: marked Offline",
+                                drive,
+                                code
+                            );
+                            vol.status.set(VolumeState::Offline);
                         }
                         continue;
                     }
@@ -385,15 +384,15 @@ impl MultiVolumeEngine {
                         if is_device_offline_win32_error(code) =>
                     {
                         let mut lock = self.volumes.write().unwrap();
-                        if let Some(vol) = lock.get_mut(&drive) {
-                            if vol.status.state() != VolumeState::Offline {
-                                tracing::info!(
-                                    "USN read on drive {}: failed with device error {:#x}: marked Offline",
-                                    drive,
-                                    code
-                                );
-                                vol.status.set(VolumeState::Offline);
-                            }
+                        if let Some(vol) = lock.get_mut(&drive)
+                            && vol.status.state() != VolumeState::Offline
+                        {
+                            tracing::info!(
+                                "USN read on drive {}: failed with device error {:#x}: marked Offline",
+                                drive,
+                                code
+                            );
+                            vol.status.set(VolumeState::Offline);
                         }
                     }
                     Err(e) => {

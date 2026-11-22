@@ -111,7 +111,7 @@ fn dialog_footer(
     cx: &mut App,
     surface: Hsla,
     actions: DialogActions,
-) -> impl IntoElement {
+) -> impl IntoElement + use<> {
     let inset = {
         let theme = cx.theme();
         let cancel_fill = theme.tokens.button_secondary.color;
@@ -260,8 +260,8 @@ pub(crate) fn body(title: String, description: String, window: &Window) -> AnyEl
 
 #[cfg(test)]
 mod tests {
-    use super::{inset_target, top_offset_for_height, InsetTarget};
-    use gpui_kit::gpui::{px, Hsla};
+    use super::{InsetTarget, inset_target, top_offset_for_height};
+    use gpui_kit::gpui::{Hsla, px};
 
     fn gray(l: f32) -> Hsla {
         Hsla {

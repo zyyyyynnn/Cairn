@@ -6,9 +6,9 @@
 //! language, autostart, zoom, the search flag toggles, the location filter, and the result
 //! table's sort order and column widths.
 
-use crate::app::{layout, CairnApp};
-use crate::search::filters::FilterCategory;
+use crate::app::{CairnApp, layout};
 use crate::search::ResultSetChange;
+use crate::search::filters::FilterCategory;
 use crate::shell::command_groups::ZoomPreset;
 use crate::shell::commands::{
     CycleFilterCategory, ResetZoom, ToggleCaseSensitive, ToggleMatchPath, ToggleRegex,
@@ -21,7 +21,7 @@ use crate::table::model::{ColumnBoundary, ColumnWidths, SortColumn, TableColumn}
 use gpui_kit::gpui::*;
 
 impl CairnApp {
-    pub fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+    pub fn toggle_sidebar(&mut self, cx: &mut Context<'_, Self>) {
         self.sidebar_collapsed = !self.sidebar_collapsed;
         cx.notify();
     }
@@ -30,7 +30,7 @@ impl CairnApp {
         &mut self,
         _: &ToggleSidebar,
         _w: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         self.toggle_sidebar(cx);
     }
@@ -45,7 +45,7 @@ impl CairnApp {
     #[cfg(test)]
     pub fn save_settings(&mut self) {}
 
-    fn commit_sort_spec_change(&mut self, cx: &mut Context<Self>) {
+    fn commit_sort_spec_change(&mut self, cx: &mut Context<'_, Self>) {
         self.settings.columns.sort_spec = self.results.table.sort_spec.to_clause();
         self.save_settings();
         if self.recycle_bin.is_open() {
@@ -58,19 +58,19 @@ impl CairnApp {
         cx.notify();
     }
 
-    pub fn toggle_table_sort(&mut self, col: SortColumn, cx: &mut Context<Self>) {
+    pub fn toggle_table_sort(&mut self, col: SortColumn, cx: &mut Context<'_, Self>) {
         self.results.table.toggle_sort(col);
         self.commit_sort_spec_change(cx);
     }
 
-    pub fn shift_toggle_table_sort(&mut self, col: SortColumn, cx: &mut Context<Self>) {
+    pub fn shift_toggle_table_sort(&mut self, col: SortColumn, cx: &mut Context<'_, Self>) {
         self.results.table.shift_toggle_sort(col);
         self.commit_sort_spec_change(cx);
     }
 
     /// Shows or hides one table column in index queries. Locked columns remain visible, and hiding
     /// a sorted column prunes it from `sort_spec` so the active order stays inspectable.
-    pub(crate) fn toggle_table_column(&mut self, col: TableColumn, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_table_column(&mut self, col: TableColumn, cx: &mut Context<'_, Self>) {
         if col.is_locked() || self.recycle_bin.is_open() {
             return;
         }
@@ -91,7 +91,7 @@ impl CairnApp {
         boundary: ColumnBoundary,
         start: ColumnWidths,
         delta: f32,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         let minima = [
             layout::NAME_MIN_COLUMN,
@@ -108,7 +108,7 @@ impl CairnApp {
     }
 
     /// Writes the live widths back to the preferences file once, when the drag ends.
-    pub(crate) fn finish_column_resize(&mut self, _cx: &mut Context<Self>) {
+    pub(crate) fn finish_column_resize(&mut self, _cx: &mut Context<'_, Self>) {
         self.store_column_widths();
         self.save_settings();
     }
@@ -125,12 +125,12 @@ impl CairnApp {
     }
 
     /// Reverses the direction of the column that is already sorting the results.
-    pub(super) fn toggle_sort_direction(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn toggle_sort_direction(&mut self, cx: &mut Context<'_, Self>) {
         self.results.table.reverse_primary_sort();
         self.commit_sort_spec_change(cx);
     }
 
-    fn toggle_flag(&mut self, flag: ToggleFlag, cx: &mut Context<Self>) {
+    fn toggle_flag(&mut self, flag: ToggleFlag, cx: &mut Context<'_, Self>) {
         // The bin filter honors only case sensitivity; the other flags
         // have no effect on its rows.
         if self.recycle_bin.is_open() && flag != ToggleFlag::Case {
@@ -155,34 +155,34 @@ impl CairnApp {
         cx.notify();
     }
 
-    pub(crate) fn toggle_exclude_hidden(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_exclude_hidden(&mut self, cx: &mut Context<'_, Self>) {
         self.toggle_exclusion_filter(ExclusionFlag::Hidden, cx);
     }
 
-    pub(crate) fn toggle_exclude_system(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_exclude_system(&mut self, cx: &mut Context<'_, Self>) {
         self.toggle_exclusion_filter(ExclusionFlag::System, cx);
     }
 
-    pub(crate) fn toggle_pinyin(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_pinyin(&mut self, cx: &mut Context<'_, Self>) {
         self.toggle_query_modifier(|this| &mut this.query.pinyin, cx);
     }
 
-    pub(crate) fn toggle_ignore_punctuation(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_ignore_punctuation(&mut self, cx: &mut Context<'_, Self>) {
         self.toggle_query_modifier(|this| &mut this.query.ignore_punctuation, cx);
     }
 
-    pub(crate) fn toggle_ignore_whitespace(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_ignore_whitespace(&mut self, cx: &mut Context<'_, Self>) {
         self.toggle_query_modifier(|this| &mut this.query.ignore_whitespace, cx);
     }
 
-    pub(crate) fn toggle_ignore_diacritics(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_ignore_diacritics(&mut self, cx: &mut Context<'_, Self>) {
         self.toggle_query_modifier(|this| &mut this.query.ignore_diacritics, cx);
     }
 
     fn toggle_query_modifier(
         &mut self,
         field: impl FnOnce(&mut Self) -> &mut bool,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         if self.recycle_bin.is_open() {
             return;
@@ -197,7 +197,7 @@ impl CairnApp {
         cx.notify();
     }
 
-    fn toggle_exclusion_filter(&mut self, flag: ExclusionFlag, cx: &mut Context<Self>) {
+    fn toggle_exclusion_filter(&mut self, flag: ExclusionFlag, cx: &mut Context<'_, Self>) {
         if self.recycle_bin.is_open() {
             return;
         }
@@ -218,7 +218,7 @@ impl CairnApp {
         &mut self,
         _: &ToggleCaseSensitive,
         _w: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         self.toggle_flag(ToggleFlag::Case, cx);
     }
@@ -227,7 +227,7 @@ impl CairnApp {
         &mut self,
         _: &ToggleWholeWord,
         _w: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         self.toggle_flag(ToggleFlag::WholeWord, cx);
     }
@@ -236,16 +236,16 @@ impl CairnApp {
         &mut self,
         _: &ToggleMatchPath,
         _w: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         self.toggle_flag(ToggleFlag::MatchPath, cx);
     }
 
-    pub fn toggle_regex(&mut self, _: &ToggleRegex, _w: &mut Window, cx: &mut Context<Self>) {
+    pub fn toggle_regex(&mut self, _: &ToggleRegex, _w: &mut Window, cx: &mut Context<'_, Self>) {
         self.toggle_flag(ToggleFlag::Regex, cx);
     }
 
-    pub fn set_filter(&mut self, category: FilterCategory, cx: &mut Context<Self>) {
+    pub fn set_filter(&mut self, category: FilterCategory, cx: &mut Context<'_, Self>) {
         // A file-type row, 所有文件 included, is a location: choosing it releases a folder-source
         // scope. Re-selecting the same category while scoped is therefore a place change, not a
         // refresh.
@@ -277,7 +277,7 @@ impl CairnApp {
         &mut self,
         _: &CycleFilterCategory,
         _w: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         self.set_filter(self.query.active_filter.next(), cx);
     }
@@ -285,7 +285,7 @@ impl CairnApp {
     /// Persists a theme choice (`system`, `light` or `dark`) and applies its resolved palette.
     /// Re-selecting `system` also re-reads the OS appearance, so a Windows theme change is picked
     /// up the next time that menu item is chosen.
-    pub(super) fn set_theme_mode(&mut self, mode: &str, cx: &mut Context<Self>) {
+    pub(super) fn set_theme_mode(&mut self, mode: &str, cx: &mut Context<'_, Self>) {
         if self.settings.theme == mode && mode != THEME_SYSTEM {
             return;
         }
@@ -298,7 +298,7 @@ impl CairnApp {
         cx.notify();
     }
 
-    pub(super) fn set_language(&mut self, language: &str, cx: &mut Context<Self>) {
+    pub(super) fn set_language(&mut self, language: &str, cx: &mut Context<'_, Self>) {
         if self.settings.language == language {
             return;
         }
@@ -311,7 +311,7 @@ impl CairnApp {
         self.repaint_shell_and_overlays(cx);
     }
 
-    pub(super) fn set_autostart(&mut self, enable: bool, cx: &mut Context<Self>) {
+    pub(super) fn set_autostart(&mut self, enable: bool, cx: &mut Context<'_, Self>) {
         if self.settings.autostart == enable {
             return;
         }
@@ -323,12 +323,12 @@ impl CairnApp {
         self.repaint_shell_and_overlays(cx);
     }
 
-    pub fn repaint_shell_and_overlays(&self, cx: &mut Context<Self>) {
+    pub fn repaint_shell_and_overlays(&self, cx: &mut Context<'_, Self>) {
         cx.notify();
         cx.refresh_windows();
     }
 
-    pub(super) fn set_zoom(&mut self, zoom: f32, cx: &mut Context<Self>) {
+    pub(super) fn set_zoom(&mut self, zoom: f32, cx: &mut Context<'_, Self>) {
         let zoom = theme::set_zoom(zoom, cx);
         if zoom == self.zoom_level {
             return;
@@ -339,15 +339,20 @@ impl CairnApp {
         self.repaint_shell_and_overlays(cx);
     }
 
-    pub(crate) fn zoom_in(&mut self, _: &ZoomIn, _w: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn zoom_in(&mut self, _: &ZoomIn, _w: &mut Window, cx: &mut Context<'_, Self>) {
         self.set_zoom(ZoomPreset::step_up(self.zoom_level).value(), cx);
     }
 
-    pub(crate) fn zoom_out(&mut self, _: &ZoomOut, _w: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn zoom_out(&mut self, _: &ZoomOut, _w: &mut Window, cx: &mut Context<'_, Self>) {
         self.set_zoom(ZoomPreset::step_down(self.zoom_level).value(), cx);
     }
 
-    pub(crate) fn reset_zoom(&mut self, _: &ResetZoom, _w: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn reset_zoom(
+        &mut self,
+        _: &ResetZoom,
+        _w: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
         self.set_zoom(ZoomPreset::Standard.value(), cx);
     }
 }
@@ -360,8 +365,8 @@ enum ExclusionFlag {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use core::prelude::rust_2021::test;
+    use super::{CairnApp, SortColumn};
+    use gpui_kit::gpui::AppContext as _;
 
     #[test]
     fn ui_zoom_and_sidebar_actions_update_state_and_theme() {

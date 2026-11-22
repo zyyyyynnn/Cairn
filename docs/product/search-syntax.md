@@ -45,8 +45,8 @@
 |:---|:---|:---|
 | `ext:` | `ext:rs;toml;md` | 分号分隔多个扩展名；忽略前导点与通配符，如 `ext:*.tar.gz` |
 | `size:` | `size:>10mb`、`size:1kb..500mb` | 文件逻辑大小过滤（`1KB = 1024 Bytes`，支持 B/KB/MB/GB/TB） |
-| `date-modified:` | `dm:today`、`dm:2026-01-01..2026-10-15` | 修改时间；支持相对时长（`2days`、`3weeks`、`4hours`）、`YYMMDD`、月份星期名、`mtd/ytd/qtd` |
-| `date-created:` | `dc:>2026`、`dc:yesterday` | 创建时间；取值格式与 `dm:` 一致 |
+| `date-modified:` | `dm:today`、`dm:2026-01-01..2026-10-15` | 修改日期；支持相对时长（`2days`、`3weeks`、`4hours`）、`YYMMDD`、月份星期名、`mtd/ytd/qtd` |
+| `date-created:` | `dc:>2026`、`dc:yesterday` | 创建日期；取值格式与 `dm:` 一致 |
 | `parent:` | `parent:C:\Windows` | 仅匹配指定绝对路径的直接子项，忽略末尾反斜杠 |
 | `content:` | `content:架构`、`content:"error code"` | 触发 Tantivy 全文内容索引；支持复合分组 `content:<abc 123>`；单条查询至多 16 个内容检索项（按解析后带内容检索的项数计，含重复与否定项），超限在管道请求边界以错误码 416 整体拒绝 |
 | `len:` | `len:>20`、`len:4..16` | 按文件名字符长度过滤 |
@@ -59,7 +59,7 @@
 
 ### 1.5 快速过滤器宏
 - 内置宏：`audio:`、`doc:`、`exe:`、`image:`、`video:`、`zip:`。
-- 宏支持使用竖线 `|` 组合，例如 `audio:|video:`。各类宏对应的文件扩展名集合可在配置文件中灵活定制。
+- 宏支持使用竖线 `|` 组合，例如 `audio:|video:`。内置宏的扩展名映射由查询解析器固定维护，与侧栏文件类型分类一致。
 
 ### 1.6 正则表达式与 ReDoS 防护
 - 正则表达式采用 Rust 官方 `regex` 库执行，匹配时间为 $O(M \times N)$，无回溯型 ReDoS 风险。

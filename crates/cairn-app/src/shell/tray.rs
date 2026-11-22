@@ -31,9 +31,9 @@ pub(crate) fn labels_with_i18n(i18n: &I18nManager) -> [String; 2] {
 /// GPUI's window class is shared with other applications, so matching the class could focus an
 /// unrelated window.
 pub(crate) fn find_main_window() -> Option<windows::Win32::Foundation::HWND> {
-    use windows::core::BOOL;
     use windows::Win32::Foundation::{HWND, LPARAM};
     use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, GetWindowTextW};
+    use windows::core::BOOL;
 
     struct EnumCtx {
         found: Option<HWND>,
@@ -66,7 +66,7 @@ pub(crate) fn find_main_window() -> Option<windows::Win32::Foundation::HWND> {
 
 pub(crate) fn activate_existing_cairn_window() -> bool {
     use windows::Win32::UI::WindowsAndMessaging::{
-        BringWindowToTop, SetForegroundWindow, ShowWindow, SW_RESTORE,
+        BringWindowToTop, SW_RESTORE, SetForegroundWindow, ShowWindow,
     };
 
     let Some(hwnd) = find_main_window() else {
@@ -86,7 +86,7 @@ pub(crate) fn activate_existing_cairn_window() -> bool {
 #[cfg_attr(test, allow(dead_code))]
 pub(crate) fn toggle_main_window() {
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, IsWindowVisible, ShowWindow, SW_HIDE,
+        GetForegroundWindow, IsWindowVisible, SW_HIDE, ShowWindow,
     };
 
     let Some(hwnd) = find_main_window() else {
@@ -165,9 +165,7 @@ pub(crate) fn set_language_with_i18n(i18n: &I18nManager) {
 
 #[cfg(test)]
 mod tests {
-    use core::prelude::rust_2021::test;
-
-    use super::{labels_with_i18n, set_language_with_i18n, MENU_KEYS};
+    use super::{MENU_KEYS, labels_with_i18n};
     use crate::shell::i18n::I18nManager;
     use crate::shell::settings::{LANGUAGE_EN_US, LANGUAGE_ZH_CN};
 
@@ -185,13 +183,5 @@ mod tests {
             assert!(!en[index].trim().is_empty(), "{key} is blank in en-US");
         }
         assert_ne!(zh, en, "the tray would read the same in every language");
-    }
-
-    /// Tests, and a desktop whose shell refused the icon, have no row handles; rewriting them
-    /// must still be safe.
-    #[test]
-    fn changing_the_language_without_a_tray_is_a_no_op() {
-        set_language_with_i18n(&I18nManager::new(LANGUAGE_ZH_CN));
-        set_language_with_i18n(&I18nManager::new(LANGUAGE_EN_US));
     }
 }

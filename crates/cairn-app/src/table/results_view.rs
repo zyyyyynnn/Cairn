@@ -4,18 +4,23 @@
 
 //! Results table region: viewport scrolling containers, virtual row band, and state overlays.
 
-use crate::app::{layout, CairnApp};
+use crate::app::{CairnApp, layout};
 use crate::shell::accessibility::{self, ControlElement};
+use crate::shell::command_groups::GroupCommand;
 use crate::shell::commands::RESULTS_CONTEXT;
 use crate::shell::theme::ShellTokens;
-use crate::table::rows::{rows_to_paint, RowBand};
-use crate::table::surface::{result_surface, ResultSurface, ResultSurfaceInputs};
+use crate::table::rows::{BIN_COMMANDS, RESULT_COMMANDS, RowBand, rows_to_paint};
+use crate::table::surface::{ResultSurface, ResultSurfaceInputs, result_surface};
 use crate::view::announce_shortcut;
+use gpui_kit::component::menu::ContextMenuExt;
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
-use gpui_kit::component::{h_flex, v_flex, InteractiveElementExt as _};
+use gpui_kit::component::{InteractiveElementExt as _, h_flex, v_flex};
 use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::*;
 use std::ops::Range;
+use std::rc::Rc;
+
+const CONTEXT_MENU_MIN_WIDTH: f32 = 12.0;
 
 impl CairnApp {
     pub(crate) fn render_results(
@@ -25,7 +30,7 @@ impl CairnApp {
         row_height: Pixels,
         results_hold_focus: bool,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let search_focused = self.query.search_focus.is_focused(window);
         let header = self.render_table_header(tokens, cx);
@@ -51,8 +56,8 @@ impl CairnApp {
 
         let has_content = rows.is_some();
         let has_state = state.is_some();
-        let rows = rows.map(|body| body.into_any_element());
-        let state = state.map(|body| body.into_any_element());
+        let rows = rows.map(gpui_kit::IntoElement::into_any_element);
+        let state = state.map(gpui_kit::IntoElement::into_any_element);
         let overflows_sideways = self.results.table_scroll.max_offset().x > px(0.0);
 
         let viewport = div()
@@ -72,7 +77,7 @@ impl CairnApp {
                     .flex_1()
                     .min_h_0()
                     .child(header)
-                    .when_some(rows, |this, rows| this.child(rows)),
+                    .when_some(rows, gpui_kit::ParentElement::child),
             );
 
         let control = accessibility::control("result-table");
@@ -93,7 +98,7 @@ impl CairnApp {
             .flex_col()
             .child(
                 h_flex()
-                    .when(has_content, |this| this.flex_1())
+                    .when(has_content, gpui_kit::Styled::flex_1)
                     .min_w_0()
                     .min_h_0()
                     .items_stretch()
@@ -137,7 +142,7 @@ impl CairnApp {
                     ),
                 )
             })
-            .when_some(state, |this, band| this.child(band))
+            .when_some(state, gpui_kit::ParentElement::child)
             .when(surface == ResultSurface::Loading, |this| {
                 this.child(
                     div()
@@ -193,7 +198,7 @@ impl CairnApp {
         visible: Range<usize>,
         row_height: Pixels,
         search_focused: bool,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) -> ControlElement {
         let extent = px(self.results.table.scroll_extent(f32::from(row_height)));
         let painted = rows_to_paint(
@@ -265,17 +270,66 @@ impl CairnApp {
                         MouseButton::Left,
                         cx.listener(|this, _, _, cx| this.dismiss_result_selection(cx)),
                     )
-                    .child(
-                        div()
-                            .absolute()
-                            .left_0()
-                            .right_0()
-                            .top(px(band_top))
-                            .flex()
-                            .flex_col()
-                            .children(rows),
-                    ),
+                    .child(self.render_rows_stack(band_top, !pinned, rows, cx)),
             )
+    }
+
+    /// Mounts one shared context menu on the visible row stack so scrolling does not recreate a
+    /// `ContextMenuState` and `FocusHandle` per row on every frame.
+    fn render_rows_stack(
+        &self,
+        band_top: f32,
+        interactive: bool,
+        rows: Vec<AnyElement>,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
+        let has_rows = !rows.is_empty();
+        let stack = div()
+            .id("result-rows-stack")
+            .absolute()
+            .left_0()
+            .right_0()
+            .top(px(band_top))
+            .flex()
+            .flex_col()
+            .children(rows);
+        if !interactive || !has_rows {
+            return stack.into_any_element();
+        }
+        let in_bin = self.recycle_bin.is_open();
+        let commands = if in_bin {
+            BIN_COMMANDS
+        } else {
+            RESULT_COMMANDS
+        };
+        let i18n = Rc::clone(&self.i18n);
+        let app = cx.entity();
+        stack
+            .context_menu(move |menu, window, cx| {
+                let mut menu = menu.min_w(window.rem_size() * CONTEXT_MENU_MIN_WIDTH);
+                let rename_available = app.read(cx).rename_target_ix().is_some();
+                for (ix, command) in commands.iter().enumerate() {
+                    if ix > 0
+                        && matches!(
+                            command,
+                            GroupCommand::DeleteSelected | GroupCommand::ShowProperties
+                        )
+                    {
+                        menu = menu.separator();
+                    }
+                    let label = i18n.get_text(command.label_key_in(in_bin));
+                    let action = command
+                        .action()
+                        .expect("a result command is an Action the root already handles");
+                    menu = if *command == GroupCommand::RenameSelected {
+                        menu.menu_with_disabled(label, action, !rename_available)
+                    } else {
+                        menu.menu(label, action)
+                    };
+                }
+                menu
+            })
+            .into_any_element()
     }
 
     fn collect_visible_rows(
@@ -285,7 +339,7 @@ impl CairnApp {
         row_height: Pixels,
         interactive: bool,
         search_focused: bool,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) -> Vec<AnyElement> {
         let band = RowBand {
             total: self.results.table.total_rows(),
@@ -308,8 +362,6 @@ impl CairnApp {
 
 #[cfg(test)]
 mod tests {
-    use core::prelude::rust_2021::test;
-
     use crate::table::rows::{rows_band_local_top, rows_to_paint};
 
     #[test]

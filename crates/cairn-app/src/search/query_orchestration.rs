@@ -4,7 +4,7 @@
 
 //! Query orchestration: search triggering, query lifecycle, paging requests, and highlight slicing.
 
-use crate::app::{layout, CairnApp, HighlightSpan};
+use crate::app::{CairnApp, HighlightSpan, layout};
 use crate::search::coordinator::{MonotonicClock, SearchCommand, SearchPlan, ServiceTransport};
 use crate::service::ipc_tasks::get_tokio_runtime;
 use gpui_kit::gpui::{AsyncApp, Context, Pixels, Point};
@@ -242,6 +242,19 @@ fn rows_page_ready(
     service_connected && !searching && !probing && !fetching_more && has_session
 }
 
+/// Decides whether the UI needs an immediate redraw after `arrived` lands, or can wait for the
+/// follow-up request already dispatched for a newer `visible` viewport.
+fn should_notify_after_page(
+    arrived: Range<usize>,
+    visible: &Range<usize>,
+    follow_up_started: bool,
+) -> bool {
+    if !follow_up_started || arrived.is_empty() {
+        return true;
+    }
+    arrived.start < visible.end && arrived.end > visible.start
+}
+
 impl CairnApp {
     /// `true` when there is something the service can answer: typed text, a
     /// file-type filter, or a folder-source scope. An empty box with a scope still
@@ -272,7 +285,7 @@ impl CairnApp {
     /// Requests the page that makes the visible band available (QRY-07). Driven by wheel, pointer,
     /// keyboard and scrollbar offsets; the render pass watches the latter through
     /// [`Self::needs_visible_rows_page`] and schedules this after the frame.
-    pub fn ensure_visible_rows_loaded(&mut self, row_height: Pixels, cx: &mut Context<Self>) {
+    pub fn ensure_visible_rows_loaded(&mut self, row_height: Pixels, cx: &mut Context<'_, Self>) {
         // The Recycle Bin holds its whole listing in memory; a page comes from that
         // listing, never from the service, so even a stopped service can show it.
         if self.recycle_bin.is_open() {
@@ -301,7 +314,7 @@ impl CairnApp {
         else {
             return;
         };
-        self.fetch_rows(offset, limit, cx);
+        self.fetch_rows(offset, limit, row_height, cx);
     }
 
     /// `true` when this frame shows rows the fetched window does not hold and no page is in flight.
@@ -331,7 +344,7 @@ impl CairnApp {
     /// Schedules an interactive search after text/IME/delete edits. Keeps already visible rows
     /// intact until new results arrive (no per-keystroke white flash), coalesces rapid key bursts,
     /// and cancels superseded in-flight queries on the service before dispatching newer ones.
-    pub fn schedule_text_search(&mut self, cx: &mut Context<Self>) {
+    pub fn schedule_text_search(&mut self, cx: &mut Context<'_, Self>) {
         self.discard_rename(cx);
         if self.recycle_bin.is_open() {
             self.filter_recycle_bin(cx);
@@ -355,7 +368,7 @@ impl CairnApp {
         }
     }
 
-    fn flush_debounced_search(&mut self, token: u64, cx: &mut Context<Self>) {
+    fn flush_debounced_search(&mut self, token: u64, cx: &mut Context<'_, Self>) {
         if self.recycle_bin.is_open() {
             return;
         }
@@ -370,7 +383,11 @@ impl CairnApp {
         }
     }
 
-    pub(crate) fn request_result_set(&mut self, change: ResultSetChange, cx: &mut Context<Self>) {
+    pub(crate) fn request_result_set(
+        &mut self,
+        change: ResultSetChange,
+        cx: &mut Context<'_, Self>,
+    ) {
         // An explicit result-set request leaves the row the rename editor was opened on.
         self.discard_rename(cx);
         // A probe is about the connection, not the place: only an empty table
@@ -462,7 +479,7 @@ impl CairnApp {
     /// Waits for the index poll instead of issuing a partial query: releases
     /// the superseded request and clears the stopped/refused state that would
     /// otherwise block the poll.
-    fn await_index_refresh(&mut self, cx: &mut Context<Self>) {
+    fn await_index_refresh(&mut self, cx: &mut Context<'_, Self>) {
         self.supersede_index_query();
         // An empty query is never refused, so a refusal of the cleared text must not
         // outlive it and block the all-files view once the index settles.
@@ -482,7 +499,7 @@ impl CairnApp {
     /// Cancels the in-flight query without changing the text or the rows already shown. The local
     /// id moves first, so the answer the service is about to finish is dropped by the same guard
     /// that ignores a superseded query.
-    pub fn cancel_in_flight_query(&mut self, cx: &mut Context<Self>) {
+    pub fn cancel_in_flight_query(&mut self, cx: &mut Context<'_, Self>) {
         if !self.supersede_index_query() {
             return;
         }
@@ -497,7 +514,7 @@ impl CairnApp {
     /// progressive index turns into a loading animation that never ends. Skipped while a query is
     /// already in flight; that answer is newer than the request would be. A hidden table (the
     /// Recycle Bin) is never refreshed in the background.
-    pub fn refresh_results(&mut self, cx: &mut Context<Self>) {
+    pub fn refresh_results(&mut self, cx: &mut Context<'_, Self>) {
         // A cancelled query is a stop, not a pause: only explicit input asks
         // for a new one.
         if !self.query.coordinator.can_background_refresh()
@@ -542,7 +559,7 @@ impl CairnApp {
         }
     }
 
-    fn run_query(&mut self, cx: &mut Context<Self>, change: ResultSetChange) {
+    fn run_query(&mut self, cx: &mut Context<'_, Self>, change: ResultSetChange) {
         // While the bin is open the search box is an in-place filter over the
         // shell listing, not a request for an index page. Typing, paste, undo
         // and IME commit all arrive here, so this one branch keeps the location
@@ -573,7 +590,11 @@ impl CairnApp {
         });
     }
 
-    fn apply_coordinator_dispatch(&mut self, transport: QueuedTransport, cx: &mut Context<Self>) {
+    fn apply_coordinator_dispatch(
+        &mut self,
+        transport: QueuedTransport,
+        cx: &mut Context<'_, Self>,
+    ) {
         self.query.rejection = None;
         self.query.degraded = None;
         self.recycle_bin.leave();
@@ -649,7 +670,7 @@ impl CairnApp {
         &mut self,
         reset_scroll: bool,
         payload: cairn_protocol::message::ResponsePayload,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         match payload {
             cairn_protocol::message::ResponsePayload::QueryResult {
@@ -711,7 +732,13 @@ impl CairnApp {
     }
 
     /// Fetches one `(offset, limit)` window of the active session and installs it.
-    pub fn fetch_rows(&mut self, offset: usize, limit: usize, cx: &mut Context<Self>) {
+    pub fn fetch_rows(
+        &mut self,
+        offset: usize,
+        limit: usize,
+        row_height: Pixels,
+        cx: &mut Context<'_, Self>,
+    ) {
         let Some(session_id) = self.query.active_session_id else {
             return;
         };
@@ -745,7 +772,28 @@ impl CairnApp {
                 match res {
                     Ok(Ok(envelope)) => match envelope.payload {
                         cairn_protocol::message::ResponsePayload::RowsResult { rows, .. } => {
+                            let arrived_end = offset.saturating_add(rows.len());
+                            let arrived_empty = rows.is_empty();
                             this.results.table.apply_page(offset, rows);
+                            this.results
+                                .table
+                                .set_scroll_top(this.scrolled_pixels(), f32::from(row_height));
+                            let current_visible = this.visible_rows(row_height);
+                            let follow_up_started = if !arrived_empty
+                                && this.needs_visible_rows_page(current_visible.clone())
+                            {
+                                this.ensure_visible_rows_loaded(row_height, cx);
+                                this.query.is_fetching_more
+                            } else {
+                                false
+                            };
+                            if !should_notify_after_page(
+                                offset..arrived_end,
+                                &current_visible,
+                                follow_up_started,
+                            ) {
+                                return;
+                            }
                         }
                         cairn_protocol::message::ResponsePayload::Error { code, .. }
                             if rows_error_requires_refresh(code) =>
@@ -1183,5 +1231,13 @@ mod tests {
                 },
             );
         });
+    }
+
+    #[test]
+    fn stale_disjoint_page_with_follow_up_skips_redundant_notify() {
+        assert!(!should_notify_after_page(100..300, &(500..520), true));
+        assert!(should_notify_after_page(100..300, &(290..310), true));
+        assert!(should_notify_after_page(100..300, &(500..520), false));
+        assert!(should_notify_after_page(100..100, &(500..520), true));
     }
 }

@@ -52,7 +52,7 @@ impl CairnApp {
     pub(super) fn render_empty_state(
         &self,
         tokens: &ShellTokens,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) -> ControlElement {
         if self.recycle_bin.error().is_some() {
             let control = accessibility::control("recycle-bin-error");
@@ -196,9 +196,11 @@ impl CairnApp {
         };
         let message = self.i18n.get_text(message_key);
         let action = match notice {
-            Some(ContentQueryNotice::Disabled)
-            | Some(ContentQueryNotice::Error)
-            | Some(ContentQueryNotice::Unreadable) => {
+            Some(
+                ContentQueryNotice::Disabled
+                | ContentQueryNotice::Error
+                | ContentQueryNotice::Unreadable,
+            ) => {
                 let label_key = match notice {
                     Some(ContentQueryNotice::Disabled) => "index_enable_action",
                     Some(ContentQueryNotice::Error) => "menu_content_search_retry",
@@ -218,7 +220,7 @@ impl CairnApp {
                         .on_click(cx.listener(move |this, _, window, cx| {
                             match notice {
                                 Some(ContentQueryNotice::Unreadable) => {
-                                    this.refresh_content_status(cx)
+                                    this.refresh_content_status(cx);
                                 }
                                 _ => this.set_content_index_enabled(true, cx),
                             }
@@ -227,9 +229,7 @@ impl CairnApp {
                         .into_any_element(),
                 )
             }
-            Some(ContentQueryNotice::Loading) | Some(ContentQueryNotice::Backfilling) | None => {
-                None
-            }
+            Some(ContentQueryNotice::Loading | ContentQueryNotice::Backfilling) | None => None,
         };
         render_state_band(tokens, control, message, icon, action)
     }
@@ -237,7 +237,7 @@ impl CairnApp {
     pub(super) fn render_service_offline_state(
         &self,
         tokens: &ShellTokens,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) -> ControlElement {
         let issue = self
             .service
@@ -293,9 +293,7 @@ impl CairnApp {
 
 #[cfg(test)]
 mod tests {
-    use core::prelude::rust_2021::test;
-
-    use super::{content_query_notice, ContentQueryNotice};
+    use super::{ContentQueryNotice, content_query_notice};
     use crate::shell::menu_rules::SubsystemMenuAccess;
     use cairn_protocol::status::{ContentIndexState, IndexJournalStatus, PropertyIndexStatus};
 

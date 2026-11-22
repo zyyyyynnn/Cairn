@@ -24,12 +24,12 @@ pub(crate) struct LaunchPlan {
 
 impl LaunchPlan {
     /// Parses CLI arguments once for both single-command handling and initial window flags.
-    pub fn parse(raw_args: Vec<String>) -> Self {
+    pub fn parse(raw_args: &[String]) -> Self {
         let mut initial_query: Option<String> = None;
         let mut sidebar_collapsed = false;
         let mut open_match = false;
 
-        for arg in &raw_args {
+        for arg in raw_args {
             if arg == "--collapsed" || arg == "--sidebar-collapsed" {
                 sidebar_collapsed = true;
             } else if arg == "--open-match" {
@@ -85,7 +85,7 @@ impl StartupBundle {
 pub(crate) struct StartupCoordinator;
 
 impl StartupCoordinator {
-    pub fn prepare(raw_args: Vec<String>, ports: &dyn BootstrapPorts) -> StartupBundle {
+    pub fn prepare(raw_args: &[String], ports: &dyn BootstrapPorts) -> StartupBundle {
         let plan = LaunchPlan::parse(raw_args);
         let settings = ports.load_settings();
         let system_dark = ports.system_prefers_dark();
@@ -143,7 +143,7 @@ mod tests {
 
     #[test]
     fn launch_plan_parses_flags_and_first_positional_query_once() {
-        let plan = LaunchPlan::parse(vec![
+        let plan = LaunchPlan::parse(&[
             "--collapsed".to_string(),
             "--unknown".to_string(),
             "cargo.toml".to_string(),
@@ -158,7 +158,7 @@ mod tests {
     #[test]
     fn prepare_reads_settings_and_theme_once_without_parsing_secondary_locale() {
         let ports = FakeBootstrapPorts::new("zh-CN", true);
-        let bundle = StartupCoordinator::prepare(vec!["*.rs".to_string()], &ports);
+        let bundle = StartupCoordinator::prepare(&["*.rs".to_string()], &ports);
 
         assert_eq!(ports.load_calls.get(), 1);
         assert_eq!(ports.dark_calls.get(), 1);

@@ -26,7 +26,7 @@ Cairn 将本地文件检索与多来源索引收敛于同一桌面工作台。�
 
 - **NTFS 实时索引**：直接读取 `$MFT` 记录与非常驻 Runlist，结合 USN Journal 增量回放、缓存校验与离线卷重连恢复。
 - **结构化查询引擎**：支持布尔逻辑、通配符、正则表达式、大小/时间范围、类型过滤与多卷并行施瓦茨变换排序。
-- **进程隔离全文检索**：内置 CJK 双字与拉丁混合分词器，支持纯文本、代码、PDF 与 DOCX 内容提取。
+- **进程隔离全文检索**：内置 CJK 双字与拉丁混合分词器，支持纯文本、代码、PDF、DOCX、XLSX 与 PPTX 内容提取。
 - **索引平台**：任意文件夹索引源、可选扩展属性索引与有界只读索引日志，均由后台服务统一管理；`CairnCli` 提供来源管理、重扫、属性索引与日志查询。
 - **原生 Shell 与回收站集成**：提供虚拟滚动结果表、中英双语切换、Windows 回收站枚举还原与系统原生属性对话框联动。
 - **安全与权限边界**：命名管道拒绝远程客户端，按调用方访问令牌实施鉴权，配置文件与索引存储强制绑定系统级安全描述符。
@@ -48,6 +48,7 @@ Cairn 将本地文件检索与多来源索引收敛于同一桌面工作台。�
 
 - Windows 10 / 11（x64）与 PowerShell 7+
 - Rust stable（见 `rust-toolchain.toml`；`x86_64-pc-windows-msvc`）
+- CMake 与 NASM（`aws-lc-rs` 的 Windows 汇编后端构建依赖）
 - WiX Toolset v5（构建安装包）
 
 ### 本地开发与运行
@@ -84,7 +85,7 @@ cargo deny check
 cargo run -p xtask -- check
 ```
 
-需要外部二进制、独立网络或提权前置条件的 `#[ignore]` 用例由 [`docs/engineering/testing.md`](docs/engineering/testing.md) 统一登记并由 `xtask check-hygiene` 校验同步；内容回填端到端用例由 CI 的 `Test / Backfill` 作业执行。
+需要外部二进制、独立网络或提权前置条件的 `#[ignore]` 用例由 [`docs/engineering/testing.md`](docs/engineering/testing.md) 统一登记并由 `xtask check-hygiene` 校验同步；内容回填与扩展属性 Worker 端到端用例由 CI 的 `Test / Engine & Tooling` 作业执行。
 
 ## 仓库结构
 
@@ -101,7 +102,7 @@ crates/
   cairn-cli/       命令行检索与 CSV / JSON 导出工具
   cairn-ui/        共享品牌、主题令牌与组件主题适配
   cairn-setup/     GPUI 安装/卸载前端与 MSI 载荷
-  cairn-setup-bin/ CairnSetup.exe 入口
+  cairn-setup-bin/ CairnSetup.exe、CairnUninstall.exe 与 CairnInstallGuard.exe 入口
 xtask/             国际化对齐校验、基准测试与 WiX 安装包构建自动化
 assets/icons/      应用 SVG 母版与固定阶梯光栅图标资产
 docs/              产品规格、工程架构与外部调研文档

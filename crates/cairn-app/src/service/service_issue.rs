@@ -105,9 +105,7 @@ pub const fn band_action(issue: ServiceIssue, service_installed: bool) -> Servic
 
 #[cfg(test)]
 mod tests {
-    use core::prelude::rust_2021::test;
-
-    use super::{band_action, should_try_silent_start, ServiceBandAction, ServiceIssue};
+    use super::{ServiceBandAction, ServiceIssue, band_action, should_try_silent_start};
 
     #[test]
     fn a_stopped_installed_service_gets_one_silent_start_attempt() {
@@ -178,49 +176,27 @@ mod tests {
         }
     }
 
+    /// Each issue has its own non-empty message key and announcement key, and the result band
+    /// speaks that registered message without drifting from `accessibility`.
     #[test]
-    fn each_issue_names_its_own_message() {
-        let keys: Vec<&str> = ServiceIssue::ALL
-            .iter()
-            .map(|issue| issue.message_key())
-            .collect();
-        assert!(
-            keys.iter().all(|key| !key.is_empty()),
-            "an issue without a message key would render the raw id"
-        );
-        let mut unique = keys.clone();
-        unique.sort_unstable();
-        unique.dedup();
-        assert_eq!(unique.len(), keys.len(), "two issues share one message");
-    }
-
-    /// The result band reads its sentence from the registry entry the issue names, so the two
-    /// mappings cannot drift apart.
-    #[test]
-    fn each_issue_speaks_the_message_its_registry_entry_registers() {
+    fn each_issue_has_unique_message_and_registered_announcement() {
+        let mut messages = std::collections::HashSet::new();
+        let mut announcements = std::collections::HashSet::new();
         for issue in ServiceIssue::ALL {
-            let entry = crate::shell::accessibility::control(issue.accessibility_key());
+            let msg = issue.message_key();
+            assert!(!msg.is_empty(), "{issue:?} must carry a message key");
+            assert!(messages.insert(msg), "two issues share message key `{msg}`");
+            let a11y_key = issue.accessibility_key();
+            assert!(
+                announcements.insert(a11y_key),
+                "two issues share announcement key `{a11y_key}`"
+            );
+            let entry = crate::shell::accessibility::control(a11y_key);
             assert_eq!(
                 entry.messages,
-                [issue.message_key()].as_slice(),
+                [msg].as_slice(),
                 "{issue:?} does not speak its registered sentence"
             );
         }
-    }
-
-    #[test]
-    fn each_issue_names_its_own_announcement() {
-        let keys: Vec<&str> = ServiceIssue::ALL
-            .iter()
-            .map(|issue| issue.accessibility_key())
-            .collect();
-        let mut unique = keys.clone();
-        unique.sort_unstable();
-        unique.dedup();
-        assert_eq!(
-            unique.len(),
-            keys.len(),
-            "two issues share one announcement"
-        );
     }
 }

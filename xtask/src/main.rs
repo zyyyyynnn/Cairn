@@ -6,6 +6,7 @@
 
 //! Cairn development, testing, and benchmark tasks (xtask).
 
+#[cfg(feature = "bench")]
 mod bench;
 mod corpus;
 mod docs_check;
@@ -15,6 +16,7 @@ mod size_check;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+#[cfg(feature = "package")]
 use xtask::package;
 
 #[derive(Parser)]
@@ -31,6 +33,9 @@ enum Commands {
         /// The workspace root to check.
         #[arg(default_value = ".")]
         workspace: PathBuf,
+        /// Only run documentation links and repository hygiene gates (for docs-only changes).
+        #[arg(long, default_value_t = false)]
+        docs_only: bool,
     },
     /// Check that every locale pair is aligned, and that the code reading them agrees
     CheckI18n {
@@ -57,6 +62,7 @@ enum Commands {
         workspace: PathBuf,
     },
     /// Package the GPUI setup (CairnSetup.exe), WiX MSI, and SHA256 checksums (REL-01, REL-02, REL-04)
+    #[cfg(feature = "package")]
     Package {
         #[arg(short, long, default_value = "dist")]
         out_dir: PathBuf,
@@ -69,6 +75,7 @@ enum Commands {
         count: usize,
     },
     /// Run the cost-model benchmark against a synthetic corpus
+    #[cfg(feature = "bench")]
     BenchQuery {
         #[arg(short, long, default_value = "corpus.tsv")]
         corpus: PathBuf,
@@ -84,10 +91,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Check { workspace } => {
-            i18n_check::check_i18n(&workspace)?;
+        Commands::Check {
+            workspace,
+            docs_only,
+        } => {
+            if !docs_only {
+                i18n_check::check_i18n(&workspace)?;
+                size_check::check_size(&workspace)?;
+            }
             docs_check::check_docs(&workspace)?;
-            size_check::check_size(&workspace)?;
             hygiene_check::check_hygiene(&workspace)?;
         }
         Commands::CheckI18n { workspace } => {
@@ -102,14 +114,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::CheckHygiene { workspace } => {
             hygiene_check::check_hygiene(&workspace)?;
         }
+        #[cfg(feature = "package")]
         Commands::Package { out_dir } => {
             package::run_package(out_dir)?;
         }
         Commands::GenCorpus { output, count } => {
-            println!("Generating {} synthetic records to {:?}...", count, output);
+            println!("Generating {count} synthetic records to {output:?}...");
             corpus::generate_synthetic_corpus(&output, count)?;
             println!("Done.");
         }
+        #[cfg(feature = "bench")]
         Commands::BenchQuery {
             corpus,
             runs,

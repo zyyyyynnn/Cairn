@@ -14,7 +14,7 @@
 
 一个行为只在一层测一次，放在最接近用户的那一层；下层不重复上层已经断言过的结果。
 
-`cairn-app` 的公开入口在 `src` 内以 `CairnApp` 上下文覆盖：就地重命名的打开、替换与取消（`rename_selected` / `cancel_rename`），查询历史后退（`go_back`），停止查询后的状态与 id（`cancel_in_flight_query`），以及取消后的状态刷新不再发起查询（`refresh_results`）；启动去重、搜索防抖取消与每帧渲染缓存通过对应 Seam（`StartupCoordinator`、`SearchCoordinator`、`RowPresentationCache`）以无 OS 真弹窗方式验证。
+`cairn-app` 的公开入口在 `src` 内以 `CairnApp` 上下文覆盖：就地重命名的打开、替换与取消（`rename_selected` / `cancel_rename`），查询历史后退（`go_back`），停止查询后的状态与 id（`cancel_in_flight_query`），以及取消后的状态刷新不发起查询（`refresh_results`）；启动去重、搜索防抖取消与每帧渲染缓存通过对应 Seam（`StartupCoordinator`、`SearchCoordinator`、`RowPresentationCache`）以无 OS 真弹窗方式验证。
 
 ## 价值判定
 
@@ -56,23 +56,27 @@
 
 | 测试 | 忽略理由 | 运行方式与前条件 |
 | --- | --- | --- |
-| `cairn-service` `a_full_backfill_reaches_ready_and_indexes_existing_files` | 测试 spawn 真实 `CairnWorker`，需要先构建 Worker；测试通过引擎的 worker 路径 seam 注入工作区构建的二进制，生产仍只在服务可执行文件旁查找。 | CI 的 `Test / Backfill` 作业在构建 `cairn-worker` 后执行 `cargo test -p cairn-service a_full_backfill_reaches_ready_and_indexes_existing_files -- --ignored`；本地先 `cargo build -p cairn-worker` 再运行同一命令。 |
-| `cairn-service` `property_index_extracts_through_real_worker_and_recovers_from_corrupt_files` | 测试 spawn 真实 `CairnWorker` 进行扩展属性抽取与损坏文件隔离，需要先构建 Worker。 | CI 的 `Test / Backfill` 作业在构建 `cairn-worker` 后执行；本地先 `cargo build -p cairn-worker` 再运行 `cargo test -p cairn-service --test platform_seam property_index_extracts_through_real_worker_and_recovers_from_corrupt_files -- --ignored`。 |
+| `cairn-service` `a_full_backfill_reaches_ready_and_indexes_existing_files` | 测试 spawn 真实 `CairnWorker`，需要先构建 Worker；测试通过引擎的 worker 路径 seam 注入工作区构建的二进制，生产仍只在服务可执行文件旁查找。 | CI 的 `Test / Engine & Tooling` 作业在编译引擎与工具测试集后直接运行已产出的测试二进制；本地先 `cargo build -p cairn-worker` 再运行 `cargo test -p cairn-service a_full_backfill_reaches_ready_and_indexes_existing_files -- --ignored`。 |
+| `cairn-service` `property_index_extracts_through_real_worker_and_recovers_from_corrupt_files` | 测试 spawn 真实 `CairnWorker` 进行扩展属性抽取与损坏文件隔离，需要先构建 Worker。 | CI 的 `Test / Engine & Tooling` 作业在编译引擎与工具测试集后直接运行已产出的测试二进制；本地先 `cargo build -p cairn-worker` 再运行 `cargo test -p cairn-service --test platform_seam property_index_extracts_through_real_worker_and_recovers_from_corrupt_files -- --ignored`。 |
 | `cairn-service` `test_live_scan_reconciles_with_the_real_change_journal` | 需要启用 USN 日志的真实 NTFS 卷，并以管理员身份读取裸卷。 | 提权后执行 `cargo test -p cairn-service test_live_scan_reconciles_with_the_real_change_journal -- --ignored`；`C:` 必须已启用 USN 日志。 |
 | `cairn-app` `a_deleted_file_lists_and_restores_through_the_shell` | 手工验证：经 Shell 在真实回收站创建并恢复一个探针文件。 | 仅在改动 Shell 管道时执行 `cargo test -p cairn-app a_deleted_file_lists_and_restores_through_the_shell -- --ignored`；探针限定为临时目录中的 `cairn-bin-round-trip.txt`，不得操作其他回收站项。 |
 | `cairn-app` `the_update_check_reaches_the_release_api` | 需要访问 GitHub releases API 的真实网络；CI 不保证出网。 | 在网络可用时执行 `cargo test -p cairn-app the_update_check_reaches_the_release_api -- --ignored`；HTTP/TLS 依赖升级后用它确认请求能穿过 TLS 后端与系统代理。 |
 | `cairn-setup` `staging_root_is_locked_to_administrators` | 需要管理员权限对安装包暂存目录写入 `SYSTEM` 与 `Administrators` 受保护 DACL。 | 提权后执行 `cargo test -p cairn-setup staging_root_is_locked_to_administrators -- --ignored`。 |
-| `xtask` `real_package_builds_msi_and_setup` | 需要 WiX 5、`mt.exe` 与 `target/release` 下的发布二进制。 | CI `Installer Package` 作业用 `package-test.exe real_package_builds_msi_and_setup --ignored --nocapture` 执行；本地构建 release 资产后执行 `cargo test -p xtask real_package_builds_msi_and_setup -- --ignored`。 |
+| `xtask` `real_package_builds_msi_and_setup` | 需要 WiX 5、`mt.exe` 与 `target/release` 下的发布二进制。 | CI `Installer Package` 作业用 `package-test.exe package::tests::real_package_builds_msi_and_setup --ignored --nocapture --exact` 执行；本地构建 release 资产后执行 `cargo test -p xtask real_package_builds_msi_and_setup -- --ignored`。 |
 
 ## CI 门禁
 
-`.github/workflows/ci.yml` 的 `Code Quality & Static Analysis` 作业在 `windows-latest` 上执行 `cargo clippy --workspace --all-targets -- -D warnings` 与 `cargo doc --workspace --no-deps`，并以四条独立命令执行仓库门禁：`cargo run -p xtask -- check-i18n`、`cargo run -p xtask -- check-size`、`cargo run -p xtask -- check-docs`、`cargo run -p xtask -- check-hygiene`（前两条跳过纯文档改动，后两条始终执行）；`Dependency Policy` 作业在 `ubuntu-latest` 上执行 `cargo fmt --all --check` 与 `cargo deny check`，随后按以下作业运行测试与回归门禁：
+`.github/workflows/ci.yml` 按正交依赖拆分为 Ubuntu 静态门禁与 Engine / Desktop 双路 Windows 作业，不重复编译无关依赖：
 
-- `Test / Core & Protocol`：`cairn-protocol` `cairn-client` `cairn-core` `cairn-ui`
-- `Test / Content & Filesystem`：`cairn-ntfs` `cairn-content`
-- `Test / Service`：`cairn-service`
-- `Test / Desktop`：`cairn-app`
-- `Test / Backfill`：构建 `cairn-worker` 并运行 `cairn-service` 内容回填与扩展属性抽取 `#[ignore]` 端到端测试
-- `Test / Tooling`：`cairn-cli` `cairn-worker` `cairn-setup` `cairn-setup-bin` `xtask`，并执行 `cargo run --release -p xtask -- bench-query --check`
+- `Repository Gates`（`ubuntu-latest`）：执行 `cargo run -p xtask --no-default-features -- check`（纯文档变更传入 `--docs-only` 只跑 `check-docs` 与 `check-hygiene`）。
+- `Lint & Rustdoc`（`windows-latest`，纯文档变更跳过）：执行 `cargo clippy --workspace --all-targets -- -D warnings` 与 `cargo doc --workspace --no-deps`。
+- `Code Quality & Static Analysis`（`ubuntu-latest`）：汇总 `Repository Gates` 与 `Lint & Rustdoc` 的结果，作为必需状态检查。
+- `Dependency Policy`（`ubuntu-latest`，纯文档变更跳过）：执行 `cargo fmt --all --check` 与预编译 `cargo deny check`。
+- `Test / Engine & Tooling`（`windows-latest`，无 GPUI / NASM）：单次编译并测试 `cairn-protocol` `cairn-core` `cairn-ntfs` `cairn-content` `cairn-client` `cairn-worker` `cairn-service` `cairn-cli` `xtask`，并直接运行 `cairn-service` 内容回填与扩展属性抽取 `#[ignore]` 端到端测试、导出 `package-test.exe`。
+- `Test / Desktop & Setup`（`windows-latest`）：编译并测试 `cairn-ui` `cairn-app` `cairn-setup` `cairn-setup-bin`。
+- `Domain & System Test Suite`（`ubuntu-latest`）：汇总两个测试作业结果，作为必需状态检查。
+- `Release / Engine`（`windows-latest`）：发布编译 `cairn-service` `cairn-cli` `cairn-worker` `xtask`，并在同机产物上直接执行 `CairnXtask.exe bench-query --check`。
+- `Release / Desktop`（`windows-latest`）：发布编译 `cairn-app` `cairn-setup-bin`。
+- `Installer Package`（代码变更用 `windows-latest` + WiX 缓存，纯文档变更在 `ubuntu-latest` 空转通过）：待发布产物与 `package-test.exe` 就绪后运行 `real_package_builds_msi_and_setup`。
 
-`Domain & System Test Suite` 汇总 `Test` 各层、Tooling 与 Backfill 的结果，作为必需状态检查；`Installer Package` 在 release 二进制与 Tooling 产物就绪后运行 `xtask` 的 `real_package_builds_msi_and_setup`。新增测试默认必须被上述命令覆盖；无法进入 CI 的测试在“需要权限的验证”或“被忽略的测试”中登记。
+新增测试默认必须被上述命令覆盖；无法进入 CI 的测试在“需要权限的验证”或“被忽略的测试”中登记。

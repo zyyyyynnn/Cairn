@@ -2,12 +2,12 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Cairn main window: the file-manager shell — title bar, locations sidebar, search band, command
-//! bar, virtualized result table and status line.
+//! Cairn main window: the file-manager shell — title bar, locations sidebar, search band,
+//! virtualized result table and status line.
 //!
 //! This module owns the window's *state and behaviour*. The layout itself lives in [`crate::view`],
 //! which reads these fields and hands interactions back to the owner methods below. Keyboard commands
-//! are Actions declared in `crate::commands` and dispatched as Actions against this view's
+//! are Actions declared in `crate::shell::commands` and dispatched as Actions against this view's
 //! `key_context`, which the window root tracks; they therefore reach the owner methods whichever
 //! descendant holds focus.
 //!
@@ -92,9 +92,12 @@ pub mod layout {
     pub const FRAMERATE_COLUMN: f32 = 21.0 * STEP;
     pub const TABLE_SCROLL_STEP_FACTOR: f32 = 0.25;
     pub const MESSAGE_MAX_WIDTH: f32 = 154.0 * STEP;
-    /// Baseline optical correction centering the 24px state icon beside the serif heading line box.
+    /// Baseline optical correction centering the 24px inline action icon beside the state sentence line box.
     pub const STATE_ACTION_OPTICAL_OFFSET: f32 = 1.5 / theme::BASE_FONT_PX;
     pub const DIALOG_WIDTH: f32 = 96.0 * STEP;
+    pub const DIALOG_FORM_WIDTH: f32 = 128.0 * STEP;
+    pub const DIALOG_WIDE_WIDTH: f32 = 220.0 * STEP;
+    pub const DIALOG_LIST_MAX_HEIGHT: f32 = 64.0 * STEP;
     pub const DIALOG_SEAT_HEIGHT: f32 = 32.0 * STEP;
 
     pub const SIDEBAR_WIDTH: f32 = 52.0 * STEP;
@@ -369,9 +372,8 @@ pub struct CairnApp {
     pub toast: Option<crate::shell::toast::ToastState>,
     pub(crate) toast_serial: u64,
     pub table_reveal: TableRevealState,
-    /// True while the GitHub release check is in flight. The Help menu row carries the loading
-    /// icon and the menu is reopened after the click; no separate waiting dialog or toast is opened.
-    pub(crate) is_checking_update: bool,
+    /// In-app update lifecycle rendered on the Help menu's update row.
+    pub(crate) update_state: crate::shell::update::UpdateState,
     /// The live window resize and the cover it owns, judged by this window's own geometry.
     pub(crate) window_resize: crate::shell::window_resize::WindowResizeTracker,
     /// Keeps the bounds observer alive for the window's lifetime.
@@ -380,18 +382,16 @@ pub struct CairnApp {
 
 impl CairnApp {
     #[cfg(test)]
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let bundle = crate::startup::StartupCoordinator::prepare(
-            Vec::new(),
-            &crate::startup::SystemBootstrapPorts,
-        );
+    pub fn new(window: &mut Window, cx: &mut Context<'_, Self>) -> Self {
+        let bundle =
+            crate::startup::StartupCoordinator::prepare(&[], &crate::startup::SystemBootstrapPorts);
         Self::new_with_startup(bundle, window, cx)
     }
 
     pub(crate) fn new_with_startup(
         startup: crate::startup::StartupBundle,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) -> Self {
         crate::shell::perf::mark("app new");
         let crate::startup::StartupBundle {
@@ -423,8 +423,8 @@ impl CairnApp {
         // A tab stop in its own right: the table owns a keyboard path that nothing else answers, so
         // Tab has to be able to reach it (Design Guides Accessibility checklist: "every action is
         // reachable and operable by keyboard"). Where it falls in the walk is decided by paint order
-        // — the query box and the four toolbar triggers come first — and no test pins that index, so
-        // none is claimed here.
+        // — the top bar and query box come first — and no test pins that index, so none is claimed
+        // here.
         let results_focus = cx.focus_handle().tab_stop(true);
 
         // Keep the window key context reachable: if a rendered region disappears and focus is
@@ -467,6 +467,7 @@ impl CairnApp {
         let hotkey_unavailable = hotkey.is_none();
 
         crate::shell::theme::ensure_shell_tokens(cx);
+        cairn_ui::locale::init_layout_direction(cx);
 
         let mut app = Self {
             i18n,
@@ -542,7 +543,7 @@ impl CairnApp {
             toast: None,
             toast_serial: 0,
             table_reveal: TableRevealState::new(),
-            is_checking_update: false,
+            update_state: crate::shell::update::UpdateState::Idle,
             window_resize: Default::default(),
             window_resize_subscription: None,
         };
@@ -612,7 +613,7 @@ impl CairnApp {
     }
 
     /// Starts the results panel's entrance and closes the pending session.
-    pub(crate) fn bump_table_reveal(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn bump_table_reveal(&mut self, cx: &mut Context<'_, Self>) {
         self.table_reveal.generation = self.table_reveal.generation.wrapping_add(1);
         self.table_reveal.pending = false;
         self.table_reveal.fade_epoch = self.table_reveal.generation;
@@ -633,7 +634,7 @@ impl CairnApp {
 
     /// Starts the table entrance once a panel session actually has rows, so the
     /// fade begins with content rather than while the query is still in flight.
-    pub(crate) fn note_table_content(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn note_table_content(&mut self, cx: &mut Context<'_, Self>) {
         if self.table_reveal.pending && self.results.table.total_rows() > 0 {
             self.bump_table_reveal(cx);
         }
@@ -641,13 +642,13 @@ impl CairnApp {
 
     /// Starts the same entrance for a new session whose answer is empty; the
     /// state band is content too, not a reason to leave the old frame static.
-    pub(crate) fn note_table_empty(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn note_table_empty(&mut self, cx: &mut Context<'_, Self>) {
         if self.table_reveal.pending {
             self.bump_table_reveal(cx);
         }
     }
 
-    pub fn set_initial_query(&mut self, text: &str, cx: &mut Context<Self>) {
+    pub fn set_initial_query(&mut self, text: &str, cx: &mut Context<'_, Self>) {
         self.query.search_input.text = text.to_string();
         self.query.search_input.selection = text.len()..text.len();
         self.request_result_set(crate::search::ResultSetChange::Replace, cx);
@@ -716,7 +717,7 @@ pub fn trim_working_set() {}
 /// Hides the main Cairn window to the system tray and aggressively trims the process working set.
 #[cfg(windows)]
 pub fn hide_main_window() {
-    use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
+    use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, ShowWindow};
 
     if let Some(hwnd) = crate::shell::tray::find_main_window() {
         // SAFETY: `hwnd` was found by `find_main_window` for the current process window.
@@ -736,25 +737,23 @@ impl EntityInputHandler for CairnApp {
         range_utf16: Range<usize>,
         adjusted_range: &mut Option<Range<usize>>,
         _window: &mut Window,
-        _cx: &mut Context<Self>,
+        _cx: &mut Context<'_, Self>,
     ) -> Option<String> {
         let mapper = crate::search::input::Utf16Utf8Mapper::new(&self.query.search_input.text);
         let u8_range = mapper.utf16_to_utf8_range(range_utf16.clone());
         let start = u8_range.start.min(self.query.search_input.text.len());
         let end = u8_range.end.min(self.query.search_input.text.len());
-        if start <= end {
+        (start <= end).then(|| {
             *adjusted_range = Some(range_utf16);
-            Some(self.query.search_input.text[start..end].to_string())
-        } else {
-            None
-        }
+            self.query.search_input.text[start..end].to_string()
+        })
     }
 
     fn selected_text_range(
         &mut self,
         _ignore_disabled_input: bool,
         _window: &mut Window,
-        _cx: &mut Context<Self>,
+        _cx: &mut Context<'_, Self>,
     ) -> Option<UTF16Selection> {
         let (start, end) = self.query.search_input.normalized_selection();
         let mapper = crate::search::input::Utf16Utf8Mapper::new(&self.query.search_input.text);
@@ -767,14 +766,14 @@ impl EntityInputHandler for CairnApp {
     fn marked_text_range(
         &self,
         _window: &mut Window,
-        _cx: &mut Context<Self>,
+        _cx: &mut Context<'_, Self>,
     ) -> Option<Range<usize>> {
         let marked = self.query.search_input.marked_range.as_ref()?;
         let mapper = crate::search::input::Utf16Utf8Mapper::new(&self.query.search_input.text);
         Some(mapper.utf8_to_utf16_range(marked.clone()))
     }
 
-    fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) {
         self.query.search_input.marked_range = None;
         cx.notify();
     }
@@ -784,7 +783,7 @@ impl EntityInputHandler for CairnApp {
         replacement_range: Option<Range<usize>>,
         text: &str,
         _window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         self.query
             .search_input
@@ -799,7 +798,7 @@ impl EntityInputHandler for CairnApp {
         new_text: &str,
         new_selected_range: Option<Range<usize>>,
         _window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         self.query
             .search_input
@@ -812,7 +811,7 @@ impl EntityInputHandler for CairnApp {
         range_utf16: Range<usize>,
         element_bounds: Bounds<Pixels>,
         window: &mut Window,
-        _cx: &mut Context<Self>,
+        _cx: &mut Context<'_, Self>,
     ) -> Option<Bounds<Pixels>> {
         // The platform hands us the painted text area; keep it so a click after an IME commit uses
         // this frame's origin rather than a stale one.
@@ -833,7 +832,7 @@ impl EntityInputHandler for CairnApp {
         &mut self,
         point: Point<Pixels>,
         window: &mut Window,
-        _cx: &mut Context<Self>,
+        _cx: &mut Context<'_, Self>,
     ) -> Option<usize> {
         let byte_index = self.query_byte_index_for_point(point, window);
         let mapper = crate::search::input::Utf16Utf8Mapper::new(&self.query.search_input.text);
@@ -844,7 +843,7 @@ impl EntityInputHandler for CairnApp {
         &mut self,
         range_utf16: Range<usize>,
         _window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         let mapper = crate::search::input::Utf16Utf8Mapper::new(&self.query.search_input.text);
         self.query.search_input.selection = mapper.utf16_to_utf8_range(range_utf16);
@@ -857,9 +856,7 @@ pub(crate) use tests::test_row;
 
 #[cfg(test)]
 mod tests {
-    use core::prelude::rust_2021::test;
-
-    use super::{join_row_path, CairnApp};
+    use super::{CairnApp, join_row_path};
     use crate::search::ResultSetChange;
     use cairn_protocol::message::{FileRowData, SourceId};
     use cairn_protocol::status::{
@@ -884,7 +881,7 @@ mod tests {
     }
 
     fn with_app(
-        test: impl FnOnce(&mut CairnApp, &mut gpui_kit::gpui::Context<CairnApp>) + 'static,
+        test: impl FnOnce(&mut CairnApp, &mut gpui_kit::gpui::Context<'_, CairnApp>) + 'static,
     ) {
         gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
             gpui_kit::init(cx);

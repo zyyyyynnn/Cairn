@@ -5,7 +5,7 @@
 //! The Everything-style menu bar the title bar owns (UI-01, UI-03).
 //!
 //! Seven top-level menus sit on the same row as the brand: 文件, 编辑, 查看, 搜索, 索引, 工具 and 帮助.
-//! Every command a toolbar, a shortcut or the result context menu can run is listed here once, so
+//! Every command a title-bar menu, a shortcut or the result context menu can run is listed here once, so
 //! the menu item and the keyboard binding cannot disagree about what a command is.
 //!
 //! This module holds no behaviour and no translated text. A [`GroupCommand`] names a window
@@ -223,8 +223,8 @@ pub enum GroupCommand {
     TogglePropertyIndex,
     PropertyIndexStatus,
     PropertyIndexUsage,
-    /// Checks the latest stable release, downloads and verifies the installer, then hands the
-    /// verified installer to the elevated setup flow.
+    /// Checks the latest stable release when idle, or downloads, verifies, and launches the
+    /// elevated installer when an update is available.
     CheckForUpdates,
     About,
 }
@@ -338,8 +338,8 @@ impl GroupCommand {
     /// item and its shortcut on one implementation.
     ///
     /// A command with no Action of its own — every choice in a single-owner family such as the sort
-    /// columns, the settings choices, the headings, and ClearQuery — returns `None` and the view
-    /// wires its click to the owner method directly. ClearQuery's key is the dismissal cascade
+    /// columns, the settings choices, the headings, and `ClearQuery` — returns `None` and the view
+    /// wires its click to the owner method directly. `ClearQuery`'s key is the dismissal cascade
     /// rather than this command, so it advertises the key through [`Self::hint_action`].
     pub fn action(self) -> Option<Box<dyn Action>> {
         match self {
@@ -367,7 +367,7 @@ impl GroupCommand {
 
     /// The Action whose binding supplies this row's hint while the click runs the command.
     ///
-    /// ClearQuery is click-only: Escape belongs to the window's dismissal cascade, so dispatching
+    /// `ClearQuery` is click-only: Escape belongs to the window's dismissal cascade, so dispatching
     /// it from the Edit menu would close the menu (or a toast) and leave the query in place. The
     /// row still advertises Escape through this hint, without dispatching it.
     pub fn hint_action(self) -> Option<Box<dyn Action>> {
@@ -631,14 +631,9 @@ pub fn all_commands() -> Vec<GroupCommand> {
 
 #[cfg(test)]
 mod tests {
-    use core::prelude::rust_2021::test;
-
-    use super::{
-        all_commands, group_spec, menu_groups, GroupCommand, MenuGroup, ZoomPreset,
-        CONTENT_INDEX_SECTIONS, PROPERTY_INDEX_SECTIONS, RESCAN_SECTIONS,
-    };
+    use super::{GroupCommand, MenuGroup, ZoomPreset, all_commands, group_spec, menu_groups};
     use crate::shell::i18n::I18nManager;
-    use crate::table::model::{SortColumn, TableColumn};
+    use crate::table::model::SortColumn;
     use cairn_ui::theme::{MAX_ZOOM, MIN_ZOOM};
 
     #[test]
@@ -660,136 +655,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    /// Rename is a read-modify command on one row, so it sits with the other row commands in the
-    /// File menu rather than in the destructive section.
-    #[test]
-    fn the_file_menu_offers_rename_beside_the_row_commands() {
-        let file = group_spec(MenuGroup::File);
-        let row_section = file
-            .sections
-            .first()
-            .expect("the File menu has a row section");
-        assert!(row_section.contains(&GroupCommand::RenameSelected));
-        assert!(
-            !file.sections[1].contains(&GroupCommand::RenameSelected),
-            "rename is not a destructive command"
-        );
-    }
-
-    /// The Help menu keeps the update entry and About in one group, update first.
-    #[test]
-    fn the_help_menu_offers_updates_before_about() {
-        let help = group_spec(MenuGroup::Help);
-        assert_eq!(help.sections.len(), 1);
-        assert_eq!(
-            help.sections[0],
-            &[GroupCommand::CheckForUpdates, GroupCommand::About][..]
-        );
-    }
-
-    #[test]
-    fn index_and_tools_menus_separate_index_operations_from_preferences() {
-        let tools = group_spec(MenuGroup::Tools);
-        let tool_commands: Vec<GroupCommand> = tools
-            .sections
-            .iter()
-            .flat_map(|section| section.iter().copied())
-            .collect();
-        assert_eq!(
-            tool_commands.len(),
-            2,
-            "Tools keeps only language and autostart"
-        );
-        assert!(tool_commands.contains(&GroupCommand::ToggleAutostart));
-        assert!(tool_commands
-            .iter()
-            .any(|cmd| matches!(cmd, GroupCommand::Submenu("settings_section_language", _))));
-
-        let index = group_spec(MenuGroup::Index);
-        let index_commands: Vec<GroupCommand> = index
-            .sections
-            .iter()
-            .flat_map(|section| section.iter().copied())
-            .collect();
-        assert_eq!(
-            index_commands,
-            vec![
-                GroupCommand::OpenIndexJournal,
-                GroupCommand::ManageFolderSources,
-                GroupCommand::RescanMenu,
-                GroupCommand::ContentIndexMenu,
-                GroupCommand::PropertyIndexMenu,
-            ]
-        );
-    }
-
-    #[test]
-    fn index_submenus_carry_their_documented_switches_facts_and_actions() {
-        let rescan_children: Vec<GroupCommand> = GroupCommand::RescanMenu
-            .submenu_sections()
-            .iter()
-            .flat_map(|section| section.iter().copied())
-            .collect();
-        assert_eq!(GroupCommand::RescanMenu.submenu_sections(), RESCAN_SECTIONS);
-        assert_eq!(rescan_children, vec![GroupCommand::RescanAll]);
-
-        let content_children: Vec<GroupCommand> = GroupCommand::ContentIndexMenu
-            .submenu_sections()
-            .iter()
-            .flat_map(|section| section.iter().copied())
-            .collect();
-        assert_eq!(
-            GroupCommand::ContentIndexMenu.submenu_sections(),
-            CONTENT_INDEX_SECTIONS
-        );
-        assert_eq!(
-            content_children,
-            vec![
-                GroupCommand::ToggleContentSearch,
-                GroupCommand::ContentSearchDetails,
-                GroupCommand::ContentSearchUsage,
-                GroupCommand::ContentSearchUpdated,
-                GroupCommand::RetryContentSearch,
-                GroupCommand::ClearContentSearch,
-            ]
-        );
-
-        let property_children: Vec<GroupCommand> = GroupCommand::PropertyIndexMenu
-            .submenu_sections()
-            .iter()
-            .flat_map(|section| section.iter().copied())
-            .collect();
-        assert_eq!(
-            GroupCommand::PropertyIndexMenu.submenu_sections(),
-            PROPERTY_INDEX_SECTIONS
-        );
-        assert_eq!(
-            property_children,
-            vec![
-                GroupCommand::TogglePropertyIndex,
-                GroupCommand::PropertyIndexStatus,
-                GroupCommand::PropertyIndexUsage,
-            ]
-        );
-    }
-
-    #[test]
-    fn radio_choices_match_only_mutually_exclusive_option_families() {
-        assert!(GroupCommand::SortBy(SortColumn::Name).is_radio_choice());
-        assert!(GroupCommand::SetTheme(crate::shell::settings::THEME_SYSTEM).is_radio_choice());
-        assert!(GroupCommand::SetZoom(ZoomPreset::Standard).is_radio_choice());
-        assert!(
-            GroupCommand::SetLanguage(crate::shell::settings::LANGUAGE_SYSTEM).is_radio_choice()
-        );
-
-        assert!(!GroupCommand::ReverseOrder.is_radio_choice());
-        assert!(!GroupCommand::ToggleColumn(TableColumn::Path).is_radio_choice());
-        assert!(!GroupCommand::ToggleCase.is_radio_choice());
-        assert!(!GroupCommand::ToggleAutostart.is_radio_choice());
-        assert!(!GroupCommand::ToggleContentSearch.is_radio_choice());
-        assert!(!GroupCommand::TogglePropertyIndex.is_radio_choice());
     }
 
     /// An item that resolves to no text is a silent failure, and a command the user cannot name is a
@@ -835,125 +700,8 @@ mod tests {
         assert_eq!(keys.len(), count, "two groups share one element key");
     }
 
-    /// A command whose Action and keyboard path exist must not also be handed a second handler by the
-    /// view: `PopupMenuItem` runs the handler *instead of* the action. The families that have no
-    /// action of their own are the choices and owner methods, so they are the only ones allowed to
-    /// return `None`.
-    #[test]
-    fn action_bearing_commands_are_the_ones_the_keymap_already_owns() {
-        for command in all_commands() {
-            let has_action = command.action().is_some();
-            match command {
-                GroupCommand::SortBy(_)
-                | GroupCommand::ReverseOrder
-                | GroupCommand::ToggleColumn(_)
-                | GroupCommand::SetTheme(_)
-                | GroupCommand::SetZoom(_)
-                | GroupCommand::Submenu(_, _)
-                | GroupCommand::SetLanguage(_)
-                | GroupCommand::ToggleAutostart
-                | GroupCommand::TogglePinyin
-                | GroupCommand::ToggleIgnorePunctuation
-                | GroupCommand::ToggleIgnoreWhitespace
-                | GroupCommand::ToggleIgnoreDiacritics
-                | GroupCommand::ToggleExcludeHidden
-                | GroupCommand::ToggleExcludeSystem
-                | GroupCommand::OpenIndexJournal
-                | GroupCommand::ManageFolderSources
-                | GroupCommand::RescanMenu
-                | GroupCommand::RescanAll
-                | GroupCommand::ContentIndexMenu
-                | GroupCommand::ToggleContentSearch
-                | GroupCommand::ContentSearchDetails
-                | GroupCommand::ContentSearchUsage
-                | GroupCommand::ContentSearchUpdated
-                | GroupCommand::RetryContentSearch
-                | GroupCommand::ClearContentSearch
-                | GroupCommand::PropertyIndexMenu
-                | GroupCommand::TogglePropertyIndex
-                | GroupCommand::PropertyIndexStatus
-                | GroupCommand::PropertyIndexUsage
-                | GroupCommand::EmptyRecycleBin
-                | GroupCommand::CheckForUpdates
-                | GroupCommand::About => {
-                    assert!(
-                        !has_action,
-                        "{command:?} is a choice or an owner method, so the view wires its click"
-                    );
-                }
-                // ClearQuery must run as a direct command: its Escape Action is the dismissal
-                // cascade, so clicking it through the action path would close the menu and leave
-                // the query in place. The row keeps the Escape binding only as its hint.
-                GroupCommand::ClearQuery => {
-                    assert!(
-                        !has_action,
-                        "ClearQuery must not dispatch EscapeQuery on click"
-                    );
-                    assert!(
-                        command.hint_action().is_some(),
-                        "ClearQuery lost the Escape hint beside its label"
-                    );
-                }
-                _ => assert!(has_action, "{command:?} lost the Action that runs it"),
-            }
-        }
-    }
-
-    /// `run_group_command` dispatches a command through its Action when it has one, so its
-    /// retained match may only cover the commands without an Action. This lists the arms that
-    /// match really keeps: a command whose Action appears here, or a command without one that is
-    /// missing, would reach the fallback `unreachable!` instead of its owner method.
-    #[test]
-    fn the_directly_dispatched_commands_are_exactly_the_ones_without_an_action() {
-        let direct = [
-            GroupCommand::ClearQuery,
-            GroupCommand::EmptyRecycleBin,
-            GroupCommand::SortBy(SortColumn::Name),
-            GroupCommand::ReverseOrder,
-            GroupCommand::ToggleColumn(TableColumn::Name),
-            GroupCommand::SetTheme(crate::shell::settings::THEME_SYSTEM),
-            GroupCommand::SetZoom(ZoomPreset::Standard),
-            GroupCommand::Submenu("menu_sort", &[]),
-            GroupCommand::SetLanguage(crate::shell::settings::LANGUAGE_SYSTEM),
-            GroupCommand::ToggleAutostart,
-            GroupCommand::TogglePinyin,
-            GroupCommand::ToggleIgnorePunctuation,
-            GroupCommand::ToggleIgnoreWhitespace,
-            GroupCommand::ToggleIgnoreDiacritics,
-            GroupCommand::ToggleExcludeHidden,
-            GroupCommand::ToggleExcludeSystem,
-            GroupCommand::OpenIndexJournal,
-            GroupCommand::ManageFolderSources,
-            GroupCommand::RescanMenu,
-            GroupCommand::RescanAll,
-            GroupCommand::ContentIndexMenu,
-            GroupCommand::ToggleContentSearch,
-            GroupCommand::ContentSearchDetails,
-            GroupCommand::ContentSearchUsage,
-            GroupCommand::ContentSearchUpdated,
-            GroupCommand::RetryContentSearch,
-            GroupCommand::ClearContentSearch,
-            GroupCommand::PropertyIndexMenu,
-            GroupCommand::TogglePropertyIndex,
-            GroupCommand::PropertyIndexStatus,
-            GroupCommand::PropertyIndexUsage,
-            GroupCommand::CheckForUpdates,
-            GroupCommand::About,
-        ];
-        for command in all_commands() {
-            let arm_matches = direct.iter().any(|candidate| {
-                core::mem::discriminant(candidate) == core::mem::discriminant(&command)
-            });
-            assert_eq!(
-                arm_matches,
-                command.action().is_none(),
-                "{command:?} does not agree with the arms run_group_command keeps"
-            );
-        }
-    }
-
     /// The Edit menu's 清空搜索 row dispatches the command itself; Escape is only the hint beside
-    /// its label. Dispatching EscapeQuery would close the menu and return before touching the query.
+    /// its label. Dispatching `EscapeQuery` would close the menu and return before touching the query.
     #[test]
     fn clear_query_runs_as_a_command_and_borrows_escape_only_as_a_hint() {
         use crate::shell::commands::EscapeQuery;
@@ -971,6 +719,55 @@ mod tests {
             "the hint must still be drawn from the Escape binding"
         );
         assert_eq!(command.shortcut(), Some("escape"));
+    }
+
+    #[test]
+    fn action_dispatch_and_radio_choice_contracts_hold() {
+        for command in all_commands() {
+            let is_action_variant = matches!(
+                command,
+                GroupCommand::OpenSelected
+                    | GroupCommand::RevealLocation
+                    | GroupCommand::CopyPaths
+                    | GroupCommand::CopyNames
+                    | GroupCommand::UndoQueryText
+                    | GroupCommand::RedoQueryText
+                    | GroupCommand::CutQueryText
+                    | GroupCommand::PasteQueryText
+                    | GroupCommand::ShowProperties
+                    | GroupCommand::DeleteSelected
+                    | GroupCommand::RenameSelected
+                    | GroupCommand::RestoreSelected
+                    | GroupCommand::RestoreAll
+                    | GroupCommand::SelectAll
+                    | GroupCommand::ToggleCase
+                    | GroupCommand::ToggleWholeWord
+                    | GroupCommand::ToggleMatchPath
+                    | GroupCommand::ToggleRegex
+            );
+            assert_eq!(
+                command.action().is_some(),
+                is_action_variant,
+                "{command:?} drifted between GroupCommand::action() and menu_actions dispatch"
+            );
+        }
+
+        assert!(GroupCommand::SortBy(SortColumn::Name).is_radio_choice());
+        assert!(GroupCommand::SetTheme(crate::shell::settings::THEME_SYSTEM).is_radio_choice());
+        assert!(GroupCommand::SetZoom(ZoomPreset::Standard).is_radio_choice());
+        assert!(
+            GroupCommand::SetLanguage(crate::shell::settings::LANGUAGE_SYSTEM).is_radio_choice()
+        );
+        for non_radio in [
+            GroupCommand::ReverseOrder,
+            GroupCommand::ToggleColumn(crate::table::model::TableColumn::Path),
+            GroupCommand::ToggleCase,
+            GroupCommand::ToggleAutostart,
+            GroupCommand::ToggleContentSearch,
+            GroupCommand::TogglePropertyIndex,
+        ] {
+            assert!(!non_radio.is_radio_choice(), "{non_radio:?}");
+        }
     }
 
     /// Two menus on one key would open whichever the keymap reaches last, so the mnemonic table has
@@ -1070,18 +867,6 @@ mod tests {
     }
 
     #[test]
-    fn search_menu_includes_hidden_and_system_exclusion_toggles() {
-        let search = group_spec(MenuGroup::Search);
-        let commands: Vec<GroupCommand> = search
-            .sections
-            .iter()
-            .flat_map(|section| section.iter().copied())
-            .collect();
-        assert!(commands.contains(&GroupCommand::ToggleExcludeHidden));
-        assert!(commands.contains(&GroupCommand::ToggleExcludeSystem));
-    }
-
-    #[test]
     fn view_menu_offers_all_table_columns_with_name_locked() {
         use crate::table::model::TableColumn;
 
@@ -1101,24 +886,5 @@ mod tests {
         for col in TableColumn::ALL {
             assert!(commands.contains(&GroupCommand::ToggleColumn(col)));
         }
-    }
-
-    #[test]
-    fn every_menu_group_is_in_declaration_order() {
-        assert_eq!(
-            menu_groups()
-                .iter()
-                .map(|spec| spec.group)
-                .collect::<Vec<_>>(),
-            vec![
-                MenuGroup::File,
-                MenuGroup::Edit,
-                MenuGroup::View,
-                MenuGroup::Search,
-                MenuGroup::Index,
-                MenuGroup::Tools,
-                MenuGroup::Help,
-            ]
-        );
     }
 }

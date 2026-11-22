@@ -5,10 +5,10 @@
 //! Multi-volume synchronization engine and index lifecycle manager.
 
 use cairn_content::ContentSearcher;
-use cairn_core::property_store::{PropertySideTables, SourceId, FOLDER_SOURCE_ID_BASE};
 use cairn_core::IndexMemoryFootprint;
+use cairn_core::property_store::{FOLDER_SOURCE_ID_BASE, PropertySideTables, SourceId};
 use cairn_ntfs::volume::enumerate_fixed_drives;
-use cairn_ntfs::volume_identity::{enumerate_volumes, VolumeIdentity};
+use cairn_ntfs::volume_identity::{VolumeIdentity, enumerate_volumes};
 use cairn_protocol::status::{
     ContentIndexState, ContentIndexStatus, IndexJournalEntry, IndexJournalStatus,
     PropertyIndexStatus, SourceStatusSummary, VolumeState, VolumeStatusSummary,
@@ -227,7 +227,7 @@ impl MultiVolumeEngine {
             if let Some(roots) = excluded_roots.get(&d) {
                 vol.set_excluded_roots(roots.iter().copied());
             }
-            let cache_file = index_dir.join(format!("vol_{}.idx", d));
+            let cache_file = index_dir.join(format!("vol_{d}.idx"));
             let mut loaded_ok = false;
             if cache_file.exists() {
                 match persistence::load_volume_index(&cache_file) {
@@ -261,18 +261,18 @@ impl MultiVolumeEngine {
                         } else {
                             if let Some(identity) = live_identity {
                                 vol.set_identity(identity.clone());
-                                if saved_guid.is_none() {
-                                    if let Err(err) = persistence::save_volume_guid_sidecar(
+                                if saved_guid.is_none()
+                                    && let Err(err) = persistence::save_volume_guid_sidecar(
                                         index_dir,
                                         d,
                                         &vol.volume_guid,
-                                    ) {
-                                        tracing::warn!(
-                                            "Failed to persist GUID sidecar for volume {}: {}",
-                                            d,
-                                            err
-                                        );
-                                    }
+                                    )
+                                {
+                                    tracing::warn!(
+                                        "Failed to persist GUID sidecar for volume {}: {}",
+                                        d,
+                                        err
+                                    );
                                 }
                             }
 
@@ -646,7 +646,10 @@ impl MultiVolumeEngine {
 
 impl MultiVolumeEngine {
     fn collect_volume_summaries(volumes: &HashMap<char, VolumeIndex>) -> Vec<VolumeStatusSummary> {
-        let mut summaries: Vec<_> = volumes.values().map(|v| v.to_summary()).collect();
+        let mut summaries: Vec<_> = volumes
+            .values()
+            .map(volume_index::VolumeIndex::to_summary)
+            .collect();
         summaries.sort_by_key(|s| s.drive_letter);
         summaries
     }
@@ -1009,8 +1012,7 @@ impl MultiVolumeEngine {
         }
         if let Some(drive) = self.folder_source_volume_conflict(&root_path) {
             return Err(format!(
-                "folder source {} is inside indexed volume {drive}:",
-                display
+                "folder source {display} is inside indexed volume {drive}:"
             ));
         }
 
@@ -1018,14 +1020,12 @@ impl MultiVolumeEngine {
             let mut next = current.clone();
             let already_listed = next.folder_sources.iter().any(|existing| {
                 folder_source::normalize_folder_root(Path::new(existing))
-                    .map(|(_, norm)| norm.eq_ignore_ascii_case(&display))
-                    .unwrap_or(false)
+                    .is_ok_and(|(_, norm)| norm.eq_ignore_ascii_case(&display))
             });
             if !already_listed {
                 if next.folder_sources.len() >= MAX_FOLDER_SOURCES {
                     return Err(format!(
-                        "folder source limit is {MAX_FOLDER_SOURCES}; remove one before adding {}",
-                        display
+                        "folder source limit is {MAX_FOLDER_SOURCES}; remove one before adding {display}"
                     ));
                 }
                 next.folder_sources.push(display.clone());
@@ -1037,8 +1037,8 @@ impl MultiVolumeEngine {
         folders
             .values()
             .find(|src| src.display_root().eq_ignore_ascii_case(&display))
-            .map(|src| src.to_summary())
-            .ok_or_else(|| format!("folder source {} was not registered", display))
+            .map(folder_source::FolderSource::to_summary)
+            .ok_or_else(|| format!("folder source {display} was not registered"))
     }
 
     pub fn remove_folder_source(&self, path: &Path, persist: bool) -> Result<bool, String> {
@@ -1051,8 +1051,9 @@ impl MultiVolumeEngine {
             let before = next.folder_sources.len();
             next.folder_sources.retain(|existing| {
                 folder_source::normalize_folder_root(Path::new(existing))
-                    .map(|(_, norm)| !norm.eq_ignore_ascii_case(&display))
-                    .unwrap_or(!existing.eq_ignore_ascii_case(&display))
+                    .map_or(!existing.eq_ignore_ascii_case(&display), |(_, norm)| {
+                        !norm.eq_ignore_ascii_case(&display)
+                    })
             });
             removed = next.folder_sources.len() != before;
             Ok(next)
@@ -1098,9 +1099,13 @@ impl MultiVolumeEngine {
                     .iter()
                     .any(|&ex| ex.eq_ignore_ascii_case(&vol.drive_letter))
             })
-            .map(|vol| vol.to_source_summary())
+            .map(volume_index::VolumeIndex::to_source_summary)
             .collect();
-        summaries.extend(folders.values().map(|folder| folder.to_summary()));
+        summaries.extend(
+            folders
+                .values()
+                .map(folder_source::FolderSource::to_summary),
+        );
         summaries.sort_by_key(|s| s.source_id.0);
         summaries
     }

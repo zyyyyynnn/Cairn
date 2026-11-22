@@ -2,13 +2,13 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! File-type filter model for the search bar capsule (UI-03, QRY-06 macros).
+//! File-type filter model for the sidebar file-type locations (UI-03, QRY-09 macros).
 //!
 //! The category is a stable machine-readable enum: the UI looks up its label through
 //! Fluent, the query builder looks up its macro prefix, and settings persist [`FilterCategory::key`].
 //! No translated text is ever compared, so switching locale cannot strand the filter state.
 
-/// Every category the capsule can hold. `All` means "add no macro to the query".
+/// File-type categories exposed in the sidebar. `All` means "add no macro to the query".
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum FilterCategory {
     All,
@@ -36,7 +36,7 @@ impl FilterCategory {
         }
     }
 
-    /// Fluent message id carrying the capsule label for the current locale (UI-07).
+    /// Fluent message id carrying the category label for the current locale (UI-07).
     pub fn label_key(self) -> &'static str {
         match self {
             FilterCategory::All => "filter_all",
@@ -50,7 +50,7 @@ impl FilterCategory {
         }
     }
 
-    /// Everything macro prefix injected into the query (QRY-06). `All` contributes nothing.
+    /// Everything macro prefix injected into the query (QRY-09). `All` contributes nothing.
     pub fn query_macro(self) -> Option<&'static str> {
         match self {
             FilterCategory::All => None,
@@ -64,7 +64,7 @@ impl FilterCategory {
         }
     }
 
-    /// Click-cycle order, preserving the order the capsule has always offered.
+    /// Cycle order across file-type categories.
     pub fn next(self) -> Self {
         match self {
             FilterCategory::All => FilterCategory::Document,

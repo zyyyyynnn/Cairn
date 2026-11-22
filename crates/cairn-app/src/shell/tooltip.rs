@@ -8,7 +8,7 @@
 //! `.tooltip()` builder, the form the result table and its heading use, shows its
 //! view without one; this wrapper gives those views the same 150 ms, 4 px entrance.
 
-use gpui_kit::component::animation::{ease_out_cubic, EffectTransition};
+use gpui_kit::component::animation::{EffectTransition, ease_out_cubic};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::gpui::*;
 use std::time::Duration;
@@ -21,7 +21,7 @@ struct AppTooltip {
 }
 
 impl Render for AppTooltip {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, _: &mut Context<'_, Self>) -> impl IntoElement {
         let content = div().child(self.content.clone());
         EffectTransition::new(ENTER_DURATION)
             .ease(ease_out_cubic)

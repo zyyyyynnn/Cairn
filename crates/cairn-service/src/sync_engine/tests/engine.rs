@@ -6,7 +6,7 @@ use super::*;
 use crate::config::ServiceConfig;
 use crate::persistence;
 use crate::sync_engine::{
-    apply_post_scan_decision, post_scan_decision, MultiVolumeEngine, PostScanDecision, VolumeIndex,
+    MultiVolumeEngine, PostScanDecision, VolumeIndex, apply_post_scan_decision, post_scan_decision,
 };
 use cairn_core::engine::CancellationToken;
 use cairn_core::sort::SortColumn;
@@ -21,7 +21,6 @@ fn test_multi_volume_engine_save_load_lifecycle() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let engine = MultiVolumeEngine::with_index_dir_and_drives(temp_dir.path(), vec![]);
 
-    // Create volume X
     let mut vol_x = VolumeIndex::new('X');
     vol_x.volume_serial = 0x1111;
     vol_x.journal_id = 100;
@@ -38,7 +37,6 @@ fn test_multi_volume_engine_save_load_lifecycle() {
         is_reparse_point: false,
     }]);
 
-    // Create volume Y
     let mut vol_y = VolumeIndex::new('Y');
     vol_y.volume_serial = 0x2222;
     vol_y.journal_id = 200;
@@ -58,10 +56,8 @@ fn test_multi_volume_engine_save_load_lifecycle() {
     engine.add_volume(vol_x);
     engine.add_volume(vol_y);
 
-    // Atomic save to disk
     engine.save_all_indexes().expect("save_all_indexes");
 
-    // Restore into a new MultiVolumeEngine from the same temp_dir
     let loaded_engine =
         MultiVolumeEngine::with_index_dir_and_drives(temp_dir.path(), vec!['X', 'Y']);
 
@@ -350,7 +346,6 @@ fn test_volume_cache_invalidation_does_not_silently_return_stale_data() {
         "Stale records must be cleared"
     );
 
-    // Search must return 0 results
     let cancel = CancellationToken::new();
     let outcome = engine.execute_search_multi(
         "stale_secret",
@@ -496,7 +491,6 @@ fn test_excluded_drives_filtering() {
     new_cfg.excluded_drives.push('C');
     engine.update_config(new_cfg);
 
-    // Volume C must be purged from memory and summaries
     let summaries_after = engine.get_volume_summaries();
     assert!(
         summaries_after.is_empty(),
@@ -536,7 +530,6 @@ fn test_excluded_paths_filtering_and_hot_apply() {
     let engine =
         MultiVolumeEngine::with_index_dir_drives_and_config(temp_dir.path(), vec![], config);
 
-    // Populate volume C
     let mut vol = VolumeIndex::new('C');
     let items = vec![
         ExtractedItem {
@@ -682,7 +675,6 @@ fn test_excluded_paths_filtering_and_hot_apply() {
     new_cfg.excluded_paths.retain(|p| !p.contains("*.tmp"));
     engine.update_config(new_cfg);
 
-    // Now search for .tmp finds scratch.tmp immediately without restart
     let outcome = engine.execute_search_multi(
         ".tmp",
         &QueryDefaults::default(),
@@ -713,7 +705,6 @@ fn test_snapshot_mode_fallback_and_search() {
         is_reparse_point: false,
     }]);
 
-    // Downgrade to SnapshotMode (IDX-08)
     vol.status.set(VolumeState::SnapshotMode);
     vol.usn_enabled = false;
 
@@ -726,7 +717,6 @@ fn test_snapshot_mode_fallback_and_search() {
     assert!(!summaries[0].usn_enabled);
     assert_eq!(summaries[0].indexed_count, 1);
 
-    // SnapshotMode volume must participate in search and return results
     let cancel = CancellationToken::new();
     let outcome = engine.execute_search_multi(
         "snapshot_file",
@@ -740,7 +730,6 @@ fn test_snapshot_mode_fallback_and_search() {
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].source_id.drive_letter(), Some('E'));
 
-    // rescan_snapshot_volumes should execute cleanly without panic
     engine.rescan_snapshot_volumes();
 }
 #[test]

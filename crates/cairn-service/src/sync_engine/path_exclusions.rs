@@ -4,9 +4,9 @@
 
 //! One exclusion view for a query or a content batch.
 
+use super::VolumeIndex;
 use super::folder_source::FolderSource;
 use super::volume_index::SUBTREE_EXCLUDED;
-use super::VolumeIndex;
 use crate::exclusion::{ExclusionPath, ExclusionRules};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -46,6 +46,14 @@ impl PathExclusions {
     /// whole subtrees, so a visible record always has visible ancestors.
     pub(crate) fn uses_segment_table(&self) -> bool {
         self.states.is_some()
+    }
+
+    /// Segment-exclusion lookup table for `drive_letter` when segment-table filtering is active.
+    pub(crate) fn drive_states(&self, drive_letter: char) -> Option<&[u8]> {
+        self.states
+            .as_ref()
+            .and_then(|states| states.get(&drive_letter))
+            .map(|table| table.as_slice())
     }
 
     /// Whether one record of `volume` falls under the rules.

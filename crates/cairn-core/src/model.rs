@@ -75,7 +75,7 @@ pub struct FileRecord {
     /// Parent directory index in the volume's records array.
     /// Sentinel `u32::MAX` represents root or detached item.
     pub parent_idx: u32,
-    /// Byte offset within the NamePool arena.
+    /// Byte offset within the `NamePool` arena.
     pub name_offset: u32,
     /// Byte length of the UTF-8 file name.
     pub name_len: u16,

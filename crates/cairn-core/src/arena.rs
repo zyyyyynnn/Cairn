@@ -75,7 +75,6 @@ impl NamePool {
         fold_append(valid_str, &mut self.folded_arena);
         debug_assert_eq!(self.arena.len(), self.folded_arena.len());
 
-        // Calculate extension offset
         let ext_offset = match slice.iter().rposition(|&b| b == b'.') {
             Some(dot_idx) if dot_idx + 1 < slice.len() => (dot_idx + 1) as u16,
             _ => u16::MAX,

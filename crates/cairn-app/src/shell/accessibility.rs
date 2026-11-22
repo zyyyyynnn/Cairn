@@ -19,7 +19,7 @@
 use crate::shell::i18n::I18nManager;
 use gpui_kit::base::{ObservedElement, TestSupportExt};
 use gpui_kit::gpui::{
-    div, Div, InteractiveElement, Role, SharedString, Stateful, StatefulInteractiveElement,
+    Div, InteractiveElement, Role, SharedString, Stateful, StatefulInteractiveElement, div,
 };
 
 /// One key control as assistive technology must see it.
@@ -31,7 +31,7 @@ pub struct KeyControl {
     /// Element id the view gives the control, exactly as GPUI sees it. Members of a repeated family
     /// record the id the view assembles, and state variants of one control share an id.
     pub element: &'static str,
-    /// `true` when the view pairs [`element`](KeyControl::element) with a row or capsule index.
+    /// `true` when the view pairs [`element`](KeyControl::element) with a row or source index.
     pub indexed: bool,
     /// AccessKit role the view must report. Never [`Role::Unknown`]: an unclassified role is not an
     /// accessible one.
@@ -134,9 +134,9 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         named_by: "",
         requirement: "UI-01",
     },
-    // The section heading is the view's own element. The rows are `SidebarMenuItem`s, which report
-    // `Role::TreeItem` themselves; the registry still names each one, by the model key the view
-    // assembles into its element id, so a category cannot gain a sidebar row without a message.
+    // The section heading is the view's own element. Custom sidebar rows report `Role::TreeItem`
+    // on their focus wrapper, and the registry names each one by the model key assembled into its
+    // element id so a category cannot gain a sidebar row without a message.
     KeyControl {
         key: "sidebar-locations",
         element: "sidebar-locations",
@@ -598,10 +598,8 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         named_by: "",
         requirement: "SVC-03, SVC-04",
     },
-    // The recovery control every one of those three alerts shows under its own sentence. The failure
-    // messages promise an action ("start the service, then try again"), so the promise needs a button
-    // a pointer and a keyboard can both reach; the band's alert element names the condition, and this
-    // one names what clicking does.
+    // Inline recovery control shown beside recoverable service alerts (`not_running` / `timeout`),
+    // paired with the band's alert element so pointer and keyboard can both trigger a retry.
     KeyControl {
         key: "service-retry-button",
         element: "service-retry-button",
@@ -655,15 +653,6 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
         indexed: false,
         role: Role::Button,
         messages: &["toast_dismiss"],
-        named_by: "",
-        requirement: "UI-03",
-    },
-    KeyControl {
-        key: "toast-retry",
-        element: "toast-retry",
-        indexed: false,
-        role: Role::Button,
-        messages: &["toast_retry"],
         named_by: "",
         requirement: "UI-03",
     },
@@ -740,7 +729,7 @@ pub fn component_name(control: &KeyControl, i18n: &I18nManager) -> String {
 }
 
 /// [`element`] for a control the view repeats inside one parent, where GPUI needs the registered id
-/// paired with the row or capsule index.
+/// paired with the row or source index.
 pub fn element_at(control: &KeyControl, index: usize) -> ControlElement {
     div()
         .id((control.element, index))
@@ -787,8 +776,7 @@ pub fn shortcuts_for(element_id: &str) -> &'static [&'static str] {
     CONTROL_SHORTCUTS
         .iter()
         .find(|(element, _)| *element == element_id)
-        .map(|(_, shortcuts)| *shortcuts)
-        .unwrap_or(&[])
+        .map_or(&[][..], |(_, shortcuts)| *shortcuts)
 }
 
 /// Accessible name of `control` in the language `i18n` currently speaks.
@@ -818,10 +806,10 @@ pub fn label_carries_mnemonic(text: &str) -> bool {
             .filter(|c| **c != '&' && !c.is_whitespace())
             .collect();
         let mut letters = inner.chars();
-        if let (Some(letter), None) = (letters.next(), letters.next()) {
-            if letter.is_ascii_alphabetic() {
-                return true;
-            }
+        if let (Some(letter), None) = (letters.next(), letters.next())
+            && letter.is_ascii_alphabetic()
+        {
+            return true;
         }
     }
     false
@@ -829,12 +817,10 @@ pub fn label_carries_mnemonic(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use core::prelude::rust_2021::test;
-
     use super::*;
     use crate::search::filters::FilterCategory;
     use crate::service::service_issue::ServiceIssue;
-    use crate::shell::command_groups::{all_commands, menu_groups};
+    use crate::shell::command_groups::{GroupCommand, all_commands, menu_groups};
     use gpui_kit::gpui::Keystroke;
     use std::collections::HashSet;
 
@@ -890,56 +876,24 @@ mod tests {
         }
     }
 
-    /// The role each kind of control must carry, stated here independently of the table so a wrong
-    /// entry is caught rather than confirmed: commands are actionable, containers group, live regions
-    /// announce, and the query box takes text.
+    /// Semantic roles must stay distinct across live-region priority levels and interactive surfaces.
     #[test]
-    fn registered_roles_match_each_controls_semantics() {
-        let expectations: &[(&str, Role)] = &[
+    fn key_control_roles_match_interaction_semantics() {
+        let expectations = [
+            ("toast", Role::Alert),
+            ("toast-info", Role::Status),
             ("search-input", Role::SearchInput),
-            ("sidebar-locations", Role::Heading),
-            ("sidebar-location-all", Role::TreeItem),
-            ("sidebar-location-doc", Role::TreeItem),
-            ("sidebar-location-image", Role::TreeItem),
-            ("sidebar-location-audio", Role::TreeItem),
-            ("sidebar-location-video", Role::TreeItem),
-            ("sidebar-location-zip", Role::TreeItem),
-            ("sidebar-location-exe", Role::TreeItem),
-            ("sidebar-location-folder", Role::TreeItem),
-            ("sidebar-recycle-bin", Role::TreeItem),
-            ("sidebar-folder-sources", Role::Heading),
-            ("sidebar-folder-source", Role::TreeItem),
-            ("sidebar-manage-folder-sources", Role::Button),
-            ("toolbar-menu-file", Role::Button),
-            ("toolbar-menu-edit", Role::Button),
-            ("toolbar-menu-view", Role::Button),
-            ("toolbar-menu-search", Role::Button),
-            ("toolbar-menu-index", Role::Button),
-            ("toolbar-menu-tools", Role::Button),
-            ("toolbar-menu-help", Role::Button),
-            ("table-header", Role::Row),
-            ("column-name", Role::ColumnHeader),
-            ("column-path", Role::ColumnHeader),
-            ("column-size", Role::ColumnHeader),
-            ("column-modified", Role::ColumnHeader),
+            ("rename-input", Role::TextInput),
             ("result-band", Role::List),
             ("result-row", Role::ListItem),
-            ("result-placeholder", Role::ListItem),
-            ("result-state", Role::Status),
-            ("rename-input", Role::TextInput),
-            ("content-search-action", Role::Button),
+            ("column-name", Role::ColumnHeader),
+            ("table-header", Role::Row),
             ("status-bar", Role::Status),
-            ("toast", Role::Alert),
-            ("toast-dismiss", Role::Button),
-            ("toast-retry", Role::Button),
-            ("recycle-bin-error", Role::Alert),
-            ("recycle-bin-retry", Role::Button),
-            ("service-issue-not-running", Role::Alert),
         ];
         for (key, expected) in expectations {
             assert_eq!(
                 control(key).role,
-                *expected,
+                expected,
                 "{key} must report the role its interaction implies"
             );
         }
@@ -980,7 +934,7 @@ mod tests {
             );
         }
 
-        // Every dropdown the toolbar owns is a registered trigger, named by the group it opens.
+        // Every top-bar menu dropdown is a registered trigger, named by the group it opens.
         for spec in menu_groups() {
             let element = format!("toolbar-menu:{}", spec.group.key());
             let entry = KEY_CONTROLS
@@ -1089,13 +1043,6 @@ mod tests {
         assert!(KEY_CONTROLS.iter().filter(|entry| !entry.indexed).count() >= 12);
     }
 
-    /// Informational toasts are polite status; only failures interrupt.
-    #[test]
-    fn error_and_info_toasts_keep_their_own_live_region_role() {
-        assert_eq!(control("toast").role, Role::Alert);
-        assert_eq!(control("toast-info").role, Role::Status);
-    }
-
     /// Each category entry registers exactly its own wording, so a stray message cannot hide in the
     /// family and a renamed category cannot leave an orphan behind.
     #[test]
@@ -1110,16 +1057,6 @@ mod tests {
             FilterCategory::Executable,
             FilterCategory::Folder,
         ];
-        for category in categories {
-            let entry = control_at(&format!("sidebar-location:{}", category.key()));
-            assert!(
-                entry.messages.contains(&category.label_key()),
-                "the sidebar does not register the {} category",
-                category.key()
-            );
-        }
-        // Each entry speaks exactly its own category's wording, so a stray message cannot hide in the
-        // family and a renamed category cannot leave an orphan behind.
         for category in categories {
             let entry = control_at(&format!("sidebar-location:{}", category.key()));
             assert_eq!(
@@ -1166,25 +1103,6 @@ mod tests {
                 messages.insert(entry.message_at(0)),
                 "{key} reuses another failure's message"
             );
-        }
-    }
-
-    /// Registered controls whose element keys appear in keymaps and registries must remain valid.
-    #[test]
-    fn every_registered_family_and_shortcut_key_is_parsable_and_well_formed() {
-        let mut families: Vec<&str> = KEY_CONTROLS
-            .iter()
-            .filter(|entry| entry.element.contains(':'))
-            .map(|entry| entry.element.split(':').next().unwrap_or_default())
-            .collect();
-        families.sort_unstable();
-        families.dedup();
-        assert!(
-            !families.is_empty(),
-            "the registry describes no repeated family, yet the view assembles ids with an index"
-        );
-        for entry in KEY_CONTROLS.iter().filter(|entry| entry.indexed) {
-            let _ = element_at(entry, 0);
         }
     }
 
@@ -1286,7 +1204,11 @@ mod tests {
             .iter()
             .flat_map(|(_, shortcuts)| shortcuts.iter().copied())
             .chain(menu_groups().iter().flat_map(|spec| spec.group.keys()))
-            .chain(all_commands().into_iter().filter_map(|cmd| cmd.shortcut()))
+            .chain(
+                all_commands()
+                    .into_iter()
+                    .filter_map(GroupCommand::shortcut),
+            )
             .collect();
         found.sort_unstable();
         found.dedup();

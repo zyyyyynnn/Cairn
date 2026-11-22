@@ -5,11 +5,11 @@
 //! Block-reader MFT scanner supporting full NTFS volumes, `$BITMAP` zero-window skipping, and
 //! standalone offline `$MFT` images.
 
-use crate::attribute::{parse_attributes, AttributeParseError, NonResidentAttrSpan};
+use crate::attribute::{AttributeParseError, NonResidentAttrSpan, parse_attributes};
 use crate::boot_sector::{BootSectorError, NtfsBootSector};
 use crate::fixup::apply_fixup;
-use crate::mft::{parse_mft_record, ExtractedItem, MftError};
-use crate::runlist::{parse_runlist, DataRun, RunlistError};
+use crate::mft::{ExtractedItem, MftError, parse_mft_record};
+use crate::runlist::{DataRun, RunlistError, parse_runlist};
 use crate::volume::VolumeError;
 use rayon::prelude::*;
 use std::fs::File;
@@ -542,10 +542,10 @@ pub fn scan_mft_from_reader<R: BlockReader + ?Sized>(
         } => {
             let mut current_record_num = 0u64;
             for run in runs {
-                if let Some(cap) = total_records_cap {
-                    if current_record_num >= cap {
-                        break;
-                    }
+                if let Some(cap) = total_records_cap
+                    && current_record_num >= cap
+                {
+                    break;
                 }
                 let run_bytes = run.cluster_count.saturating_mul(bytes_per_cluster);
                 let mut run_records = run_bytes / layout.record_size as u64;

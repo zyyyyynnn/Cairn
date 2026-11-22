@@ -4,7 +4,7 @@
 
 //! Caller authentication and request authorization for pipe connections.
 //!
-//! The service runs as LocalSystem and indexes files the caller has no access to, so every request
+//! The service runs as `LocalSystem` and indexes files the caller has no access to, so every request
 //! must be attributed to a real OS identity rather than to a self-reported field (SPEC SVC-02,
 //! SVC-05).
 //!
@@ -21,7 +21,7 @@ use cairn_protocol::message::{
 /// The status of a pipe caller as derived from its access token.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CallerAuthorization {
-    /// Token of the LocalSystem account.
+    /// Token of the `LocalSystem` account.
     LocalSystem,
     /// Token with enabled built-in Administrators membership, i.e. an elevated process.
     Administrator,
@@ -140,17 +140,17 @@ pub fn authorize(
 mod platform {
     use super::{CallerAuthError, CallerAuthorization, CallerIdentity};
     use std::io;
-    use windows::core::BOOL;
-    use windows::core::PWSTR;
-    use windows::Win32::Foundation::{CloseHandle, GetLastError, LocalFree, HANDLE, HLOCAL};
+    use windows::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, HLOCAL, LocalFree};
     use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
     use windows::Win32::Security::{
-        CheckTokenMembership, CreateWellKnownSid, GetTokenInformation, RevertToSelf, TokenGroups,
-        TokenUser, WinBuiltinAdministratorsSid, WinLocalSystemSid, PSID, TOKEN_GROUPS,
-        TOKEN_INFORMATION_CLASS, TOKEN_QUERY, TOKEN_USER, WELL_KNOWN_SID_TYPE,
+        CheckTokenMembership, CreateWellKnownSid, GetTokenInformation, PSID, RevertToSelf,
+        TOKEN_GROUPS, TOKEN_INFORMATION_CLASS, TOKEN_QUERY, TOKEN_USER, TokenGroups, TokenUser,
+        WELL_KNOWN_SID_TYPE, WinBuiltinAdministratorsSid, WinLocalSystemSid,
     };
     use windows::Win32::System::Pipes::{GetNamedPipeClientProcessId, ImpersonateNamedPipeClient};
     use windows::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
+    use windows::core::BOOL;
+    use windows::core::PWSTR;
 
     /// Reverts thread impersonation when dropped, including on early returns.
     pub struct Impersonation;
@@ -227,32 +227,87 @@ mod platform {
                 &mut size,
             )
         };
-        if result.is_ok() {
-            Some(buffer)
-        } else {
-            None
+        result.is_ok().then_some(buffer)
+    }
+
+    /// 8-byte aligned buffer for Win32 `GetTokenInformation` structures (`TOKEN_USER`, `TOKEN_GROUPS`).
+    pub(super) struct AlignedTokenBuffer {
+        words: Vec<u64>,
+        byte_len: usize,
+    }
+
+    impl AlignedTokenBuffer {
+        fn new(capacity_bytes: usize) -> Self {
+            let word_len = capacity_bytes.div_ceil(size_of::<u64>());
+            Self {
+                words: vec![0u64; word_len],
+                byte_len: 0,
+            }
+        }
+
+        #[cfg(test)]
+        pub(super) fn from_words(words: Vec<u64>, byte_len: usize) -> Self {
+            Self { words, byte_len }
+        }
+
+        #[cfg(test)]
+        pub(super) fn as_ptr(&self) -> *const u64 {
+            self.words.as_ptr()
+        }
+
+        fn as_mut_ptr(&mut self) -> *mut core::ffi::c_void {
+            self.words.as_mut_ptr().cast()
+        }
+
+        fn capacity_bytes(&self) -> usize {
+            self.words.len().saturating_mul(size_of::<u64>())
+        }
+
+        /// Returns a reference to the leading `T` header when `byte_len` covers `size_of::<T>()`
+        /// within allocated capacity and `T`'s alignment does not exceed 8 bytes.
+        pub(super) fn read_header<T>(&self) -> Option<&T> {
+            const {
+                assert!(align_of::<T>() <= align_of::<u64>());
+            }
+            if self.byte_len < size_of::<T>() || self.byte_len > self.capacity_bytes() {
+                return None;
+            }
+            // SAFETY: `words` is `Vec<u64>` (8-byte aligned >= `align_of::<T>()`), zero-initialized,
+            // and `self.byte_len >= size_of::<T>()` within `self.words` allocated byte capacity.
+            Some(unsafe { &*self.words.as_ptr().cast::<T>() })
         }
     }
 
-    /// Reads a variable-length token information class into a fresh buffer.
-    fn token_information(token: HANDLE, class: TOKEN_INFORMATION_CLASS) -> io::Result<Vec<u8>> {
+    /// Reads a variable-length token information class into an 8-byte aligned buffer.
+    fn token_information(
+        token: HANDLE,
+        class: TOKEN_INFORMATION_CLASS,
+    ) -> io::Result<AlignedTokenBuffer> {
         let mut needed = 0u32;
         // SAFETY: a null buffer with length 0 asks GetTokenInformation for the required size.
         let _ = unsafe { GetTokenInformation(token, class, None, 0, &mut needed) };
         if needed == 0 {
             return Err(io::Error::last_os_error());
         }
-        let mut buffer = vec![0u8; needed as usize];
-        // SAFETY: `buffer` has at least `needed` bytes as reported by the sizing call.
+        let mut buffer = AlignedTokenBuffer::new(needed as usize);
+        let mut written = 0u32;
+        // SAFETY: `buffer` is 8-byte aligned and has at least `needed` bytes capacity.
         unsafe {
             GetTokenInformation(
                 token,
                 class,
-                Some(buffer.as_mut_ptr() as *mut core::ffi::c_void),
+                Some(buffer.as_mut_ptr()),
                 needed,
-                &mut needed,
+                &mut written,
             )
         }?;
+        if (written as usize) > buffer.capacity_bytes() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "GetTokenInformation returned length exceeding allocated buffer",
+            ));
+        }
+        buffer.byte_len = written as usize;
         Ok(buffer)
     }
 
@@ -300,9 +355,11 @@ mod platform {
     ) -> Result<CallerIdentity, CallerAuthError> {
         let user_buffer = token_information(token, TokenUser)
             .map_err(|err| CallerAuthError::TokenUnavailable(err.to_string()))?;
-        // SAFETY: GetTokenInformation(TokenUser) filled the buffer with a TOKEN_USER header whose
-        // `User.Sid` points into the very same buffer, which lives until the SID has been rendered.
-        let user = unsafe { &*(user_buffer.as_ptr() as *const TOKEN_USER) };
+        let user = user_buffer.read_header::<TOKEN_USER>().ok_or_else(|| {
+            CallerAuthError::TokenUnavailable(
+                "TokenUser buffer shorter than TOKEN_USER header".to_string(),
+            )
+        })?;
         let user_sid =
             sid_to_string(user.User.Sid).unwrap_or_else(|| "<unrenderable-sid>".to_string());
 
@@ -348,12 +405,10 @@ mod platform {
 
         // TokenGroups is only read to make the derived identity auditable; the access decision uses
         // CheckTokenMembership, which also honours disabled and deny-only group SIDs.
-        if let Ok(groups_buffer) = token_information(token, TokenGroups) {
-            // SAFETY: the buffer holds a TOKEN_GROUPS header of the length GetTokenInformation
-            // reported; only the fixed-size header is read.
-            let group_count = unsafe { (groups_buffer.as_ptr() as *const TOKEN_GROUPS).as_ref() }
-                .map(|groups| groups.GroupCount)
-                .unwrap_or(0);
+        if let Ok(groups_buffer) = token_information(token, TokenGroups)
+            && let Some(groups) = groups_buffer.read_header::<TOKEN_GROUPS>()
+        {
+            let group_count = groups.GroupCount;
             if group_count > 0 {
                 groups_readable = true;
                 tracing::debug!(
@@ -534,39 +589,47 @@ mod tests {
             ))
         );
         // The handshake itself still works so the client learns the server is there (SVC-03/04).
-        assert!(authorize(
-            &ClientRequest::Hello {
-                client_protocol_version: 1,
-                pid: 7
-            },
-            CallerAuthorization::Unauthenticated,
-            true
-        )
-        .is_ok());
+        assert!(
+            authorize(
+                &ClientRequest::Hello {
+                    client_protocol_version: 1,
+                    pid: 7
+                },
+                CallerAuthorization::Unauthenticated,
+                true
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn admin_only_query_switch_gates_reads_for_standard_users_only() {
         assert!(authorize(&query(), CallerAuthorization::StandardUser, true).is_err());
-        assert!(authorize(
-            &ClientRequest::GetConfig,
-            CallerAuthorization::StandardUser,
-            true
-        )
-        .is_err());
-        assert!(authorize(
-            &ClientRequest::GetStatus,
-            CallerAuthorization::StandardUser,
-            true
-        )
-        .is_err());
+        assert!(
+            authorize(
+                &ClientRequest::GetConfig,
+                CallerAuthorization::StandardUser,
+                true
+            )
+            .is_err()
+        );
+        assert!(
+            authorize(
+                &ClientRequest::GetStatus,
+                CallerAuthorization::StandardUser,
+                true
+            )
+            .is_err()
+        );
         assert!(authorize(&query(), CallerAuthorization::StandardUser, false).is_ok());
-        assert!(authorize(
-            &ClientRequest::GetConfig,
-            CallerAuthorization::Administrator,
-            true
-        )
-        .is_ok());
+        assert!(
+            authorize(
+                &ClientRequest::GetConfig,
+                CallerAuthorization::Administrator,
+                true
+            )
+            .is_ok()
+        );
         assert!(authorize(&query(), CallerAuthorization::LocalSystem, true).is_ok());
     }
 
@@ -589,5 +652,41 @@ mod tests {
         assert!(CallerAuthorization::Administrator.is_privileged());
         assert!(!CallerAuthorization::StandardUser.is_privileged());
         assert!(!CallerAuthorization::Unauthenticated.is_privileged());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn aligned_token_buffer_guarantees_8_byte_alignment_and_rejects_short_buffers() {
+        use windows::Win32::Security::{TOKEN_GROUPS, TOKEN_USER};
+
+        let aligned =
+            platform::AlignedTokenBuffer::from_words(vec![0u64; 8], size_of::<TOKEN_USER>());
+        assert_eq!(
+            aligned.as_ptr() as usize % align_of::<u64>(),
+            0,
+            "token buffer must stay 8-byte aligned"
+        );
+        assert_eq!(aligned.as_ptr() as usize % align_of::<TOKEN_USER>(), 0);
+        assert!(aligned.read_header::<TOKEN_USER>().is_some());
+
+        let short_user = platform::AlignedTokenBuffer::from_words(
+            vec![0u64; 4],
+            size_of::<TOKEN_USER>().saturating_sub(1),
+        );
+        assert!(short_user.read_header::<TOKEN_USER>().is_none());
+
+        let over_capacity =
+            platform::AlignedTokenBuffer::from_words(vec![0u64; 1], size_of::<TOKEN_USER>() + 16);
+        assert!(over_capacity.read_header::<TOKEN_USER>().is_none());
+
+        let valid_groups =
+            platform::AlignedTokenBuffer::from_words(vec![0u64; 8], size_of::<TOKEN_GROUPS>());
+        assert!(valid_groups.read_header::<TOKEN_GROUPS>().is_some());
+
+        let short_groups = platform::AlignedTokenBuffer::from_words(
+            vec![0u64; 4],
+            size_of::<TOKEN_GROUPS>().saturating_sub(1),
+        );
+        assert!(short_groups.read_header::<TOKEN_GROUPS>().is_none());
     }
 }

@@ -12,8 +12,8 @@
 //! - Modifiers and functions
 
 use crate::filter::{
-    parse_duration_filter, parse_framerate_filter, parse_u64_filter, AttribFilter, DateFilter,
-    DimensionsFilter, DupeMode, SizeFilter,
+    AttribFilter, DateFilter, DimensionsFilter, DupeMode, SizeFilter, parse_duration_filter,
+    parse_framerate_filter, parse_u64_filter,
 };
 use crate::property_store::PropertyKind;
 use crate::sort::SortSpec;
@@ -46,15 +46,11 @@ pub struct QueryDefaults {
 
 impl QueryDefaults {
     fn attribute_filter(&self) -> Option<SearchTerm> {
-        if self.exclude_hidden || self.exclude_system {
-            Some(SearchTerm {
-                exclude_hidden: self.exclude_hidden,
-                exclude_system: self.exclude_system,
-                ..Default::default()
-            })
-        } else {
-            None
-        }
+        (self.exclude_hidden || self.exclude_system).then(|| SearchTerm {
+            exclude_hidden: self.exclude_hidden,
+            exclude_system: self.exclude_system,
+            ..Default::default()
+        })
     }
 }
 
@@ -185,12 +181,10 @@ impl QueryExpr {
     fn collect_positive_content_queries(&self, positive: bool, out: &mut Vec<String>) {
         match self {
             QueryExpr::Term(term) => {
-                if positive {
-                    if let Some(ref content) = term.content_query {
-                        let trimmed = content.trim();
-                        if !trimmed.is_empty() {
-                            out.push(trimmed.to_string());
-                        }
+                if positive && let Some(ref content) = term.content_query {
+                    let trimmed = content.trim();
+                    if !trimmed.is_empty() {
+                        out.push(trimmed.to_string());
                     }
                 }
             }
@@ -252,7 +246,7 @@ impl QueryExpr {
             QueryExpr::And(subs) => {
                 let filtered: Vec<QueryExpr> = subs
                     .iter()
-                    .filter_map(|s| s.strip_content_queries())
+                    .filter_map(QueryExpr::strip_content_queries)
                     .collect();
                 if filtered.is_empty() {
                     None
@@ -265,7 +259,7 @@ impl QueryExpr {
             QueryExpr::Or(subs) => {
                 let filtered: Vec<QueryExpr> = subs
                     .iter()
-                    .filter_map(|s| s.strip_content_queries())
+                    .filter_map(QueryExpr::strip_content_queries)
                     .collect();
                 if filtered.is_empty() {
                     None
@@ -609,8 +603,7 @@ impl<'a> QueryParser<'a> {
             }
 
             if temp_pos < self.chars.len() && self.chars[temp_pos] == '|' {
-                self.pos = temp_pos + 1; // consume '|'
-                                         // skip spaces after '|'
+                self.pos = temp_pos + 1;
                 self.skip_whitespace();
                 let next_term = self.parse_unary();
                 or_terms.push(next_term);
@@ -908,7 +901,7 @@ pub fn parse_search_term(raw_token: &str, defaults: &QueryDefaults) -> SearchTer
                     "size" => term.dupe_mode = Some(DupeMode::Size),
                     "namepart" | "stem" => term.dupe_mode = Some(DupeMode::NamePart),
                     "name;size" | "size;name" | "all" => {
-                        term.dupe_mode = Some(DupeMode::NameAndSize)
+                        term.dupe_mode = Some(DupeMode::NameAndSize);
                     }
                     _ => term.match_nothing = true,
                 }
@@ -1494,7 +1487,7 @@ mod tests {
                 assert_eq!(subs.len(), 2);
                 match &subs[0] {
                     QueryExpr::And(group) => {
-                        assert!(group.iter().all(|s| term_of(s).case_sensitive), "{group:?}")
+                        assert!(group.iter().all(|s| term_of(s).case_sensitive), "{group:?}");
                     }
                     other => panic!("Expected grouped And, got {other:?}"),
                 }
@@ -1633,7 +1626,7 @@ mod tests {
         }
     }
 
-    /// The hidden/system defaults are one more query-wide constraint, ANDed alongside the
+    /// The hidden/system defaults are one more query-wide constraint, AND-combined alongside the
     /// items and never folded into a negation.
     #[test]
     fn attribute_defaults_are_a_top_level_constraint() {

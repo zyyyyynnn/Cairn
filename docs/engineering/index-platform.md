@@ -46,7 +46,7 @@ NTFS 卷适配器保持现有 `$MFT` 流式扫描、USN 增量与五态状态机
 
 ## 3. 属性索引
 
-- 侧表以（来源，记录）为键，不扩张 `FileRecord` 定长布局；属性注册表只收录已确认的高频属性，首批建议为长度、作者、标签、尺寸与帧率。
+- 侧表以（来源，记录）为键，不扩张 `FileRecord` 定长布局；属性注册表只收录已确认的高频属性，当前收录时长、作者、标签、尺寸与帧速率。
 - 属性只来自 `CairnWorker` 内的内置纯 Rust 解析器；Shell 与第三方 property handler 已禁用，不在提权 Worker 中执行外部代码。
 - 抽取在 Worker 进程执行，带超时、崩溃隔离与失败降级；抽取失败不得阻塞文件名查询或污染索引状态。解析不到的字段留空：检索时按不匹配处理，排序时置后。
 - 属性槽位记录抽取时的记录修改时间；提交前校验记录仍是抽取时的版本，读取时校验槽位时间与记录一致，过期槽位不参与结果。
@@ -89,7 +89,7 @@ NTFS 卷适配器保持现有 `$MFT` 流式扫描、USN 增量与五态状态机
 
 1. `IndexSource` 抽象与文件夹源端到端：扫描、监控、状态、排除、总计与回归测试。
 2. 搜索语言与结果工作流：拼音、忽略标点/空白、层级/去重函数、多键排序、列显隐。
-3. 属性索引首批 3–5 个属性，完成 400 万条内存与查询实测。
+3. 属性索引（时长、作者、标签、尺寸与帧速率）的 400 万条内存与查询实测。
 4. 只读索引日志的查询与录制开关。
 5. FAT/exFAT、ReFS、EFU 按同一抽象跟进；网络/远程保持非目标。
 
@@ -97,4 +97,4 @@ NTFS 卷适配器保持现有 `$MFT` 流式扫描、USN 增量与五态状态机
 
 - [SPEC](../SPEC.md)：§2.2 优先级划分、§3.10 当前状态、IDX-11..13、QRY-10、UI-11。
 - Everything 1.5 官方文档：[Folder indexing](https://www.voidtools.com/support/everything/folder_indexing/)、[Options](https://www.voidtools.com/support/everything/options/)、[Properties](https://www.voidtools.com/support/everything/properties/)、[Index Journal](https://www.voidtools.com/support/everything/index_journal/)、[Search Modifiers](https://www.voidtools.com/support/everything/search_modifiers/)、[Search Functions](https://www.voidtools.com/support/everything/search_functions/)、[Result Omissions](https://www.voidtools.com/support/everything/result_omissions/)。
-- 差距调研与来源清单保存在项目记忆中，项目文档只引用 Everything 1.5 官方页面与 SPEC。
+- [everything.md](../research/everything.md) 与 [references.md](../research/references.md)：Everything 1.5 对照调研与外部来源清单。

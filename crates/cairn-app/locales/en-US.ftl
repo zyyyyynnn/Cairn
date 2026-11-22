@@ -153,16 +153,15 @@ service_timeout_title = The background service is not responding; try again
 service_not_installed_title = The background service is not installed; run the Cairn installer again
 service_incompatible_title = The background service is an incompatible build; check for updates in the Help menu and reinstall.
 service_unauthorized_title = This account cannot use the background service; use an authorized account
-# The recovery lines promise another attempt, so the promise needs a button a pointer and a keyboard
-# can both reach.
+# Inline retry control for recoverable connection failures (reachable by pointer and keyboard).
 service_probe_label = Connecting to the background service
 service_retry_button = Retry connection
 # Starting the service is the only runtime elevation, and it happens only on this explicit click.
 service_start_button = Start background service
 
 # Preferences live in the title bar's View and Tools menus (SET-01).
-# Choices commit as they are made; the menu checkmark is the current value, and there is no
-# separate settings dialog.
+# Choices commit as they are made; radio dots mark single-choice selections and checkmarks mark
+# booleans, with no separate settings dialog.
 settings_theme = Theme
 settings_theme_system = System
 settings_theme_light = Light
@@ -180,18 +179,16 @@ settings_zoom_relaxed = Relaxed
 settings_autostart = Start with Windows
 menu_sort = Sort
 menu_check_updates = Check for updates
-update_checking_title = Checking for updates
+menu_download_and_install = Download and install
 update_up_to_date_title = Cairn is up to date
 update_up_to_date_body = Version { $version } is the latest available.
 update_no_releases_body = No published updates are available yet.
 update_available_title = A Cairn update is available
-update_available_body = Version { $version } is available. You have { $current }. Cairn restarts when the installation finishes.
-update_download_action = Update
+update_available_body = Version { $version } is available in Help > Download and install.
 update_check_failed_title = Could not check for updates
 update_check_failed_body = Check your connection, then try again.
 update_incomplete_title = The update package is incomplete
 update_incomplete_body = The release does not include the installer and checksum. Try again later.
-update_retry = Retry
 update_installing_title = Updating Cairn
 update_installing_body = Downloading, verifying, and installing the update. Cairn restarts when it finishes.
 update_verify_failed_title = Could not verify the update
@@ -238,7 +235,6 @@ status_refreshing = Refreshing
 status_refresh = Refresh
 toast_status = Notification
 toast_dismiss = Dismiss notification
-toast_retry = Retry
 toast_accessible_name = { $title }. { $message }
 bin_error_access_denied = Access denied; check the item's permissions, then retry
 bin_error_read_only = The original location is read-only; clear the read-only attribute, then retry
@@ -312,7 +308,6 @@ journal_dialog_status_loading = Reading the index journal
 journal_dialog_status_off = Recording is off
 journal_dialog_status_summary = { $count } entries ({ $size })
 journal_dialog_refresh = Refresh
-journal_dialog_close = Close
 journal_dialog_col_time = Time
 journal_dialog_col_kind = Type
 journal_dialog_col_path = Path
@@ -332,12 +327,12 @@ toast_rescan_source_started_body = The background service is rescanning { $sourc
 toast_rescan_failed_title = Could not start index rescan
 toast_rescan_failed_body = Could not start the index rescan. Try again shortly.
 folder_sources_title = Folder sources
-folder_sources_path_placeholder = Enter a folder path
+folder_sources_path_label = Folder path
+folder_sources_path_placeholder = C:\Projects
 folder_sources_add = Add
 folder_sources_remove = Remove
 folder_sources_rescan = Rescan
-folder_sources_empty = No folder sources yet.
-folder_sources_close = Close
+folder_sources_empty = No folder sources yet
 toast_folder_source_add_failed_title = Could not add folder source
 toast_folder_source_add_failed_body = Check that the path exists and the service can read it, and that the folder-source limit is not reached.
 toast_folder_source_remove_failed_title = Could not remove folder source

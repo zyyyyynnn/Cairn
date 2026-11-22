@@ -10,31 +10,26 @@ publish.workspace = true
 name = "CairnXtask"
 path = "src/main.rs"
 
+[features]
+default = ["bench", "package"]
+bench = ["dep:cairn-core", "dep:cairn-ntfs", "dep:cairn-service", "dep:tempfile"]
+package = ["dep:cairn-protocol", "dep:cairn-setup", "dep:sha2"]
+
 [dependencies]
 clap.workspace = true
-cairn-core.workspace = true
-cairn-ntfs.workspace = true
-cairn-protocol.workspace = true
-cairn-client.workspace = true
-cairn-service.workspace = true
-cairn-setup.workspace = true
-sha2.workspace = true
-serde.workspace = true
-serde_json.workspace = true
 toml.workspace = true
-rayon.workspace = true
+cairn-core = { workspace = true, optional = true }
+cairn-ntfs = { workspace = true, optional = true }
+cairn-protocol = { workspace = true, optional = true }
+cairn-service = { workspace = true, optional = true }
+cairn-setup = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+tempfile = { workspace = true, optional = true }
+
+[dev-dependencies]
 tempfile.workspace = true
-thiserror.workspace = true
 
-[dependencies.windows]
-workspace = true
-features = [
-    "Win32_Foundation",
-    "Win32_Storage_FileSystem",
-    "Win32_System_Ioctl",
-]
-
-[build-dependencies]
+[target.'cfg(windows)'.build-dependencies]
 winresource.workspace = true
 
 [lints]

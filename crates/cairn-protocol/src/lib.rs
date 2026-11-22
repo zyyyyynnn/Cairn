@@ -13,15 +13,15 @@ pub mod status;
 pub mod worker_exit;
 
 pub use codec::{
-    encode_frame, encode_frame_with_version, peek_frame_header, try_decode_frame, CodecError,
-    FrameHeader, HEADER_SIZE, MAX_FRAME_PAYLOAD,
+    CodecError, FrameHeader, HEADER_SIZE, MAX_FRAME_PAYLOAD, encode_frame,
+    encode_frame_with_version, peek_frame_header, try_decode_frame,
 };
 pub use message::{
-    ClientRequest, Envelope, FileRowData, PropertyKind, QueryDefaults, QueryDegradedReason,
-    RecordPropertyData, ResponsePayload, SortColumn, SortDirection, SortKey, SortSpec, SourceId,
-    ERROR_CODE_ADMIN_ONLY_QUERY, ERROR_CODE_HANDSHAKE_REQUIRED, ERROR_CODE_INVALID_REQUEST,
-    ERROR_CODE_PROTOCOL_VERSION_MISMATCH, ERROR_CODE_SESSION_EXPIRED, ERROR_CODE_UNAUTHORIZED,
-    PIPE_NAME, PROTOCOL_VERSION,
+    ClientRequest, ERROR_CODE_ADMIN_ONLY_QUERY, ERROR_CODE_HANDSHAKE_REQUIRED,
+    ERROR_CODE_INVALID_REQUEST, ERROR_CODE_PROTOCOL_VERSION_MISMATCH, ERROR_CODE_SESSION_EXPIRED,
+    ERROR_CODE_UNAUTHORIZED, Envelope, FileRowData, PIPE_NAME, PROTOCOL_VERSION, PropertyKind,
+    QueryDefaults, QueryDegradedReason, RecordPropertyData, ResponsePayload, SortColumn,
+    SortDirection, SortKey, SortSpec, SourceId,
 };
 pub use status::{
     ContentIndexState, ContentIndexStatus, ContentIndexTask, IndexJournalEntry, IndexJournalStatus,

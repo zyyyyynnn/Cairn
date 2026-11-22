@@ -5,8 +5,8 @@
 //! Framing codec for Named Pipe length-prefixed postcard streams.
 
 use crate::message::PROTOCOL_VERSION;
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use thiserror::Error;
 
 pub const MAX_FRAME_PAYLOAD: usize = 16 * 1024 * 1024; // 16 MiB limit to prevent OOM
@@ -423,18 +423,20 @@ mod tests {
             try_decode_frame::<ClientRequest>(&frame[..frame.len() - 1]).expect("partial"),
             None
         );
-        assert!(try_decode_frame::<ClientRequest>(&frame)
-            .expect("complete")
-            .is_some());
+        assert!(
+            try_decode_frame::<ClientRequest>(&frame)
+                .expect("complete")
+                .is_some()
+        );
     }
 }
 
 /// Pins the serialized `ClientRequest::Query` payload; the header carries the protocol version.
 #[cfg(test)]
 mod wire_layout {
-    use super::{encode_frame, HEADER_SIZE};
+    use super::{HEADER_SIZE, encode_frame};
     use crate::message::{
-        ClientRequest, SortColumn, SortDirection, SortSpec, SourceId, PROTOCOL_VERSION,
+        ClientRequest, PROTOCOL_VERSION, SortColumn, SortDirection, SortSpec, SourceId,
     };
     use std::str::FromStr;
 
@@ -512,9 +514,11 @@ mod wire_layout {
             postcard::from_bytes::<SortColumn>(&bogus).is_err(),
             "an unknown key must not decode into a default"
         );
-        assert!(cairn_core::sort::SortColumn::from_str("bogus")
-            .expect_err("the key vocabulary is closed")
-            .to_string()
-            .contains("unknown sort column"));
+        assert!(
+            cairn_core::sort::SortColumn::from_str("bogus")
+                .expect_err("the key vocabulary is closed")
+                .to_string()
+                .contains("unknown sort column")
+        );
     }
 }

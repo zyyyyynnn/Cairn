@@ -6,14 +6,14 @@
 
 use crate::arena::NamePool;
 use crate::engine::{
-    execute_query_with_context, glob_match, CancellationToken, ContentHitResolver, EvalContext,
+    CancellationToken, ContentHitResolver, EvalContext, execute_query_with_context, glob_match,
 };
 use crate::filter::DupeMode;
 use crate::model::FileRecord;
-use crate::path_cache::{normalize_root, DirectoryPathCache};
+use crate::path_cache::{DirectoryPathCache, normalize_root};
 use crate::property_store::{PropertyKind, PropertySideTables, SourceId};
 use crate::sort::{
-    sort_indices_with_spec, PresortedIndices, SortColumn, SortContext, SortDirection, SortSpec,
+    PresortedIndices, SortColumn, SortContext, SortDirection, SortSpec, sort_indices_with_spec,
 };
 use crate::syntax::{QueryExpr, SearchTerm};
 use serde::{Deserialize, Serialize};
@@ -105,19 +105,19 @@ pub fn execute_query(
     let root = normalize_root(source.root_prefix);
     if expr.is_unfiltered() && !source.has_tombstones && applied_sort.keys.len() == 1 {
         let key = applied_sort.primary();
-        if let Some(ps) = source.presorted {
-            if let Some(len) = presorted_column_len(ps, key.column) {
-                return QueryResult {
-                    rows: QueryRows::PresortedAll {
-                        column: key.column,
-                        descending: key.direction == SortDirection::Descending,
-                        len,
-                    },
-                    applied_sort,
-                    highlight_terms,
-                    degraded,
-                };
-            }
+        if let Some(ps) = source.presorted
+            && let Some(len) = presorted_column_len(ps, key.column)
+        {
+            return QueryResult {
+                rows: QueryRows::PresortedAll {
+                    column: key.column,
+                    descending: key.direction == SortDirection::Descending,
+                    len,
+                },
+                applied_sort,
+                highlight_terms,
+                degraded,
+            };
         }
     }
 
@@ -183,11 +183,8 @@ fn presorted_column_len(ps: &PresortedIndices, col: SortColumn) -> Option<usize>
 
 fn drive_letter_from_root(root: &str) -> Option<char> {
     let bytes = root.as_bytes();
-    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
-        Some((bytes[0] as char).to_ascii_uppercase())
-    } else {
-        None
-    }
+    (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
+        .then(|| (bytes[0] as char).to_ascii_uppercase())
 }
 
 pub fn detect_degraded_properties(
@@ -263,20 +260,20 @@ fn eval_extra_term(
         if term.empty_folder_only && total != 0 {
             return false;
         }
-        if let Some(ref f) = term.child_count_filter {
-            if !f.matches(total) {
-                return false;
-            }
+        if let Some(ref f) = term.child_count_filter
+            && !f.matches(total)
+        {
+            return false;
         }
-        if let Some(ref f) = term.child_file_count_filter {
-            if !f.matches(files as u64) {
-                return false;
-            }
+        if let Some(ref f) = term.child_file_count_filter
+            && !f.matches(files as u64)
+        {
+            return false;
         }
-        if let Some(ref f) = term.child_folder_count_filter {
-            if !f.matches(folders as u64) {
-                return false;
-            }
+        if let Some(ref f) = term.child_folder_count_filter
+            && !f.matches(folders as u64)
+        {
+            return false;
         }
     }
 
@@ -319,33 +316,32 @@ fn eval_extra_term(
         else {
             return false;
         };
-        if let Some(ref lf) = term.length_filter {
-            if !props.length_ms.is_some_and(|ms| lf.matches(ms)) {
-                return false;
-            }
+        if let Some(ref lf) = term.length_filter
+            && !props.length_ms.is_some_and(|ms| lf.matches(ms))
+        {
+            return false;
         }
-        if let Some(ref pat) = term.author_filter {
-            if !props.author.is_some_and(|a| matches_property_text(a, pat)) {
-                return false;
-            }
+        if let Some(ref pat) = term.author_filter
+            && !props.author.is_some_and(|a| matches_property_text(a, pat))
+        {
+            return false;
         }
-        if let Some(ref pat) = term.tags_filter {
-            if !props.tags.is_some_and(|t| matches_property_text(t, pat)) {
-                return false;
-            }
+        if let Some(ref pat) = term.tags_filter
+            && !props.tags.is_some_and(|t| matches_property_text(t, pat))
+        {
+            return false;
         }
-        if let Some(ref dim_f) = term.dimensions_filter {
-            if !props.dimensions.is_some_and(|(w, h)| dim_f.matches(w, h)) {
-                return false;
-            }
+        if let Some(ref dim_f) = term.dimensions_filter
+            && !props.dimensions.is_some_and(|(w, h)| dim_f.matches(w, h))
+        {
+            return false;
         }
-        if let Some(ref fps_f) = term.framerate_filter {
-            if !props
+        if let Some(ref fps_f) = term.framerate_filter
+            && !props
                 .framerate_mfps
                 .is_some_and(|mfps| fps_f.matches(mfps as u64))
-            {
-                return false;
-            }
+        {
+            return false;
         }
     }
 
@@ -470,7 +466,7 @@ fn collect_hierarchy_needs(
             }
         }
         QueryExpr::Not(inner) => {
-            collect_hierarchy_needs(inner, need_depth, need_counts, child_patterns)
+            collect_hierarchy_needs(inner, need_depth, need_counts, child_patterns);
         }
     }
 }

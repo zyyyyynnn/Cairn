@@ -11,7 +11,7 @@
 use crate::config::ServiceConfig;
 use crate::pipe_server::PipeServer;
 use crate::security::{
-    default_service_data_root, prepare_data_layout, DataDirectoryError, ServiceDataLayout,
+    DataDirectoryError, ServiceDataLayout, default_service_data_root, prepare_data_layout,
 };
 use crate::session::SessionManager;
 use crate::sync_engine::MultiVolumeEngine;

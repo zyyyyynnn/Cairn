@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! MSI custom action that rejects an install folder outside Program Files. The published MSI can be
-//! run without the GPUI setup, so the UI's path validation alone does not protect the LocalSystem
+//! run without the GPUI setup, so the UI's path validation alone does not protect the `LocalSystem`
 //! service from a user-writable folder.
 
 #![forbid(unsafe_code)]

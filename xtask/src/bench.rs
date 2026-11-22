@@ -7,7 +7,7 @@
 
 use cairn_core::engine::CancellationToken;
 use cairn_core::frn_index::IndexMemoryFootprint;
-use cairn_core::model::{FileRecord, FLAG_DIRECTORY};
+use cairn_core::model::{FLAG_DIRECTORY, FileRecord};
 use cairn_core::sort::SortSpec;
 use cairn_core::syntax::QueryDefaults;
 use cairn_ntfs::mft::ExtractedItem;
@@ -274,10 +274,9 @@ pub fn run_benchmark(
 
     println!("=== Cairn Engine Benchmark ===");
     match use_corpus.filter(|p| p.exists()) {
-        Some(p) => println!("Loading synthetic corpus from {:?}...", p),
+        Some(p) => println!("Loading synthetic corpus from {p:?}..."),
         None => println!(
-            "Generating {} deterministic multi-level records in memory...",
-            CHECK_FIXTURE_COUNT
+            "Generating {CHECK_FIXTURE_COUNT} deterministic multi-level records in memory..."
         ),
     }
 
@@ -309,10 +308,7 @@ pub fn run_benchmark(
         "",
     ];
 
-    println!(
-        "\n--- Query Latency Benchmark (Warmup 2x, Samples {}x) ---",
-        effective_runs
-    );
+    println!("\n--- Query Latency Benchmark (Warmup 2x, Samples {effective_runs}x) ---");
     println!(
         "{:<25} {:<12} {:<12} {:<10}",
         "Query", "Matches", "Median", "P95"
@@ -345,10 +341,7 @@ pub fn run_benchmark(
         let p95 = latencies[p95_idx];
 
         let label = if q.is_empty() { "<all>" } else { q };
-        println!(
-            "{:<25} {:<12} {:<12?} {:<10?}",
-            label, match_count, median, p95
-        );
+        println!("{label:<25} {match_count:<12} {median:<12?} {p95:<10?}");
         measurements.push(QueryMeasurement {
             query: label,
             matches: match_count,

@@ -6,12 +6,12 @@
 
 use cairn_core::property_store::{RecordPropertyData, SourceId};
 use cairn_protocol::PropertyExtractTask;
-use cairn_worker::isolation::{extract_with_isolation, IsolationOutcome};
+use cairn_worker::isolation::{IsolationOutcome, extract_with_isolation};
 use cairn_worker::property_extract::{extract_file_properties, parse_properties_from_bytes};
 use std::io::Write;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 fn build_minimal_png(width: u32, height: u32) -> Vec<u8> {
@@ -73,11 +73,11 @@ fn build_minimal_mp4_with_metadata(
     fps_den: u32,
     author: &str,
 ) -> Vec<u8> {
-    fn atom(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+    fn atom(kind: [u8; 4], body: &[u8]) -> Vec<u8> {
         let len = (8 + body.len()) as u32;
         let mut out = Vec::with_capacity(len as usize);
         out.extend_from_slice(&len.to_be_bytes());
-        out.extend_from_slice(kind);
+        out.extend_from_slice(&kind);
         out.extend_from_slice(body);
         out
     }
@@ -86,50 +86,50 @@ fn build_minimal_mp4_with_metadata(
     let mut mvhd_body = vec![0u8; 100];
     mvhd_body[12..16].copy_from_slice(&1000u32.to_be_bytes());
     mvhd_body[16..20].copy_from_slice(&duration_ms.to_be_bytes());
-    let mvhd = atom(b"mvhd", &mvhd_body);
+    let mvhd = atom(*b"mvhd", &mvhd_body);
 
     // tkhd (version 0): width & height in 16.16 fixed point at offsets 76..84
     let mut tkhd_body = vec![0u8; 84];
     tkhd_body[76..80].copy_from_slice(&(width << 16).to_be_bytes());
     tkhd_body[80..84].copy_from_slice(&(height << 16).to_be_bytes());
-    let tkhd = atom(b"tkhd", &tkhd_body);
+    let tkhd = atom(*b"tkhd", &tkhd_body);
 
     // mdhd: timescale=fps_num, duration=fps_num * 2
     let mut mdhd_body = vec![0u8; 24];
     mdhd_body[12..16].copy_from_slice(&fps_num.to_be_bytes());
     mdhd_body[16..20].copy_from_slice(&(fps_num * 2).to_be_bytes());
-    let mdhd = atom(b"mdhd", &mdhd_body);
+    let mdhd = atom(*b"mdhd", &mdhd_body);
 
     // stts: entry_count=1, sample_count=60, sample_delta=fps_den
     let mut stts_body = vec![0u8; 16];
     stts_body[4..8].copy_from_slice(&1u32.to_be_bytes());
     stts_body[8..12].copy_from_slice(&60u32.to_be_bytes());
     stts_body[12..16].copy_from_slice(&fps_den.to_be_bytes());
-    let stts = atom(b"stts", &stts_body);
+    let stts = atom(*b"stts", &stts_body);
 
     // hdlr: vide
     let mut hdlr_body = vec![0u8; 24];
     hdlr_body[8..12].copy_from_slice(b"vide");
-    let hdlr = atom(b"hdlr", &hdlr_body);
+    let hdlr = atom(*b"hdlr", &hdlr_body);
 
-    let stbl = atom(b"stbl", &stts);
-    let minf = atom(b"minf", &stbl);
-    let mdia = atom(b"mdia", &[mdhd, hdlr, minf].concat());
-    let trak = atom(b"trak", &[tkhd, mdia].concat());
+    let stbl = atom(*b"stbl", &stts);
+    let minf = atom(*b"minf", &stbl);
+    let mdia = atom(*b"mdia", &[mdhd, hdlr, minf].concat());
+    let trak = atom(*b"trak", &[tkhd, mdia].concat());
 
     // meta -> ilst -> ©ART -> data
     let mut data_body = vec![0u8; 8];
     data_body[3] = 1; // UTF-8
     data_body.extend_from_slice(author.as_bytes());
-    let data = atom(b"data", &data_body);
-    let art = atom(b"\xa9ART", &data);
-    let ilst = atom(b"ilst", &art);
+    let data = atom(*b"data", &data_body);
+    let art = atom(*b"\xa9ART", &data);
+    let ilst = atom(*b"ilst", &art);
     let mut meta_body = vec![0u8; 4]; // version+flags
     meta_body.extend_from_slice(&ilst);
-    let meta = atom(b"meta", &meta_body);
-    let udta = atom(b"udta", &meta);
+    let meta = atom(*b"meta", &meta_body);
+    let udta = atom(*b"udta", &meta);
 
-    atom(b"moov", &[mvhd, trak, udta].concat())
+    atom(*b"moov", &[mvhd, trak, udta].concat())
 }
 
 #[test]

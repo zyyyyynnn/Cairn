@@ -18,7 +18,7 @@ fn main() {
         res.set("OriginalFilename", "CairnCli.exe");
         res.set("LegalCopyright", "Copyright (c) 2026 Cairn Contributors");
         if let Err(e) = res.compile() {
-            eprintln!("cargo:warning=Failed to compile Windows resource: {}", e);
+            eprintln!("cargo:warning=Failed to compile Windows resource: {e}");
         }
     }
 }

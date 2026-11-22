@@ -5,24 +5,23 @@
 //! Folder sources: the sidebar section that scopes a query to one indexed folder, and the
 //! manager dialog that adds, rescans and removes folder sources.
 
-use crate::app::{element_id, layout, CairnApp};
+use crate::app::{CairnApp, element_id, layout};
 use crate::shell::dialogs;
 use crate::shell::i18n::I18nManager;
-use crate::shell::theme::{self, ShellTokens};
+use crate::shell::theme::{self, HAIRLINE, ShellTokens};
 use cairn_protocol::status::{SourceKind, SourceStatusSummary, VolumeState};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::Disableable;
-use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
-use gpui_kit::component::dialog::{DialogEntrance, DialogFooter};
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::dialog::DialogEntrance;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, Icon, Sizable as _, WindowExt as _};
-use gpui_kit::gpui::prelude::FluentBuilder as _;
+use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::gpui::*;
 use std::cell::Cell;
 use std::rc::Rc;
 
-/// The folder sources in service order. NTFS volumes never enter the sidebar or the manager:
-/// their rows are gone and a folder source is the only source a query can be scoped to.
+/// Folder sources in service order; queries can scope to folder sources only.
 pub(crate) fn folder_source_summaries(
     sources: &[SourceStatusSummary],
 ) -> impl Iterator<Item = &SourceStatusSummary> {
@@ -57,11 +56,12 @@ pub(crate) struct FolderSourcesDialogView {
 }
 
 impl FolderSourcesDialogView {
-    pub(crate) fn new(app: Entity<CairnApp>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let placeholder = app
-            .read(cx)
-            .i18n
-            .get_text("folder_sources_path_placeholder");
+    pub(crate) fn new(
+        app: Entity<CairnApp>,
+        placeholder: String,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> Self {
         let input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder(placeholder)
@@ -89,7 +89,7 @@ impl FolderSourcesDialogView {
         self.input.read(cx).value().trim().to_string()
     }
 
-    fn submit_add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn submit_add(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let path = self.input_value(cx);
         if path.is_empty() || self.app.read(cx).service.folder_source_action_pending {
             return;
@@ -104,7 +104,7 @@ impl FolderSourcesDialogView {
         &mut self,
         source_id: cairn_protocol::message::SourceId,
         path: String,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         if self.app.read(cx).service.folder_source_action_pending {
             return;
@@ -117,7 +117,7 @@ impl FolderSourcesDialogView {
         &mut self,
         source_id: cairn_protocol::message::SourceId,
         label: String,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         let app = self.app.read(cx);
         if app.service.connection.is_control_pending() || app.service.folder_source_action_pending {
@@ -134,7 +134,7 @@ impl FolderSourcesDialogView {
         tokens: &ShellTokens,
         busy: bool,
         window: &Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let status = source_state_label(i18n, source.status);
         let rescan_label = i18n.get_text("folder_sources_rescan");
@@ -161,10 +161,13 @@ impl FolderSourcesDialogView {
                 &source.source_id.0.to_string(),
             ))
             .w_full()
-            .min_h(rems(layout::CONTROL_HEIGHT))
-            .gap_x(rems(layout::INNER_SPACING))
+            .h(rems(layout::ROW_HEIGHT))
+            .flex_shrink_0()
             .items_center()
-            .rounded(tokens.radius)
+            .gap_x(rems(layout::INNER_SPACING))
+            .px(rems(layout::SPACE_8))
+            .border_b(HAIRLINE)
+            .border_color(tokens.border)
             .hover(|this| this.bg(tokens.row_hover))
             .child(
                 Icon::new(IconName::Folder)
@@ -172,26 +175,23 @@ impl FolderSourcesDialogView {
                     .text_color(tokens.muted_foreground),
             )
             .child(
-                v_flex()
+                div()
+                    .id(("folder-source-path", source.source_id.0))
                     .flex_1()
                     .min_w_0()
-                    .gap_y(rems(layout::SPACE_4))
-                    .child(
-                        div()
-                            .w_full()
-                            .truncate()
-                            .text_sm()
-                            .text_color(tokens.foreground)
-                            .child(source.root_path.clone()),
-                    )
-                    .child(
-                        div()
-                            .w_full()
-                            .truncate()
-                            .text_size(rems(theme::SMALL_TEXT_SIZE))
-                            .text_color(status_color)
-                            .child(status),
-                    ),
+                    .truncate()
+                    .text_sm()
+                    .text_color(tokens.foreground)
+                    .tooltip(crate::shell::tooltip::text(source.root_path.clone()))
+                    .child(source.root_path.clone()),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .truncate()
+                    .text_sm()
+                    .text_color(status_color)
+                    .child(status),
             )
             .child(
                 Button::new(element_id(
@@ -206,7 +206,7 @@ impl FolderSourcesDialogView {
                 .disabled(busy)
                 .on_click(move |_, _, cx| {
                     view_rescan.update(cx, |this, cx| {
-                        this.rescan_source(source_id, rescan_path.clone(), cx)
+                        this.rescan_source(source_id, rescan_path.clone(), cx);
                     });
                 }),
             )
@@ -223,7 +223,7 @@ impl FolderSourcesDialogView {
                 .disabled(busy)
                 .on_click(move |_, _, cx| {
                     view_remove.update(cx, |this, cx| {
-                        this.remove_source(source_id, remove_path.clone(), cx)
+                        this.remove_source(source_id, remove_path.clone(), cx);
                     });
                 }),
             )
@@ -233,7 +233,7 @@ impl FolderSourcesDialogView {
 }
 
 impl Render for FolderSourcesDialogView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let tokens = ShellTokens::current(cx);
         let app = self.app.read(cx);
         let i18n = app.i18n.clone();
@@ -246,7 +246,7 @@ impl Render for FolderSourcesDialogView {
             .collect();
 
         let add_label = i18n.get_text("folder_sources_add");
-        let placeholder = i18n.get_text("folder_sources_path_placeholder");
+        let path_label = i18n.get_text("folder_sources_path_label");
         let empty_label = i18n.get_text("folder_sources_empty");
         let unavailable_label = i18n.get_text("folder_sources_unavailable");
         let add_disabled = busy || self.input_value(cx).is_empty();
@@ -257,58 +257,99 @@ impl Render for FolderSourcesDialogView {
             .gap_x(rems(layout::INNER_SPACING))
             .child(
                 Input::new(&self.input)
-                    .small()
                     .flex_1()
                     .min_w_0()
                     .cleanable(true)
-                    .aria_label(placeholder)
+                    .aria_label(path_label.clone())
                     .disabled(busy),
             )
             .child(
                 Button::new("folder-source-add")
+                    .primary()
                     .label(add_label.clone())
-                    .with_variant(ButtonVariant::Primary)
-                    .small()
                     .accessibility_label(add_label)
                     .disabled(add_disabled)
                     .on_click(move |_, window, cx| {
                         view.update(cx, |this, cx| this.submit_add(window, cx));
                     }),
             );
-
-        let list: Vec<AnyElement> = if sources.is_empty() {
-            vec![div()
-                .py(rems(layout::SPACE_8))
-                .text_sm()
-                .text_color(tokens.muted_foreground)
-                .child(empty_label)
-                .into_any_element()]
+        let list_body: AnyElement = if !connected {
+            empty_panel(unavailable_label, tokens.danger)
+        } else if sources.is_empty() {
+            empty_panel(empty_label, tokens.muted_foreground)
         } else {
-            sources
-                .iter()
-                .map(|source| self.render_source_row(source, &i18n, &tokens, busy, window, cx))
-                .collect()
+            let rem = window.rem_size();
+            let list_height = (rem * (sources.len() as f32 * layout::ROW_HEIGHT))
+                .min(rem * layout::DIALOG_LIST_MAX_HEIGHT);
+            let scroll_handle = window
+                .use_keyed_state("folder-source-scroll", cx, |_, _| ScrollHandle::new())
+                .read(cx)
+                .clone();
+            let rows = v_flex().w_full();
+            #[cfg(test)]
+            let rows = rows.on_children_prepainted(|bounds, _, _| {
+                tests::record_folder_source_row_bounds(bounds);
+            });
+            let rows =
+                rows.children(sources.iter().map(|source| {
+                    self.render_source_row(source, &i18n, &tokens, busy, window, cx)
+                }));
+            let scroll_list = v_flex()
+                .id("folder-source-list")
+                .w_full()
+                .h(list_height)
+                .overflow_y_scroll()
+                .track_scroll(&scroll_handle)
+                .child(rows);
+            let rail = div()
+                .flex_shrink_0()
+                .w(Scrollbar::width())
+                .h(list_height)
+                .border_l(HAIRLINE)
+                .border_color(tokens.border)
+                .child(
+                    Scrollbar::vertical(&scroll_handle)
+                        .id("folder-source-scrollbar")
+                        .mode(ScrollbarMode::Always)
+                        .viewport_from_layout(),
+                );
+            h_flex()
+                .w_full()
+                .items_stretch()
+                .child(scroll_list.flex_1().min_w_0())
+                .child(rail)
+                .into_any_element()
         };
+        let list_surface = div()
+            .w_full()
+            .rounded(tokens.radius)
+            .border(HAIRLINE)
+            .border_color(tokens.border)
+            .bg(tokens.background)
+            .overflow_hidden()
+            .child(list_body);
 
         v_flex()
             .w_full()
-            .gap_y(rems(layout::SPACE_8))
-            .when(!connected, |this| {
-                this.child(
-                    div()
-                        .text_sm()
-                        .text_color(tokens.danger)
-                        .child(unavailable_label),
-                )
-            })
+            .pt(rems(layout::SPACE_8))
+            .gap_y(rems(layout::SPACE_12))
             .child(input_row)
-            .child(
-                v_flex()
-                    .w_full()
-                    .gap_y(rems(layout::SPACE_4))
-                    .children(list),
-            )
+            .child(list_surface)
     }
+}
+
+fn empty_panel(message: String, color: Hsla) -> AnyElement {
+    h_flex()
+        .w_full()
+        .min_h(rems(10.0))
+        .p(rems(layout::SPACE_12))
+        .items_center()
+        .justify_center()
+        .text_sm()
+        .text_center()
+        .text_color(color)
+        .child(message)
+        .into_any_element()
 }
 
 impl CairnApp {
@@ -318,7 +359,7 @@ impl CairnApp {
     pub(crate) fn select_folder_source(
         &mut self,
         source_id: cairn_protocol::message::SourceId,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         if !self
             .service
@@ -350,51 +391,73 @@ impl CairnApp {
     pub(crate) fn open_folder_sources_dialog(
         &mut self,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut Context<'_, Self>,
     ) {
         self.close_group();
         self.refresh_sources(cx);
         let app = cx.entity();
-        let view = cx.new(|cx| FolderSourcesDialogView::new(app.clone(), window, cx));
+        let placeholder = self.i18n.get_text("folder_sources_path_placeholder");
+        let view = cx.new(|cx| FolderSourcesDialogView::new(app.clone(), placeholder, window, cx));
         let focus_input = Rc::new(Cell::new(true));
         let content = view.clone();
         let title = self.i18n.get_text("folder_sources_title");
-        let close = self.i18n.get_text("folder_sources_close");
+        let close_label = self.i18n.get_text("window_close");
         window.open_dialog(cx, move |dialog, window, cx| {
             if focus_input.replace(false) {
                 let input = content.read(cx).input.clone();
                 input.update(cx, |input, cx| input.focus(window, cx));
             }
             let surface = cairn_ui::theme::dialog_surface(cx.theme());
+            let title_row = h_flex()
+                .w_full()
+                .items_center()
+                .justify_between()
+                .gap_x(rems(layout::SPACE_8))
+                .child(dialogs::title(title.clone(), window))
+                .child(
+                    Button::new("folder-sources-close")
+                        .ghost()
+                        .small()
+                        .icon(IconName::X)
+                        .accessibility_label(close_label.clone())
+                        .tooltip(close_label.clone())
+                        .on_click(|_, window, cx| window.close_dialog(cx)),
+                );
             dialog
-                .width(window.rem_size() * layout::DIALOG_WIDTH)
+                .width(window.rem_size() * layout::DIALOG_FORM_WIDTH)
                 .centered()
                 .bg(surface)
                 .entrance(DialogEntrance::FadeSlide)
-                .title(dialogs::title(title.clone(), window))
+                .close_button(false)
+                .title(title_row)
                 .child(content.clone())
-                .footer(
-                    DialogFooter::new().child(
-                        Button::new("folder-sources-close")
-                            .label(close.clone())
-                            .with_variant(ButtonVariant::Secondary)
-                            .small()
-                            .on_click(|_, window, cx| window.close_dialog(cx)),
-                    ),
-                )
         });
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{folder_source_summaries, source_state_key, FolderSourcesDialogView};
-    use crate::app::CairnApp;
+    use super::{FolderSourcesDialogView, folder_source_summaries, source_state_key};
+    use crate::app::{CairnApp, layout};
     use crate::shell::i18n::I18nManager;
     use cairn_protocol::message::SourceId;
     use cairn_protocol::status::{SourceKind, SourceStatusSummary, VolumeState};
-    use core::prelude::rust_2021::test;
-    use gpui_kit::gpui::AppContext as _;
+    use gpui_kit::gpui::{AppContext as _, Bounds, Pixels, px};
+    use std::cell::RefCell;
+
+    thread_local! {
+        static LAST_FOLDER_SOURCE_ROW_BOUNDS: RefCell<Vec<Bounds<Pixels>>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(super) fn record_folder_source_row_bounds(bounds: Vec<Bounds<Pixels>>) {
+        LAST_FOLDER_SOURCE_ROW_BOUNDS.with(|slot| {
+            *slot.borrow_mut() = bounds;
+        });
+    }
+
+    fn take_folder_source_row_bounds() -> Vec<Bounds<Pixels>> {
+        LAST_FOLDER_SOURCE_ROW_BOUNDS.with(|slot| std::mem::take(&mut *slot.borrow_mut()))
+    }
 
     fn source(id: u32, kind: SourceKind, status: VolumeState, root: &str) -> SourceStatusSummary {
         SourceStatusSummary {
@@ -440,18 +503,17 @@ mod tests {
             assert!(i18n.has_key("folder_sources_remove"));
             assert!(i18n.has_key("folder_sources_rescan"));
             assert!(i18n.has_key("folder_sources_empty"));
-            assert!(i18n.has_key("folder_sources_close"));
             assert!(i18n.has_key("folder_source_row_label"));
         }
     }
 
     fn with_dialog(
         test: impl FnOnce(
-                &gpui_kit::gpui::Entity<CairnApp>,
-                &gpui_kit::gpui::Entity<FolderSourcesDialogView>,
-                &mut gpui_kit::gpui::Window,
-                &mut gpui_kit::gpui::App,
-            ) + 'static,
+            &gpui_kit::gpui::Entity<CairnApp>,
+            &gpui_kit::gpui::Entity<FolderSourcesDialogView>,
+            &mut gpui_kit::gpui::Window,
+            &mut gpui_kit::gpui::App,
+        ) + 'static,
     ) {
         gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
             gpui_kit::init(cx);
@@ -464,12 +526,136 @@ mod tests {
                 cx,
                 |window, cx| {
                     let app = cx.new(|cx| CairnApp::new(window, cx));
-                    let dialog = cx.new(|cx| FolderSourcesDialogView::new(app.clone(), window, cx));
+                    let placeholder = app
+                        .read(cx)
+                        .i18n
+                        .get_text("folder_sources_path_placeholder");
+                    let dialog = cx.new(|cx| {
+                        FolderSourcesDialogView::new(app.clone(), placeholder, window, cx)
+                    });
                     test(&app, &dialog, window, cx);
                     cx.quit();
                     app
                 },
             );
+        });
+    }
+
+    #[test]
+    fn opening_folder_sources_dialog_inside_app_update_renders_without_reentrant_borrow() {
+        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
+            gpui_kit::init(cx);
+            let (handle, app) = gpui_kit::open_window(
+                gpui_kit::gpui::WindowOptions {
+                    show: false,
+                    focus: false,
+                    ..gpui_kit::gpui::WindowOptions::default()
+                },
+                cx,
+                |window, cx| cx.new(|cx| CairnApp::new(window, cx)),
+            )
+            .expect("test window opens");
+
+            handle
+                .update(cx, |_, window, cx| {
+                    app.update(cx, |this, cx| {
+                        this.service.sources = vec![
+                            source(1000, SourceKind::Folder, VolumeState::Synced, r"D:\Work"),
+                            source(
+                                1001,
+                                SourceKind::Folder,
+                                VolumeState::CatchingUp(50),
+                                r"E:\Archive",
+                            ),
+                        ];
+                        this.open_folder_sources_dialog(window, cx);
+                    });
+                    assert!(
+                        gpui_kit::component::WindowExt::has_active_dialog(window, cx),
+                        "folder sources dialog must be active on the window"
+                    );
+                    window.draw(cx).clear(cx);
+                })
+                .expect("window update and draw succeed");
+            cx.quit();
+        });
+    }
+
+    #[test]
+    fn folder_source_rows_keep_the_uniform_row_height() {
+        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
+            gpui_kit::init(cx);
+            let (handle, _view) = gpui_kit::open_window(
+                gpui_kit::gpui::WindowOptions {
+                    show: false,
+                    focus: false,
+                    ..gpui_kit::gpui::WindowOptions::default()
+                },
+                cx,
+                |window, cx| {
+                    let app = cx.new(|cx| CairnApp::new(window, cx));
+                    app.update(cx, |app, cx| {
+                        app.service.sources = vec![
+                            source(1000, SourceKind::Folder, VolumeState::Synced, r"D:\Work"),
+                            source(
+                                1001,
+                                SourceKind::Folder,
+                                VolumeState::CatchingUp(50),
+                                r"E:\Archive",
+                            ),
+                            source(1002, SourceKind::Folder, VolumeState::Synced, r"F:\Media"),
+                        ];
+                        app.service.connection.mark_connected();
+                        cx.notify();
+                    });
+                    let placeholder = app
+                        .read(cx)
+                        .i18n
+                        .get_text("folder_sources_path_placeholder");
+                    cx.new(|cx| FolderSourcesDialogView::new(app, placeholder, window, cx))
+                },
+            )
+            .expect("test window opens");
+
+            handle
+                .update(cx, |_, window, cx| {
+                    take_folder_source_row_bounds();
+                    window.draw(cx).clear(cx);
+                    let row_bounds = take_folder_source_row_bounds();
+                    assert_eq!(
+                        row_bounds.len(),
+                        3,
+                        "all three folder source rows must be laid out"
+                    );
+
+                    let expected_row_height = window.rem_size() * layout::ROW_HEIGHT;
+                    let subpixel_epsilon = px(0.01);
+                    for (ix, bounds) in row_bounds.iter().enumerate() {
+                        assert!(
+                            (bounds.size.height - expected_row_height).abs() <= subpixel_epsilon,
+                            "row {ix} height ({:?}) must equal the uniform row height ({:?})",
+                            bounds.size.height,
+                            expected_row_height
+                        );
+                        assert_eq!(
+                            bounds.left(),
+                            row_bounds[0].left(),
+                            "row {ix} must share the list's left edge"
+                        );
+                    }
+                    for (ix, pair) in row_bounds.windows(2).enumerate() {
+                        assert!(
+                            pair[1].top() + subpixel_epsilon >= pair[0].bottom(),
+                            "row {} top ({:?}) must not overlap row {} bottom ({:?})",
+                            ix + 1,
+                            pair[1].top(),
+                            ix,
+                            pair[0].bottom()
+                        );
+                    }
+                })
+                .expect("dialog draw succeeds");
+            cx.quit();
         });
     }
 
@@ -506,7 +692,7 @@ mod tests {
             );
 
             app.update(cx, |app, _| {
-                app.service.folder_source_action_pending = false
+                app.service.folder_source_action_pending = false;
             });
             dialog.update(cx, |dialog, cx| dialog.submit_add(window, cx));
             assert!(app.read(cx).service.folder_source_action_pending);
@@ -518,7 +704,7 @@ mod tests {
     fn removing_a_row_starts_a_remove_request() {
         with_dialog(|app, dialog, _window, cx| {
             dialog.update(cx, |dialog, cx| {
-                dialog.remove_source(SourceId(1000), r"D:\Work".to_string(), cx)
+                dialog.remove_source(SourceId(1000), r"D:\Work".to_string(), cx);
             });
             assert!(app.read(cx).service.folder_source_action_pending);
         });

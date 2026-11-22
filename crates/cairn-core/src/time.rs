@@ -38,8 +38,6 @@ pub fn filetime_ticks_to_unix_seconds(ticks: u64) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use core::prelude::rust_2021::test;
-
     use super::{filetime_ticks_to_unix_seconds, timestamp_to_unix_seconds};
 
     #[test]

@@ -34,8 +34,13 @@ fn is_restart_app(arg: &str) -> bool {
 }
 
 fn expected_sha256(args: &[String]) -> Option<String> {
-    let index = args
-        .iter()
-        .position(|arg| arg.eq_ignore_ascii_case("--expected-sha256"))?;
+    let index = args.iter().position(|arg| is_expected_sha256(arg))?;
     args.get(index + 1).cloned()
+}
+
+fn is_expected_sha256(arg: &str) -> bool {
+    matches!(
+        arg.to_ascii_lowercase().as_str(),
+        "--expected-sha256" | "/expected-sha256" | "-expected-sha256"
+    )
 }

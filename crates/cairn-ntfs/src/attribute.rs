@@ -194,10 +194,11 @@ pub fn parse_attributes(
                         let val_offset =
                             u16::from_le_bytes([buf[cursor + 20], buf[cursor + 21]]) as usize;
                         let val_start = cursor + val_offset;
-                        if let Some(val_end) = val_start.checked_add(val_len) {
-                            if val_end <= cursor + attr_len && val_end <= buf.len() {
-                                result.bitmap_resident = Some(buf[val_start..val_end].to_vec());
-                            }
+                        if let Some(val_end) = val_start.checked_add(val_len)
+                            && val_end <= cursor + attr_len
+                            && val_end <= buf.len()
+                        {
+                            result.bitmap_resident = Some(buf[val_start..val_end].to_vec());
                         }
                     } else if non_resident
                         && cursor + 56 <= cursor + attr_len

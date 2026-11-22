@@ -29,8 +29,6 @@ pub fn format_size_bytes(bytes: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use core::prelude::rust_2021::test;
-
     use super::format_size_bytes;
 
     #[test]

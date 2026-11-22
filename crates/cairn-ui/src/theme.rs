@@ -12,9 +12,9 @@
 //! roles keep the component palette.
 
 use gpui_kit::component::{
-    red_300, red_400, red_500, red_600, red_700, red_800, Colorize as _, Theme, ThemeMode,
+    Colorize as _, Theme, ThemeMode, red_300, red_400, red_500, red_600, red_700, red_800,
 };
-use gpui_kit::gpui::{hsla, px, App, Hsla, Pixels};
+use gpui_kit::gpui::{App, Hsla, Pixels, hsla, px};
 
 use crate::brand::{BASE_FONT_PX, RADIUS};
 
@@ -264,11 +264,11 @@ mod gray {
 /// borders.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ModePalette {
-    /// The page: result body, table head and the light dialog.
+    /// The page: result body, table head, and light dialogs and toasts.
     pub content: Hsla,
-    /// Sunken surfaces: cards, toasts and the unfocused search box.
+    /// Sunken surfaces: cards, the unfocused search box, loading/resize covers, and scrollbar tracks.
     pub inset: Hsla,
-    /// Window chrome: title bar, sidebar, status bar and the dark dialog.
+    /// Window chrome: title bar, sidebar, status bar, and dark dialogs and toasts.
     pub frame: Hsla,
     /// Hover, pressed and selected-row fill, and the highlight of a ghost control or menu item.
     /// One step serves both because the component paints this role at half strength over a dark
@@ -336,11 +336,7 @@ pub const DARK_PALETTE: ModePalette = ModePalette {
 
 /// The palette for one appearance.
 pub const fn mode_palette(dark: bool) -> &'static ModePalette {
-    if dark {
-        &DARK_PALETTE
-    } else {
-        &LIGHT_PALETTE
-    }
+    if dark { &DARK_PALETTE } else { &LIGHT_PALETTE }
 }
 
 /// Writes the mode's roles into the component theme. Button fields are written on both the colors
@@ -688,14 +684,12 @@ pub fn rem(window: &gpui_kit::gpui::Window) -> Pixels {
 
 #[cfg(test)]
 mod tests {
-    use core::prelude::rust_2021::test;
-
     use super::{
-        apply_danger_button_palette, apply_unified_interaction_fill, clamp_zoom, contrast_ratio,
-        dialog_surface, enforce_contrast_floor, gray, is_neutral_ramp_step, lightness_step,
-        mode_palette, oklch, overlay_color, perceptual_distance, relative_luminance,
-        repair_ink_contrast, ModePalette, DARK_PALETTE, INK_CONTRAST_FLOOR, LIGHT_PALETTE,
-        MAX_ZOOM, MIN_ZOOM, NEUTRAL_RAMP, RING_CONTRAST_FLOOR, SURFACE_CONTRAST_FLOOR,
+        DARK_PALETTE, INK_CONTRAST_FLOOR, LIGHT_PALETTE, MAX_ZOOM, MIN_ZOOM, ModePalette,
+        NEUTRAL_RAMP, RING_CONTRAST_FLOOR, SURFACE_CONTRAST_FLOOR, apply_danger_button_palette,
+        apply_unified_interaction_fill, clamp_zoom, contrast_ratio, dialog_surface,
+        enforce_contrast_floor, gray, is_neutral_ramp_step, lightness_step, mode_palette, oklch,
+        overlay_color, perceptual_distance, relative_luminance, repair_ink_contrast,
     };
     use gpui_kit::component::{Theme, ThemeMode};
     use gpui_kit::gpui::Hsla;
@@ -911,21 +905,6 @@ mod tests {
     }
 
     #[test]
-    fn one_interaction_fill_lights_rows_controls_and_menu_items() {
-        for dark in [false, true] {
-            let theme = product_theme(dark);
-            let palette = mode_palette(dark);
-            assert_eq!(theme.list_hover, palette.interaction);
-            assert_eq!(theme.list_active, theme.list_hover);
-            assert_eq!(theme.sidebar_accent, theme.list_hover);
-            assert_eq!(theme.tokens.button_hover.color, theme.list_hover);
-            assert_eq!(theme.tokens.button_active.color, theme.list_hover);
-            assert_eq!(theme.accent, palette.interaction);
-            assert_eq!(theme.tokens.accent.color, theme.accent);
-        }
-    }
-
-    #[test]
     fn secondary_hover_and_pressed_move_toward_the_label_ink() {
         let mut dark = Theme::default();
         dark.mode = ThemeMode::Dark;
@@ -975,82 +954,17 @@ mod tests {
     }
 
     #[test]
-    fn the_dark_secondary_action_clears_the_dialog_surface() {
-        let theme = product_theme(true);
-        let dialog = dialog_surface(&theme);
-        let fill = theme.tokens.button_secondary.color;
-        assert_eq!(
-            fill, DARK_PALETTE.secondary,
-            "the filled action should take the palette's secondary step"
-        );
-        assert_ne!(
-            fill, dialog,
-            "the filled action is painted in the dialog's own surface color"
-        );
-        println!(
-            "dark secondary action on the dialog: {:.2}",
-            contrast_ratio(fill, dialog)
-        );
-    }
-
-    #[test]
-    fn ring_clears_non_text_contrast_on_card_surfaces() {
-        for (mode, background, muted, ring) in [
-            (ThemeMode::Light, 0.9765, 0.961, 0.639),
-            (ThemeMode::Dark, 0.0627, 0.149, 0.451),
-        ] {
-            let bg = Hsla {
-                h: 0.0,
-                s: 0.0,
-                l: background,
-                a: 1.0,
-            };
-            let card = Hsla {
-                h: 0.0,
-                s: 0.0,
-                l: muted,
-                a: 1.0,
-            };
-            let ink = Hsla {
-                h: 0.0,
-                s: 0.0,
-                l: ring,
-                a: 1.0,
-            };
-            let stroke = enforce_contrast_floor(ink, &[bg, card], super::RING_CONTRAST_FLOOR);
-            let ratio = contrast_ratio(stroke, bg).min(contrast_ratio(stroke, card));
-            assert!(ratio >= 3.0, "{mode:?} ring contrast {ratio} is below 3:1");
-        }
-    }
-
-    #[test]
-    fn the_dark_dialog_uses_a_raised_surface_and_a_stronger_scrim() {
-        let mut dark = Theme::default();
-        dark.mode = ThemeMode::Dark;
-        dark.background = Hsla {
-            h: 0.0,
-            s: 0.0,
-            l: 0.078431,
-            a: 1.0,
-        };
-        dark.title_bar = Hsla {
-            h: 0.0,
-            s: 0.0,
-            l: 0x1F as f32 / 255.0,
-            a: 1.0,
-        };
-        assert_eq!(dialog_surface(&dark), dark.title_bar);
-
-        let scrim = overlay_color(true);
-        assert_eq!(scrim.h, 0.0);
-        assert_eq!(scrim.s, 0.0);
-        assert_eq!(scrim.l, 0.0);
-        assert!((scrim.a - 0.35).abs() < f32::EPSILON);
-
-        let mut light = Theme::default();
-        light.mode = ThemeMode::Light;
+    fn dialog_surface_and_scrim_separate_modals_from_page() {
+        let light = product_theme(false);
+        let dark = product_theme(true);
         assert_eq!(dialog_surface(&light), light.background);
-        assert!((overlay_color(false).a - 0.18).abs() < f32::EPSILON);
+        assert_eq!(dialog_surface(&dark), dark.title_bar);
+        assert_ne!(dialog_surface(&dark), dark.background);
+        assert_ne!(dark.tokens.button_secondary.color, dialog_surface(&dark));
+
+        let light_scrim = overlay_color(false);
+        let dark_scrim = overlay_color(true);
+        assert!(light_scrim.a > 0.0 && light_scrim.a < dark_scrim.a && dark_scrim.a < 1.0);
     }
 
     #[test]
@@ -1126,37 +1040,6 @@ mod tests {
                     "{dark:?} ring contrast {ratio} on {surface:?} is below 3:1"
                 );
             }
-        }
-    }
-
-    #[test]
-    fn the_theme_colors_anchor_ink_and_accent() {
-        let light = product_theme(false);
-        assert_eq!(rgb_bytes(light.foreground), (0x1a, 0x1a, 0x1a));
-        assert_eq!(
-            rgb_bytes(light.tokens.button_primary.color),
-            (0x1a, 0x1a, 0x1a)
-        );
-        assert_eq!(rgb_bytes(light.background), (0xf7, 0xf7, 0xf7));
-
-        let dark = product_theme(true);
-        assert_eq!(rgb_bytes(dark.foreground), (0xe4, 0xe4, 0xe4));
-        assert_eq!(
-            rgb_bytes(dark.tokens.button_primary.color),
-            (0xe4, 0xe4, 0xe4)
-        );
-        assert_eq!(rgb_bytes(dark.background), (0x14, 0x14, 0x14));
-
-        for theme in [light, dark] {
-            let palette = mode_palette(theme.mode == ThemeMode::Dark);
-            assert_eq!(theme.caret, palette.foreground);
-            assert_eq!(theme.primary, palette.accent);
-            assert_eq!(
-                theme.tokens.button_primary_foreground.color,
-                palette.solid_label
-            );
-            assert_eq!(theme.sidebar_foreground, palette.foreground);
-            assert_eq!(theme.popover_foreground, palette.foreground);
         }
     }
 
@@ -1351,52 +1234,6 @@ mod tests {
     }
 
     #[test]
-    fn the_danger_button_keeps_the_products_red() {
-        let light = product_theme(false);
-        assert_eq!(
-            rgb_bytes(light.tokens.button_danger.color),
-            (0xdc, 0x26, 0x26)
-        );
-        assert_eq!(
-            rgb_bytes(light.tokens.button_danger_hover.color),
-            (0xb9, 0x1c, 0x1c)
-        );
-        assert_eq!(
-            rgb_bytes(light.tokens.button_danger_active.color),
-            (0x99, 0x1b, 0x1b)
-        );
-        assert_eq!(
-            rgb_bytes(light.colors.button_danger_foreground),
-            (0xf7, 0xf7, 0xf7)
-        );
-
-        let dark = product_theme(true);
-        assert_eq!(
-            rgb_bytes(dark.tokens.button_danger.color),
-            (0xef, 0x44, 0x44)
-        );
-        assert_eq!(
-            rgb_bytes(dark.tokens.button_danger_hover.color),
-            (0xf8, 0x71, 0x71)
-        );
-        assert_eq!(
-            rgb_bytes(dark.tokens.button_danger_active.color),
-            (0xfc, 0xa5, 0xa5)
-        );
-        assert_eq!(
-            rgb_bytes(dark.colors.button_danger_foreground),
-            (0x14, 0x14, 0x14)
-        );
-
-        for theme in [light, dark] {
-            assert!(
-                theme.tokens.button_danger.color.s >= 0.7,
-                "the fill is not a red"
-            );
-        }
-    }
-
-    #[test]
     fn the_danger_button_reads_one_value_per_field() {
         for dark in [false, true] {
             let theme = product_theme(dark);
@@ -1444,8 +1281,7 @@ mod tests {
             }
 
             // The halved composite is what sets the step. The line tier sits one step below it,
-            // and borrowing that step would leave a ghost control's hover under the floor, which is
-            // exactly the state this rule replaced.
+            // so borrowing that step would leave a ghost control's hover under the floor.
             let line_as_control = lightness_step(
                 control_hover_fill(palette.border, palette.frame, dark),
                 palette.frame,

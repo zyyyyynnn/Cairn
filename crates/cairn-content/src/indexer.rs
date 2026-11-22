@@ -4,7 +4,7 @@
 
 //! Tantivy full-text index management and content querying.
 
-use crate::tokenizer::{CjkBigramLatinTokenizer, CJK_BIGRAM_LATIN_TOKENIZER};
+use crate::tokenizer::{CJK_BIGRAM_LATIN_TOKENIZER, CjkBigramLatinTokenizer};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
@@ -15,8 +15,8 @@ use tantivy::query::{BooleanQuery, Occur, QueryParser, TermQuery};
 use tantivy::schema::IndexRecordOption;
 use tantivy::schema::*;
 use tantivy::{
-    doc, DocId, Index, IndexReader, IndexWriter, ReloadPolicy, Score, SegmentOrdinal,
-    SegmentReader, TantivyDocument, Term,
+    DocId, Index, IndexReader, IndexWriter, ReloadPolicy, Score, SegmentOrdinal, SegmentReader,
+    TantivyDocument, Term, doc,
 };
 use thiserror::Error;
 
@@ -312,7 +312,7 @@ impl ContentSearcher {
     }
 
     /// Builds a conjunction of the term's body tokens. An empty token stream yields an empty
-    /// BooleanQuery, which matches nothing.
+    /// `BooleanQuery`, which matches nothing.
     fn plain_text_query(&self, text: &str) -> Result<BooleanQuery, ContentIndexError> {
         let mut analyzer = self.index.tokenizer_for_field(self.f_body)?;
         let mut stream = analyzer.token_stream(text);
@@ -1009,10 +1009,12 @@ mod tests {
         let hits = index.search("架构设计", 10).expect("search failed");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].frn, 1001);
-        assert!(hits[0]
-            .snippets
-            .iter()
-            .any(|snippet| snippet.contains("架构设计")));
+        assert!(
+            hits[0]
+                .snippets
+                .iter()
+                .any(|snippet| snippet.contains("架构设计"))
+        );
     }
 
     #[test]
@@ -1353,9 +1355,10 @@ mod tests {
             .expect("snippets_for_keys");
         assert_eq!(fetched.len(), 1);
         let row4 = fetched.get(&(0, 4)).expect("frn 4 snippets");
-        assert!(row4
-            .iter()
-            .any(|s| s.contains("alpha") || s.contains("beta")));
+        assert!(
+            row4.iter()
+                .any(|s| s.contains("alpha") || s.contains("beta"))
+        );
     }
 
     #[test]

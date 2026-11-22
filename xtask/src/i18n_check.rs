@@ -35,7 +35,7 @@ pub fn check_i18n(workspace: &Path) -> Result<(), String> {
         }
         checked += 1;
         if let Err(problems) = check_crate(&crate_dir, &locales) {
-            let _ = writeln!(report, "{}", problems);
+            let _ = writeln!(report, "{problems}");
         }
     }
 
@@ -63,7 +63,7 @@ fn crate_dirs(workspace: &Path) -> Vec<PathBuf> {
         return Vec::new();
     };
     let mut dirs: Vec<PathBuf> = entries
-        .filter_map(|entry| entry.ok())
+        .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|path| path.is_dir())
         .collect();
@@ -73,10 +73,10 @@ fn crate_dirs(workspace: &Path) -> Vec<PathBuf> {
 
 /// Checks one crate's locale pair against its own source tree.
 fn check_crate(crate_dir: &Path, locales_dir: &Path) -> Result<(), String> {
-    let crate_name = crate_dir
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .unwrap_or_else(|| crate_dir.to_string_lossy().to_string());
+    let crate_name = crate_dir.file_name().map_or_else(
+        || crate_dir.to_string_lossy().to_string(),
+        |name| name.to_string_lossy().to_string(),
+    );
 
     let mut keys_by_locale: Vec<BTreeSet<String>> = Vec::new();
     for locale in LOCALE_NAMES {
@@ -118,7 +118,7 @@ fn check_crate(crate_dir: &Path, locales_dir: &Path) -> Result<(), String> {
             let _ = writeln!(
                 problems,
                 "  {literal} ({})",
-                literals[literal].first().map(String::as_str).unwrap_or("")
+                literals[literal].first().map_or("", String::as_str)
             );
         }
     }
@@ -178,7 +178,7 @@ fn namespaces(keys: &BTreeSet<String>) -> BTreeSet<String> {
     keys.iter()
         .filter_map(|key| key.split('_').next())
         .filter(|segment| !segment.is_empty())
-        .map(|segment| segment.to_string())
+        .map(ToString::to_string)
         .collect()
 }
 

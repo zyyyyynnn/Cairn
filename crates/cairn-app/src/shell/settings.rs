@@ -221,11 +221,11 @@ pub fn default_settings_path() -> PathBuf {
 /// Configures current-user autostart via Windows Registry HKCU Run key (SET-03).
 #[cfg(windows)]
 pub fn set_autostart_registry(enable: bool) -> Result<(), Box<dyn std::error::Error>> {
-    use windows::core::w;
     use windows::Win32::System::Registry::{
-        RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegSetValueExW, HKEY_CURRENT_USER,
-        KEY_SET_VALUE, REG_SZ,
+        HKEY_CURRENT_USER, KEY_SET_VALUE, REG_SZ, RegCloseKey, RegDeleteValueW, RegOpenKeyExW,
+        RegSetValueExW,
     };
+    use windows::core::w;
 
     let subkey = w!(r"Software\Microsoft\Windows\CurrentVersion\Run");
     let value_name = w!("Cairn");
@@ -236,7 +236,7 @@ pub fn set_autostart_registry(enable: bool) -> Result<(), Box<dyn std::error::Er
         let mut hkey = windows::Win32::System::Registry::HKEY::default();
         let status = RegOpenKeyExW(HKEY_CURRENT_USER, subkey, None, KEY_SET_VALUE, &mut hkey);
         if status.is_err() {
-            return Err(format!("RegOpenKeyExW failed with code {:?}", status).into());
+            return Err(format!("RegOpenKeyExW failed with code {status:?}").into());
         }
 
         if enable {
@@ -256,7 +256,7 @@ pub fn set_autostart_registry(enable: bool) -> Result<(), Box<dyn std::error::Er
             );
             let _ = RegCloseKey(hkey);
             if res.is_err() {
-                return Err(format!("RegSetValueExW failed: {:?}", res).into());
+                return Err(format!("RegSetValueExW failed: {res:?}").into());
             }
         } else {
             let _ = RegDeleteValueW(hkey, value_name);
@@ -338,51 +338,57 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_settings_default_and_serialization() {
+    fn defaults_and_empty_toml_keep_compatible_settings() {
+        use crate::table::model::OptionalColumn;
+
         let default_settings = AppSettings::default();
         assert_eq!(default_settings.language, LANGUAGE_SYSTEM);
         assert_eq!(default_settings.theme, THEME_SYSTEM);
         assert_eq!(default_settings.zoom_level, 1.0);
         assert!(!default_settings.autostart);
+        assert!(!default_settings.exclude_hidden);
+        assert!(!default_settings.exclude_system);
         assert_eq!(default_settings.columns.name_width, 310.0);
         assert_eq!(default_settings.columns.sort_spec, "name-asc");
-
-        let serialized = toml::to_string_pretty(&default_settings).unwrap();
-        let parsed: AppSettings = toml::from_str(&serialized).unwrap();
-        assert_eq!(parsed, default_settings);
-    }
-
-    #[test]
-    fn optional_columns_are_hidden_by_default_and_roundtrip() {
-        use crate::table::model::OptionalColumn;
-
-        let default_settings = AppSettings::default();
         for col in OptionalColumn::ALL {
             assert!(!default_settings.columns.is_optional_shown(col));
         }
 
-        let mut settings = AppSettings::default();
-        for col in OptionalColumn::ALL {
-            settings.columns.set_optional_shown(col, true);
-        }
-        settings.columns.sort_spec = "size-desc,name-asc".to_string();
-        let serialized = toml::to_string_pretty(&settings).unwrap();
-        let parsed: AppSettings = toml::from_str(&serialized).unwrap();
-        for col in OptionalColumn::ALL {
-            assert!(parsed.columns.is_optional_shown(col));
-        }
-        assert_eq!(parsed.columns.sort_spec, "size-desc,name-asc");
+        let legacy: AppSettings = toml::from_str("").unwrap();
+        assert_eq!(legacy, default_settings);
     }
 
     #[test]
-    fn a_settings_file_without_optional_columns_keeps_them_hidden() {
+    fn save_and_load_roundtrips_all_custom_fields() {
         use crate::table::model::OptionalColumn;
 
-        let legacy: AppSettings = toml::from_str("").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("Cairn").join("settings.toml");
+
+        let mut custom_settings = AppSettings {
+            language: "en-US".to_string(),
+            theme: "dark".to_string(),
+            zoom_level: 1.25,
+            autostart: true,
+            exclude_hidden: true,
+            exclude_system: true,
+            columns: ColumnSettings {
+                name_width: 350.0,
+                sort_spec: "size-desc,name-asc".to_string(),
+                ..Default::default()
+            },
+        };
         for col in OptionalColumn::ALL {
-            assert!(!legacy.columns.is_optional_shown(col));
+            custom_settings.columns.set_optional_shown(col, true);
         }
-        assert_eq!(legacy.columns.sort_spec, "name-asc");
+
+        custom_settings.save_to_path(&settings_path).unwrap();
+
+        let loaded = AppSettings::load_from_path(&settings_path).unwrap();
+        assert_eq!(loaded, custom_settings);
+        for col in OptionalColumn::ALL {
+            assert!(loaded.columns.is_optional_shown(col));
+        }
     }
 
     #[test]
@@ -410,29 +416,6 @@ mod tests {
     }
 
     #[test]
-    fn test_settings_save_and_load_roundtrip() {
-        let dir = tempfile::tempdir().unwrap();
-        let settings_path = dir.path().join("Cairn").join("settings.toml");
-
-        let custom_settings = AppSettings {
-            language: "en-US".to_string(),
-            theme: "dark".to_string(),
-            zoom_level: 1.25,
-            columns: ColumnSettings {
-                name_width: 350.0,
-                sort_spec: "size-desc".to_string(),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        custom_settings.save_to_path(&settings_path).unwrap();
-
-        let loaded = AppSettings::load_from_path(&settings_path).unwrap();
-        assert_eq!(loaded, custom_settings);
-    }
-
-    #[test]
     fn test_settings_missing_or_invalid_fallback() {
         let dir = tempfile::tempdir().unwrap();
         let invalid_path = dir.path().join("invalid.toml");
@@ -443,42 +426,6 @@ mod tests {
         let non_existent = dir.path().join("missing.toml");
         let fallback = AppSettings::load_from_path(&non_existent).unwrap();
         assert_eq!(fallback, AppSettings::default());
-    }
-
-    #[test]
-    fn test_autostart_setting_persistence() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("settings.toml");
-
-        let settings = AppSettings {
-            autostart: true,
-            ..Default::default()
-        };
-        settings.save_to_path(&path).unwrap();
-
-        let loaded = AppSettings::load_from_path(&path).unwrap();
-        assert!(loaded.autostart);
-    }
-
-    #[test]
-    fn exclusion_flags_default_to_false_and_roundtrip() {
-        let default_settings = AppSettings::default();
-        assert!(!default_settings.exclude_hidden);
-        assert!(!default_settings.exclude_system);
-
-        let partial: AppSettings = toml::from_str("").unwrap();
-        assert!(!partial.exclude_hidden);
-        assert!(!partial.exclude_system);
-
-        let custom = AppSettings {
-            exclude_hidden: true,
-            exclude_system: true,
-            ..Default::default()
-        };
-        let encoded = toml::to_string_pretty(&custom).unwrap();
-        let decoded: AppSettings = toml::from_str(&encoded).unwrap();
-        assert!(decoded.exclude_hidden);
-        assert!(decoded.exclude_system);
     }
 
     #[test]

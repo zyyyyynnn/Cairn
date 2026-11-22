@@ -4,8 +4,8 @@
 
 //! MFT Record parsing and entry generation.
 
-use crate::attribute::{parse_attributes, ParsedAttributes};
-use crate::fixup::{apply_fixup, RECORD_FLAG_IN_USE, RECORD_FLAG_IS_DIR};
+use crate::attribute::{ParsedAttributes, parse_attributes};
+use crate::fixup::{RECORD_FLAG_IN_USE, RECORD_FLAG_IS_DIR, apply_fixup};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -31,7 +31,7 @@ pub struct ExtractedItem {
 }
 
 /// Parses an MFT record buffer (e.g. 1024 bytes), applying USA fixup and returning
-/// all extracted items (one per valid non-DOS $FILE_NAME, supporting hard links).
+/// all extracted items (one per valid non-DOS `$FILE_NAME`, supporting hard links).
 pub fn parse_mft_record(
     record_buf: &mut [u8],
     sector_size: usize,

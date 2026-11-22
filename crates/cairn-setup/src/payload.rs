@@ -8,12 +8,17 @@
 //! MSI and a fixed footer. The footer is deliberately small and self-describing so the setup binary
 //! can find its engine without a second file or a self-extraction directory format.
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
+#[cfg(all(windows, feature = "gui"))]
+use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
+#[cfg(all(windows, feature = "gui"))]
 use std::os::windows::fs::OpenOptionsExt;
 use std::path::Path;
 
+#[cfg(all(windows, feature = "gui"))]
 use sha2::{Digest, Sha256};
+#[cfg(all(windows, feature = "gui"))]
 use windows::Win32::Storage::FileSystem::FILE_SHARE_READ;
 
 const MAGIC: &[u8; 8] = b"CAIRNMSI";
@@ -86,6 +91,7 @@ pub fn extract_payload(exe: &Path, destination: &Path) -> Result<(), PayloadErro
 /// Opens this executable with write and delete denied, verifies the hash the updater already
 /// checked, then extracts the payload from that same handle. The handle stays open for the whole
 /// read, so a same-user process cannot swap the file between verification and extraction.
+#[cfg(all(windows, feature = "gui"))]
 pub fn extract_payload_locked(
     expected_sha256: Option<&str>,
     destination: &Path,
@@ -104,6 +110,7 @@ pub fn extract_payload_locked(
     extract_payload_from(&mut file, destination)
 }
 
+#[cfg(all(windows, feature = "gui"))]
 fn sha256_file(file: &mut File) -> Result<String, PayloadError> {
     file.seek(SeekFrom::Start(0))?;
     let mut hasher = Sha256::new();
@@ -166,10 +173,9 @@ fn extract_payload_from(file: &mut File, destination: &Path) -> Result<(), Paylo
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        append_payload, extract_payload, extract_payload_locked, has_payload, sha256_file,
-        PayloadError,
-    };
+    use super::{PayloadError, append_payload, extract_payload, has_payload};
+    #[cfg(all(windows, feature = "gui"))]
+    use super::{extract_payload_locked, sha256_file};
 
     fn fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -231,6 +237,7 @@ mod tests {
         ));
     }
 
+    #[cfg(all(windows, feature = "gui"))]
     #[test]
     fn the_setup_hash_helper_reads_the_whole_file() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -243,6 +250,7 @@ mod tests {
         );
     }
 
+    #[cfg(all(windows, feature = "gui"))]
     #[test]
     fn a_wrong_setup_hash_is_rejected_before_extraction() {
         let dir = tempfile::tempdir().expect("tempdir");

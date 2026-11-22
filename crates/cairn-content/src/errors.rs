@@ -8,8 +8,8 @@
 
 use std::error::Error;
 use std::io;
-use tantivy::directory::error::{LockError, OpenDirectoryError, OpenReadError, OpenWriteError};
 use tantivy::TantivyError;
+use tantivy::directory::error::{LockError, OpenDirectoryError, OpenReadError, OpenWriteError};
 
 /// The OS error code of an extraction or indexing failure, searched across the whole source
 /// chain and inside Tantivy's variants, which keep the `io::Error` private.

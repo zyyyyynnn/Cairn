@@ -7,7 +7,7 @@
 
 use cairn_core::arena::NamePool;
 use cairn_core::index_file::{
-    decode_record, encode_record, IndexFileError, IndexHeader, HEADER_SIZE, RECORD_SIZE,
+    HEADER_SIZE, IndexFileError, IndexHeader, RECORD_SIZE, decode_record, encode_record,
 };
 use cairn_core::model::FileRecord;
 use crc32fast::Hasher;
@@ -61,20 +61,12 @@ const STREAM_CHUNK_BYTES: usize = DECODE_CHUNK_RECORDS * RECORD_SIZE;
 /// Controlled growth headroom (~3.1%) reserved on loaded/compacted record tables so small USN
 /// bursts do not trigger immediate 2x `Vec` reallocations.
 pub(crate) fn headroom_for_records(len: usize) -> usize {
-    if len == 0 {
-        0
-    } else {
-        (len / 32).max(64)
-    }
+    if len == 0 { 0 } else { (len / 32).max(64) }
 }
 
 /// Controlled growth headroom (~3.1%) reserved on loaded/compacted string arenas.
 pub(crate) fn headroom_for_arena(len: usize) -> usize {
-    if len == 0 {
-        0
-    } else {
-        (len / 32).max(2_048)
-    }
+    if len == 0 { 0 } else { (len / 32).max(2_048) }
 }
 
 /// Atomically saves volume index records and arena to `vol_<drive>.idx`.
@@ -86,7 +78,7 @@ pub fn save_volume_index_atomic(
 
     let file_name = format!("vol_{}.idx", snapshot.drive_letter.to_ascii_uppercase());
     let target_path = dir.join(&file_name);
-    let tmp_path = dir.join(format!("{}.tmp", file_name));
+    let tmp_path = dir.join(format!("{file_name}.tmp"));
 
     let (arena_bytes, folded_bytes) = snapshot.arena.raw_parts();
     let record_count = u32::try_from(snapshot.records.len())
@@ -256,10 +248,10 @@ fn load_volume_index_with_len<R: Read>(
         .and_then(|n| n.checked_add(arena_len))
         .and_then(|n| n.checked_add(folded_len))
         .ok_or(PersistenceError::InvalidPayloadLength)?;
-    if let Some(actual_len) = actual_file_len {
-        if actual_len != expected_file_len {
-            return Err(PersistenceError::InvalidPayloadLength);
-        }
+    if let Some(actual_len) = actual_file_len
+        && actual_len != expected_file_len
+    {
+        return Err(PersistenceError::InvalidPayloadLength);
     }
     if arena_len != folded_len {
         return Err(PersistenceError::InvalidPayloadLength);
@@ -348,10 +340,10 @@ fn atomic_replace_file(src: &Path, dst: &Path) -> Result<(), std::io::Error> {
     #[cfg(windows)]
     {
         use std::os::windows::ffi::OsStrExt;
-        use windows::core::PCWSTR;
         use windows::Win32::Storage::FileSystem::{
-            MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+            MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
         };
+        use windows::core::PCWSTR;
 
         let wide_src: Vec<u16> = src
             .as_os_str()
@@ -373,7 +365,6 @@ fn atomic_replace_file(src: &Path, dst: &Path) -> Result<(), std::io::Error> {
             )
         };
         if res.is_err() {
-            // Fall back to remove + rename if needed
             let _ = fs::remove_file(dst);
             fs::rename(src, dst)?;
         }

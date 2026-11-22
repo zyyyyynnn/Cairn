@@ -18,13 +18,13 @@ use cairn_ntfs::mft::ExtractedItem;
 use cairn_ntfs::volume_identity::VolumeIdentity;
 use cairn_protocol::status::{ContentIndexState, JournalChangeKind, SourceKind, VolumeState};
 use cairn_service::config::ServiceConfig;
+use cairn_service::sync_engine::MultiVolumeEngine;
 use cairn_service::sync_engine::folder_source::{
-    FolderSource, FolderWatchEvent, FOLDER_CHANGE_BUFFER_CAP,
+    FOLDER_CHANGE_BUFFER_CAP, FolderSource, FolderWatchEvent,
 };
 use cairn_service::sync_engine::index_journal::{
-    IndexJournal, INDEX_JOURNAL_MAX_BYTES, INDEX_JOURNAL_MAX_ENTRIES,
+    INDEX_JOURNAL_MAX_BYTES, INDEX_JOURNAL_MAX_ENTRIES, IndexJournal,
 };
-use cairn_service::sync_engine::MultiVolumeEngine;
 use cairn_service::sync_engine::{RefreshedRecordMetadata, VolumeIndex};
 use std::fs;
 use std::path::PathBuf;
@@ -42,15 +42,16 @@ fn cairn_worker_exe() -> PathBuf {
     } else {
         "CairnWorker"
     };
-    let target = std::env::var_os("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
+    let target = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
+        || {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .parent()
                 .and_then(std::path::Path::parent)
                 .expect("workspace root")
                 .join("target")
-        });
+        },
+        PathBuf::from,
+    );
     let candidate = target.join(profile).join(name);
     if candidate.is_file() {
         return candidate;
@@ -90,12 +91,10 @@ fn wait_for_folder_scan(engine: &MultiVolumeEngine, minimum: u64) {
             .get_sources()
             .into_iter()
             .find(|source| source.kind == SourceKind::Folder)
+            && summary.indexed_count >= minimum
+            && !matches!(summary.status, VolumeState::Rebuilding)
         {
-            if summary.indexed_count >= minimum
-                && !matches!(summary.status, VolumeState::Rebuilding)
-            {
-                return;
-            }
+            return;
         }
         assert!(
             Instant::now() < deadline,
@@ -283,11 +282,10 @@ fn folder_source_scans_updates_incrementally_and_recovers_on_buffer_overflow() {
     );
     assert!(!overflowed.needs_rescan);
     assert_eq!(overflowed.changed_records.len(), 1);
-    assert!(source
-        .records()
-        .iter()
-        .any(|r| !r.is_tombstone()
-            && source.arena().get_name(r.name_offset, r.name_len) == "gamma.txt"));
+    assert!(
+        source.records().iter().any(|r| !r.is_tombstone()
+            && source.arena().get_name(r.name_offset, r.name_len) == "gamma.txt")
+    );
     assert_eq!(journal.status().entry_count, 1);
 
     let removed = source.apply_folder_events(
@@ -317,11 +315,10 @@ fn folder_source_scans_updates_incrementally_and_recovers_on_buffer_overflow() {
         "exceeding FOLDER_CHANGE_BUFFER_CAP must trigger fallback rescan"
     );
     source.rescan(&[]).expect("overflow fallback rescan");
-    assert!(source
-        .records()
-        .iter()
-        .any(|r| !r.is_tombstone()
-            && source.arena().get_name(r.name_offset, r.name_len) == "delta.txt"));
+    assert!(
+        source.records().iter().any(|r| !r.is_tombstone()
+            && source.arena().get_name(r.name_offset, r.name_len) == "delta.txt")
+    );
 
     // Deleting the root folder marks the source Offline cleanly.
     fs::remove_dir_all(&root).unwrap();
@@ -359,10 +356,9 @@ fn engine_folder_source_watch_and_persistence_work_end_to_end() {
             .get_sources()
             .into_iter()
             .find(|source| source.source_id == added.source_id)
+            && summary.status == VolumeState::Synced
         {
-            if summary.status == VolumeState::Synced {
-                break summary;
-            }
+            break summary;
         }
         assert!(
             Instant::now() < scan_deadline,

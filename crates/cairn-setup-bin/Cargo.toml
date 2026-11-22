@@ -22,7 +22,7 @@ path = "src/bin/cairn-install-guard.rs"
 test = false
 
 [dependencies]
-cairn-setup.workspace = true
+cairn-setup = { workspace = true, features = ["gui"] }
 
 [build-dependencies]
 winresource.workspace = true

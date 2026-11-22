@@ -156,7 +156,6 @@ fn appended_batches_report_folder_sizes() {
 #[test]
 fn ingest_items_aggregates_directory_sizes_and_marks_valid() {
     let mut vol = VolumeIndex::new('X');
-    // Initial ingest of nested tree with file sizes
     vol.ingest_items(vec![
         index_item(1, 0, "X:", true),
         index_item(2, 1, "dir", true),
@@ -482,7 +481,6 @@ fn compact_if_needed_leaves_a_small_index_alone() {
 fn test_volume_index_ingest_and_usn_changes() {
     let mut vol = VolumeIndex::new('C');
 
-    // Initial ingest of 3 items
     let items = vec![
         ExtractedItem {
             frn: 10,
@@ -767,19 +765,16 @@ fn bitset_operations_and_boundaries() {
     let mut bs = BitSet::with_capacity(128);
     assert_eq!(bs.words.len(), 2);
 
-    // Insertion of boundary bits
     assert!(bs.insert(0));
     assert!(bs.insert(63));
     assert!(bs.insert(64));
     assert!(bs.insert(127));
 
-    // Re-insertion of existing bits returns false
     assert!(!bs.insert(0));
     assert!(!bs.insert(63));
     assert!(!bs.insert(64));
     assert!(!bs.insert(127));
 
-    // Out of bounds insertion returns false
     assert!(!bs.insert(128));
     assert!(!bs.insert(1000));
 }

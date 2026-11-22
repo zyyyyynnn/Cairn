@@ -8,7 +8,7 @@
 //!
 //! The service owns the MFT and the decision of which files are eligible. This process owns the
 //! risky half: decoding a document, extracting its text and writing the Tantivy index. A malformed
-//! file can crash or stall this process without touching the LocalSystem service.
+//! file can crash or stall this process without touching the `LocalSystem` service.
 
 use cairn_content::extractor::CompositeExtractor;
 use cairn_content::indexer::ContentWriter;
@@ -40,8 +40,10 @@ struct WorkerCli {
     #[arg(short, long)]
     batch: Option<PathBuf>,
 
-    /// JSON Lines deletions produced by the service: one [volume_id, frn] pair per line
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "JSON Lines deletions produced by the service: one [volume_id, frn] pair per line"
+    )]
     delete_batch: Option<PathBuf>,
 
     /// Maximum document bytes to extract per file

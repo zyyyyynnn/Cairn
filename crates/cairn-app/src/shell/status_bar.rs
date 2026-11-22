@@ -15,7 +15,7 @@ pub struct StatusBarModel {
     /// The last completed result-set total. It is not a running/partial figure: the status band
     /// renders it only after the query and any index build have settled.
     objects_count: usize,
-    /// Sum of matched files' own sizes, from the same completed query.
+    /// Sum of matched entries counted once at each highest hit point, from the same completed query.
     objects_bytes: u64,
     summary_known: bool,
     pub volumes: Vec<VolumeStatusSummary>,
@@ -38,7 +38,7 @@ impl StatusBarModel {
         })
     }
 
-    /// Records a completed query's exact count and matched-file byte total. While a new result
+    /// Records a completed query's exact count and highest-hit byte total. While a new result
     /// set is loading, the caller clears this first so the band never presents stale values.
     pub fn set_objects_summary(&mut self, count: usize, bytes: u64) {
         self.objects_count = count;
@@ -106,8 +106,6 @@ pub(crate) fn format_count(count: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use core::prelude::rust_2021::test;
-
     use super::*;
     use crate::shell::i18n::I18nManager;
 

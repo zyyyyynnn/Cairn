@@ -7,19 +7,19 @@
 use cairn_client::client::ClientError;
 use cairn_client::codec::{encode_frame, try_decode_frame};
 use cairn_client::message::{
-    ClientRequest, Envelope, QueryDefaults, ResponsePayload, SortColumn, SortDirection, SortKey,
-    SortSpec, SourceId, PROTOCOL_VERSION,
+    ClientRequest, Envelope, PROTOCOL_VERSION, QueryDefaults, ResponsePayload, SortColumn,
+    SortDirection, SortKey, SortSpec, SourceId,
 };
 use cairn_client::status::{
     IndexJournalStatus, PropertyIndexStatus, SourceKind, SourceStatusSummary, VolumeState,
 };
 use cairn_client::{CairnClient, ServiceSession};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{Mutex, oneshot};
 
 /// The fields a `Query` carries, captured to compare a request with its replay.
 type SentQuery = (

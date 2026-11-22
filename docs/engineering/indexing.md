@@ -4,9 +4,9 @@
 
 ## 1. 数据真值与持久化
 
-- **先落盘，再宣布同步完成**：状态上报必须基于实际持久化结果；数据库写入未确认时不得向 UI 广播 Synced。
+- **先落盘，再宣布同步完成**：状态上报必须基于实际持久化结果；索引快照写入未确认时不得向 UI 上报 Synced。
 - **原子替换**：索引/配置文件采用临时文件加原子替换；异常退出不能留下半个可解析文件。
-- 数据库备份必须与主文件版本匹配；恢复流程不得把不完整备份当成有效索引。
+- 索引快照的魔数与版本号（`INDEX_MAGIC` / `INDEX_VERSION`）必须与当前格式匹配；恢复流程不得把损坏或不完整快照当成有效索引。
 
 ## 2. USN 与增量修复
 
@@ -51,6 +51,6 @@
 
 ## 代码位置
 
-- `crates/cairn-service/src/sync_engine/`：USN、日记账、内容索引与卷同步。
+- `crates/cairn-service/src/sync_engine/`：USN、索引日志、内容索引与卷同步。
 - `crates/cairn-core/src/engine.rs`、`crates/cairn-core/src/syntax.rs`：查询与过滤。
 - `crates/cairn-core/src/dir_size.rs`、`crates/cairn-core/src/file_kind.rs`：目录后代大小聚合与文件类别判定。卷索引在构建与增量更新后按 `parent_idx` 链维护目录大小，表格的大小列、排序与 `size:` 过滤共用同一值。

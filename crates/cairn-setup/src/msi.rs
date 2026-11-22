@@ -12,16 +12,16 @@ use crate::registry::wide;
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Mutex;
-use windows::core::{PCWSTR, PWSTR};
+use std::sync::mpsc::{self, Receiver, Sender};
 use windows::Win32::System::ApplicationInstallationAndServicing::{
-    MsiConfigureProductW, MsiEnableLogW, MsiInstallProductW, MsiRecordGetInteger,
-    MsiRecordGetStringW, MsiSetExternalUIRecord, MsiSetInternalUI, INSTALLLEVEL_DEFAULT,
-    INSTALLLOGMODE_ACTIONSTART, INSTALLLOGMODE_ERROR, INSTALLLOGMODE_PROGRESS,
-    INSTALLLOGMODE_VERBOSE, INSTALLMESSAGE_ACTIONSTART, INSTALLMESSAGE_ERROR,
-    INSTALLMESSAGE_PROGRESS, INSTALLSTATE_ABSENT, INSTALLUILEVEL_NONE, MSIHANDLE,
+    INSTALLLEVEL_DEFAULT, INSTALLLOGMODE_ACTIONSTART, INSTALLLOGMODE_ERROR,
+    INSTALLLOGMODE_PROGRESS, INSTALLLOGMODE_VERBOSE, INSTALLMESSAGE_ACTIONSTART,
+    INSTALLMESSAGE_ERROR, INSTALLMESSAGE_PROGRESS, INSTALLSTATE_ABSENT, INSTALLUILEVEL_NONE,
+    MSIHANDLE, MsiConfigureProductW, MsiEnableLogW, MsiInstallProductW, MsiRecordGetInteger,
+    MsiRecordGetStringW, MsiSetExternalUIRecord, MsiSetInternalUI,
 };
+use windows::core::{PCWSTR, PWSTR};
 
 const MSI_FILTER: u32 = INSTALLMESSAGE_PROGRESS.0 as u32
     | INSTALLMESSAGE_ACTIONSTART.0 as u32
@@ -442,7 +442,7 @@ unsafe extern "system" fn external_ui_handler(
         let event = context
             .progress
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .apply(kind, value);
         if let Some((current, total)) = event {
             let _ = context.sender.send(MsiEvent::Progress { current, total });
@@ -461,12 +461,12 @@ unsafe extern "system" fn external_ui_handler(
     0
 }
 
-/// The ProductCode a package carries. It is generated per build, so it names the build rather than
+/// The `ProductCode` a package carries. It is generated per build, so it names the build rather than
 /// the product version: two packages of the same version carry different codes.
 pub fn package_product_code(package: &std::path::Path) -> Option<String> {
     use windows::Win32::System::ApplicationInstallationAndServicing::{
-        MsiCloseHandle, MsiDatabaseOpenViewW, MsiOpenDatabaseW, MsiViewExecute, MsiViewFetch,
-        MSIDBOPEN_READONLY,
+        MSIDBOPEN_READONLY, MsiCloseHandle, MsiDatabaseOpenViewW, MsiOpenDatabaseW, MsiViewExecute,
+        MsiViewFetch,
     };
 
     let path = wide(package.as_os_str());
@@ -525,7 +525,7 @@ unsafe fn record_string(record: MSIHANDLE, field: u32) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{finish, FailureKind, MsiFailure, ProgressState};
+    use super::{FailureKind, MsiFailure, ProgressState, finish};
     use std::path::PathBuf;
 
     #[test]
@@ -536,12 +536,6 @@ mod tests {
         assert_eq!(state.apply(3, 50), Some((25, 150)));
         assert_eq!(state.apply(2, 200), Some((150, 150)));
         assert_eq!(state.apply(1, 1), None);
-    }
-
-    #[test]
-    fn a_reboot_initiated_result_is_a_success_with_restart() {
-        let success = finish(1641, &PathBuf::from("uninstall.log")).expect("reboot initiated");
-        assert!(success.restart_required);
     }
 
     #[test]
@@ -602,17 +596,17 @@ mod tests {
     }
 
     #[test]
-    fn installer_exit_codes_map_to_user_facing_failures() {
+    fn installer_exit_codes_map_to_user_facing_outcomes_and_preserve_log_path() {
+        let reboot = finish(1641, &PathBuf::from("uninstall.log")).expect("reboot initiated");
+        assert!(reboot.restart_required);
+
         assert_eq!(FailureKind::from_code(1602), FailureKind::Cancelled);
         assert_eq!(FailureKind::from_code(1618), FailureKind::Busy);
         assert_eq!(FailureKind::from_code(1620), FailureKind::InvalidPackage);
         assert_eq!(FailureKind::from_code(1605), FailureKind::NotInstalled);
         assert_eq!(FailureKind::from_code(1603), FailureKind::Fatal);
         assert_eq!(FailureKind::from_code(1234), FailureKind::Other(1234));
-    }
 
-    #[test]
-    fn a_failure_keeps_the_log_path_it_was_written_to() {
         let failure = MsiFailure::new(1603, PathBuf::from(r"C:\Temp\cairn.log"));
         assert_eq!(failure.kind, FailureKind::Fatal);
         assert_eq!(failure.log, PathBuf::from(r"C:\Temp\cairn.log"));

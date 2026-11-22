@@ -9,10 +9,10 @@ use crate::shell::accessibility::{self, ControlElement, KeyControl};
 use crate::shell::theme::ShellTokens;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{h_flex, Sizable as _};
+use gpui_kit::component::{Sizable as _, h_flex};
 use gpui_kit::gpui::*;
 
-/// One recovery action in a state surface or toast: a 24px semantic icon whose tooltip and
+/// One recovery action in a state surface: a 24px semantic icon whose tooltip and
 /// accessible name carry the full phrase, so the action never takes a row of its own.
 pub(crate) fn icon_action(
     control: &'static KeyControl,
@@ -27,6 +27,7 @@ pub(crate) fn icon_action(
         .min_w(rems(layout::SPACE_24))
         .min_h(rems(layout::SPACE_24))
         .icon(icon)
+        .loading_icon(IconName::LoaderCircle)
         .tooltip(label.clone())
         .accessibility_label(label)
 }
@@ -67,8 +68,8 @@ pub(crate) fn render_state_band(
                     .items_center()
                     .pl(rems(layout::SPACE_4))
                     .child(
-                        // Seat the semantic icon on the serif sentence's measured ink
-                        // centre instead of the flex line box.
+                        // Seat the action icon on the state sentence's measured ink center
+                        // instead of the flex line box.
                         div()
                             .relative()
                             .top(rems(layout::STATE_ACTION_OPTICAL_OFFSET))

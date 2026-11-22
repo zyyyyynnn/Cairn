@@ -6,4 +6,5 @@
 
 //! Library surface for the engineering tasks whose behavior is tested outside the CLI entry point.
 
+#[cfg(feature = "package")]
 pub mod package;

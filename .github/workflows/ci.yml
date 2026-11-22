@@ -9,7 +9,6 @@ on:
 permissions:
   contents: read
   pull-requests: read
-  actions: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('ref-{0}', github.sha) }}
@@ -19,9 +18,9 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
 
-# Rust caches are keyed by lockfiles and the toolchain, so workflow-only edits
-# reuse the compiled release and debug artifacts. Only main pushes write caches;
-# pull-request runs restore them and never pay the save cost.
+# Rust caches are keyed by shared-key + lockfiles + toolchain with workspace crates excluded, so
+# PRs matching main hit the primary key without saving, and lockfile-changing PRs warm their own
+# branch cache for follow-up pushes.
 
 jobs:
   changes:
@@ -51,9 +50,28 @@ jobs:
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
           fi
 
-  quality:
-    name: Code Quality & Static Analysis
+  repo-gates:
+    name: Repository Gates
     needs: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run repository gates
+        run: |
+          if [[ "${{ needs.changes.outputs.docs_only }}" == "true" ]]; then
+            cargo run -p xtask --no-default-features -- check --docs-only
+          else
+            cargo run -p xtask --no-default-features -- check
+          fi
+
+  lint:
+    name: Lint & Rustdoc
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true'
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
@@ -66,12 +84,11 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: windows-debug
+          shared-key: windows-lint
           add-job-id-key: false
           cache-bin: false
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-workspace-crates: false
       - name: Install NASM
-        if: needs.changes.outputs.docs_only != 'true'
         shell: pwsh
         run: |
           $zip = Join-Path $env:RUNNER_TEMP 'nasm.zip'
@@ -80,23 +97,29 @@ jobs:
           $nasm = Get-ChildItem -Path (Join-Path $env:RUNNER_TEMP 'nasm') -Filter nasm.exe -Recurse | Select-Object -First 1
           Split-Path $nasm.FullName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - name: Clippy lint
-        if: needs.changes.outputs.docs_only != 'true'
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Rust documentation
-        if: needs.changes.outputs.docs_only != 'true'
         run: cargo doc --workspace --no-deps
         env:
           RUSTDOCFLAGS: "-D warnings"
-      - name: Internationalization check
-        if: needs.changes.outputs.docs_only != 'true'
-        run: cargo run -p xtask -- check-i18n
-      - name: Source size gate
-        if: needs.changes.outputs.docs_only != 'true'
-        run: cargo run -p xtask -- check-size
-      - name: Documentation links
-        run: cargo run -p xtask -- check-docs
-      - name: Repository hygiene
-        run: cargo run -p xtask -- check-hygiene
+
+  quality:
+    name: Code Quality & Static Analysis
+    needs: [changes, repo-gates, lint]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify quality gates
+        run: |
+          if [[ "${{ needs.repo-gates.result }}" != "success" ]]; then
+            echo "Repository gates did not succeed."
+            exit 1
+          fi
+          if [[ "${{ needs.changes.outputs.docs_only }}" != "true" && "${{ needs.lint.result }}" != "success" ]]; then
+            echo "Lint and rustdoc did not succeed."
+            exit 1
+          fi
 
   deny:
     name: Dependency Policy
@@ -118,80 +141,17 @@ jobs:
       - name: Format check
         if: needs.changes.outputs.docs_only != 'true'
         run: cargo fmt --all --check
+      - name: Install cargo-deny
+        if: needs.changes.outputs.docs_only != 'true'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
       - name: Dependency policy
         if: needs.changes.outputs.docs_only != 'true'
-        uses: EmbarkStudios/cargo-deny-action@v2
+        run: cargo deny check
 
-  test-layers:
-    name: "Test / ${{ matrix.name }}"
-    needs: changes
-    if: needs.changes.outputs.docs_only != 'true'
-    runs-on: windows-latest
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Core & Protocol
-            command: cargo test -p cairn-protocol -p cairn-client -p cairn-core -p cairn-ui
-          - name: Content & Filesystem
-            command: cargo test -p cairn-ntfs -p cairn-content
-          - name: Service
-            command: cargo test -p cairn-service
-          - name: Desktop
-            command: cargo test -p cairn-app
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: windows-debug
-          add-job-id-key: false
-          cache-bin: false
-          save-if: false
-      - name: Install NASM
-        if: matrix.name == 'Desktop'
-        shell: pwsh
-        run: |
-          $zip = Join-Path $env:RUNNER_TEMP 'nasm.zip'
-          Invoke-WebRequest -Uri 'https://www.nasm.us/pub/nasm/releasebuilds/3.02/win64/nasm-3.02-win64.zip' -OutFile $zip
-          Expand-Archive -Path $zip -DestinationPath (Join-Path $env:RUNNER_TEMP 'nasm') -Force
-          $nasm = Get-ChildItem -Path (Join-Path $env:RUNNER_TEMP 'nasm') -Filter nasm.exe -Recurse | Select-Object -First 1
-          Split-Path $nasm.FullName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-      - name: Run tests
-        run: ${{ matrix.command }}
-
-  backfill:
-    name: Test / Backfill
-    needs: changes
-    if: needs.changes.outputs.docs_only != 'true'
-    runs-on: windows-latest
-    timeout-minutes: 20
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: windows-debug
-          add-job-id-key: false
-          cache-bin: false
-          save-if: false
-      - name: Build the content worker
-        run: cargo build -p cairn-worker
-      - name: Content and property worker end-to-end tests
-        shell: pwsh
-        run: |
-          cargo test -p cairn-service a_full_backfill_reaches_ready_and_indexes_existing_files -- --ignored
-          cargo test -p cairn-service --test platform_seam property_index_extracts_through_real_worker_and_recovers_from_corrupt_files -- --ignored
-
-  tooling:
-    name: Test / Tooling
+  test-engine:
+    name: Test / Engine & Tooling
     needs: changes
     if: needs.changes.outputs.docs_only != 'true'
     runs-on: windows-latest
@@ -204,33 +164,53 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: windows-debug
+          shared-key: windows-test-engine
           add-job-id-key: false
           cache-bin: false
-          save-if: false
-      - name: Run tests
-        run: cargo test -p cairn-cli -p cairn-worker -p cairn-setup -p cairn-setup-bin -p xtask
-      - name: Query memory and latency regression check
-        run: cargo run --release -p xtask -- bench-query --check
-      - name: Locate installer test binary
+          cache-workspace-crates: false
+      - name: Run engine and tooling tests
+        run: cargo test -p cairn-protocol -p cairn-core -p cairn-ntfs -p cairn-content -p cairn-client -p cairn-worker -p cairn-service -p cairn-cli -p xtask
+      - name: Run worker end-to-end tests and export installer test binary
         shell: pwsh
         run: |
-          $artifacts = cargo test -p xtask --no-run --message-format=json |
-            ForEach-Object { $_ | ConvertFrom-Json }
-          $binary = $artifacts |
-            Where-Object {
-              $_.reason -eq 'compiler-artifact' -and
-              $_.executable -and
-              $_.target.name -eq 'xtask' -and
-              $_.target.test -eq $true
-            } |
-            Select-Object -Last 1
-          if (-not $binary) { throw "The installer test binary was not produced." }
-          $tests = & $binary.executable --list
+          $ErrorActionPreference = 'Stop'
+          if (-not (Test-Path -LiteralPath 'target\debug\CairnWorker.exe')) {
+            throw "CairnWorker.exe was not produced at target\debug\CairnWorker.exe."
+          }
+
+          $json = cargo test -p cairn-protocol -p cairn-core -p cairn-ntfs -p cairn-content -p cairn-client -p cairn-worker -p cairn-service -p cairn-cli -p xtask --no-run --message-format=json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $artifacts = $json | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object {
+            $_.reason -eq 'compiler-artifact' -and $_.executable -and $_.profile.test -eq $true
+          }
+
+          function Invoke-IgnoredTest {
+            param([string]$Exe, [string]$Filter)
+            $testArgs = @($Filter, '--ignored', '--nocapture', '--exact')
+            $output = & $Exe @testArgs 2>&1
+            $output | Out-Host
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            if (-not (($output -join "`n") -match 'test result: ok\. 1 passed; 0 failed;')) {
+              throw "Expected exactly 1 passing test for '$Filter'."
+            }
+          }
+
+          $serviceLibTest = $artifacts | Where-Object { $_.target.name -eq 'cairn_service' } | Select-Object -Last 1
+          if (-not $serviceLibTest) { throw "The cairn_service lib test binary was not produced." }
+          Invoke-IgnoredTest -Exe $serviceLibTest.executable -Filter 'sync_engine::content_pipeline::tests::a_full_backfill_reaches_ready_and_indexes_existing_files'
+
+          $platformSeamTest = $artifacts | Where-Object { $_.target.name -eq 'platform_seam' } | Select-Object -Last 1
+          if (-not $platformSeamTest) { throw "The platform_seam integration test binary was not produced." }
+          Invoke-IgnoredTest -Exe $platformSeamTest.executable -Filter 'property_index_extracts_through_real_worker_and_recovers_from_corrupt_files'
+
+          $packageTest = $artifacts | Where-Object { $_.target.name -eq 'xtask' } | Select-Object -Last 1
+          if (-not $packageTest) { throw "The installer test binary was not produced." }
+          $tests = & $packageTest.executable --list
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if (-not ($tests -match 'real_package_builds_msi_and_setup')) {
             throw "The installer test binary does not carry the package test."
           }
-          Copy-Item -LiteralPath $binary.executable -Destination package-test.exe
+          Copy-Item -LiteralPath $packageTest.executable -Destination package-test.exe
       - name: Upload installer test binary
         uses: actions/upload-artifact@v7
         with:
@@ -238,26 +218,8 @@ jobs:
           path: package-test.exe
           retention-days: 1
 
-  test:
-    name: Domain & System Test Suite
-    needs: [changes, test-layers, tooling, backfill]
-    if: always()
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Verify every test layer
-        run: |
-          if [[ "${{ needs.changes.outputs.docs_only }}" == "true" ]]; then
-            echo "Documentation-only change; no test layer is required."
-            exit 0
-          fi
-          if [[ "${{ needs.test-layers.result }}" != "success" || "${{ needs.tooling.result }}" != "success" || "${{ needs.backfill.result }}" != "success" ]]; then
-            echo "At least one test layer did not succeed."
-            exit 1
-          fi
-
-  release_runtime:
-    name: Release / Runtime
+  test-desktop:
+    name: Test / Desktop & Setup
     needs: changes
     if: needs.changes.outputs.docs_only != 'true'
     runs-on: windows-latest
@@ -270,11 +232,10 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: release
+          shared-key: windows-test-desktop
           add-job-id-key: false
           cache-bin: false
-          cache-workspace-crates: true
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          cache-workspace-crates: false
       - name: Install NASM
         shell: pwsh
         run: |
@@ -283,22 +244,29 @@ jobs:
           Expand-Archive -Path $zip -DestinationPath (Join-Path $env:RUNNER_TEMP 'nasm') -Force
           $nasm = Get-ChildItem -Path (Join-Path $env:RUNNER_TEMP 'nasm') -Filter nasm.exe -Recurse | Select-Object -First 1
           Split-Path $nasm.FullName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-      - name: Build runtime binaries
-        run: cargo build --release -p cairn-app -p cairn-service -p cairn-cli -p cairn-worker
-      - name: Upload runtime binaries
-        uses: actions/upload-artifact@v7
-        with:
-          name: release-runtime-binaries
-          path: |
-            target/release/Cairn.exe
-            target/release/CairnService.exe
-            target/release/CairnCli.exe
-            target/release/CairnWorker.exe
-          if-no-files-found: error
-          retention-days: 1
+      - name: Run desktop and setup tests
+        run: cargo test -p cairn-ui -p cairn-app -p cairn-setup -p cairn-setup-bin
 
-  release_installer:
-    name: Release / Installer
+  test:
+    name: Domain & System Test Suite
+    needs: [changes, test-engine, test-desktop]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify every test suite
+        run: |
+          if [[ "${{ needs.changes.outputs.docs_only }}" == "true" ]]; then
+            echo "Documentation-only change; no test suite is required."
+            exit 0
+          fi
+          if [[ "${{ needs.test-engine.result }}" != "success" || "${{ needs.test-desktop.result }}" != "success" ]]; then
+            echo "At least one test suite did not succeed."
+            exit 1
+          fi
+
+  release_engine:
+    name: Release / Engine
     needs: changes
     if: needs.changes.outputs.docs_only != 'true'
     runs-on: windows-latest
@@ -311,18 +279,62 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: release-installer
+          shared-key: windows-release-engine
           add-job-id-key: false
           cache-bin: false
-          cache-workspace-crates: true
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-      - name: Build installer binaries
-        run: cargo build --release -p cairn-setup-bin
-      - name: Upload installer binaries
+          cache-workspace-crates: false
+      - name: Build engine release binaries
+        run: cargo build --release -p cairn-service -p cairn-cli -p cairn-worker -p xtask
+      - name: Query memory and latency regression check
+        shell: pwsh
+        run: |
+          & ".\target\release\CairnXtask.exe" bench-query --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Upload engine binaries
         uses: actions/upload-artifact@v7
         with:
-          name: release-installer-binaries
+          name: release-engine-binaries
           path: |
+            target/release/CairnService.exe
+            target/release/CairnCli.exe
+            target/release/CairnWorker.exe
+          if-no-files-found: error
+          retention-days: 1
+
+  release_desktop:
+    name: Release / Desktop
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-release-desktop
+          add-job-id-key: false
+          cache-bin: false
+          cache-workspace-crates: false
+      - name: Install NASM
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP 'nasm.zip'
+          Invoke-WebRequest -Uri 'https://www.nasm.us/pub/nasm/releasebuilds/3.02/win64/nasm-3.02-win64.zip' -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath (Join-Path $env:RUNNER_TEMP 'nasm') -Force
+          $nasm = Get-ChildItem -Path (Join-Path $env:RUNNER_TEMP 'nasm') -Filter nasm.exe -Recurse | Select-Object -First 1
+          Split-Path $nasm.FullName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Build desktop and installer binaries
+        run: cargo build --release -p cairn-app -p cairn-setup-bin
+      - name: Upload desktop and installer binaries
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-desktop-binaries
+          path: |
+            target/release/Cairn.exe
             target/release/CairnSetup.exe
             target/release/CairnUninstall.exe
             target/release/CairnInstallGuard.exe
@@ -331,28 +343,33 @@ jobs:
 
   package:
     name: Installer Package
-    needs: [changes, release_runtime, release_installer, tooling]
-    if: always() && (needs.changes.outputs.docs_only == 'true' || (needs.release_runtime.result == 'success' && needs.release_installer.result == 'success' && needs.tooling.result == 'success'))
-    runs-on: windows-latest
+    needs: [changes, release_engine, release_desktop, test-engine]
+    if: always()
+    runs-on: ${{ (needs.changes.outputs.docs_only == 'true' || needs.release_engine.result != 'success' || needs.release_desktop.result != 'success' || needs.test-engine.result != 'success') && 'ubuntu-latest' || 'windows-latest' }}
     timeout-minutes: 20
     steps:
       - name: Documentation-only change
         if: needs.changes.outputs.docs_only == 'true'
         run: echo "Documentation-only change; installer packaging is not required."
+      - name: Verify upstream build artifacts
+        if: needs.changes.outputs.docs_only != 'true' && (needs.release_engine.result != 'success' || needs.release_desktop.result != 'success' || needs.test-engine.result != 'success')
+        run: |
+          echo "At least one release or engine test job did not succeed."
+          exit 1
       - name: Checkout repository
         if: needs.changes.outputs.docs_only != 'true'
         uses: actions/checkout@v7
-      - name: Download runtime binaries
+      - name: Download engine binaries
         if: needs.changes.outputs.docs_only != 'true'
         uses: actions/download-artifact@v8
         with:
-          name: release-runtime-binaries
+          name: release-engine-binaries
           path: release-bin
-      - name: Download installer binaries
+      - name: Download desktop and installer binaries
         if: needs.changes.outputs.docs_only != 'true'
         uses: actions/download-artifact@v8
         with:
-          name: release-installer-binaries
+          name: release-desktop-binaries
           path: release-bin
       - name: Download installer test binary
         if: needs.changes.outputs.docs_only != 'true'
@@ -360,18 +377,42 @@ jobs:
         with:
           name: package-test-binary
           path: package-test-bin
+      - name: Cache WiX Toolset
+        id: wix-cache
+        if: needs.changes.outputs.docs_only != 'true'
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.dotnet/tools
+            ~/.wix
+          key: wix-5.0.2-win-x64
       - name: Install WiX
         if: needs.changes.outputs.docs_only != 'true'
+        shell: pwsh
         run: |
-          dotnet tool install --global wix --version 5.0.2
-          echo "$env:USERPROFILE\.dotnet\tools" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-      - name: Add the WiX UI extension
-        if: needs.changes.outputs.docs_only != 'true'
-        run: wix extension add -g WixToolset.Util.wixext/5.0.2
+          $ErrorActionPreference = 'Stop'
+          $toolsDir = Join-Path $env:USERPROFILE '.dotnet\tools'
+          $wixExe = Join-Path $toolsDir 'wix.exe'
+          if (-not (Test-Path -LiteralPath $wixExe)) {
+            dotnet tool install --global wix --version 5.0.2
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          $exts = & $wixExe extension list -g 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0 -or -not ($exts -match 'WixToolset\.Util\.wixext')) {
+            & $wixExe extension add -g WixToolset.Util.wixext/5.0.2
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          $toolsDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - name: Build and validate the installer
         if: needs.changes.outputs.docs_only != 'true'
+        shell: pwsh
         env:
           CAIRN_BIN_DIR: ${{ github.workspace }}/release-bin
         run: |
-          & "$env:GITHUB_WORKSPACE\package-test-bin\package-test.exe" real_package_builds_msi_and_setup --ignored --nocapture
+          $ErrorActionPreference = 'Stop'
+          $output = & "$env:GITHUB_WORKSPACE\package-test-bin\package-test.exe" package::tests::real_package_builds_msi_and_setup --ignored --nocapture --exact 2>&1
+          $output | Out-Host
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (($output -join "`n") -match 'test result: ok\. 1 passed; 0 failed;')) {
+            throw "Expected exactly 1 passing installer packaging test."
+          }

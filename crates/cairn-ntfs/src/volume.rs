@@ -5,19 +5,19 @@
 //! Volume access, sector reading, and MFT stream parsing.
 
 use crate::mft::ExtractedItem;
-use crate::mft_reader::{scan_mft_from_reader, BlockReader, MftScanOptions};
+use crate::mft_reader::{BlockReader, MftScanOptions, scan_mft_from_reader};
 use thiserror::Error;
 
-#[cfg(windows)]
-use windows::core::PCWSTR;
 #[cfg(windows)]
 use windows::Win32::Foundation::{CloseHandle, GENERIC_READ, HANDLE, INVALID_HANDLE_VALUE};
 #[cfg(windows)]
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, ReadFile, SetFilePointerEx, FILE_BEGIN, FILE_FLAGS_AND_ATTRIBUTES,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    OPEN_EXISTING,
+    CreateFileW, FILE_BEGIN, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAGS_AND_ATTRIBUTES,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, ReadFile,
+    SetFilePointerEx,
 };
+#[cfg(windows)]
+use windows::core::PCWSTR;
 
 #[derive(Error, Debug)]
 pub enum VolumeError {
@@ -97,7 +97,7 @@ impl RawVolumeHandle {
         }
     }
 
-    /// Reads raw bytes at `offset` using SetFilePointerEx and ReadFile.
+    /// Reads raw bytes at `offset` using `SetFilePointerEx` and `ReadFile`.
     pub fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<usize, std::io::Error> {
         let mut moved_offset = 0i64;
         // SAFETY: SetFilePointerEx moves file pointer to specified 64-bit physical offset.
@@ -123,7 +123,7 @@ impl RawVolumeHandle {
         Ok(bytes_read as usize)
     }
 
-    /// Queries the volume's USN journal metadata (FSCTL_QUERY_USN_JOURNAL).
+    /// Queries the volume's USN journal metadata (`FSCTL_QUERY_USN_JOURNAL`).
     pub fn query_usn_journal(&self) -> Result<crate::usn::UsnJournalData, crate::usn::UsnError> {
         let mut out_buf = [0u8; 80];
         let mut bytes_returned = 0u32;
@@ -148,7 +148,7 @@ impl RawVolumeHandle {
         crate::usn::UsnJournalData::parse(&out_buf[..bytes_returned as usize])
     }
 
-    /// Reads USN change journal records starting from `start_usn` (FSCTL_READ_USN_JOURNAL).
+    /// Reads USN change journal records starting from `start_usn` (`FSCTL_READ_USN_JOURNAL`).
     pub fn read_usn_journal(
         &self,
         journal_id: u64,

@@ -77,7 +77,7 @@ enum CliCommand {
         /// Disable index journal recording
         #[arg(long)]
         disable: bool,
-        /// Write the journal window after `after_seq` to a JSON file (all pages)
+        /// Write the journal window after the given sequence number to a JSON file (all pages)
         #[arg(long, value_name = "PATH", conflicts_with_all = ["enable", "disable", "json"])]
         export: Option<PathBuf>,
     },
@@ -109,7 +109,7 @@ struct CliArgs {
     #[arg(short, long, default_value_t = 100)]
     max: usize,
 
-    /// Comma-separated sort clauses, e.g. `-size,+name` or `modified-desc`
+    /// Comma-separated sort clauses, e.g. -size,+name or modified-desc
     #[arg(
         short,
         long,
@@ -158,7 +158,7 @@ trait CliTransport {
     fn add_folder_source(&self, path: &str) -> Result<Envelope<ResponsePayload>, TransportError>;
 
     fn remove_folder_source(&self, path: &str)
-        -> Result<Envelope<ResponsePayload>, TransportError>;
+    -> Result<Envelope<ResponsePayload>, TransportError>;
 
     fn rescan(&self, volume_id: Option<u16>) -> Result<Envelope<ResponsePayload>, TransportError>;
 
@@ -376,7 +376,7 @@ fn stream_query_rows<F>(
     session_id: u64,
     total_matches: usize,
     max_rows: usize,
-    first_page: Vec<FileRowData>,
+    first_page: &[FileRowData],
     mut on_row: F,
 ) -> Result<usize, CliStreamError>
 where
@@ -971,7 +971,7 @@ fn execute_cli(
             session_id,
             total_matches,
             args.max,
-            first_page,
+            &first_page,
             |row| {
                 if wrote_any {
                     buf.write_all(b",\n")?;
@@ -1016,7 +1016,7 @@ fn execute_cli(
             session_id,
             total_matches,
             args.max,
-            first_page,
+            &first_page,
             |row| write_csv_row(&mut writer, row),
         ) {
             Ok(count) => count,
@@ -1060,7 +1060,7 @@ fn execute_cli(
         session_id,
         total_matches,
         args.max,
-        first_page,
+        &first_page,
         |row| {
             let size_str = if row.is_dir {
                 "<DIR>".to_string()
@@ -1362,7 +1362,9 @@ mod tests {
         let content = std::fs::read_to_string(&csv_path).expect("read csv");
         assert!(content.contains("Name,Path,Size,Modified,Created,IsDir,Snippets,LengthMs,Author,Tags,Dimensions,FramerateMfps"));
         assert!(content.contains(r"file1.txt,C:\test\file1.txt,2048,1600000000,1500000000,false,line one | line two,12500,Alice,finance;q1,1920x1080,29970"));
-        assert!(content.contains(r"subfolder,C:\test\subfolder,0,1600000100,1500000100,true,,,,,,"));
+        assert!(
+            content.contains(r"subfolder,C:\test\subfolder,0,1600000100,1500000100,true,,,,,,")
+        );
     }
 
     fn make_row(
@@ -1596,9 +1598,11 @@ mod tests {
             execute_cli(args, &transport_err, &mut out, &mut err),
             std::process::ExitCode::from(1)
         );
-        assert!(String::from_utf8(err)
-            .unwrap()
-            .contains("Query failed: timeout"));
+        assert!(
+            String::from_utf8(err)
+                .unwrap()
+                .contains("Query failed: timeout")
+        );
 
         let args = CliArgs::try_parse_from(["CairnCli", "hello"]).unwrap();
         let service_err = StubTransport {
@@ -1684,9 +1688,11 @@ mod tests {
         let mut err = Vec::new();
         let code = execute_cli(csv_args, &transport, &mut out, &mut err);
         assert_eq!(code, std::process::ExitCode::SUCCESS);
-        assert!(String::from_utf8(out)
-            .unwrap()
-            .contains("Exported 5 results"));
+        assert!(
+            String::from_utf8(out)
+                .unwrap()
+                .contains("Exported 5 results")
+        );
 
         let mut reader = csv::Reader::from_path(&csv_path).unwrap();
         let records: Vec<csv::StringRecord> = reader.records().map(Result::unwrap).collect();
@@ -1812,9 +1818,11 @@ mod tests {
             &mut err,
         );
         assert_eq!(code, ExitCode::from(1));
-        assert!(String::from_utf8(err)
-            .unwrap()
-            .contains("admin_only_query active"));
+        assert!(
+            String::from_utf8(err)
+                .unwrap()
+                .contains("admin_only_query active")
+        );
 
         let journal_transport = StubTransport {
             control_response: Some(Envelope {
@@ -1852,9 +1860,11 @@ mod tests {
             &mut err,
         );
         assert_eq!(code, ExitCode::SUCCESS);
-        assert!(String::from_utf8(out)
-            .unwrap()
-            .contains(r"D:\Work\notes.md"));
+        assert!(
+            String::from_utf8(out)
+                .unwrap()
+                .contains(r"D:\Work\notes.md")
+        );
 
         let export_dir = tempfile::tempdir().unwrap();
         let export_path = export_dir.path().join("journal.json");

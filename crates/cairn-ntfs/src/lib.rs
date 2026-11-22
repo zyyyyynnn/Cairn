@@ -15,18 +15,18 @@ pub mod usn;
 pub mod volume;
 pub mod volume_identity;
 
-pub use attribute::{parse_attributes, NonResidentAttrSpan, ParsedAttributes, ParsedFileName};
+pub use attribute::{NonResidentAttrSpan, ParsedAttributes, ParsedFileName, parse_attributes};
 pub use boot_sector::NtfsBootSector;
 pub use file_id::directory_file_id;
-pub use fixup::{apply_fixup, RECORD_FLAG_IN_USE, RECORD_FLAG_IS_DIR};
-pub use mft::{parse_mft_record, ExtractedItem, MftError};
+pub use fixup::{RECORD_FLAG_IN_USE, RECORD_FLAG_IS_DIR, apply_fixup};
+pub use mft::{ExtractedItem, MftError, parse_mft_record};
 pub use mft_reader::{
-    scan_mft_from_file, scan_mft_from_reader, BlockReader, FileBlockReader, MftScanOptions,
-    MftScanResult, MftScanStats, SliceBlockReader,
+    BlockReader, FileBlockReader, MftScanOptions, MftScanResult, MftScanStats, SliceBlockReader,
+    scan_mft_from_file, scan_mft_from_reader,
 };
-pub use runlist::{parse_runlist, DataRun};
-pub use usn::{parse_usn_records, ReadUsnJournalDataV0, UsnChange, UsnJournalData};
+pub use runlist::{DataRun, parse_runlist};
+pub use usn::{ReadUsnJournalDataV0, UsnChange, UsnJournalData, parse_usn_records};
 #[cfg(windows)]
 pub use volume::RawVolumeHandle;
-pub use volume::{enumerate_fixed_drives, scan_live_volume_mft, VolumeError};
-pub use volume_identity::{enumerate_volumes, parse_volume_path_names, VolumeIdentity};
+pub use volume::{VolumeError, enumerate_fixed_drives, scan_live_volume_mft};
+pub use volume_identity::{VolumeIdentity, enumerate_volumes, parse_volume_path_names};
