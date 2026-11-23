@@ -366,11 +366,10 @@ impl MultiVolumeEngine {
         &self,
         port: &dyn super::worker_process::WorkerProcessPort,
     ) {
-        if self.content_pipeline.is_shutdown() {
+        if !self.content_pipeline.reset_cancel() {
             self.set_content_disabled();
             return;
         }
-        self.content_pipeline.reset_cancel();
         self.drop_content_searcher();
         // A new backfill invalidates any previous completion until it reaches Ready again; a
         // cancelled or failed run must not leave a marker that a later restart would trust.

@@ -69,7 +69,9 @@ impl ContentPipeline {
         }
         if previous_enabled != next_enabled {
             if next_enabled {
-                self.cancel.store(false, Ordering::SeqCst);
+                if !self.reset_cancel() {
+                    return;
+                }
                 self.set_progress(0, 0);
                 self.send_command(ContentCommand::Start);
             } else {
@@ -78,18 +80,25 @@ impl ContentPipeline {
                 self.send_command(ContentCommand::Cancel);
             }
         } else if next_enabled && matches!(self.status().state, ContentIndexState::Error(_)) {
-            self.cancel.store(false, Ordering::SeqCst);
+            if !self.reset_cancel() {
+                return;
+            }
             self.set_progress(0, 0);
             self.send_command(ContentCommand::Start);
         }
     }
 
-    pub(super) fn reset_cancel(&self) {
+    pub(super) fn reset_cancel(&self) -> bool {
         self.cancel.store(false, Ordering::SeqCst);
+        if self.is_shutdown() {
+            self.cancel.store(true, Ordering::SeqCst);
+            return false;
+        }
+        true
     }
 
     pub(super) fn is_cancelled(&self) -> bool {
-        self.cancel.load(Ordering::SeqCst)
+        self.cancel.load(Ordering::SeqCst) || self.is_shutdown()
     }
 
     fn set_searcher(&self, searcher: Arc<ContentSearcher>) {
@@ -515,10 +524,10 @@ impl MultiVolumeEngine {
     }
 
     pub fn request_clear_content_index(&self) -> bool {
+        let sender = self.content_pipeline.commands.lock().unwrap();
         if self.content_pipeline.is_shutdown() {
             return false;
         }
-        let sender = self.content_pipeline.commands.lock().unwrap();
         if let Some(tx) = sender.as_ref() {
             return tx.send(ContentCommand::Clear).is_ok();
         }

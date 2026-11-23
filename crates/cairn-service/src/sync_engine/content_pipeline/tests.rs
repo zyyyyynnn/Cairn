@@ -1977,8 +1977,20 @@ fn queued_start_after_stop_content_worker_does_not_run_backfill_or_restart() {
     assert!(engine.backfill_marker_path().exists());
 
     engine.stop_content_worker();
+    engine.set_content_disabled();
     engine.handle_content_command(ContentCommand::Start);
+    engine.handle_content_command(ContentCommand::IndexChanges {
+        tasks: Vec::new(),
+        deletions: Vec::new(),
+    });
+    engine.handle_content_command(ContentCommand::Clear);
+    engine.handle_content_command(ContentCommand::Cancel);
     engine.run_full_backfill_with(&PanicPort);
+    engine.content_pipeline.apply_switch(false, true);
+    assert_eq!(
+        engine.content_index_status().state,
+        ContentIndexState::Disabled
+    );
     assert!(engine.backfill_marker_path().exists());
     assert!(engine.content_pipeline.is_cancelled());
     assert!(!engine.request_clear_content_index());

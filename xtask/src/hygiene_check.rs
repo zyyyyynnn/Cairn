@@ -264,19 +264,26 @@ const FORBIDDEN_PARSER_AND_WORKER_DEPS: &[&str] = &[
     "encoding_rs",
 ];
 
+fn normalize_crate_name(name: &str) -> String {
+    name.replace('_', "-").to_ascii_lowercase()
+}
+
 fn check_isolated_manifest_deps(rel: &str, parsed: &toml::Table, violations: &mut Vec<String>) {
     let mut check_dep_table = |section: &str, table: &toml::Table| {
         for (alias, spec) in table {
-            let aliased_pkg = spec
+            let actual_pkg = spec
                 .as_table()
                 .and_then(|t| t.get("package"))
-                .and_then(toml::Value::as_str);
-            for forbidden in FORBIDDEN_PARSER_AND_WORKER_DEPS {
-                if alias == forbidden || aliased_pkg == Some(*forbidden) {
-                    violations.push(format!(
-                        "{rel}: forbidden isolated dependency `{forbidden}` in [{section}]"
-                    ));
-                }
+                .and_then(toml::Value::as_str)
+                .unwrap_or(alias.as_str());
+            let normalized = normalize_crate_name(actual_pkg);
+            if FORBIDDEN_PARSER_AND_WORKER_DEPS
+                .iter()
+                .any(|forbidden| normalize_crate_name(forbidden) == normalized)
+            {
+                violations.push(format!(
+                    "{rel}: forbidden isolated dependency `{actual_pkg}` in [{section}]"
+                ));
             }
         }
     };
@@ -1300,7 +1307,11 @@ mod tests {
             ),
             (
                 "cairn-service",
-                "[build-dependencies]\nchardetng.workspace = true\n",
+                "[build-dependencies]\nquick_xml.workspace = true\n",
+            ),
+            (
+                "cairn-content",
+                "[dependencies]\nencoding-rs.workspace = true\n",
             ),
             (
                 "cairn-service",
@@ -1322,5 +1333,15 @@ mod tests {
                 .expect_err("parser or worker dependency in isolated crate must fail");
             assert!(err.contains("forbidden isolated dependency"), "{err}");
         }
+
+        let temp_alias = tempfile::tempdir().expect("tempdir");
+        seed_valid_workspace(temp_alias.path());
+        fs::create_dir_all(temp_alias.path().join("crates/cairn-service")).expect("crate dir");
+        fs::write(
+            temp_alias.path().join("crates/cairn-service/Cargo.toml"),
+            "[package]\nname = \"cairn-service\"\nedition.workspace = true\n[lints]\nworkspace = true\n[dependencies]\nzip = { package = \"benign-crate\", version = \"1.0\" }\n",
+        )
+        .expect("write benign alias");
+        check_hygiene(temp_alias.path()).expect("benign crate aliased as zip must pass");
     }
 }
