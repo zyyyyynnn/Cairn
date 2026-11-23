@@ -4,18 +4,16 @@
 
 //! Multi-volume synchronization engine and index lifecycle manager.
 
-use cairn_content::ContentSearcher;
 use cairn_core::IndexMemoryFootprint;
-use cairn_core::property_store::{FOLDER_SOURCE_ID_BASE, PropertySideTables, SourceId};
+use cairn_core::property_store::{FOLDER_SOURCE_ID_BASE, SourceId};
 use cairn_ntfs::volume::enumerate_fixed_drives;
 use cairn_ntfs::volume_identity::{VolumeIdentity, enumerate_volumes};
 use cairn_protocol::status::{
-    ContentIndexState, ContentIndexStatus, IndexJournalEntry, IndexJournalStatus,
-    PropertyIndexStatus, SourceStatusSummary, VolumeState, VolumeStatusSummary,
+    IndexJournalEntry, IndexJournalStatus, SourceStatusSummary, VolumeState, VolumeStatusSummary,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -37,11 +35,12 @@ mod search;
 mod startup_scan;
 mod volume_index;
 mod volume_status;
+pub(crate) mod worker_runner;
 
 pub use journal_reconciliation::*;
 pub use post_scan::*;
 pub use search::{AllFilesView, MatchSet, SearchOutcome, SearchResultItem};
-pub(crate) use volume_index::SourceTableView;
+pub(crate) use volume_index::build_file_row;
 pub use volume_index::{CompactPolicy, CompactionReport, RefreshedRecordMetadata, VolumeIndex};
 
 #[cfg(test)]
@@ -61,24 +60,15 @@ fn log_safe(text: &str) -> String {
 }
 
 pub struct MultiVolumeEngine {
-    // Lock order invariant: config_apply_lock -> property_extract_lock -> volumes -> folder_sources -> property_tables -> property_refresh -> property_status -> index_journal.
+    // Lock order invariant: config_apply_lock -> property_pipeline.extract_lock -> volumes -> folder_sources -> property_pipeline.(tables -> refresh -> status) -> index_journal.
     volumes: RwLock<HashMap<char, VolumeIndex>>,
     folder_sources: Arc<RwLock<HashMap<SourceId, folder_source::FolderSource>>>,
     folder_watchers: Mutex<HashMap<SourceId, folder_source::FolderWatcherHandle>>,
     folder_scanning: Arc<Mutex<HashSet<SourceId>>>,
     next_folder_source_id: AtomicU32,
-    property_tables: Arc<RwLock<PropertySideTables>>,
-    property_status: RwLock<PropertyIndexStatus>,
-    property_refresh: Arc<Mutex<property_refresh::PropertyRefresh>>,
-    property_spawner: property_refresh::PropertySpawner,
-    property_generation: AtomicU64,
-    property_run_cancel: Mutex<Arc<AtomicBool>>,
-    property_running: AtomicBool,
-    property_stopped: AtomicBool,
-    property_extract_lock: Mutex<()>,
+    property_pipeline: property_pipeline::PropertyPipeline,
     index_journal: Arc<Mutex<index_journal::IndexJournal>>,
     index_dir: PathBuf,
-    content_dir: PathBuf,
     /// Directories written by this process (MFT cache, Tantivy index, configuration and logs).
     /// Content extraction must never read them back: a Tantivy commit rewrites `meta.json`, and
     /// indexing that file would feed the index's own writes back in as new user content.
@@ -88,10 +78,7 @@ pub struct MultiVolumeEngine {
     /// Serializes configuration applies from the comparison through the content-pipeline
     /// transition, so a switch command cannot be overtaken by the change that reverses it.
     config_apply_lock: Mutex<()>,
-    content_searcher: RwLock<Option<Arc<ContentSearcher>>>,
-    content_status: RwLock<ContentIndexStatus>,
-    content_cancel: Arc<AtomicBool>,
-    content_commands: Mutex<Option<std::sync::mpsc::Sender<content_pipeline::ContentCommand>>>,
+    content_pipeline: content_pipeline::ContentPipeline,
     /// Last complete set of volume summaries, outside the volume lock. A query holds the volume
     /// read lock for seconds; serving the response envelope from this cache keeps new connections
     /// (handshake, status probes) from waiting behind it. Refreshed on every uncontended read.
@@ -486,66 +473,22 @@ impl MultiVolumeEngine {
         let content_enabled = config.content_index_enabled;
         let property_enabled = config.property_index_enabled;
         let journal_enabled = config.index_journal_enabled;
-        let content_status = if content_enabled {
-            ContentIndexStatus {
-                state: ContentIndexState::Backfilling {
-                    processed: 0,
-                    total: 0,
-                },
-                ..Default::default()
-            }
-        } else {
-            ContentIndexStatus {
-                state: ContentIndexState::Disabled,
-                index_bytes: content_pipeline::content_dir_bytes(content_dir),
-                ..Default::default()
-            }
-        };
         let engine = Self {
             volumes: RwLock::new(map),
             folder_sources: Arc::new(RwLock::new(HashMap::new())),
             folder_watchers: Mutex::new(HashMap::new()),
             folder_scanning: Arc::new(Mutex::new(HashSet::new())),
             next_folder_source_id: AtomicU32::new(FOLDER_SOURCE_ID_BASE),
-            property_tables: Arc::new(RwLock::new(PropertySideTables::new(property_enabled))),
-            property_status: RwLock::new(if property_enabled {
-                PropertyIndexStatus {
-                    enabled: true,
-                    state: ContentIndexState::Backfilling {
-                        processed: 0,
-                        total: 0,
-                    },
-                    ..Default::default()
-                }
-            } else {
-                PropertyIndexStatus::default()
-            }),
-            property_refresh: {
-                let refresh = Arc::new(Mutex::new(property_refresh::PropertyRefresh::default()));
-                if property_enabled {
-                    refresh.lock().unwrap().mark_full();
-                }
-                refresh
-            },
-            property_spawner: Arc::new(Mutex::new(None)),
-            property_generation: AtomicU64::new(0),
-            property_run_cancel: Mutex::new(Arc::new(AtomicBool::new(false))),
-            property_running: AtomicBool::new(false),
-            property_stopped: AtomicBool::new(false),
-            property_extract_lock: Mutex::new(()),
+            property_pipeline: property_pipeline::PropertyPipeline::new(property_enabled),
             index_journal: Arc::new(Mutex::new(index_journal::IndexJournal::new(
                 journal_enabled,
             ))),
             index_dir: index_dir.to_path_buf(),
-            content_dir: content_dir.to_path_buf(),
             self_data_dirs,
             config_path: config_path.to_path_buf(),
             config: RwLock::new(config),
             config_apply_lock: Mutex::new(()),
-            content_searcher: RwLock::new(None),
-            content_status: RwLock::new(content_status),
-            content_cancel: Arc::new(AtomicBool::new(false)),
-            content_commands: Mutex::new(None),
+            content_pipeline: content_pipeline::ContentPipeline::new(content_dir, content_enabled),
             summary_cache: Mutex::new(Vec::new()),
             usn_read_buf: Mutex::new(Vec::new()),
             #[cfg(test)]
@@ -554,6 +497,11 @@ impl MultiVolumeEngine {
         };
         engine.ensure_folder_sources_loaded();
         engine
+    }
+
+    #[cfg(test)]
+    pub(crate) fn content_dir(&self) -> &Path {
+        self.content_pipeline.dir()
     }
 
     /// Adds the data root that holds this indexer's content index, MFT cache, configuration and
@@ -720,7 +668,7 @@ impl MultiVolumeEngine {
     {
         let volumes = self.volumes.read().unwrap();
         let folders = self.folder_sources.read().unwrap();
-        let properties = self.property_tables.read().unwrap();
+        let properties = self.property_pipeline.read_tables();
         f(crate::session::SourceTables {
             volumes: &volumes,
             folders: &folders,
@@ -802,12 +750,7 @@ impl MultiVolumeEngine {
         };
 
         if !removed_ids.is_empty() {
-            {
-                let mut tables = self.property_tables.write().unwrap();
-                for &sid in &removed_ids {
-                    tables.clear_source(sid);
-                }
-            }
+            self.property_pipeline.clear_sources(&removed_ids);
             let dropped_handles: Vec<folder_source::FolderWatcherHandle> = {
                 let mut watchers = self.folder_watchers.lock().unwrap();
                 removed_ids
@@ -1161,7 +1104,7 @@ impl MultiVolumeEngine {
                 total.accumulate(&folder.memory_footprint());
             }
         }
-        total.property_store_bytes += self.property_tables.read().unwrap().allocated_bytes();
+        total.property_store_bytes += self.property_pipeline.allocated_bytes();
         // The journal buffers are engine-wide allocations read outside volume/folder locks.
         total.scratch_bytes += self.usn_read_buf.lock().unwrap().capacity();
         total.scratch_bytes += self.index_journal.lock().unwrap().status().resident_bytes;

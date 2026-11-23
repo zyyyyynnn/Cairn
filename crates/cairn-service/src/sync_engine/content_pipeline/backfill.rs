@@ -8,7 +8,6 @@ use super::{BatchOutcome, ContentCommand};
 use cairn_protocol::status::{ContentIndexState, ContentIndexTask};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::atomic::Ordering;
 
 use crate::config::ServiceConfig;
 use crate::exclusion::{ExclusionPath, ExclusionRules};
@@ -367,7 +366,7 @@ impl MultiVolumeEngine {
         &self,
         port: &dyn super::worker_process::WorkerProcessPort,
     ) {
-        self.content_cancel.store(false, Ordering::SeqCst);
+        self.content_pipeline.reset_cancel();
         self.drop_content_searcher();
         // A new backfill invalidates any previous completion until it reaches Ready again; a
         // cancelled or failed run must not leave a marker that a later restart would trust.
@@ -391,7 +390,7 @@ impl MultiVolumeEngine {
         for drive in drives {
             let mut start = 0usize;
             loop {
-                if self.content_cancel.load(Ordering::SeqCst) {
+                if self.content_pipeline.is_cancelled() {
                     self.set_content_disabled();
                     return;
                 }
@@ -438,7 +437,7 @@ impl MultiVolumeEngine {
             }
         }
 
-        if self.content_cancel.load(Ordering::SeqCst) {
+        if self.content_pipeline.is_cancelled() {
             self.set_content_disabled();
             return;
         }
@@ -473,15 +472,14 @@ impl MultiVolumeEngine {
             self.set_content_disabled();
             return;
         }
-        if self.content_cancel.load(Ordering::SeqCst) {
+        if self.content_pipeline.is_cancelled() {
             self.drop_content_searcher();
             self.set_content_disabled();
             return;
         }
 
         // Incremental batches never leave Ready: the worker commits new segments while the
-        // existing read-only searcher keeps answering from the last committed snapshot. Dropping
-        // it here made `content:` queries return empty for every small USN burst.
+        // existing read-only searcher keeps answering from the last committed snapshot.
         if tasks.is_empty() {
             // A deletion-only cycle still has to run the worker once; it never writes from the
             // service process.
@@ -500,7 +498,7 @@ impl MultiVolumeEngine {
         } else {
             let chunk_count = tasks.len().div_ceil(CONTENT_BATCH_SIZE);
             for (chunk_index, chunk) in tasks.chunks(CONTENT_BATCH_SIZE).enumerate() {
-                if self.content_cancel.load(Ordering::SeqCst) {
+                if self.content_pipeline.is_cancelled() {
                     self.drop_content_searcher();
                     self.set_content_disabled();
                     return;

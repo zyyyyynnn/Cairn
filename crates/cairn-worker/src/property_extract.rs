@@ -9,10 +9,10 @@
 
 #![forbid(unsafe_code)]
 
+use cairn_content::open_no_follow;
 use cairn_core::property_store::RecordPropertyData;
 use quick_xml::Reader;
 use quick_xml::events::Event;
-use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
@@ -65,18 +65,18 @@ pub fn parse_properties_from_bytes(ext: &str, bytes: &[u8]) -> Option<RecordProp
 fn extract_pure_rust_from_path(ext: &str, path: &Path) -> Option<RecordPropertyData> {
     match ext {
         "docx" | "xlsx" | "pptx" | "odt" | "ods" | "odp" => {
-            let file = open_no_follow(path)?;
+            let file = open_no_follow(path).ok()?;
             parse_zip_office(file)
         }
         "mp4" | "m4a" | "mov" | "m4v" | "3gp" => parse_mp4_file(path),
         "mp3" => {
-            let mut file = open_no_follow(path)?;
+            let mut file = open_no_follow(path).ok()?;
             let file_len = file.metadata().ok()?.len();
             let header = read_capped(&mut file, MAX_HEADER_READ_BYTES)?;
             parse_mp3(&header, Some(file_len))
         }
         "pdf" => {
-            let mut file = open_no_follow(path)?;
+            let mut file = open_no_follow(path).ok()?;
             let file_len = file.metadata().ok()?.len();
             if file_len as usize > MAX_CONTAINER_READ_BYTES {
                 return None;
@@ -85,38 +85,11 @@ fn extract_pure_rust_from_path(ext: &str, path: &Path) -> Option<RecordPropertyD
             parse_pdf(&bytes)
         }
         "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "wav" | "avi" | "flac" => {
-            let mut file = open_no_follow(path)?;
+            let mut file = open_no_follow(path).ok()?;
             let bytes = read_capped(&mut file, MAX_HEADER_READ_BYTES)?;
             parse_properties_from_bytes(ext, &bytes)
         }
         _ => None,
-    }
-}
-
-/// Opens a file without following a reparse point at the final component.
-///
-/// The index decides a path is a regular file, but a symlink or junction can replace it between
-/// indexing and extraction. Opening the reparse point itself and checking the opened handle
-/// attributes closes that TOCTOU gap.
-fn open_no_follow(path: &Path) -> Option<File> {
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
-        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-            .open(path)
-            .ok()?;
-        if file.metadata().ok()?.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-            return None;
-        }
-        Some(file)
-    }
-    #[cfg(not(windows))]
-    {
-        File::open(path).ok()
     }
 }
 
@@ -552,7 +525,7 @@ fn parse_xing_frames(frame: &[u8]) -> Option<u32> {
 }
 
 fn parse_mp4_file(path: &Path) -> Option<RecordPropertyData> {
-    let mut file = open_no_follow(path)?;
+    let mut file = open_no_follow(path).ok()?;
     let file_len = file.metadata().ok()?.len();
     let mut pos = 0u64;
     let mut header = [0u8; 16];

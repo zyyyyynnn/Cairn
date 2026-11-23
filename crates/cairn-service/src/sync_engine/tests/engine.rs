@@ -270,11 +270,11 @@ fn unsupported_exclusion_rule_forms_keep_the_reference_fallback() {
         let exclusions =
             crate::sync_engine::path_exclusions::PathExclusions::new(&volumes, &[rule.to_string()]);
         assert!(
-            exclusions.excludes(volume, index_of(excluded_frn)),
+            exclusions.excludes(&volume.view(), index_of(excluded_frn)),
             "{rule} must exclude its path through the full-path fallback"
         );
         assert!(
-            !exclusions.excludes(volume, index_of(kept_frn)),
+            !exclusions.excludes(&volume.view(), index_of(kept_frn)),
             "{rule} must not exclude an unrelated path"
         );
     }

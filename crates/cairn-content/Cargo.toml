@@ -8,13 +8,23 @@ publish.workspace = true
 
 [dependencies]
 tantivy.workspace = true
-chardetng.workspace = true
-encoding_rs.workspace = true
-zip.workspace = true
-quick-xml.workspace = true
-lopdf.workspace = true
+chardetng = { workspace = true, optional = true }
+encoding_rs = { workspace = true, optional = true }
+zip = { workspace = true, optional = true }
+quick-xml = { workspace = true, optional = true }
+lopdf = { workspace = true, optional = true }
 tracing.workspace = true
 thiserror.workspace = true
+
+[features]
+default = []
+extractors = [
+    "dep:chardetng",
+    "dep:encoding_rs",
+    "dep:zip",
+    "dep:quick-xml",
+    "dep:lopdf",
+]
 
 [dev-dependencies]
 tempfile.workspace = true

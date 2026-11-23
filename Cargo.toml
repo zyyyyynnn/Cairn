@@ -28,7 +28,7 @@ publish = false
 cairn-core = { path = "crates/cairn-core" }
 cairn-protocol = { path = "crates/cairn-protocol" }
 cairn-ntfs = { path = "crates/cairn-ntfs" }
-cairn-content = { path = "crates/cairn-content" }
+cairn-content = { path = "crates/cairn-content", default-features = false }
 cairn-service = { path = "crates/cairn-service" }
 cairn-worker = { path = "crates/cairn-worker" }
 cairn-client = { path = "crates/cairn-client" }

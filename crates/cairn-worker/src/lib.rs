@@ -4,5 +4,4 @@
 
 //! Subprocess property and content extraction library for `CairnWorker.exe`.
 
-pub mod isolation;
 pub mod property_extract;

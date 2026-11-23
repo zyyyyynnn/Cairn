@@ -16,7 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 cairn-core.workspace = true
-cairn-content.workspace = true
+cairn-content = { workspace = true, features = ["extractors"] }
 cairn-protocol.workspace = true
 clap.workspace = true
 lopdf.workspace = true

@@ -5,14 +5,10 @@
 //! Integration seam tests for isolated extended property extraction (`IDX-12`).
 
 use cairn_core::property_store::{RecordPropertyData, SourceId};
-use cairn_protocol::PropertyExtractTask;
-use cairn_worker::isolation::{IsolationOutcome, extract_with_isolation};
+use cairn_protocol::{PropertyExtractResult, PropertyExtractTask};
 use cairn_worker::property_extract::{extract_file_properties, parse_properties_from_bytes};
 use std::io::Write;
 use std::path::Path;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
 
 fn build_minimal_png(width: u32, height: u32) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(32);
@@ -243,7 +239,7 @@ fn pure_rust_parsers_extract_media_image_and_document_properties() {
 }
 
 #[test]
-fn real_worker_binary_extracts_properties_over_isolated_subprocess() {
+fn real_worker_binary_extracts_properties_batch() {
     let temp = tempfile::tempdir().expect("tempdir");
     let png_path = temp.path().join("shot.png");
     let wav_path = temp.path().join("clip.wav");
@@ -252,7 +248,7 @@ fn real_worker_binary_extracts_properties_over_isolated_subprocess() {
     std::fs::write(&wav_path, build_minimal_wav(1500, 44_100)).expect("write wav");
     build_minimal_docx(&docx_path, "Carol", "arch");
 
-    let tasks = vec![
+    let tasks = [
         PropertyExtractTask {
             source_id: SourceId(1),
             record_key: 10,
@@ -273,103 +269,42 @@ fn real_worker_binary_extracts_properties_over_isolated_subprocess() {
         },
     ];
 
-    let cancel = AtomicBool::new(false);
-    let worker_bin = Path::new(env!("CARGO_BIN_EXE_CairnWorker"));
-    let outcome = extract_with_isolation(
-        worker_bin,
-        &tasks,
-        temp.path(),
-        Duration::from_secs(15),
-        &cancel,
-    );
-
-    match outcome {
-        IsolationOutcome::Completed(results) => {
-            assert_eq!(results.len(), 3);
-            assert_eq!(
-                results[0].properties.as_ref().and_then(|p| p.dimensions),
-                Some((800, 600))
-            );
-            assert_eq!(
-                results[1].properties.as_ref().and_then(|p| p.length_ms),
-                Some(1500)
-            );
-            let doc_props = results[2].properties.as_ref().expect("docx props");
-            assert_eq!(doc_props.author.as_deref(), Some("Carol"));
-            assert_eq!(doc_props.tags.as_deref(), Some("arch"));
+    let batch_path = temp.path().join("batch.jsonl");
+    let out_path = temp.path().join("out.jsonl");
+    {
+        let mut batch = std::fs::File::create(&batch_path).expect("create batch");
+        for task in &tasks {
+            writeln!(batch, "{}", serde_json::to_string(task).expect("json")).expect("write");
         }
-        other => panic!("expected Completed, got {other:?}"),
     }
-}
 
-#[test]
-fn hung_extraction_is_killed_on_timeout_and_crash_recovers_cleanly() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let task = vec![PropertyExtractTask {
-        source_id: SourceId(1),
-        record_key: 1,
-        modified_ts: 1,
-        path: temp.path().join("dummy.txt").to_string_lossy().into_owned(),
-    }];
+    let status = std::process::Command::new(env!("CARGO_BIN_EXE_CairnWorker"))
+        .arg("--extract-properties")
+        .arg("--batch")
+        .arg(&batch_path)
+        .arg("--out")
+        .arg(&out_path)
+        .status()
+        .expect("run CairnWorker");
+    assert!(status.success(), "CairnWorker exited with {status}");
 
-    let cancel = AtomicBool::new(false);
-    let started = Instant::now();
-    let timeout_outcome = cairn_worker::isolation::run_command_with_isolation(
-        Path::new("powershell"),
-        &[
-            "-NoProfile".to_string(),
-            "-Command".to_string(),
-            "Start-Sleep -Seconds 20".to_string(),
-        ],
-        &task,
-        temp.path(),
-        Duration::from_millis(250),
-        &cancel,
-    );
-    assert!(
-        matches!(timeout_outcome, IsolationOutcome::TimedOut { .. }),
-        "hung worker must time out cleanly: {timeout_outcome:?}"
-    );
-    assert!(
-        started.elapsed() < Duration::from_secs(5),
-        "timeout must kill hung child promptly"
-    );
+    let raw = std::fs::read_to_string(&out_path).expect("read out.jsonl");
+    let results: Vec<PropertyExtractResult> = raw
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).expect("parse result"))
+        .collect();
 
-    let cancel_flag = Arc::new(AtomicBool::new(false));
-    let cancel_trigger = Arc::clone(&cancel_flag);
-    std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(120));
-        cancel_trigger.store(true, Ordering::SeqCst);
-    });
-    let cancelled = cairn_worker::isolation::run_command_with_isolation(
-        Path::new("powershell"),
-        &[
-            "-NoProfile".to_string(),
-            "-Command".to_string(),
-            "Start-Sleep -Seconds 20".to_string(),
-        ],
-        &task,
-        temp.path(),
-        Duration::from_secs(10),
-        &cancel_flag,
+    assert_eq!(results.len(), 3);
+    assert_eq!(
+        results[0].properties.as_ref().and_then(|p| p.dimensions),
+        Some((800, 600))
     );
-    assert!(
-        matches!(cancelled, IsolationOutcome::Cancelled),
-        "cancellation must terminate hung worker: {cancelled:?}"
+    assert_eq!(
+        results[1].properties.as_ref().and_then(|p| p.length_ms),
+        Some(1500)
     );
-
-    let crashed = cairn_worker::isolation::run_command_with_isolation(
-        Path::new("cmd"),
-        &["/C".to_string(), "exit 42".to_string()],
-        &task,
-        temp.path(),
-        Duration::from_secs(5),
-        &AtomicBool::new(false),
-    );
-    match crashed {
-        IsolationOutcome::WorkerFailed { exit_code, .. } => {
-            assert_eq!(exit_code, Some(42));
-        }
-        other => panic!("expected WorkerFailed, got {other:?}"),
-    }
+    let doc_props = results[2].properties.as_ref().expect("docx props");
+    assert_eq!(doc_props.author.as_deref(), Some("Carol"));
+    assert_eq!(doc_props.tags.as_deref(), Some("arch"));
 }

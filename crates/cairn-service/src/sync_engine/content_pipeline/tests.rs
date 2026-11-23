@@ -816,7 +816,7 @@ fn test_content_query_intersection_with_mft() {
     ]);
     engine.add_volume(vol);
 
-    let writer = ContentIndex::open_or_create(&engine.content_dir).expect("content index");
+    let writer = ContentIndex::open_or_create(engine.content_dir()).expect("content index");
     writer
         .index_document_deferred(
             2,
@@ -948,7 +948,7 @@ fn test_clear_content_index_roundtrip() {
     }]);
     engine.add_volume(vol);
 
-    let writer = ContentIndex::open_or_create(&engine.content_dir).expect("content index");
+    let writer = ContentIndex::open_or_create(engine.content_dir()).expect("content index");
     writer
         .index_document_deferred(2, 101, 100, 100, r"C:\test.txt", "全文搜索关键词")
         .unwrap();
@@ -987,7 +987,7 @@ fn the_service_never_creates_a_content_index() {
 
     assert!(engine.get_or_create_content_searcher().is_none());
     assert!(
-        !engine.content_dir.exists(),
+        !engine.content_dir().exists(),
         "the query path must not create an index, a directory or a writer"
     );
 }
@@ -996,7 +996,7 @@ fn the_service_never_creates_a_content_index() {
 fn stale_batches_and_old_temps_are_removed_without_touching_index_files() {
     let index = tempfile::tempdir().expect("index");
     let engine = MultiVolumeEngine::with_index_dir_and_drives(index.path(), vec![]);
-    let dir = engine.content_dir.clone();
+    let dir = engine.content_dir().to_path_buf();
     std::fs::create_dir_all(&dir).expect("content dir");
 
     std::fs::write(dir.join("batch-1.jsonl"), "{}\n").expect("batch file");
@@ -1066,7 +1066,7 @@ fn engine_with_completed_backfill(
 ) -> MultiVolumeEngine {
     let engine =
         MultiVolumeEngine::with_index_dir_drives_and_config(index_dir, vec![], config.clone());
-    let writer = ContentIndex::open_or_create(&engine.content_dir).expect("content index");
+    let writer = ContentIndex::open_or_create(engine.content_dir()).expect("content index");
     writer
         .index_document_deferred(2, 101, 7, 1, r"C:\docs\note.txt", "resumable needle")
         .expect("index document");
@@ -1088,7 +1088,7 @@ fn the_backfill_marker_keeps_the_configuration_the_backfill_ran_with() {
     let config = backfill_config();
     let engine =
         MultiVolumeEngine::with_index_dir_drives_and_config(index.path(), vec![], config.clone());
-    let writer = ContentIndex::open_or_create(&engine.content_dir).expect("content index");
+    let writer = ContentIndex::open_or_create(engine.content_dir()).expect("content index");
     writer
         .index_document_deferred(2, 101, 7, 1, r"C:\docs\note.txt", "resumable needle")
         .expect("index document");
@@ -1188,7 +1188,7 @@ fn a_completed_backfill_is_reused_on_restart_without_a_writer() {
     let config = backfill_config();
     let engine = engine_with_completed_backfill(index.path(), &config);
     // A writer creates this lock file. The resume path must not recreate it.
-    let writer_lock = engine.content_dir.join(".tantivy-writer.lock");
+    let writer_lock = engine.content_dir().join(".tantivy-writer.lock");
     let _ = std::fs::remove_file(&writer_lock);
     drop(engine);
 
@@ -1278,7 +1278,7 @@ fn a_marker_without_a_usable_index_is_discarded() {
     let missing = tempfile::tempdir().expect("index");
     let engine =
         MultiVolumeEngine::with_index_dir_drives_and_config(missing.path(), vec![], config.clone());
-    std::fs::create_dir_all(&engine.content_dir).expect("content dir");
+    std::fs::create_dir_all(engine.content_dir()).expect("content dir");
     std::fs::write(
         engine.backfill_marker_path(),
         serde_json::to_vec(&backfill_marker_for(&config)).expect("encode marker"),
@@ -1298,7 +1298,7 @@ fn a_marker_without_a_usable_index_is_discarded() {
     let empty = tempfile::tempdir().expect("index");
     let engine =
         MultiVolumeEngine::with_index_dir_drives_and_config(empty.path(), vec![], config.clone());
-    let writer = ContentIndex::open_or_create(&engine.content_dir).expect("content index");
+    let writer = ContentIndex::open_or_create(engine.content_dir()).expect("content index");
     writer.finish().expect("finish empty index");
     engine.reopen_content_index_ready();
     assert!(engine.content_index_status().state.is_ready());
@@ -1324,7 +1324,7 @@ fn an_incremental_commit_keeps_the_index_searchable_until_reopen() {
     );
 
     // Finished backfill: one committed document and a published read-only searcher.
-    let writer = ContentIndex::open_or_create(&engine.content_dir).expect("content index");
+    let writer = ContentIndex::open_or_create(engine.content_dir()).expect("content index");
     writer
         .index_document_deferred(2, 101, 7, 1, r"C:\docs\first.txt", "first needle")
         .expect("index first document");
@@ -1336,7 +1336,7 @@ fn an_incremental_commit_keeps_the_index_searchable_until_reopen() {
 
     // The worker commits its batch while the service still holds the existing reader.
     let worker =
-        ContentIndex::open_or_create(&engine.content_dir).expect("incremental content index");
+        ContentIndex::open_or_create(engine.content_dir()).expect("incremental content index");
     worker
         .index_document_deferred(2, 102, 7, 1, r"C:\docs\second.txt", "second needle")
         .expect("index second document");
@@ -1373,13 +1373,13 @@ fn cleanup_keeps_the_backfill_marker_and_remove_deletes_it() {
     let config = backfill_config();
     let engine =
         MultiVolumeEngine::with_index_dir_drives_and_config(index.path(), vec![], config.clone());
-    std::fs::create_dir_all(&engine.content_dir).expect("content dir");
+    std::fs::create_dir_all(engine.content_dir()).expect("content dir");
     std::fs::write(
         engine.backfill_marker_path(),
         serde_json::to_vec(&backfill_marker_for(&config)).expect("encode marker"),
     )
     .expect("write marker");
-    std::fs::write(engine.content_dir.join(CONTENT_BACKFILL_MARKER_TMP), "{}")
+    std::fs::write(engine.content_dir().join(CONTENT_BACKFILL_MARKER_TMP), "{}")
         .expect("write tmp marker");
 
     // Age both files beyond the stale threshold: the completion marker must survive any age,
@@ -1387,7 +1387,7 @@ fn cleanup_keeps_the_backfill_marker_and_remove_deletes_it() {
     for name in [CONTENT_BACKFILL_MARKER, CONTENT_BACKFILL_MARKER_TMP] {
         let file = std::fs::File::options()
             .write(true)
-            .open(engine.content_dir.join(name))
+            .open(engine.content_dir().join(name))
             .expect("marker file");
         file.set_modified(SystemTime::now() - Duration::from_secs(2 * 60 * 60))
             .expect("set old mtime");
@@ -1399,7 +1399,7 @@ fn cleanup_keeps_the_backfill_marker_and_remove_deletes_it() {
     );
     assert!(
         !engine
-            .content_dir
+            .content_dir()
             .join(CONTENT_BACKFILL_MARKER_TMP)
             .exists(),
         "a stale half-written marker is removed"
@@ -1415,7 +1415,7 @@ fn a_content_command_without_a_receiver_reports_an_error() {
     let engine = MultiVolumeEngine::with_index_dir_and_drives(index.path(), vec![]);
     let (tx, rx) = std::sync::mpsc::channel();
     drop(rx);
-    *engine.content_commands.lock().unwrap() = Some(tx);
+    engine.content_pipeline.set_test_sender(tx);
 
     assert!(
         !engine.send_content_command(ContentCommand::Start),
@@ -1693,7 +1693,7 @@ fn worker_port_full_backfill_retries_transient_failure_without_sleeping() {
             }
             if !tasks.is_empty() || clear {
                 let writer =
-                    ContentIndex::open_or_create(&self.engine.content_dir).expect("content dir");
+                    ContentIndex::open_or_create(self.engine.content_dir()).expect("content dir");
                 if clear {
                     writer.clear().expect("clear");
                 }

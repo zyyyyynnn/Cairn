@@ -64,7 +64,7 @@ pub trait TextExtractor: Send + Sync {
 /// stale (a file replaced by a symlink between indexing and extraction). Opening the reparse
 /// point itself and then checking the opened handle's attributes closes that gap: the handle that
 /// is read is the one whose attributes were checked.
-fn open_no_follow(path: &Path) -> std::io::Result<File> {
+pub fn open_no_follow(path: &Path) -> std::io::Result<File> {
     #[cfg(windows)]
     {
         use std::os::windows::fs::{MetadataExt, OpenOptionsExt};

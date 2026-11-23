@@ -8,6 +8,8 @@ use crate::arena::NamePool;
 use crate::model::FileRecord;
 use crate::path_cache::{DirectoryPathCache, root_path_for_drive};
 use crate::pinyin::pinyin_matches_with_options;
+use crate::property_store::{PropertySideTables, SourceId};
+use crate::query::{DupeOracle, HierarchyOracle};
 use crate::syntax::{QueryExpr, SearchTerm};
 use crate::text_match::{TextMatchOptions, normalize_for_match};
 use memchr::memmem::Finder;
@@ -44,124 +46,43 @@ impl CancellationToken {
 /// Resolves whether a content term's full-text hits include one record, keyed by record index.
 pub type ContentHitResolver<'a> = &'a (dyn Fn(&str, u32) -> bool + Sync);
 
-pub(crate) type ExtraTermEval<'a> = &'a (dyn Fn(&SearchTerm, &FileRecord, u32) -> bool + Sync);
-
 #[derive(Clone, Copy)]
 pub(crate) struct EvalContext<'a> {
+    pub source_id: SourceId,
     pub records: &'a [FileRecord],
     pub arena: &'a NamePool,
     pub path_cache: &'a DirectoryPathCache,
     pub root: &'a Arc<str>,
     pub drive_letter: Option<char>,
     pub content_hit: Option<ContentHitResolver<'a>>,
-    pub extra_term_eval: Option<ExtraTermEval<'a>>,
-}
-
-/// Evaluates a `QueryExpr` against indexed file records in parallel, preserving order if given.
-pub fn execute_query_ordered(
-    records: &[FileRecord],
-    arena: &NamePool,
-    path_cache: &DirectoryPathCache,
-    drive_letter: char,
-    query: &QueryExpr,
-    order: Option<&[u32]>,
-    cancel: &CancellationToken,
-) -> Vec<u32> {
-    let root = root_path_for_drive(drive_letter);
-    let ctx = EvalContext {
-        records,
-        arena,
-        path_cache,
-        root: &root,
-        drive_letter: Some(drive_letter),
-        content_hit: None,
-        extra_term_eval: None,
-    };
-    execute_query_with_context(&ctx, query, order, cancel)
-}
-
-/// Evaluates `query` with `content:` terms resolved through `content_hit`.
-#[cfg(test)]
-pub fn execute_query_with_content(
-    records: &[FileRecord],
-    arena: &NamePool,
-    path_cache: &DirectoryPathCache,
-    drive_letter: char,
-    query: &QueryExpr,
-    content_hit: ContentHitResolver<'_>,
-    cancel: &CancellationToken,
-) -> Vec<u32> {
-    let root = root_path_for_drive(drive_letter);
-    let ctx = EvalContext {
-        records,
-        arena,
-        path_cache,
-        root: &root,
-        drive_letter: Some(drive_letter),
-        content_hit: Some(content_hit),
-        extra_term_eval: None,
-    };
-    execute_query_with_context(&ctx, query, None, cancel)
+    pub properties: Option<&'a PropertySideTables>,
+    pub hierarchy: Option<&'a HierarchyOracle>,
+    pub dupes: Option<&'a DupeOracle>,
 }
 
 pub(crate) fn execute_query_with_context(
     ctx: &EvalContext<'_>,
     query: &QueryExpr,
-    order: Option<&[u32]>,
     cancel: &CancellationToken,
 ) -> Vec<u32> {
     if query.is_empty() {
         if cancel.is_cancelled() {
             return Vec::new();
         }
-        if let Some(order_indices) = order {
-            let mut matched = Vec::with_capacity(order_indices.len());
-            for (i, &idx) in order_indices.iter().enumerate() {
-                if (i & 0x3FFF) == 0 && cancel.is_cancelled() {
-                    return Vec::new();
-                }
-                if !ctx.records[idx as usize].is_tombstone() {
-                    matched.push(idx);
-                }
+        let mut matched = Vec::with_capacity(ctx.records.len());
+        for (idx, rec) in ctx.records.iter().enumerate() {
+            if (idx & 0x3FFF) == 0 && cancel.is_cancelled() {
+                return Vec::new();
             }
-            return matched;
-        } else {
-            let mut matched = Vec::with_capacity(ctx.records.len());
-            for (idx, rec) in ctx.records.iter().enumerate() {
-                if (idx & 0x3FFF) == 0 && cancel.is_cancelled() {
-                    return Vec::new();
-                }
-                if !rec.is_tombstone() {
-                    matched.push(idx as u32);
-                }
+            if !rec.is_tombstone() {
+                matched.push(idx as u32);
             }
-            return matched;
         }
+        return matched;
     }
 
     let compiled = CompiledExpr::compile(query);
     let chunk_size = 16384;
-
-    let scan_chunk = |chunk: &[u32]| -> Vec<u32> {
-        if cancel.is_cancelled() {
-            return Vec::new();
-        }
-
-        let mut matched = Vec::new();
-        for &idx in chunk {
-            let rec = &ctx.records[idx as usize];
-            if rec.is_tombstone() {
-                continue;
-            }
-            if evaluate_compiled_expr(rec, idx, ctx, &compiled) {
-                if matched.is_empty() {
-                    matched.reserve(64);
-                }
-                matched.push(idx);
-            }
-        }
-        matched
-    };
 
     let scan_range = |range: Range<u32>| -> Vec<u32> {
         if cancel.is_cancelled() {
@@ -184,23 +105,16 @@ pub(crate) fn execute_query_with_context(
         matched
     };
 
-    if let Some(order_slice) = order {
-        order_slice
-            .par_chunks(chunk_size)
-            .flat_map(scan_chunk)
-            .collect()
-    } else {
-        let total = ctx.records.len() as u32;
-        let num_chunks = total.div_ceil(chunk_size as u32);
-        (0..num_chunks)
-            .into_par_iter()
-            .flat_map(|c| {
-                let start = c * chunk_size as u32;
-                let end = (start + chunk_size as u32).min(total);
-                scan_range(start..end)
-            })
-            .collect()
-    }
+    let total = ctx.records.len() as u32;
+    let num_chunks = total.div_ceil(chunk_size as u32);
+    (0..num_chunks)
+        .into_par_iter()
+        .flat_map(|c| {
+            let start = c * chunk_size as u32;
+            let end = (start + chunk_size as u32).min(total);
+            scan_range(start..end)
+        })
+        .collect()
 }
 
 /// Evaluates a `QueryExpr` against indexed file records in parallel.
@@ -212,15 +126,20 @@ pub fn execute_query(
     query: &QueryExpr,
     cancel: &CancellationToken,
 ) -> Vec<u32> {
-    execute_query_ordered(
+    let root = root_path_for_drive(drive_letter);
+    let ctx = EvalContext {
+        source_id: SourceId::for_drive(drive_letter).unwrap_or_default(),
         records,
         arena,
         path_cache,
-        drive_letter,
-        query,
-        None,
-        cancel,
-    )
+        root: &root,
+        drive_letter: Some(drive_letter),
+        content_hit: None,
+        properties: None,
+        hierarchy: None,
+        dupes: None,
+    };
+    execute_query_with_context(&ctx, query, cancel)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -690,8 +609,7 @@ fn evaluate_compiled_term(
         }
     }
 
-    if has_extra_constraints(term) && !ctx.extra_term_eval.is_some_and(|eval| eval(term, rec, idx))
-    {
+    if has_extra_constraints(term) && !crate::query::eval_extra_term(term, rec, idx, ctx) {
         return false;
     }
 
@@ -1321,21 +1239,27 @@ mod tests {
         ];
         let path_cache = DirectoryPathCache::new();
         let cancel = CancellationToken::new();
+        let root = root_path_for_drive('C');
+        let props = PropertySideTables::disabled();
+        let view = crate::query::SourceView {
+            source_id: SourceId::for_drive('C').unwrap(),
+            root_prefix: &root,
+            records: &records,
+            arena: &pool,
+            path_cache: &path_cache,
+            generation: 0,
+        };
 
         // Only record 0 carries the content hit for `needle`; the resolver stands in for the
         // service's per-record hit membership.
         let content_hits = |term: &str, idx| term == "needle" && idx == 0;
+        let policy = crate::query::QueryPolicy {
+            sort: crate::sort::SortSpec::default(),
+            content_hit: Some(&content_hits),
+        };
 
         let query = parse_query("!content:needle");
-        let matched = execute_query_with_content(
-            &records,
-            &pool,
-            &path_cache,
-            'C',
-            &query,
-            &content_hits,
-            &cancel,
-        );
+        let matched = crate::query::execute_query(&view, &props, &query, &policy, &cancel).rows;
         assert_eq!(
             matched,
             vec![1],

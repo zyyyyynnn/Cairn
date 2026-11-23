@@ -452,9 +452,7 @@ fn compact_drops_tombstones_and_excluded_subtrees_and_remaps_parents() {
         &cancel,
     );
     assert_eq!(matches, vec![2]);
-    let row = vol
-        .table_view()
-        .build_file_row(2, &[], |_| Vec::new(), |_, _| None)
+    let row = crate::sync_engine::build_file_row(&vol.view(), 2, &[], |_| Vec::new(), |_, _| None)
         .expect("file row");
     assert_eq!(row.name, "notes.txt");
 
@@ -1004,8 +1002,8 @@ fn appended_records_extend_the_cached_exclusion_states() {
     let kept = volumes[&'C']
         .first_record_index_for_frn(10)
         .expect("the old file");
-    assert!(exclusions.excludes(&volumes[&'C'], excluded));
-    assert!(!exclusions.excludes(&volumes[&'C'], kept));
+    assert!(exclusions.excludes(&volumes[&'C'].view(), excluded));
+    assert!(!exclusions.excludes(&volumes[&'C'].view(), kept));
 }
 
 /// A pending change set makes the cached order unreadable; the merged order must match a

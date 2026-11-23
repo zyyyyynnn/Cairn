@@ -5,9 +5,9 @@
 //! One exclusion view for a query or a content batch.
 
 use super::VolumeIndex;
-use super::folder_source::FolderSource;
 use super::volume_index::SUBTREE_EXCLUDED;
 use crate::exclusion::{ExclusionPath, ExclusionRules};
+use cairn_core::SourceView;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -56,34 +56,22 @@ impl PathExclusions {
             .map(|table| table.as_slice())
     }
 
-    /// Whether one record of `volume` falls under the rules.
-    pub(crate) fn excludes(&self, volume: &VolumeIndex, index: u32) -> bool {
-        if let Some(states) = &self.states {
+    /// Whether one record of `view` falls under the configured path exclusion rules.
+    pub(crate) fn excludes(&self, view: &SourceView<'_>, index: u32) -> bool {
+        if let Some(states) = &self.states
+            && let Some(drive) = view.source_id.drive_letter()
+        {
             return states
-                .get(&volume.drive_letter)
+                .get(&drive)
                 .is_some_and(|table| table.get(index as usize).copied() == Some(SUBTREE_EXCLUDED));
         }
         if self.rules.is_empty() {
             return false;
         }
-        let path = volume.path_cache().get_full_path(
-            volume.records(),
-            volume.arena(),
-            volume.drive_letter,
-            index,
-        );
-        self.rules.excludes(&ExclusionPath::new(&path))
-    }
-
-    /// Whether one record of `folder` falls under the configured path exclusion rules.
-    pub(crate) fn excludes_folder(&self, folder: &FolderSource, index: u32) -> bool {
-        if self.rules.is_empty() {
-            return false;
-        }
-        let path = folder.path_cache().get_full_path_for_root(
-            folder.records(),
-            folder.arena(),
-            &folder.root_prefix,
+        let path = view.path_cache.get_full_path_with_root(
+            view.records,
+            view.arena,
+            view.root_prefix,
             index,
         );
         self.rules.excludes(&ExclusionPath::new(&path))

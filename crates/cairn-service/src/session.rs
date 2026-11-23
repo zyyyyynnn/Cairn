@@ -5,7 +5,7 @@
 //! Query session cache and pagination manager with multi-volume support.
 
 use crate::sync_engine::folder_source::FolderSource;
-use crate::sync_engine::{AllFilesView, MatchSet, SearchResultItem, VolumeIndex};
+use crate::sync_engine::{AllFilesView, MatchSet, SearchResultItem, VolumeIndex, build_file_row};
 use cairn_core::engine::CancellationToken;
 use cairn_core::property_store::{PropertySideTables, SourceId};
 use cairn_protocol::message::FileRowData;
@@ -355,7 +355,9 @@ fn rows_for_all_files(
     };
     let mut rows = Vec::new();
     let current = view.visit_visible(volume, offset, limit, |idx| {
-        if let Some(row) = volume.table_view().build_file_row(
+        let source = volume.view();
+        if let Some(row) = build_file_row(
+            &source,
             idx,
             &[],
             |_| Vec::new(),
@@ -398,13 +400,8 @@ fn rows_for_items(
         let Some(source) = item
             .source_id
             .drive_letter()
-            .and_then(|drive| sources.volumes.get(&drive).map(VolumeIndex::table_view))
-            .or_else(|| {
-                sources
-                    .folders
-                    .get(&item.source_id)
-                    .map(FolderSource::table_view)
-            })
+            .and_then(|drive| sources.volumes.get(&drive).map(VolumeIndex::view))
+            .or_else(|| sources.folders.get(&item.source_id).map(FolderSource::view))
         else {
             continue;
         };
@@ -419,7 +416,8 @@ fn rows_for_items(
         if record.is_tombstone() {
             continue;
         }
-        if let Some(row) = source.build_file_row(
+        if let Some(row) = build_file_row(
+            &source,
             item.record_idx,
             &session.pre_folded_terms,
             |frn| {

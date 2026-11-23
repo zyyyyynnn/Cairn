@@ -10,25 +10,334 @@
 //! property system is never queried from the elevated worker.
 
 use super::folder_source::FolderSource;
-use super::property_refresh::{PropertyRefresh, PropertyRefreshHandles};
+use super::property_refresh::{PropertyRefresh, PropertyRefreshHandles, PropertySpawner};
 use super::volume_index::VolumeIndex;
-use super::{MultiVolumeEngine, SourceTableView, unix_now_secs};
+use super::worker_runner::{PropertyIsolationOutcome, extract_properties_isolated};
+use super::{MultiVolumeEngine, unix_now_secs};
 use crate::config::ServiceConfig;
 use crate::exclusion::{ExclusionPath, ExclusionRules};
+use cairn_core::SourceView;
 use cairn_core::model::FileRecord;
 use cairn_core::property_store::{PROPERTY_INDEX_EXTENSIONS, PropertySideTables, SourceId};
 use cairn_protocol::status::{
     ContentIndexState, PropertyExtractResult, PropertyExtractTask, PropertyIndexStatus,
 };
-use cairn_worker::isolation::{IsolationOutcome, extract_with_isolation};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
 use std::time::Duration;
 
 const PROPERTY_BATCH_SIZE: usize = 64;
 const DEFAULT_PROPERTY_WORKER_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Autonomous extended-property pipeline owning side-table storage, status, coalesced refresh
+/// state, cancellation, and serialization of extraction passes.
+pub(super) struct PropertyPipeline {
+    tables: Arc<RwLock<PropertySideTables>>,
+    status: RwLock<PropertyIndexStatus>,
+    refresh: Arc<Mutex<PropertyRefresh>>,
+    spawner: PropertySpawner,
+    generation: AtomicU64,
+    run_cancel: Mutex<Arc<AtomicBool>>,
+    running: AtomicBool,
+    stopped: AtomicBool,
+    extract_lock: Mutex<()>,
+}
+
+impl PropertyPipeline {
+    pub(super) fn new(enabled: bool) -> Self {
+        let refresh = Arc::new(Mutex::new(PropertyRefresh::default()));
+        if enabled {
+            refresh.lock().unwrap().mark_full();
+        }
+        Self {
+            tables: Arc::new(RwLock::new(PropertySideTables::new(enabled))),
+            status: RwLock::new(if enabled {
+                PropertyIndexStatus {
+                    enabled: true,
+                    state: ContentIndexState::Backfilling {
+                        processed: 0,
+                        total: 0,
+                    },
+                    ..Default::default()
+                }
+            } else {
+                PropertyIndexStatus::default()
+            }),
+            refresh,
+            spawner: Arc::new(Mutex::new(None)),
+            generation: AtomicU64::new(0),
+            run_cancel: Mutex::new(Arc::new(AtomicBool::new(false))),
+            running: AtomicBool::new(false),
+            stopped: AtomicBool::new(false),
+            extract_lock: Mutex::new(()),
+        }
+    }
+
+    pub(super) fn read_tables(&self) -> RwLockReadGuard<'_, PropertySideTables> {
+        self.tables.read().unwrap()
+    }
+
+    pub(super) fn is_enabled(&self) -> bool {
+        self.tables.read().unwrap().is_enabled()
+    }
+
+    pub(super) fn clear_sources(&self, removed_ids: &[SourceId]) {
+        let mut tables = self.tables.write().unwrap();
+        for &sid in removed_ids {
+            tables.clear_source(sid);
+        }
+    }
+
+    pub(super) fn allocated_bytes(&self) -> usize {
+        self.tables.read().unwrap().allocated_bytes()
+    }
+
+    pub(super) fn refresh_handles(&self) -> PropertyRefreshHandles {
+        PropertyRefreshHandles {
+            tables: Arc::clone(&self.tables),
+            refresh: Arc::clone(&self.refresh),
+            spawner: Arc::clone(&self.spawner),
+        }
+    }
+
+    pub(super) fn register_spawner(&self, engine: &Arc<MultiVolumeEngine>) {
+        *self.spawner.lock().unwrap() = Some(Arc::downgrade(engine));
+    }
+
+    pub(super) fn wake(&self) {
+        super::property_refresh::wake_property_spawner(&self.spawner);
+    }
+
+    pub(super) fn stop(&self) {
+        self.stopped.store(true, Ordering::SeqCst);
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        self.run_cancel
+            .lock()
+            .unwrap()
+            .store(true, Ordering::SeqCst);
+    }
+
+    pub(super) fn status(&self) -> PropertyIndexStatus {
+        let tables = self.tables.read().unwrap();
+        let mut status = self.status.read().unwrap().clone();
+        status.enabled = tables.is_enabled();
+        status.indexed_records = tables.record_count() as u64;
+        status.side_table_bytes = tables.allocated_bytes();
+        status
+    }
+
+    pub(super) fn apply_config_change(&self, enabled: bool, scope_changed: bool) {
+        let state_changed = self.tables.read().unwrap().is_enabled() != enabled;
+        if state_changed {
+            self.generation.fetch_add(1, Ordering::SeqCst);
+            self.run_cancel
+                .lock()
+                .unwrap()
+                .store(true, Ordering::SeqCst);
+            let mut tables = self.tables.write().unwrap();
+            tables.set_enabled(enabled);
+            let mut refresh = self.refresh.lock().unwrap();
+            if enabled {
+                refresh.mark_full();
+            } else {
+                refresh.clear();
+            }
+            let mut status = self.status.write().unwrap();
+            status.enabled = enabled;
+            if !enabled {
+                status.state = ContentIndexState::Disabled;
+                status.indexed_records = 0;
+                status.side_table_bytes = 0;
+                status.last_updated_ts = 0;
+            } else {
+                status.state = ContentIndexState::Backfilling {
+                    processed: 0,
+                    total: 0,
+                };
+            }
+            return;
+        }
+        if !enabled {
+            return;
+        }
+        let mut refresh = self.refresh.lock().unwrap();
+        let mut status = self.status.write().unwrap();
+        if matches!(status.state, ContentIndexState::Error(_)) {
+            self.generation.fetch_add(1, Ordering::SeqCst);
+            status.state = ContentIndexState::Backfilling {
+                processed: 0,
+                total: 0,
+            };
+            refresh.mark_full();
+        } else if scope_changed {
+            refresh.mark_full();
+        }
+    }
+
+    fn can_run_queued(&self) -> bool {
+        if self.stopped.load(Ordering::SeqCst) {
+            return false;
+        }
+        let tables = self.tables.read().unwrap();
+        if !tables.is_enabled() {
+            return false;
+        }
+        if !self.refresh.lock().unwrap().has_work() {
+            return false;
+        }
+        !matches!(
+            self.status.read().unwrap().state,
+            ContentIndexState::Error(_)
+        )
+    }
+
+    fn update_status_if_current(
+        &self,
+        generation: u64,
+        update: impl FnOnce(&PropertySideTables, &mut PropertyIndexStatus),
+    ) -> bool {
+        let tables = self.tables.read().unwrap();
+        let mut status = self.status.write().unwrap();
+        if self.stopped.load(Ordering::SeqCst)
+            || self.generation.load(Ordering::SeqCst) != generation
+            || !tables.is_enabled()
+        {
+            return false;
+        }
+        update(&tables, &mut status);
+        true
+    }
+
+    fn is_run_current(&self, generation: u64) -> bool {
+        !self.stopped.load(Ordering::SeqCst)
+            && self.generation.load(Ordering::SeqCst) == generation
+            && self.tables.read().unwrap().is_enabled()
+    }
+
+    fn take_current_refresh(&self, generation: u64) -> Option<PropertyRefresh> {
+        let mut refresh = self.refresh.lock().unwrap();
+        if self.generation.load(Ordering::SeqCst) != generation
+            || self.stopped.load(Ordering::SeqCst)
+        {
+            return None;
+        }
+        Some(refresh.take())
+    }
+
+    fn prepare_extraction_tasks(
+        &self,
+        generation: u64,
+        planned: PlannedPropertyRefresh,
+    ) -> Option<Vec<PropertyExtractTask>> {
+        let mut tasks = planned.tasks;
+        let mut tables = self.tables.write().unwrap();
+        if !tables.is_enabled()
+            || self.stopped.load(Ordering::SeqCst)
+            || self.generation.load(Ordering::SeqCst) != generation
+        {
+            return None;
+        }
+        if let Some(present_sources) = planned.present_sources {
+            tables.retain_sources(&present_sources);
+        }
+        for (source_id, live_keys) in planned.source_live_keys {
+            tables.retain_source_keys(source_id, &live_keys);
+        }
+        let mut removed_any = false;
+        for (source_id, record_key) in planned.stale_records {
+            if tables.remove(source_id, record_key) {
+                removed_any = true;
+            }
+        }
+        if removed_any {
+            tables.compact_strings();
+        }
+        tasks.retain(|task| {
+            tables
+                .get(task.source_id, task.record_key, task.modified_ts)
+                .is_none()
+        });
+        Some(tasks)
+    }
+
+    fn finish_status(
+        &self,
+        generation: u64,
+        total: u64,
+        failed: u64,
+        launch_failures: u64,
+        full_pass: bool,
+    ) -> bool {
+        self.update_status_if_current(generation, |tables, status| {
+            let indexed_count = tables.record_count();
+            status.enabled = true;
+            if total == 0 {
+                if !matches!(status.state, ContentIndexState::Error(_)) {
+                    status.state = ContentIndexState::Ready;
+                    status.last_updated_ts = unix_now_secs();
+                }
+            } else if failed == total
+                && (launch_failures == total || (full_pass && indexed_count == 0))
+            {
+                status.state = ContentIndexState::Error(format!(
+                    "property extraction failed for {failed} files"
+                ));
+                status.last_updated_ts = unix_now_secs();
+            } else {
+                status.state = ContentIndexState::Ready;
+                status.last_updated_ts = unix_now_secs();
+            }
+        })
+    }
+
+    fn commit_results_if_current(
+        &self,
+        generation: u64,
+        results: &[PropertyExtractResult],
+        is_current_record: impl Fn(&PropertyExtractResult) -> bool,
+    ) -> bool {
+        let mut tables = self.tables.write().unwrap();
+        if !tables.is_enabled()
+            || self.stopped.load(Ordering::SeqCst)
+            || self.generation.load(Ordering::SeqCst) != generation
+        {
+            return false;
+        }
+        let mut stale = 0u64;
+        let mut removed_any = false;
+        for item in results {
+            if !is_current_record(item) {
+                stale += 1;
+                continue;
+            }
+            match item.properties {
+                Some(ref props) => {
+                    if !tables.upsert(item.source_id, item.record_key, props, item.modified_ts) {
+                        removed_any = true;
+                    }
+                }
+                None => {
+                    if tables.remove(item.source_id, item.record_key) {
+                        removed_any = true;
+                    }
+                }
+            }
+        }
+        if removed_any {
+            tables.compact_strings();
+        }
+        if stale > 0 {
+            tracing::debug!(
+                stale,
+                "property results dropped because their records changed during extraction"
+            );
+        }
+        true
+    }
+}
+
 struct PropertyRunGuard<'a>(&'a AtomicBool);
 
 impl Drop for PropertyRunGuard<'_> {
@@ -64,17 +373,13 @@ struct PropertyExtraction<'a> {
 
 impl MultiVolumeEngine {
     pub(super) fn property_refresh_handles(&self) -> PropertyRefreshHandles {
-        PropertyRefreshHandles {
-            tables: Arc::clone(&self.property_tables),
-            refresh: Arc::clone(&self.property_refresh),
-            spawner: Arc::clone(&self.property_spawner),
-        }
+        self.property_pipeline.refresh_handles()
     }
 
     /// Registers this engine instance so background index updates and config changes can spawn
     /// queued property extraction passes.
     pub fn ensure_property_runtime(self: &Arc<Self>) {
-        *self.property_spawner.lock().unwrap() = Some(Arc::downgrade(self));
+        self.property_pipeline.register_spawner(self);
     }
 
     pub fn spawn_property_extraction(self: &Arc<Self>) {
@@ -83,10 +388,10 @@ impl MultiVolumeEngine {
     }
 
     pub(super) fn start_queued_property_extraction(self: &Arc<Self>) {
-        if !self.can_run_queued_property_extraction() {
+        if !self.property_pipeline.can_run_queued() {
             return;
         }
-        if self.property_running.swap(true, Ordering::SeqCst) {
+        if self.property_pipeline.running.swap(true, Ordering::SeqCst) {
             return;
         }
         let engine = Arc::clone(self);
@@ -95,39 +400,34 @@ impl MultiVolumeEngine {
             .spawn(move || {
                 loop {
                     {
-                        let _guard = PropertyRunGuard(&engine.property_running);
-                        while engine.can_run_queued_property_extraction() {
+                        let _guard = PropertyRunGuard(&engine.property_pipeline.running);
+                        while engine.property_pipeline.can_run_queued() {
                             engine.run_property_extraction();
                         }
                     }
-                    if !engine.can_run_queued_property_extraction()
-                        || engine.property_running.swap(true, Ordering::SeqCst)
+                    if !engine.property_pipeline.can_run_queued()
+                        || engine
+                            .property_pipeline
+                            .running
+                            .swap(true, Ordering::SeqCst)
                     {
                         break;
                     }
                 }
             });
         if spawned.is_err() {
-            self.property_running.store(false, Ordering::SeqCst);
+            self.property_pipeline
+                .running
+                .store(false, Ordering::SeqCst);
         }
     }
 
     pub fn stop_property_extraction(&self) {
-        self.property_stopped.store(true, Ordering::SeqCst);
-        self.property_generation.fetch_add(1, Ordering::SeqCst);
-        self.property_run_cancel
-            .lock()
-            .unwrap()
-            .store(true, Ordering::SeqCst);
+        self.property_pipeline.stop();
     }
 
     pub fn property_index_status(&self) -> PropertyIndexStatus {
-        let tables = self.property_tables.read().unwrap();
-        let mut status = self.property_status.read().unwrap().clone();
-        status.enabled = tables.is_enabled();
-        status.indexed_records = tables.record_count() as u64;
-        status.side_table_bytes = tables.allocated_bytes();
-        status
+        self.property_pipeline.status()
     }
 
     pub fn set_property_index_enabled(&self, enabled: bool) -> PropertyIndexStatus {
@@ -157,161 +457,8 @@ impl MultiVolumeEngine {
     }
 
     pub(super) fn apply_property_config_change(&self, enabled: bool, scope_changed: bool) {
-        let state_changed = self.property_tables.read().unwrap().is_enabled() != enabled;
-        if state_changed {
-            self.property_generation.fetch_add(1, Ordering::SeqCst);
-            self.property_run_cancel
-                .lock()
-                .unwrap()
-                .store(true, Ordering::SeqCst);
-            let mut tables = self.property_tables.write().unwrap();
-            tables.set_enabled(enabled);
-            let mut refresh = self.property_refresh.lock().unwrap();
-            if enabled {
-                refresh.mark_full();
-            } else {
-                refresh.clear();
-            }
-            let mut status = self.property_status.write().unwrap();
-            status.enabled = enabled;
-            if !enabled {
-                status.state = ContentIndexState::Disabled;
-                status.indexed_records = 0;
-                status.side_table_bytes = 0;
-                status.last_updated_ts = 0;
-            } else {
-                status.state = ContentIndexState::Backfilling {
-                    processed: 0,
-                    total: 0,
-                };
-            }
-            return;
-        }
-        if !enabled {
-            return;
-        }
-        let mut refresh = self.property_refresh.lock().unwrap();
-        let mut status = self.property_status.write().unwrap();
-        if matches!(status.state, ContentIndexState::Error(_)) {
-            self.property_generation.fetch_add(1, Ordering::SeqCst);
-            status.state = ContentIndexState::Backfilling {
-                processed: 0,
-                total: 0,
-            };
-            refresh.mark_full();
-        } else if scope_changed {
-            refresh.mark_full();
-        }
-    }
-
-    fn update_property_status_if_current(
-        &self,
-        generation: u64,
-        update: impl FnOnce(&PropertySideTables, &mut PropertyIndexStatus),
-    ) -> bool {
-        let tables = self.property_tables.read().unwrap();
-        let mut status = self.property_status.write().unwrap();
-        if self.property_stopped.load(Ordering::SeqCst)
-            || self.property_generation.load(Ordering::SeqCst) != generation
-            || !tables.is_enabled()
-        {
-            return false;
-        }
-        update(&tables, &mut status);
-        true
-    }
-
-    fn take_current_property_refresh(&self, generation: u64) -> Option<PropertyRefresh> {
-        let mut refresh = self.property_refresh.lock().unwrap();
-        if self.property_generation.load(Ordering::SeqCst) != generation
-            || self.property_stopped.load(Ordering::SeqCst)
-        {
-            return None;
-        }
-        Some(refresh.take())
-    }
-
-    fn prepare_extraction_tasks(
-        &self,
-        generation: u64,
-        planned: PlannedPropertyRefresh,
-    ) -> Option<Vec<PropertyExtractTask>> {
-        let mut tasks = planned.tasks;
-        let mut tables = self.property_tables.write().unwrap();
-        if !tables.is_enabled()
-            || self.property_stopped.load(Ordering::SeqCst)
-            || self.property_generation.load(Ordering::SeqCst) != generation
-        {
-            return None;
-        }
-        if let Some(present_sources) = planned.present_sources {
-            tables.retain_sources(&present_sources);
-        }
-        for (source_id, live_keys) in planned.source_live_keys {
-            tables.retain_source_keys(source_id, &live_keys);
-        }
-        let mut removed_any = false;
-        for (source_id, record_key) in planned.stale_records {
-            if tables.remove(source_id, record_key) {
-                removed_any = true;
-            }
-        }
-        if removed_any {
-            tables.compact_strings();
-        }
-        tasks.retain(|task| {
-            tables
-                .get(task.source_id, task.record_key, task.modified_ts)
-                .is_none()
-        });
-        Some(tasks)
-    }
-
-    fn finish_property_status(
-        &self,
-        generation: u64,
-        total: u64,
-        failed: u64,
-        launch_failures: u64,
-        full_pass: bool,
-    ) -> bool {
-        self.update_property_status_if_current(generation, |tables, status| {
-            let indexed_count = tables.record_count();
-            status.enabled = true;
-            if total == 0 {
-                if !matches!(status.state, ContentIndexState::Error(_)) {
-                    status.state = ContentIndexState::Ready;
-                    status.last_updated_ts = unix_now_secs();
-                }
-            } else if failed == total
-                && (launch_failures == total || (full_pass && indexed_count == 0))
-            {
-                status.state = ContentIndexState::Error(format!(
-                    "property extraction failed for {failed} files"
-                ));
-                status.last_updated_ts = unix_now_secs();
-            } else {
-                status.state = ContentIndexState::Ready;
-                status.last_updated_ts = unix_now_secs();
-            }
-        })
-    }
-
-    fn can_run_queued_property_extraction(&self) -> bool {
-        if self.property_stopped.load(Ordering::SeqCst) {
-            return false;
-        }
-        let tables = self.property_tables.read().unwrap();
-        if !tables.is_enabled() {
-            return false;
-        }
-        if !self.property_refresh.lock().unwrap().has_work() {
-            return false;
-        }
-        !matches!(
-            self.property_status.read().unwrap().state,
-            ContentIndexState::Error(_)
-        )
+        self.property_pipeline
+            .apply_config_change(enabled, scope_changed);
     }
 
     /// Refreshes queued property work using `worker_exe` subprocess isolation, bisecting crashing or
@@ -321,33 +468,37 @@ impl MultiVolumeEngine {
         worker_exe: &Path,
         timeout: Duration,
     ) -> Result<PropertyIndexStatus, String> {
-        let _extract_guard = self.property_extract_lock.lock().unwrap();
-        if !self.property_tables.read().unwrap().is_enabled()
-            || self.property_stopped.load(Ordering::SeqCst)
+        let _extract_guard = self.property_pipeline.extract_lock.lock().unwrap();
+        if !self.property_pipeline.tables.read().unwrap().is_enabled()
+            || self.property_pipeline.stopped.load(Ordering::SeqCst)
         {
             return Ok(self.property_index_status());
         }
-        let generation = self.property_generation.load(Ordering::SeqCst);
+        let generation = self.property_pipeline.generation.load(Ordering::SeqCst);
         let cancel = Arc::new(AtomicBool::new(false));
-        *self.property_run_cancel.lock().unwrap() = Arc::clone(&cancel);
-        let Some(requests) = self.take_current_property_refresh(generation) else {
+        *self.property_pipeline.run_cancel.lock().unwrap() = Arc::clone(&cancel);
+        let Some(requests) = self.property_pipeline.take_current_refresh(generation) else {
             return Ok(self.property_index_status());
         };
         let full_pass = requests.is_full();
 
         let planned = self.plan_property_refresh_with_scope(&requests);
-        let Some(tasks) = self.prepare_extraction_tasks(generation, planned) else {
+        let Some(tasks) = self
+            .property_pipeline
+            .prepare_extraction_tasks(generation, planned)
+        else {
             return Ok(self.property_index_status());
         };
 
         let total = tasks.len() as u64;
         if total > 0 {
-            self.update_property_status_if_current(generation, |_, status| {
-                status.state = ContentIndexState::Backfilling {
-                    processed: 0,
-                    total,
-                };
-            });
+            self.property_pipeline
+                .update_status_if_current(generation, |_, status| {
+                    status.state = ContentIndexState::Backfilling {
+                        processed: 0,
+                        total,
+                    };
+                });
         }
 
         let work_dir = self.index_dir.join("property-work");
@@ -362,13 +513,13 @@ impl MultiVolumeEngine {
             launch_failures: 0,
         };
         for chunk in tasks.chunks(PROPERTY_BATCH_SIZE) {
-            if cancel.load(Ordering::SeqCst) || !self.property_run_is_current(generation) {
+            if cancel.load(Ordering::SeqCst) || !self.property_pipeline.is_run_current(generation) {
                 break;
             }
             self.process_property_chunk(chunk, &mut run);
         }
 
-        let updated = self.finish_property_status(
+        let updated = self.property_pipeline.finish_status(
             generation,
             total,
             run.failed,
@@ -386,18 +537,18 @@ impl MultiVolumeEngine {
     }
 
     pub fn run_property_extraction(&self) {
-        if self.property_stopped.load(Ordering::SeqCst)
-            || !self.property_tables.read().unwrap().is_enabled()
+        if self.property_pipeline.stopped.load(Ordering::SeqCst)
+            || !self.property_pipeline.tables.read().unwrap().is_enabled()
         {
             return;
         }
-        let generation = self.property_generation.load(Ordering::SeqCst);
+        let generation = self.property_pipeline.generation.load(Ordering::SeqCst);
         let Ok(worker_exe) = self.worker_path() else {
-            let tables = self.property_tables.read().unwrap();
-            let mut refresh = self.property_refresh.lock().unwrap();
-            let mut status = self.property_status.write().unwrap();
-            if !self.property_stopped.load(Ordering::SeqCst)
-                && self.property_generation.load(Ordering::SeqCst) == generation
+            let tables = self.property_pipeline.tables.read().unwrap();
+            let mut refresh = self.property_pipeline.refresh.lock().unwrap();
+            let mut status = self.property_pipeline.status.write().unwrap();
+            if !self.property_pipeline.stopped.load(Ordering::SeqCst)
+                && self.property_pipeline.generation.load(Ordering::SeqCst) == generation
                 && tables.is_enabled()
             {
                 refresh.clear();
@@ -408,12 +559,6 @@ impl MultiVolumeEngine {
         };
         let _ =
             self.run_property_extraction_with_worker(&worker_exe, DEFAULT_PROPERTY_WORKER_TIMEOUT);
-    }
-
-    fn property_run_is_current(&self, generation: u64) -> bool {
-        !self.property_stopped.load(Ordering::SeqCst)
-            && self.property_generation.load(Ordering::SeqCst) == generation
-            && self.property_tables.read().unwrap().is_enabled()
     }
 
     fn plan_property_refresh_with_scope(
@@ -446,7 +591,7 @@ impl MultiVolumeEngine {
             }
             collector.collect_source(
                 source_id,
-                &volume.table_view(),
+                &volume.view(),
                 &mut seen,
                 &mut selected_sources,
                 &mut planned,
@@ -458,7 +603,7 @@ impl MultiVolumeEngine {
             }
             collector.collect_source(
                 folder.source_id,
-                &folder.table_view(),
+                &folder.view(),
                 &mut seen,
                 &mut selected_sources,
                 &mut planned,
@@ -481,13 +626,13 @@ impl MultiVolumeEngine {
             let task = if let Some(volume) = volumes_by_source.get(&source_id) {
                 collector.task_for_frn(
                     source_id,
-                    &volume.table_view(),
+                    &volume.view(),
                     volume.record_indices_for_frn(record_key),
                 )
             } else if let Some(folder) = folders.get(&source_id) {
                 collector.task_for_frn(
                     source_id,
-                    &folder.table_view(),
+                    &folder.view(),
                     folder.record_indices_for_frn(record_key),
                 )
             } else {
@@ -509,8 +654,14 @@ impl MultiVolumeEngine {
         if chunk.is_empty() || run.cancel.load(Ordering::SeqCst) {
             return;
         }
-        match extract_with_isolation(run.worker_exe, chunk, run.work_dir, run.timeout, run.cancel) {
-            IsolationOutcome::Completed(results) => {
+        match extract_properties_isolated(
+            run.worker_exe,
+            chunk,
+            run.work_dir,
+            run.timeout,
+            run.cancel,
+        ) {
+            PropertyIsolationOutcome::Completed(results) => {
                 self.commit_property_results(
                     &results,
                     chunk.len() as u64,
@@ -518,9 +669,9 @@ impl MultiVolumeEngine {
                     run.generation,
                 );
             }
-            IsolationOutcome::Cancelled => {}
-            outcome @ (IsolationOutcome::TimedOut { .. }
-            | IsolationOutcome::WorkerFailed { .. }) => {
+            PropertyIsolationOutcome::Cancelled => {}
+            outcome @ (PropertyIsolationOutcome::TimedOut { .. }
+            | PropertyIsolationOutcome::WorkerFailed { .. }) => {
                 if chunk.len() > 1 {
                     let mid = chunk.len() / 2;
                     self.process_property_chunk(&chunk[..mid], run);
@@ -528,16 +679,17 @@ impl MultiVolumeEngine {
                 } else {
                     run.failed += 1;
                     let reason = match outcome {
-                        IsolationOutcome::WorkerFailed {
+                        PropertyIsolationOutcome::WorkerFailed {
                             exit_code: None,
                             reason,
                         } => {
                             run.launch_failures += 1;
                             reason
                         }
-                        IsolationOutcome::WorkerFailed { reason, .. }
-                        | IsolationOutcome::TimedOut { reason } => reason,
-                        IsolationOutcome::Completed(_) | IsolationOutcome::Cancelled => {
+                        PropertyIsolationOutcome::WorkerFailed { reason, .. }
+                        | PropertyIsolationOutcome::TimedOut { reason } => reason,
+                        PropertyIsolationOutcome::Completed(_)
+                        | PropertyIsolationOutcome::Cancelled => {
                             unreachable!()
                         }
                     };
@@ -553,11 +705,12 @@ impl MultiVolumeEngine {
     }
 
     fn advance_property_progress(&self, delta: u64, total: u64, generation: u64) {
-        self.update_property_status_if_current(generation, |_, status| {
-            if let ContentIndexState::Backfilling { processed, .. } = &mut status.state {
-                *processed = processed.saturating_add(delta).min(total);
-            }
-        });
+        self.property_pipeline
+            .update_status_if_current(generation, |_, status| {
+                if let ContentIndexState::Backfilling { processed, .. } = &mut status.state {
+                    *processed = processed.saturating_add(delta).min(total);
+                }
+            });
     }
 
     fn commit_property_results(
@@ -567,51 +720,19 @@ impl MultiVolumeEngine {
         total: u64,
         generation: u64,
     ) {
-        if !self.property_run_is_current(generation) {
+        if !self.property_pipeline.is_run_current(generation) {
             return;
         }
         let volumes = self.volumes.read().unwrap();
         let folders = self.folder_sources.read().unwrap();
-        {
-            let mut tables = self.property_tables.write().unwrap();
-            if !tables.is_enabled()
-                || self.property_stopped.load(Ordering::SeqCst)
-                || self.property_generation.load(Ordering::SeqCst) != generation
-            {
-                return;
-            }
-            let mut stale = 0u64;
-            let mut removed_any = false;
-            for item in results {
-                if !result_record_is_current(&volumes, &folders, item) {
-                    stale += 1;
-                    continue;
-                }
-                match item.properties {
-                    Some(ref props) => {
-                        if !tables.upsert(item.source_id, item.record_key, props, item.modified_ts)
-                        {
-                            removed_any = true;
-                        }
-                    }
-                    None => {
-                        if tables.remove(item.source_id, item.record_key) {
-                            removed_any = true;
-                        }
-                    }
-                }
-            }
-            if removed_any {
-                tables.compact_strings();
-            }
-            if stale > 0 {
-                tracing::debug!(
-                    stale,
-                    "property results dropped because their records changed during extraction"
-                );
-            }
+        let committed =
+            self.property_pipeline
+                .commit_results_if_current(generation, results, |item| {
+                    result_record_is_current(&volumes, &folders, item)
+                });
+        if committed {
+            self.advance_property_progress(chunk_len, total, generation);
         }
-        self.advance_property_progress(chunk_len, total, generation);
     }
 }
 
@@ -649,7 +770,7 @@ impl PropertyCollector {
     fn collect_source(
         &self,
         source_id: SourceId,
-        view: &SourceTableView<'_>,
+        view: &SourceView<'_>,
         seen: &mut HashSet<(u32, u64)>,
         selected_sources: &mut HashSet<u32>,
         planned: &mut PlannedPropertyRefresh,
@@ -673,7 +794,7 @@ impl PropertyCollector {
     fn task_for_frn(
         &self,
         source_id: SourceId,
-        view: &SourceTableView<'_>,
+        view: &SourceView<'_>,
         indices: Option<&[u32]>,
     ) -> Option<PropertyExtractTask> {
         indices?.iter().find_map(|&index| {
@@ -687,7 +808,7 @@ impl PropertyCollector {
     fn task_for_source(
         &self,
         source_id: SourceId,
-        view: &SourceTableView<'_>,
+        view: &SourceView<'_>,
         index: u32,
         record: &FileRecord,
     ) -> Option<PropertyExtractTask> {
@@ -703,7 +824,7 @@ impl PropertyCollector {
         let path = view.path_cache.get_full_path_with_root(
             view.records,
             view.arena,
-            &view.root_prefix,
+            view.root_prefix,
             index,
         );
         if self.is_excluded(&path) {
@@ -825,7 +946,8 @@ mod tests {
 
         // An empty delta (no tasks) must keep Error instead of clearing it to Ready.
         engine
-            .property_refresh
+            .property_pipeline
+            .refresh
             .lock()
             .unwrap()
             .mark_records(source_id, [999_999]);
@@ -853,7 +975,7 @@ mod tests {
         // Seed one valid slot and confirm a single-item parse failure keeps Ready, whereas a
         // launch failure (`exit_code: None`) on every queued task still transitions to Error.
         {
-            let mut tables = engine.property_tables.write().unwrap();
+            let mut tables = engine.property_pipeline.tables.write().unwrap();
             assert!(tables.upsert(
                 source_id,
                 img_rec.frn.wrapping_add(1),
@@ -865,16 +987,17 @@ mod tests {
             ));
         }
         {
-            let mut st = engine.property_status.write().unwrap();
+            let mut st = engine.property_pipeline.status.write().unwrap();
             st.state = ContentIndexState::Ready;
         }
         #[cfg(windows)]
         {
             let fail_cmd = temp.path().join("fail-worker.cmd");
             std::fs::write(&fail_cmd, b"@exit /b 1\r\n").unwrap();
-            engine.property_refresh.lock().unwrap().take();
+            engine.property_pipeline.refresh.lock().unwrap().take();
             engine
-                .property_refresh
+                .property_pipeline
+                .refresh
                 .lock()
                 .unwrap()
                 .mark_records(source_id, [img_rec.frn]);
@@ -887,7 +1010,8 @@ mod tests {
             assert_eq!(after_inc.indexed_records, 1);
 
             engine
-                .property_refresh
+                .property_pipeline
+                .refresh
                 .lock()
                 .unwrap()
                 .mark_records(source_id, [img_rec.frn]);
@@ -918,21 +1042,21 @@ mod tests {
         ));
 
         // Simulate disable -> enable advancing generation while a stale refresh could be checked.
-        let gen_before = engine.property_generation.load(Ordering::SeqCst);
+        let gen_before = engine.property_pipeline.generation.load(Ordering::SeqCst);
         engine.apply_property_config_change(false, false);
         engine.apply_property_config_change(true, false);
         assert_ne!(
-            engine.property_generation.load(Ordering::SeqCst),
+            engine.property_pipeline.generation.load(Ordering::SeqCst),
             gen_before
         );
-        assert!(engine.property_refresh.lock().unwrap().has_work());
-        assert!(!engine.property_run_is_current(gen_before));
+        assert!(engine.property_pipeline.refresh.lock().unwrap().has_work());
+        assert!(!engine.property_pipeline.is_run_current(gen_before));
 
         // stop_property_extraction permanently blocks background spawns even if work is queued.
         engine.stop_property_extraction();
-        engine.property_refresh.lock().unwrap().mark_full();
+        engine.property_pipeline.refresh.lock().unwrap().mark_full();
         engine.spawn_property_extraction();
-        assert!(!engine.property_running.load(Ordering::SeqCst));
+        assert!(!engine.property_pipeline.running.load(Ordering::SeqCst));
     }
 
     #[cfg(windows)]
@@ -989,8 +1113,8 @@ mod tests {
         engine.set_property_index_enabled(true);
 
         let drain_deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while engine.property_running.load(Ordering::SeqCst)
-            || engine.property_refresh.lock().unwrap().has_work()
+        while engine.property_pipeline.running.load(Ordering::SeqCst)
+            || engine.property_pipeline.refresh.lock().unwrap().has_work()
         {
             assert!(
                 std::time::Instant::now() < drain_deadline,
@@ -1042,9 +1166,9 @@ mod tests {
         // Drain the initial excluded scope into settled Ready with an empty refresh queue.
         engine.spawn_property_extraction();
         let settled_deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while engine.property_running.load(Ordering::SeqCst)
+        while engine.property_pipeline.running.load(Ordering::SeqCst)
             || engine.property_index_status().state != ContentIndexState::Ready
-            || engine.property_refresh.lock().unwrap().has_work()
+            || engine.property_pipeline.refresh.lock().unwrap().has_work()
         {
             assert!(std::time::Instant::now() < settled_deadline);
             std::thread::sleep(Duration::from_millis(10));
@@ -1059,7 +1183,7 @@ mod tests {
             ..Default::default()
         });
         let scope_deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while engine.property_running.load(Ordering::SeqCst)
+        while engine.property_pipeline.running.load(Ordering::SeqCst)
             || !matches!(
                 engine.property_index_status().state,
                 ContentIndexState::Error(_)
@@ -1072,8 +1196,8 @@ mod tests {
         // Retrying enabled after Error must drain cleanly through the registered spawner.
         engine.set_property_index_enabled(true);
         let retry_deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while engine.property_running.load(Ordering::SeqCst)
-            || engine.property_refresh.lock().unwrap().has_work()
+        while engine.property_pipeline.running.load(Ordering::SeqCst)
+            || engine.property_pipeline.refresh.lock().unwrap().has_work()
         {
             assert!(std::time::Instant::now() < retry_deadline);
             std::thread::sleep(Duration::from_millis(10));
@@ -1128,9 +1252,10 @@ mod tests {
             .insert(source_id, folder);
 
         // Discard the initial full pass so this run is an incremental delta with an empty store.
-        engine.property_refresh.lock().unwrap().take();
+        engine.property_pipeline.refresh.lock().unwrap().take();
         engine
-            .property_refresh
+            .property_pipeline
+            .refresh
             .lock()
             .unwrap()
             .mark_records(source_id, [frn]);

@@ -1018,7 +1018,6 @@ dependencies = [
  "cairn-core",
  "cairn-ntfs",
  "cairn-protocol",
- "cairn-worker",
  "clap",
  "crc32fast",
  "memchr",
