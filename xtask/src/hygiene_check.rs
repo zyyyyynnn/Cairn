@@ -20,6 +20,9 @@ const FORBID_UNSAFE_ENTRYPOINTS: &[&str] = &[
     "crates/cairn-client/src/lib.rs",
     "crates/cairn-cli/src/main.rs",
     "crates/cairn-worker/src/main.rs",
+    "crates/cairn-worker/src/detector.rs",
+    "crates/cairn-worker/src/extractor.rs",
+    "crates/cairn-worker/src/property_extract.rs",
     "crates/cairn-service/src/main.rs",
     "crates/cairn-setup-bin/src/bin/cairn-setup.rs",
     "crates/cairn-setup-bin/src/bin/cairn-uninstall.rs",
@@ -239,9 +242,69 @@ fn check_workspace_lints(workspace: &Path, violations: &mut Vec<String>) -> Resu
         if !inherits_workspace_key(&parsed, &["lints"]) {
             violations.push(format!("{rel}: missing `[lints] workspace = true`"));
         }
+        if ISOLATED_SERVICE_CONTENT_MANIFESTS.contains(&rel.as_str()) {
+            check_isolated_manifest_deps(&rel, &parsed, violations);
+        }
     }
 
     Ok(manifests.len())
+}
+
+const ISOLATED_SERVICE_CONTENT_MANIFESTS: &[&str] = &[
+    "crates/cairn-service/Cargo.toml",
+    "crates/cairn-content/Cargo.toml",
+];
+
+const FORBIDDEN_PARSER_AND_WORKER_DEPS: &[&str] = &[
+    "cairn-worker",
+    "lopdf",
+    "zip",
+    "quick-xml",
+    "chardetng",
+    "encoding_rs",
+];
+
+fn normalize_crate_name(name: &str) -> String {
+    name.replace('_', "-").to_ascii_lowercase()
+}
+
+fn check_isolated_manifest_deps(rel: &str, parsed: &toml::Table, violations: &mut Vec<String>) {
+    let mut check_dep_table = |section: &str, table: &toml::Table| {
+        for (alias, spec) in table {
+            let actual_pkg = spec
+                .as_table()
+                .and_then(|t| t.get("package"))
+                .and_then(toml::Value::as_str)
+                .unwrap_or(alias.as_str());
+            let normalized = normalize_crate_name(actual_pkg);
+            if FORBIDDEN_PARSER_AND_WORKER_DEPS
+                .iter()
+                .any(|forbidden| normalize_crate_name(forbidden) == normalized)
+            {
+                violations.push(format!(
+                    "{rel}: forbidden isolated dependency `{actual_pkg}` in [{section}]"
+                ));
+            }
+        }
+    };
+
+    for section in ["dependencies", "dev-dependencies", "build-dependencies"] {
+        if let Some(deps) = parsed.get(section).and_then(toml::Value::as_table) {
+            check_dep_table(section, deps);
+        }
+    }
+    if let Some(targets) = parsed.get("target").and_then(toml::Value::as_table) {
+        for (cfg, target_val) in targets {
+            let Some(target_table) = target_val.as_table() else {
+                continue;
+            };
+            for section in ["dependencies", "dev-dependencies", "build-dependencies"] {
+                if let Some(deps) = target_table.get(section).and_then(toml::Value::as_table) {
+                    check_dep_table(&format!("target.{cfg}.{section}"), deps);
+                }
+            }
+        }
+    }
 }
 
 fn inherits_workspace_key(manifest: &toml::Table, path: &[&str]) -> bool {
@@ -1224,5 +1287,61 @@ mod tests {
         let err = check_hygiene(temp.path()).expect_err("non-inherited member edition must fail");
         assert!(err.contains("crates/demo/Cargo.toml"), "{err}");
         assert!(err.contains("edition.workspace = true"), "{err}");
+    }
+
+    #[test]
+    fn isolated_manifests_reject_worker_and_parser_dependencies() {
+        for (crate_dir, bad_section) in [
+            (
+                "cairn-service",
+                "[dependencies]\ncairn-worker.workspace = true\n",
+            ),
+            ("cairn-content", "[dependencies]\nlopdf.workspace = true\n"),
+            (
+                "cairn-service",
+                "[dependencies]\npdf_alias = { package = \"lopdf\", workspace = true }\n",
+            ),
+            (
+                "cairn-content",
+                "[dev-dependencies]\nquick-xml.workspace = true\n",
+            ),
+            (
+                "cairn-service",
+                "[build-dependencies]\nquick_xml.workspace = true\n",
+            ),
+            (
+                "cairn-content",
+                "[dependencies]\nencoding-rs.workspace = true\n",
+            ),
+            (
+                "cairn-service",
+                "[target.'cfg(windows)'.dependencies]\nzip.workspace = true\n",
+            ),
+        ] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            seed_valid_workspace(temp.path());
+            fs::create_dir_all(temp.path().join("crates").join(crate_dir)).expect("crate dir");
+            fs::write(
+                temp.path().join("crates").join(crate_dir).join("Cargo.toml"),
+                format!(
+                    "[package]\nname = \"{crate_dir}\"\nedition.workspace = true\n[lints]\nworkspace = true\n{bad_section}"
+                ),
+            )
+            .expect("write isolated manifest");
+
+            let err = check_hygiene(temp.path())
+                .expect_err("parser or worker dependency in isolated crate must fail");
+            assert!(err.contains("forbidden isolated dependency"), "{err}");
+        }
+
+        let temp_alias = tempfile::tempdir().expect("tempdir");
+        seed_valid_workspace(temp_alias.path());
+        fs::create_dir_all(temp_alias.path().join("crates/cairn-service")).expect("crate dir");
+        fs::write(
+            temp_alias.path().join("crates/cairn-service/Cargo.toml"),
+            "[package]\nname = \"cairn-service\"\nedition.workspace = true\n[lints]\nworkspace = true\n[dependencies]\nzip = { package = \"benign-crate\", version = \"1.0\" }\n",
+        )
+        .expect("write benign alias");
+        check_hygiene(temp_alias.path()).expect("benign crate aliased as zip must pass");
     }
 }

@@ -16,9 +16,10 @@ use cairn_core::arena::NamePool;
 use cairn_core::frn_index::{FrnLookup, IndexMemoryFootprint, hashmap_table_bytes};
 use cairn_core::model::{FLAG_REPARSE_POINT, FileRecord, flags_from_win32_attributes};
 use cairn_core::path_cache::{DirectoryPathCache, normalize_root};
-use cairn_core::property_store::{PropertySideTables, SourceId};
-use cairn_core::query::SourceIndex;
-use cairn_core::sort::PresortedIndices;
+#[cfg(test)]
+use cairn_core::property_store::PropertySideTables;
+use cairn_core::property_store::SourceId;
+use cairn_core::query::SourceView;
 use cairn_protocol::status::{JournalChangeKind, SourceKind, SourceStatusSummary, VolumeState};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, Metadata};
@@ -240,7 +241,6 @@ pub struct FolderSource {
     records: Vec<FileRecord>,
     arena: NamePool,
     path_cache: DirectoryPathCache,
-    presorted: PresortedIndices,
     frn_to_idx: FrnLookup,
     path_to_idx: HashMap<String, u32>,
     excluded_paths: Vec<String>,
@@ -253,7 +253,6 @@ pub struct FolderSource {
     last_skipped: u64,
     generation: u64,
     live_count: u64,
-    has_tombstones: bool,
     volume_id_tag: u16,
 }
 
@@ -272,7 +271,6 @@ impl FolderSource {
             records: Vec::new(),
             arena: NamePool::default(),
             path_cache: DirectoryPathCache::new(),
-            presorted: PresortedIndices::default(),
             frn_to_idx: FrnLookup::new(),
             path_to_idx: HashMap::new(),
             excluded_paths: Vec::new(),
@@ -285,7 +283,6 @@ impl FolderSource {
             last_skipped: 0,
             generation: 1,
             live_count: 0,
-            has_tombstones: false,
             volume_id_tag,
         })
     }
@@ -332,20 +329,18 @@ impl FolderSource {
         self.frn_to_idx.get(frn)
     }
 
-    pub(crate) fn calculate_matched_bytes(&self, matched_indices: &[u32]) -> u64 {
-        super::volume_index::calculate_matched_bytes_for_records(&self.records, matched_indices)
+    pub(crate) fn frn_lookup(&self) -> &FrnLookup {
+        &self.frn_to_idx
     }
 
-    pub fn as_source_index<'a>(&'a self, properties: &'a PropertySideTables) -> SourceIndex<'a> {
-        SourceIndex {
+    pub fn view(&self) -> SourceView<'_> {
+        SourceView {
             source_id: self.source_id,
             root_prefix: &self.root_prefix,
             records: &self.records,
             arena: &self.arena,
             path_cache: &self.path_cache,
-            presorted: None,
-            properties,
-            has_tombstones: self.has_tombstones,
+            generation: self.generation,
         }
     }
 
@@ -411,7 +406,7 @@ impl FolderSource {
             arena_bytes,
             folded_arena_bytes,
             frn_lookup_bytes: self.frn_to_idx.allocated_bytes(),
-            presorted_bytes: self.presorted.allocated_bytes(),
+            presorted_bytes: 0,
             property_store_bytes: 0,
             directory_sizes_bytes: 0,
             path_cache_bytes: self.path_cache.allocated_bytes() + path_map_bytes,
@@ -536,9 +531,7 @@ impl FolderSource {
         self.frn_to_idx = frn_to_idx;
         self.path_to_idx = path_to_idx;
         self.path_cache.clear();
-        self.presorted.clear_and_shrink();
         self.live_count = live_count;
-        self.has_tombstones = false;
         self.generation = self.generation.wrapping_add(1);
         self.last_skipped = skipped;
         self.status.mark_folder_scanned(self.live_watch_enabled);
@@ -622,7 +615,6 @@ impl FolderSource {
             }
             self.records[idx as usize].mark_tombstone();
             self.live_count = self.live_count.saturating_sub(1);
-            self.has_tombstones = true;
         }
         primary_frn
     }
@@ -840,16 +832,6 @@ impl FolderSource {
         FolderApplyOutcome {
             needs_rescan,
             changed_records,
-        }
-    }
-
-    pub(crate) fn table_view(&self) -> super::SourceTableView<'_> {
-        super::SourceTableView {
-            root_prefix: self.root_prefix.clone(),
-            records: &self.records,
-            arena: &self.arena,
-            path_cache: &self.path_cache,
-            generation: self.generation,
         }
     }
 }

@@ -7,21 +7,18 @@
 
 use super::folder_source::FolderSource;
 use super::path_exclusions::PathExclusions;
-use super::volume_index::{BitSet, SUBTREE_EXCLUDED};
+use super::volume_index::{BitSet, SUBTREE_EXCLUDED, calculate_matched_bytes_for_records};
 use super::{MultiVolumeEngine, VolumeIndex};
 use cairn_content::{CONTENT_RESULT_TOP_K, ContentSearcher};
 use cairn_core::FileRecord;
-use cairn_core::arena::NamePool;
 use cairn_core::engine::CancellationToken;
-use cairn_core::path_cache::{DirectoryPathCache, root_path_for_drive};
-use cairn_core::property_store::{PropertySideTables, SourceId};
+use cairn_core::frn_index::FrnLookup;
+use cairn_core::property_store::SourceId;
 use cairn_core::query::{
-    QueryDegradedReason, QueryPolicy, QueryRows, SourceIndex, detect_degraded_properties,
-    execute_query,
+    QueryDegradedReason, QueryPolicy, SourceView, detect_degraded_properties, execute_query,
 };
 use cairn_core::sort::{
     SortColumn, SortContext, SortDirection, SortSpec, compare_cross_source_records,
-    sort_indices_with_spec,
 };
 use cairn_core::syntax::{QueryDefaults, QueryExpr, parse_query_with};
 use rayon::prelude::*;
@@ -101,7 +98,7 @@ enum VisibilityFilter<'a> {
     },
     Full {
         exclusions: &'a PathExclusions,
-        volume: &'a VolumeIndex,
+        view: SourceView<'a>,
         records: Option<&'a [FileRecord]>,
     },
 }
@@ -126,7 +123,7 @@ impl<'a> VisibilityFilter<'a> {
         }
         Self::Full {
             exclusions: &view.exclusions,
-            volume,
+            view: volume.view(),
             records,
         }
     }
@@ -144,7 +141,7 @@ impl<'a> VisibilityFilter<'a> {
             }
             Self::Full {
                 exclusions,
-                volume,
+                view,
                 records,
             } => {
                 if let Some(recs) = records
@@ -152,7 +149,7 @@ impl<'a> VisibilityFilter<'a> {
                 {
                     return false;
                 }
-                !exclusions.excludes(volume, idx)
+                !exclusions.excludes(&view, idx)
             }
         }
     }
@@ -435,92 +432,23 @@ impl MultiVolumeEngine {
     }
 }
 
-enum IndexedSource<'a> {
-    Volume(&'a VolumeIndex, Arc<str>),
-    Folder(&'a FolderSource),
+struct QuerySource<'a> {
+    view: SourceView<'a>,
+    frn_to_idx: &'a FrnLookup,
 }
 
-impl<'a> IndexedSource<'a> {
-    fn source_id(&self) -> SourceId {
-        match self {
-            Self::Volume(vol, _) => {
-                SourceId::for_drive(vol.drive_letter).expect("NTFS drive letter maps to a SourceId")
-            }
-            Self::Folder(folder) => folder.source_id,
+impl<'a> QuerySource<'a> {
+    fn from_volume(vol: &'a VolumeIndex) -> Self {
+        Self {
+            view: vol.view(),
+            frn_to_idx: vol.frn_lookup(),
         }
     }
 
-    fn generation(&self) -> u64 {
-        match self {
-            Self::Volume(vol, _) => vol.generation(),
-            Self::Folder(folder) => folder.generation(),
-        }
-    }
-
-    fn root_prefix(&self) -> &Arc<str> {
-        match self {
-            Self::Volume(_, root) => root,
-            Self::Folder(folder) => &folder.root_prefix,
-        }
-    }
-
-    fn records(&self) -> &[FileRecord] {
-        match self {
-            Self::Volume(vol, _) => vol.records(),
-            Self::Folder(folder) => folder.records(),
-        }
-    }
-
-    fn arena(&self) -> &NamePool {
-        match self {
-            Self::Volume(vol, _) => vol.arena(),
-            Self::Folder(folder) => folder.arena(),
-        }
-    }
-
-    fn path_cache(&self) -> &DirectoryPathCache {
-        match self {
-            Self::Volume(vol, _) => vol.path_cache(),
-            Self::Folder(folder) => folder.path_cache(),
-        }
-    }
-
-    fn record_indices_for_frn(&self, frn: u64) -> Option<&[u32]> {
-        match self {
-            Self::Volume(vol, _) => vol.record_indices_for_frn(frn),
-            Self::Folder(folder) => folder.record_indices_for_frn(frn),
-        }
-    }
-
-    fn excludes(&self, exclusions: &PathExclusions, idx: u32) -> bool {
-        match self {
-            Self::Volume(vol, _) => exclusions.excludes(vol, idx),
-            Self::Folder(folder) => exclusions.excludes_folder(folder, idx),
-        }
-    }
-
-    fn calculate_matched_bytes(&self, matched: &[u32]) -> u64 {
-        match self {
-            Self::Volume(vol, _) => vol.calculate_matched_bytes(matched),
-            Self::Folder(folder) => folder.calculate_matched_bytes(matched),
-        }
-    }
-
-    fn as_source_index(&'a self, properties: &'a PropertySideTables) -> SourceIndex<'a> {
-        match self {
-            Self::Volume(vol, root) => vol.as_source_index(root, properties),
-            Self::Folder(folder) => folder.as_source_index(properties),
-        }
-    }
-
-    fn sort_context(&'a self, properties: Option<&'a PropertySideTables>) -> SortContext<'a> {
-        SortContext {
-            records: self.records(),
-            arena: self.arena(),
-            path_cache: self.path_cache(),
-            root: self.root_prefix(),
-            source_id: self.source_id(),
-            properties,
+    fn from_folder(folder: &'a FolderSource) -> Self {
+        Self {
+            view: folder.view(),
+            frn_to_idx: folder.frn_lookup(),
         }
     }
 }
@@ -829,14 +757,14 @@ impl MultiVolumeEngine {
                 None
             };
             let Some(searcher) = searcher else {
-                let props = self.property_tables.read().unwrap();
+                let props = self.property_pipeline.read_tables();
                 let degraded = detect_degraded_properties(&props, &query_expr, &applied_sort);
                 return SearchOutcome::empty(highlight_terms, applied_sort, degraded);
             };
             let Some((hits, snippet_terms)) =
                 collect_content_hits(&searcher, &query_expr, &content_queries, cancel)
             else {
-                let props = self.property_tables.read().unwrap();
+                let props = self.property_pipeline.read_tables();
                 let degraded = detect_degraded_properties(&props, &query_expr, &applied_sort);
                 return SearchOutcome::empty(highlight_terms, applied_sort, degraded);
             };
@@ -852,7 +780,7 @@ impl MultiVolumeEngine {
         {
             let volumes = self.volumes.read().unwrap();
             let folders = self.folder_sources.read().unwrap();
-            let properties = self.property_tables.read().unwrap();
+            let properties = self.property_pipeline.read_tables();
             degraded = detect_degraded_properties(&properties, &query_expr, &applied_sort);
             let exclusions = PathExclusions::new(&volumes, &excluded_paths);
 
@@ -899,14 +827,13 @@ impl MultiVolumeEngine {
                 }
             }
 
-            let mut sources: Vec<IndexedSource<'_>> =
+            let mut sources: Vec<QuerySource<'_>> =
                 Vec::with_capacity(active_vols.len() + active_folders.len());
             for vol in active_vols {
-                let root = root_path_for_drive(vol.drive_letter);
-                sources.push(IndexedSource::Volume(vol, root));
+                sources.push(QuerySource::from_volume(vol));
             }
             for folder in active_folders {
-                sources.push(IndexedSource::Folder(folder));
+                sources.push(QuerySource::from_folder(folder));
             }
 
             let single_source = sources.len() == 1;
@@ -916,8 +843,8 @@ impl MultiVolumeEngine {
                 if cancel.is_cancelled() {
                     return SearchOutcome::empty(highlight_terms, applied_sort, degraded);
                 }
-                let sid = src.source_id();
-                let generation = src.generation();
+                let sid = src.view.source_id;
+                let generation = src.view.generation;
 
                 let mut matched = match content_only_plan {
                     Some(
@@ -930,16 +857,13 @@ impl MultiVolumeEngine {
                         if cancel.is_cancelled() {
                             return SearchOutcome::empty(highlight_terms, applied_sort, degraded);
                         }
-                        let source_idx = src.as_source_index(&properties);
                         let resolver = |_term: &str, idx: u32| bits.contains(idx as usize);
                         let policy = QueryPolicy {
                             sort: applied_sort.clone(),
                             content_hit: Some(&resolver),
+                            skip_sort: !single_source,
                         };
-                        match execute_query(&source_idx, &query_expr, &policy, cancel).rows {
-                            QueryRows::Materialized(indices) => indices,
-                            QueryRows::PresortedAll { .. } => Vec::new(),
-                        }
+                        execute_query(&src.view, &properties, &query_expr, &policy, cancel).rows
                     }
                     Some(ContentHits::General {
                         term_index,
@@ -957,7 +881,6 @@ impl MultiVolumeEngine {
                         if cancel.is_cancelled() {
                             return SearchOutcome::empty(highlight_terms, applied_sort, degraded);
                         }
-                        let source_idx = src.as_source_index(&properties);
                         let resolver = |term: &str, idx: u32| {
                             term_index.get(term).is_some_and(|&slot| {
                                 sets.get(slot)
@@ -967,48 +890,22 @@ impl MultiVolumeEngine {
                         let policy = QueryPolicy {
                             sort: applied_sort.clone(),
                             content_hit: Some(&resolver),
+                            skip_sort: !single_source,
                         };
-                        match execute_query(&source_idx, &query_expr, &policy, cancel).rows {
-                            QueryRows::Materialized(indices) => indices,
-                            QueryRows::PresortedAll { .. } => Vec::new(),
-                        }
+                        execute_query(&src.view, &properties, &query_expr, &policy, cancel).rows
                     }
                     None => {
-                        let source_idx = src.as_source_index(&properties);
                         let policy = QueryPolicy {
                             sort: applied_sort.clone(),
                             content_hit: None,
+                            skip_sort: !single_source,
                         };
-                        match execute_query(&source_idx, &query_expr, &policy, cancel).rows {
-                            QueryRows::Materialized(indices) => indices,
-                            QueryRows::PresortedAll { .. } => {
-                                // Fallback when PresortedAll applies on a non-view path (e.g.
-                                // multiple sources or explicit non-view configuration).
-                                let mut indices: Vec<u32> = src
-                                    .records()
-                                    .iter()
-                                    .enumerate()
-                                    .filter_map(|(idx, rec)| {
-                                        (!rec.is_tombstone()).then_some(idx as u32)
-                                    })
-                                    .collect();
-                                if single_source && indices.len() > 1 {
-                                    let ctx = src.sort_context(Some(&properties));
-                                    sort_indices_with_spec(
-                                        &mut indices,
-                                        &ctx,
-                                        &applied_sort,
-                                        cancel,
-                                    );
-                                }
-                                indices
-                            }
-                        }
+                        execute_query(&src.view, &properties, &query_expr, &policy, cancel).rows
                     }
                 };
 
                 let Some(src_bytes) =
-                    filter_unique_source_matches(src, &mut matched, &exclusions, cancel)
+                    filter_unique_source_matches(&src.view, &mut matched, &exclusions, cancel)
                 else {
                     return SearchOutcome::empty(highlight_terms, applied_sort, degraded);
                 };
@@ -1026,7 +923,7 @@ impl MultiVolumeEngine {
             if !single_source && all_results.len() > 1 && !cancel.is_cancelled() {
                 let ctx_by_id: HashMap<SourceId, SortContext<'_>> = sources
                     .iter()
-                    .map(|s| (s.source_id(), s.sort_context(Some(&properties))))
+                    .map(|s| (s.view.source_id, s.view.sort_context(Some(&properties))))
                     .collect();
                 all_results.par_sort_unstable_by(|a, b| {
                     let ctx_a = &ctx_by_id[&a.source_id];
@@ -1051,13 +948,13 @@ impl MultiVolumeEngine {
                 && !all_results.is_empty()
                 && !snippet_terms.is_empty()
             {
-                let src_by_id: HashMap<SourceId, &IndexedSource<'_>> =
-                    sources.iter().map(|s| (s.source_id(), s)).collect();
+                let src_by_id: HashMap<SourceId, &QuerySource<'_>> =
+                    sources.iter().map(|s| (s.view.source_id, s)).collect();
                 let limit = all_results.len().min(CONTENT_RESULT_TOP_K);
                 let mut keys = Vec::with_capacity(limit);
                 for item in &all_results[..limit] {
                     if let Some(src) = src_by_id.get(&item.source_id)
-                        && let Some(rec) = src.records().get(item.record_idx as usize)
+                        && let Some(rec) = src.view.records.get(item.record_idx as usize)
                     {
                         keys.push((item.source_id.0 as u64, rec.frn));
                     }
@@ -1100,7 +997,7 @@ impl MultiVolumeEngine {
 }
 
 fn filter_unique_source_matches(
-    source: &IndexedSource<'_>,
+    view: &SourceView<'_>,
     matches: &mut Vec<u32>,
     exclusions: &PathExclusions,
     cancel: &CancellationToken,
@@ -1111,14 +1008,14 @@ fn filter_unique_source_matches(
             return None;
         }
         let idx = matches[read];
-        if source.excludes(exclusions, idx) {
+        if exclusions.excludes(view, idx) {
             continue;
         }
         matches[write] = idx;
         write += 1;
     }
     matches.truncate(write);
-    Some(source.calculate_matched_bytes(matches))
+    Some(calculate_matched_bytes_for_records(view.records, matches))
 }
 
 fn is_positive_conjunction(expr: &QueryExpr) -> bool {
@@ -1132,14 +1029,14 @@ fn is_positive_conjunction(expr: &QueryExpr) -> bool {
 const HIT_RESOLVE_CHUNK: usize = 16_384;
 
 fn hit_bitset_for_source(
-    source: &IndexedSource<'_>,
+    source: &QuerySource<'_>,
     frns: &[u64],
     cancel: &CancellationToken,
 ) -> BitSet {
     if frns.is_empty() {
         return BitSet::with_capacity(0);
     }
-    let total_records = source.records().len();
+    let total_records = source.view.records.len();
     frns.par_chunks(HIT_RESOLVE_CHUNK)
         .map(|chunk| {
             if cancel.is_cancelled() {
@@ -1147,7 +1044,7 @@ fn hit_bitset_for_source(
             }
             let mut bits = BitSet::with_capacity(total_records);
             for &frn in chunk {
-                if let Some(indices) = source.record_indices_for_frn(frn) {
+                if let Some(indices) = source.frn_to_idx.get(frn) {
                     for &idx in indices {
                         bits.insert(idx as usize);
                     }

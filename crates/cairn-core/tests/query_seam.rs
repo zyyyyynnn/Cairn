@@ -8,10 +8,10 @@
 use cairn_core::engine::CancellationToken;
 use cairn_core::model::{FLAG_DIRECTORY, FLAG_HIDDEN, FLAG_READONLY, FLAG_SYSTEM, FLAG_TOMBSTONE};
 use cairn_core::property_store::{PropertyKind, PropertySideTables, RecordPropertyData, SourceId};
-use cairn_core::query::{QueryDegradedReason, QueryPolicy, QueryRows, SourceIndex, execute_query};
-use cairn_core::sort::{PresortedIndices, SortColumn, SortDirection, SortKey, SortSpec};
+use cairn_core::query::{QueryDegradedReason, QueryPolicy, SourceView, execute_query};
+use cairn_core::sort::{SortColumn, SortDirection, SortKey, SortSpec};
 use cairn_core::syntax::{QueryDefaults, parse_query, parse_query_with};
-use cairn_core::{DirectoryPathCache, FileRecord, NamePool};
+use cairn_core::{DirectoryPathCache, FileRecord, NamePool, normalize_root};
 
 struct FixtureBuilder {
     arena: NamePool,
@@ -88,32 +88,6 @@ impl FixtureBuilder {
     }
 }
 
-fn materialize(rows: QueryRows, presorted: Option<&PresortedIndices>) -> Vec<u32> {
-    match rows {
-        QueryRows::Materialized(v) => v,
-        QueryRows::PresortedAll {
-            column,
-            descending,
-            len,
-        } => {
-            let ps = presorted.expect("PresortedAll requires presorted index");
-            let slice = match column {
-                SortColumn::Name => &ps.by_name,
-                SortColumn::Path => &ps.by_path,
-                SortColumn::Size => &ps.by_size,
-                SortColumn::DateModified => &ps.by_date_modified,
-                other => panic!("unexpected presorted column {other:?}"),
-            };
-            assert_eq!(slice.len(), len);
-            if descending {
-                slice.iter().copied().rev().collect()
-            } else {
-                slice.clone()
-            }
-        }
-    }
-}
-
 #[test]
 fn property_side_tables_zero_bytes_when_disabled_and_tracks_sparse_updates() {
     let mut store = PropertySideTables::disabled();
@@ -181,23 +155,22 @@ fn query_supports_pinyin_diacritics_punctuation_and_whitespace_modifiers() {
 
     let cache = DirectoryPathCache::new();
     let props = PropertySideTables::disabled();
-    let idx = SourceIndex {
+    let root = normalize_root("C:\\");
+    let idx = SourceView {
         source_id: SourceId(0),
-        root_prefix: "C:\\",
+        root_prefix: &root,
         records: &fx.records,
         arena: &fx.arena,
         path_cache: &cache,
-        presorted: None,
-        properties: &props,
-        has_tombstones: false,
+        generation: 0,
     };
     let cancel = CancellationToken::new();
     let policy = QueryPolicy::default();
 
     let run = |q: &str, defaults: &QueryDefaults| {
         let expr = parse_query_with(q, defaults);
-        let res = execute_query(&idx, &expr, &policy, &cancel);
-        fx.names_for(&materialize(res.rows, None))
+        let res = execute_query(&idx, &props, &expr, &policy, &cancel);
+        fx.names_for(&res.rows)
     };
 
     assert_eq!(
@@ -268,23 +241,22 @@ fn query_evaluates_len_attrib_depth_children_and_duplicates() {
     let cache = DirectoryPathCache::new();
     let props = PropertySideTables::disabled();
     // Root as a non-drive FolderSource (`D:\Projects\Cairn`)
-    let idx = SourceIndex {
+    let folder_root = normalize_root(r"D:\Projects\Cairn");
+    let idx = SourceView {
         source_id: SourceId(1),
-        root_prefix: r"D:\Projects\Cairn",
+        root_prefix: &folder_root,
         records: &fx.records,
         arena: &fx.arena,
         path_cache: &cache,
-        presorted: None,
-        properties: &props,
-        has_tombstones: false,
+        generation: 0,
     };
     let cancel = CancellationToken::new();
     let policy = QueryPolicy::default();
 
     let run = |q: &str| {
         let expr = parse_query(q);
-        let res = execute_query(&idx, &expr, &policy, &cancel);
-        fx.names_for(&materialize(res.rows, None))
+        let res = execute_query(&idx, &props, &expr, &policy, &cancel);
+        fx.names_for(&res.rows)
     };
 
     // `D:\Projects\Cairn` has 3 path segments; `src\main.rs` sits at depth 4.
@@ -364,30 +336,31 @@ fn property_queries_work_when_enabled_and_report_explicit_degradation_when_disab
 
     let cache = DirectoryPathCache::new();
     let cancel = CancellationToken::new();
-    let enabled_idx = SourceIndex {
+    let drive_d = normalize_root("D:\\");
+    let view = SourceView {
         source_id: SourceId(3),
-        root_prefix: "D:\\",
+        root_prefix: &drive_d,
         records: &fx.records,
         arena: &fx.arena,
         path_cache: &cache,
-        presorted: None,
-        properties: &props,
-        has_tombstones: false,
+        generation: 0,
     };
 
     let run_enabled = |q: &str, sort: SortSpec| {
         let expr = parse_query(q);
         let res = execute_query(
-            &enabled_idx,
+            &view,
+            &props,
             &expr,
             &QueryPolicy {
                 sort,
                 content_hit: None,
+                skip_sort: false,
             },
             &cancel,
         );
         assert!(res.degraded.is_none());
-        fx.names_for(&materialize(res.rows, None))
+        fx.names_for(&res.rows)
     };
 
     assert_eq!(
@@ -423,19 +396,15 @@ fn property_queries_work_when_enabled_and_report_explicit_degradation_when_disab
 
     // Disabled store must return empty results AND explicit degraded reason.
     let disabled_props = PropertySideTables::disabled();
-    let disabled_idx = SourceIndex {
-        source_id: SourceId(3),
-        root_prefix: "D:\\",
-        records: &fx.records,
-        arena: &fx.arena,
-        path_cache: &cache,
-        presorted: None,
-        properties: &disabled_props,
-        has_tombstones: false,
-    };
     let expr = parse_query("length:>1m tags:hdr");
-    let degraded = execute_query(&disabled_idx, &expr, &QueryPolicy::default(), &cancel);
-    assert!(materialize(degraded.rows, None).is_empty());
+    let degraded = execute_query(
+        &view,
+        &disabled_props,
+        &expr,
+        &QueryPolicy::default(),
+        &cancel,
+    );
+    assert!(degraded.rows.is_empty());
     assert_eq!(
         degraded.degraded,
         Some(QueryDegradedReason::PropertyIndexDisabled {
@@ -445,12 +414,11 @@ fn property_queries_work_when_enabled_and_report_explicit_degradation_when_disab
 }
 
 #[test]
-fn multi_key_sort_presorted_all_and_hidden_system_opt_in_contract() {
+fn multi_key_sort_and_hidden_system_opt_in_contract() {
     let mut fx = FixtureBuilder::new();
     fx.push_file("b.txt", FileRecord::ROOT_PARENT, 0, 200, 10, 300);
     fx.push_file("a.txt", FileRecord::ROOT_PARENT, 0, 200, 20, 100);
     fx.push_file("c.log", FileRecord::ROOT_PARENT, FLAG_HIDDEN, 50, 30, 200);
-    // Deliberate tombstone to verify normal queries exclude tombstones even on zero-filter paths.
     fx.push_file(
         "gone.txt",
         FileRecord::ROOT_PARENT,
@@ -463,20 +431,24 @@ fn multi_key_sort_presorted_all_and_hidden_system_opt_in_contract() {
     let cache = DirectoryPathCache::new();
     let props = PropertySideTables::disabled();
     let cancel = CancellationToken::new();
+    let root = normalize_root("C:\\");
 
-    // Multi-key inline sort: equal sizes break by Name ascending without reversing Name.
-    let idx_with_tombstone = SourceIndex {
+    let idx_with_tombstone = SourceView {
         source_id: SourceId(0),
-        root_prefix: "C:\\",
+        root_prefix: &root,
         records: &fx.records,
         arena: &fx.arena,
         path_cache: &cache,
-        presorted: None,
-        properties: &props,
-        has_tombstones: false,
+        generation: 0,
     };
     let expr = parse_query("sort:size-desc,name-asc");
-    let res = execute_query(&idx_with_tombstone, &expr, &QueryPolicy::default(), &cancel);
+    let res = execute_query(
+        &idx_with_tombstone,
+        &props,
+        &expr,
+        &QueryPolicy::default(),
+        &cancel,
+    );
     assert_eq!(
         res.applied_sort,
         SortSpec {
@@ -486,57 +458,59 @@ fn multi_key_sort_presorted_all_and_hidden_system_opt_in_contract() {
             ]
         }
     );
-    assert_eq!(
-        fx.names_for(&materialize(res.rows, None)),
-        vec!["a.txt", "b.txt", "c.log"]
-    );
+    assert_eq!(fx.names_for(&res.rows), vec!["a.txt", "b.txt", "c.log"]);
 
-    // DateCreated & Extension sorting.
     let res_created = execute_query(
         &idx_with_tombstone,
+        &props,
         &parse_query(""),
         &QueryPolicy {
             sort: SortSpec::single(SortColumn::DateCreated, SortDirection::Ascending),
             content_hit: None,
+            skip_sort: false,
         },
         &cancel,
     );
     assert_eq!(
-        fx.names_for(&materialize(res_created.rows, None)),
+        fx.names_for(&res_created.rows),
         vec!["a.txt", "c.log", "b.txt"]
     );
 
-    // Clean fixture without tombstones tests zero-materialization `PresortedAll` path.
-    fx.records.pop();
-    let presorted = PresortedIndices::build(&fx.records, &fx.arena, &cache, 'C');
-    let clean_idx = SourceIndex {
-        source_id: SourceId(0),
-        root_prefix: "C:\\",
-        records: &fx.records,
-        arena: &fx.arena,
-        path_cache: &cache,
-        presorted: Some(&presorted),
-        properties: &props,
-        has_tombstones: false,
-    };
+    let res_unsorted = execute_query(
+        &idx_with_tombstone,
+        &props,
+        &parse_query(""),
+        &QueryPolicy {
+            sort: SortSpec::single(SortColumn::Name, SortDirection::Ascending),
+            content_hit: None,
+            skip_sort: true,
+        },
+        &cancel,
+    );
+    assert_eq!(
+        fx.names_for(&res_unsorted.rows),
+        vec!["b.txt", "a.txt", "c.log"]
+    );
+    assert_eq!(
+        res_unsorted.applied_sort,
+        SortSpec::single(SortColumn::Name, SortDirection::Ascending)
+    );
+
     let unfiltered = execute_query(
-        &clean_idx,
+        &idx_with_tombstone,
+        &props,
         &parse_query_with("", &QueryDefaults::default()),
         &QueryPolicy::default(),
         &cancel,
     );
-    assert!(matches!(
-        unfiltered.rows,
-        QueryRows::PresortedAll {
-            column: SortColumn::Name,
-            descending: false,
-            len: 3
-        }
-    ));
+    assert_eq!(
+        fx.names_for(&unfiltered.rows),
+        vec!["a.txt", "b.txt", "c.log"]
+    );
 
-    // Enabling `exclude_hidden` narrows via Materialized even on empty query text.
     let hidden_filtered = execute_query(
-        &clean_idx,
+        &idx_with_tombstone,
+        &props,
         &parse_query_with(
             "",
             &QueryDefaults {
@@ -547,9 +521,5 @@ fn multi_key_sort_presorted_all_and_hidden_system_opt_in_contract() {
         &QueryPolicy::default(),
         &cancel,
     );
-    assert!(matches!(hidden_filtered.rows, QueryRows::Materialized(_)));
-    assert_eq!(
-        fx.names_for(&materialize(hidden_filtered.rows, Some(&presorted))),
-        vec!["a.txt", "b.txt"]
-    );
+    assert_eq!(fx.names_for(&hidden_filtered.rows), vec!["a.txt", "b.txt"]);
 }

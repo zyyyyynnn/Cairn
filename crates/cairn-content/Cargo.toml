@@ -8,11 +8,6 @@ publish.workspace = true
 
 [dependencies]
 tantivy.workspace = true
-chardetng.workspace = true
-encoding_rs.workspace = true
-zip.workspace = true
-quick-xml.workspace = true
-lopdf.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
 

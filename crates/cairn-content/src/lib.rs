@@ -4,21 +4,15 @@
 
 #![forbid(unsafe_code)]
 
-//! `cairn-content`: Full-text content search engine with Tantivy,
-//! CJK Bigram + Latin tokenizer, auto encoding detection, and document text extractors.
+//! `cairn-content`: Full-text content index and query library powered by Tantivy
+//! with a CJK Bigram + Latin tokenizer. Document parsing and encoding detection
+//! live in `cairn-worker`.
 
-pub mod detector;
 pub mod errors;
-pub mod extractor;
 pub mod indexer;
 pub mod tokenizer;
 
-pub use detector::decode_bytes_to_string;
 pub use errors::raw_os_error;
-pub use extractor::{
-    CompositeExtractor, ExtractError, OfficeExtractor, PdfExtractor, PlainTextExtractor,
-    TextExtractor,
-};
 pub use indexer::{
     CONTENT_RESULT_TOP_K, ContentHit, ContentIndex, ContentIndexError, ContentSearcher,
     ContentWriter, MAX_CONTENT_SNIPPETS, create_snippets,

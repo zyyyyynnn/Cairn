@@ -10,26 +10,41 @@ use crate::engine::{
 };
 use crate::filter::DupeMode;
 use crate::model::FileRecord;
-use crate::path_cache::{DirectoryPathCache, normalize_root};
+use crate::path_cache::DirectoryPathCache;
 use crate::property_store::{PropertyKind, PropertySideTables, SourceId};
-use crate::sort::{
-    PresortedIndices, SortColumn, SortContext, SortDirection, SortSpec, sort_indices_with_spec,
-};
+use crate::sort::{SortContext, SortSpec, sort_indices_with_spec};
 use crate::syntax::{QueryExpr, SearchTerm};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
-/// Borrowed view of one indexed source (NTFS volume or folder source) supplied to [`execute_query`].
+/// Borrowed read-only projection of one indexed source (NTFS volume or folder source).
 #[derive(Clone, Copy)]
-pub struct SourceIndex<'a> {
+pub struct SourceView<'a> {
     pub source_id: SourceId,
-    pub root_prefix: &'a str,
+    /// Canonical root prefix normalized with a trailing backslash (e.g. `C:\` or `D:\Projects\`).
+    pub root_prefix: &'a Arc<str>,
     pub records: &'a [FileRecord],
     pub arena: &'a NamePool,
     pub path_cache: &'a DirectoryPathCache,
-    pub presorted: Option<&'a PresortedIndices>,
-    pub properties: &'a PropertySideTables,
-    pub has_tombstones: bool,
+    pub generation: u64,
+}
+
+impl<'a> SourceView<'a> {
+    pub fn drive_letter(&self) -> Option<char> {
+        drive_letter_from_root(self.root_prefix)
+    }
+
+    pub fn sort_context(&self, properties: Option<&'a PropertySideTables>) -> SortContext<'a> {
+        SortContext {
+            records: self.records,
+            arena: self.arena,
+            path_cache: self.path_cache,
+            root: self.root_prefix,
+            source_id: self.source_id,
+            properties,
+        }
+    }
 }
 
 /// Execution policy passed to [`execute_query`].
@@ -37,6 +52,8 @@ pub struct SourceIndex<'a> {
 pub struct QueryPolicy<'a> {
     pub sort: SortSpec,
     pub content_hit: Option<ContentHitResolver<'a>>,
+    /// Skip per-source sorting when the caller merges and sorts results across multiple sources.
+    pub skip_sort: bool,
 }
 
 /// Explicit degradation reason emitted when an extended capability was requested while disabled.
@@ -45,31 +62,19 @@ pub enum QueryDegradedReason {
     PropertyIndexDisabled { requested: Vec<PropertyKind> },
 }
 
-/// Resulting row sequence produced by [`execute_query`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum QueryRows {
-    /// Zero-materialization view over an intact presorted index column.
-    PresortedAll {
-        column: SortColumn,
-        descending: bool,
-        len: usize,
-    },
-    /// Materialized matching record indices in final sort order.
-    Materialized(Vec<u32>),
-}
-
 /// Complete output of [`execute_query`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QueryResult {
-    pub rows: QueryRows,
+    pub rows: Vec<u32>,
     pub applied_sort: SortSpec,
     pub highlight_terms: Vec<String>,
     pub degraded: Option<QueryDegradedReason>,
 }
 
-/// Evaluates `expr` against `source` honoring `policy` and `cancel`.
+/// Evaluates `expr` against `source` honoring `properties`, `policy`, and `cancel`.
 pub fn execute_query(
-    source: &SourceIndex<'_>,
+    source: &SourceView<'_>,
+    properties: &PropertySideTables,
     expr: &QueryExpr,
     policy: &QueryPolicy<'_>,
     cancel: &CancellationToken,
@@ -82,65 +87,44 @@ pub fn execute_query(
     }
 
     let highlight_terms = expr.collect_highlight_terms();
-    let degraded = detect_degraded_properties(source.properties, expr, &applied_sort);
+    let degraded = detect_degraded_properties(properties, expr, &applied_sort);
 
     if cancel.is_cancelled() {
         return QueryResult {
-            rows: QueryRows::Materialized(Vec::new()),
+            rows: Vec::new(),
             applied_sort,
             highlight_terms,
             degraded,
         };
     }
 
-    if !source.properties.is_enabled() && definitely_empty_without_properties(expr) {
+    if !properties.is_enabled() && definitely_empty_without_properties(expr) {
         return QueryResult {
-            rows: QueryRows::Materialized(Vec::new()),
+            rows: Vec::new(),
             applied_sort,
             highlight_terms,
             degraded,
         };
-    }
-
-    let root = normalize_root(source.root_prefix);
-    if expr.is_unfiltered() && !source.has_tombstones && applied_sort.keys.len() == 1 {
-        let key = applied_sort.primary();
-        if let Some(ps) = source.presorted
-            && let Some(len) = presorted_column_len(ps, key.column)
-        {
-            return QueryResult {
-                rows: QueryRows::PresortedAll {
-                    column: key.column,
-                    descending: key.direction == SortDirection::Descending,
-                    len,
-                },
-                applied_sort,
-                highlight_terms,
-                degraded,
-            };
-        }
     }
 
     let hierarchy = expr
         .uses_hierarchy()
-        .then(|| HierarchyOracle::build(source.records, source.arena, &root, expr));
+        .then(|| HierarchyOracle::build(source.records, source.arena, source.root_prefix, expr));
     let dupes = expr
         .uses_dupes()
         .then(|| DupeOracle::build(source.records, source.arena, expr));
 
-    let extra_eval = |term: &SearchTerm, rec: &FileRecord, idx: u32| -> bool {
-        eval_extra_term(term, rec, idx, source, hierarchy.as_ref(), dupes.as_ref())
-    };
-
-    let drive_letter = drive_letter_from_root(&root);
     let eval_ctx = EvalContext {
+        source_id: source.source_id,
         records: source.records,
         arena: source.arena,
         path_cache: source.path_cache,
-        root: &root,
-        drive_letter,
+        root: source.root_prefix,
+        drive_letter: source.drive_letter(),
         content_hit: policy.content_hit,
-        extra_term_eval: Some(&extra_eval),
+        properties: Some(properties),
+        hierarchy: hierarchy.as_ref(),
+        dupes: dupes.as_ref(),
     };
 
     let eval_expr = if expr.is_unfiltered() {
@@ -148,37 +132,19 @@ pub fn execute_query(
     } else {
         expr.clone()
     };
-    let mut matched = execute_query_with_context(&eval_ctx, &eval_expr, None, cancel);
+    let mut matched = execute_query_with_context(&eval_ctx, &eval_expr, cancel);
 
-    if !cancel.is_cancelled() && matched.len() > 1 {
-        let sort_ctx = SortContext {
-            records: source.records,
-            arena: source.arena,
-            path_cache: source.path_cache,
-            root: &root,
-            source_id: source.source_id,
-            properties: Some(source.properties),
-        };
+    if !policy.skip_sort && !cancel.is_cancelled() && matched.len() > 1 {
+        let sort_ctx = source.sort_context(Some(properties));
         sort_indices_with_spec(&mut matched, &sort_ctx, &applied_sort, cancel);
     }
 
     QueryResult {
-        rows: QueryRows::Materialized(matched),
+        rows: matched,
         applied_sort,
         highlight_terms,
         degraded,
     }
-}
-
-fn presorted_column_len(ps: &PresortedIndices, col: SortColumn) -> Option<usize> {
-    let slice = match col {
-        SortColumn::Name => &ps.by_name,
-        SortColumn::Size => &ps.by_size,
-        SortColumn::DateModified => &ps.by_date_modified,
-        SortColumn::Path => &ps.by_path,
-        _ => return None,
-    };
-    (!slice.is_empty()).then_some(slice.len())
 }
 
 fn drive_letter_from_root(root: &str) -> Option<char> {
@@ -226,16 +192,14 @@ fn definitely_empty_without_properties(expr: &QueryExpr) -> bool {
     }
 }
 
-fn eval_extra_term(
+pub(crate) fn eval_extra_term(
     term: &SearchTerm,
     rec: &FileRecord,
     idx: u32,
-    source: &SourceIndex<'_>,
-    hierarchy: Option<&HierarchyOracle>,
-    dupes: Option<&DupeOracle>,
+    ctx: &EvalContext<'_>,
 ) -> bool {
     if let Some(ref df) = term.depth_filter {
-        let Some(h) = hierarchy else {
+        let Some(h) = ctx.hierarchy else {
             return false;
         };
         let depth = h.depths.get(idx as usize).copied().unwrap_or(0) as u64;
@@ -252,7 +216,7 @@ fn eval_extra_term(
         if !rec.is_dir() {
             return false;
         }
-        let Some(h) = hierarchy else {
+        let Some(h) = ctx.hierarchy else {
             return false;
         };
         let (files, folders) = h.child_counts.get(idx as usize).copied().unwrap_or((0, 0));
@@ -281,7 +245,7 @@ fn eval_extra_term(
         if !rec.is_dir() {
             return false;
         }
-        let Some(h) = hierarchy else {
+        let Some(h) = ctx.hierarchy else {
             return false;
         };
         if !h
@@ -296,7 +260,7 @@ fn eval_extra_term(
     }
 
     if let Some(mode) = term.dupe_mode {
-        let Some(d) = dupes else {
+        let Some(d) = ctx.dupes else {
             return false;
         };
         if !d.matches(mode, idx) {
@@ -310,10 +274,10 @@ fn eval_extra_term(
         || term.dimensions_filter.is_some()
         || term.framerate_filter.is_some()
     {
-        let Some(props) = source
-            .properties
-            .get(source.source_id, rec.frn, rec.modified_ts)
-        else {
+        let Some(properties) = ctx.properties else {
+            return false;
+        };
+        let Some(props) = properties.get(ctx.source_id, rec.frn, rec.modified_ts) else {
             return false;
         };
         if let Some(ref lf) = term.length_filter
@@ -365,7 +329,7 @@ fn matches_property_text(value: &str, pattern: &str) -> bool {
     }
 }
 
-struct HierarchyOracle {
+pub(crate) struct HierarchyOracle {
     depths: Vec<u16>,
     /// Per-record `(child_files, child_folders)`.
     child_counts: Vec<(u32, u32)>,
@@ -516,7 +480,7 @@ fn compute_depths(records: &[FileRecord], root: &str) -> Vec<u16> {
     depths
 }
 
-struct DupeOracle {
+pub(crate) struct DupeOracle {
     modes: HashMap<DupeMode, Vec<bool>>,
 }
 

@@ -962,15 +962,10 @@ dependencies = [
 name = "cairn-content"
 version = "0.2.1"
 dependencies = [
- "chardetng",
- "encoding_rs",
- "lopdf",
- "quick-xml 0.42.0",
  "tantivy",
  "tempfile",
  "thiserror 2.0.21",
  "tracing",
- "zip",
 ]
 
 [[package]]
@@ -1018,7 +1013,6 @@ dependencies = [
  "cairn-core",
  "cairn-ntfs",
  "cairn-protocol",
- "cairn-worker",
  "clap",
  "crc32fast",
  "memchr",
@@ -1078,7 +1072,9 @@ dependencies = [
  "cairn-content",
  "cairn-core",
  "cairn-protocol",
+ "chardetng",
  "clap",
+ "encoding_rs",
  "lopdf",
  "quick-xml 0.42.0",
  "serde",
@@ -1087,6 +1083,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tracing",
  "tracing-subscriber",
+ "windows 0.62.2",
  "winresource",
  "zip",
 ]

@@ -119,15 +119,15 @@ pub fn try_decode_frame<T: DeserializeOwned>(buf: &[u8]) -> Result<Option<(usize
         return Ok(None);
     };
 
-    let total_len = header.total_len();
-    if buf.len() < total_len {
-        return Ok(None);
-    }
-
     if header.version != PROTOCOL_VERSION {
         return Err(CodecError::IncompatibleVersion {
             received: header.version,
         });
+    }
+
+    let total_len = header.total_len();
+    if buf.len() < total_len {
+        return Ok(None);
     }
 
     let payload = postcard::from_bytes(&buf[HEADER_SIZE..total_len])?;
@@ -428,6 +428,22 @@ mod tests {
                 .expect("complete")
                 .is_some()
         );
+    }
+
+    #[test]
+    fn mismatched_protocol_version_is_rejected_from_header_before_buffering_payload() {
+        let declared_len: u32 = 10_000_000;
+        let bad_version: u16 = PROTOCOL_VERSION + 1;
+        let mut partial_frame = Vec::with_capacity(HEADER_SIZE);
+        partial_frame.extend_from_slice(&declared_len.to_le_bytes());
+        partial_frame.extend_from_slice(&bad_version.to_le_bytes());
+
+        let err = try_decode_frame::<ClientRequest>(&partial_frame)
+            .expect_err("mismatched protocol version must fail at header");
+        assert!(matches!(
+            err,
+            CodecError::IncompatibleVersion { received } if received == bad_version
+        ));
     }
 }
 

@@ -344,8 +344,7 @@ impl MultiVolumeEngine {
                             vol.journal_id = active_jid;
                             vol.last_usn = next_usn;
                             if !changes.is_empty() {
-                                let property_enabled =
-                                    self.property_tables.read().unwrap().is_enabled();
+                                let property_enabled = self.property_pipeline.is_enabled();
                                 let (needs_source_refresh, changed_records) = if property_enabled {
                                     let mut source_refresh = false;
                                     let mut records = Vec::new();

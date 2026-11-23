@@ -94,10 +94,10 @@ crates/
   cairn-core/      查询语法 AST、过滤评估、自然排序与目录大小聚合
   cairn-protocol/  Named Pipe 帧协议、Postcard 载荷与状态数据结构
   cairn-ntfs/      NTFS 引导扇区、$MFT 记录、Runlist 与 USN 日志解析
-  cairn-content/   Tantivy 全文索引、CJK 分词器与文档内容提取器
+  cairn-content/   Tantivy 全文索引与 CJK 分词器
   cairn-client/    异步 Named Pipe 客户端、版本握手与错误分类
   cairn-service/   CairnService 系统服务、多卷同步引擎、会话缓存与调用方鉴权
-  cairn-worker/    全文索引提取与合并隔离子进程
+  cairn-worker/    文档文本提取、扩展属性解析与索引写入隔离子进程
   cairn-app/       GPUI Kit 桌面客户端、虚拟表格与 Shell 集成
   cairn-cli/       命令行检索与 CSV / JSON 导出工具
   cairn-ui/        共享品牌、主题令牌与组件主题适配

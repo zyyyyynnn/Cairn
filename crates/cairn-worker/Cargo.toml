@@ -18,7 +18,9 @@ path = "src/main.rs"
 cairn-core.workspace = true
 cairn-content.workspace = true
 cairn-protocol.workspace = true
+chardetng.workspace = true
 clap.workspace = true
+encoding_rs.workspace = true
 lopdf.workspace = true
 quick-xml.workspace = true
 serde.workspace = true
@@ -27,6 +29,9 @@ thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 zip.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = ["Win32_System_Threading"] }
 
 [build-dependencies]
 winresource.workspace = true

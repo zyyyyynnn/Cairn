@@ -14,8 +14,8 @@ use cairn_core::model::{
     FLAG_DIRECTORY, FLAG_INDEXED_ATTRIBUTES_MASK, FileRecord, flags_from_win32_attributes,
 };
 use cairn_core::path_cache::{DirectoryPathCache, root_path_for_drive};
-use cairn_core::property_store::{PropertySideTables, RecordPropertyData, SourceId};
-use cairn_core::query::SourceIndex;
+use cairn_core::property_store::{RecordPropertyData, SourceId};
+use cairn_core::query::SourceView;
 use cairn_core::sort::{PresortedIndices, SortColumn};
 use cairn_ntfs::mft::ExtractedItem;
 use cairn_ntfs::usn::{UsnChange, file_record_flags};
@@ -147,63 +147,53 @@ fn apply_size_delta(value: u64, delta: i128) -> u64 {
     }
 }
 
-/// Borrowed table slice unifying `VolumeIndex` and `FolderSource` row serialization.
-pub(crate) struct SourceTableView<'a> {
-    pub root_prefix: Arc<str>,
-    pub records: &'a [FileRecord],
-    pub arena: &'a NamePool,
-    pub path_cache: &'a DirectoryPathCache,
-    pub generation: u64,
-}
+/// Builds one wire row for `record_idx` from a borrowed [`SourceView`].
+pub(crate) fn build_file_row<F, P>(
+    view: &SourceView<'_>,
+    record_idx: u32,
+    folded_terms: &[Vec<u8>],
+    snippet_lookup: F,
+    property_lookup: P,
+) -> Option<FileRowData>
+where
+    F: FnOnce(u64) -> Vec<String>,
+    P: FnOnce(u64, i64) -> Option<RecordPropertyData>,
+{
+    let rec = view.records.get(record_idx as usize)?;
+    let name = view.arena.get_name(rec.name_offset, rec.name_len);
+    let parent_path = view.path_cache.get_parent_path_with_root(
+        view.records,
+        view.arena,
+        view.root_prefix,
+        record_idx,
+    );
 
-impl<'a> SourceTableView<'a> {
-    pub(crate) fn build_file_row<F, P>(
-        &self,
-        record_idx: u32,
-        folded_terms: &[Vec<u8>],
-        snippet_lookup: F,
-        property_lookup: P,
-    ) -> Option<FileRowData>
-    where
-        F: FnOnce(u64) -> Vec<String>,
-        P: FnOnce(u64, i64) -> Option<RecordPropertyData>,
-    {
-        let rec = self.records.get(record_idx as usize)?;
-        let name = self.arena.get_name(rec.name_offset, rec.name_len);
-        let parent_path = self.path_cache.get_parent_path_with_root(
-            self.records,
-            self.arena,
-            &self.root_prefix,
-            record_idx,
-        );
+    let mut name_highlights = Vec::new();
+    let mut path_highlights = Vec::new();
 
-        let mut name_highlights = Vec::new();
-        let mut path_highlights = Vec::new();
+    if !folded_terms.is_empty() {
+        let folded_name = view.arena.get_folded(rec.name_offset, rec.name_len);
+        collect_term_highlights(folded_name, folded_terms, &mut name_highlights);
 
-        if !folded_terms.is_empty() {
-            let folded_name = self.arena.get_folded(rec.name_offset, rec.name_len);
-            collect_term_highlights(folded_name, folded_terms, &mut name_highlights);
-
-            let mut folded_path = parent_path.as_bytes().to_vec();
-            folded_path.make_ascii_lowercase();
-            collect_term_highlights(&folded_path, folded_terms, &mut path_highlights);
-        }
-
-        Some(FileRowData {
-            frn: rec.frn,
-            name: name.to_string(),
-            path: parent_path.to_string(),
-            size: rec.size,
-            modified_ts: rec.modified_ts,
-            created_ts: rec.created_ts,
-            is_dir: rec.is_dir(),
-            flags: rec.flags,
-            name_highlights,
-            path_highlights,
-            snippets: snippet_lookup(rec.frn),
-            properties: property_lookup(rec.frn, rec.modified_ts),
-        })
+        let mut folded_path = parent_path.as_bytes().to_vec();
+        folded_path.make_ascii_lowercase();
+        collect_term_highlights(&folded_path, folded_terms, &mut path_highlights);
     }
+
+    Some(FileRowData {
+        frn: rec.frn,
+        name: name.to_string(),
+        path: parent_path.to_string(),
+        size: rec.size,
+        modified_ts: rec.modified_ts,
+        created_ts: rec.created_ts,
+        is_dir: rec.is_dir(),
+        flags: rec.flags,
+        name_highlights,
+        path_highlights,
+        snippets: snippet_lookup(rec.frn),
+        properties: property_lookup(rec.frn, rec.modified_ts),
+    })
 }
 
 struct PresortedCache {
@@ -384,6 +374,7 @@ impl PresortedCache {
 
 pub struct VolumeIndex {
     pub drive_letter: char,
+    root_prefix: Arc<str>,
     pub volume_guid: String,
     pub(super) status: VolumeStatus,
     records: Vec<FileRecord>,
@@ -426,8 +417,10 @@ pub struct VolumeIndex {
 
 impl VolumeIndex {
     pub fn new(drive_letter: char) -> Self {
+        let drive_letter = drive_letter.to_ascii_uppercase();
         Self {
             drive_letter,
+            root_prefix: root_path_for_drive(drive_letter),
             volume_guid: format!("VOL_{drive_letter}:"),
             status: VolumeStatus::rebuilding(),
             records: Vec::new(),
@@ -776,18 +769,6 @@ impl VolumeIndex {
             self.mark_directory_sizes_dirty();
         } else if !is_dir {
             self.update_file_size(update.index, update.size);
-        }
-    }
-
-    /// Reconstructs full row data and highlights for a matched record index, encapsulating
-    /// arena string extraction and path cache traversal.
-    pub(crate) fn table_view(&self) -> SourceTableView<'_> {
-        SourceTableView {
-            root_prefix: root_path_for_drive(self.drive_letter),
-            records: &self.records,
-            arena: &self.arena,
-            path_cache: &self.path_cache,
-            generation: self.generation,
         }
     }
 
@@ -1790,23 +1771,21 @@ impl VolumeIndex {
             && (self.status.state().is_synced() || !self.records.is_empty())
     }
 
-    pub fn as_source_index<'a>(
-        &'a self,
-        root_prefix: &'a str,
-        properties: &'a PropertySideTables,
-    ) -> SourceIndex<'a> {
+    pub fn view(&self) -> SourceView<'_> {
         let source_id =
             SourceId::for_drive(self.drive_letter).expect("NTFS drive letter maps to a SourceId");
-        SourceIndex {
+        SourceView {
             source_id,
-            root_prefix,
+            root_prefix: &self.root_prefix,
             records: &self.records,
             arena: &self.arena,
             path_cache: &self.path_cache,
-            presorted: Some(&self.presorted.indices),
-            properties,
-            has_tombstones: self.has_tombstones(),
+            generation: self.generation,
         }
+    }
+
+    pub(crate) fn frn_lookup(&self) -> &FrnLookup {
+        &self.frn_to_idx
     }
 
     pub fn to_summary(&self) -> VolumeStatusSummary {

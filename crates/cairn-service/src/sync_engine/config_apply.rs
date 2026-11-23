@@ -4,9 +4,8 @@
 
 //! Service configuration reads, hot apply and secure persistence.
 
-use super::{MultiVolumeEngine, content_pipeline};
+use super::MultiVolumeEngine;
 use crate::config::ServiceConfig;
-use cairn_protocol::status::ContentIndexState;
 use std::sync::atomic::Ordering;
 
 impl MultiVolumeEngine {
@@ -62,7 +61,7 @@ impl MultiVolumeEngine {
         }
         self.retain_indexed_volumes(&applied);
         self.sync_folder_sources_from_config(&applied.folder_sources, &applied.excluded_paths);
-        super::property_refresh::wake_property_spawner(&self.property_spawner);
+        self.property_pipeline.wake();
         Ok(())
     }
 
@@ -72,34 +71,10 @@ impl MultiVolumeEngine {
     }
 
     /// Moves the content pipeline when the master switch changed, and retries a failed run when
-    /// the same enabled value is submitted again. Runs outside the configuration lock: the
-    /// content thread reads that configuration when it handles the command.
+    /// the same enabled value is submitted again.
     fn apply_content_switch(&self, previous_enabled: bool, next_enabled: bool) {
-        if previous_enabled != next_enabled {
-            if next_enabled {
-                self.content_cancel
-                    .store(false, std::sync::atomic::Ordering::SeqCst);
-                self.set_content_progress(0, 0);
-                self.send_content_command(content_pipeline::ContentCommand::Start);
-            } else {
-                self.content_cancel
-                    .store(true, std::sync::atomic::Ordering::SeqCst);
-                self.set_content_disabled();
-                self.send_content_command(content_pipeline::ContentCommand::Cancel);
-            }
-        } else if next_enabled
-            && matches!(
-                self.content_index_status().state,
-                ContentIndexState::Error(_)
-            )
-        {
-            // Saving the same enabled value is the explicit retry path: the previous run failed,
-            // and the user asked again. A full backfill clears the partial index first.
-            self.content_cancel
-                .store(false, std::sync::atomic::Ordering::SeqCst);
-            self.set_content_progress(0, 0);
-            self.send_content_command(content_pipeline::ContentCommand::Start);
-        }
+        self.content_pipeline
+            .apply_switch(previous_enabled, next_enabled);
     }
 
     /// Drops unindexed drives and updates each surviving volume's full-path exclusion mode.

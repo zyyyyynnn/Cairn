@@ -10,9 +10,9 @@
 //! risky half: decoding a document, extracting its text and writing the Tantivy index. A malformed
 //! file can crash or stall this process without touching the `LocalSystem` service.
 
-use cairn_content::extractor::CompositeExtractor;
 use cairn_content::indexer::ContentWriter;
 use cairn_protocol::{ContentIndexTask, PropertyExtractResult, PropertyExtractTask};
+use cairn_worker::extractor::CompositeExtractor;
 use cairn_worker::property_extract::extract_file_properties;
 use clap::Parser;
 use std::fs::File;
@@ -155,6 +155,7 @@ fn apply_batches<RB: BufRead, RD: BufRead>(
 
 fn main() -> std::process::ExitCode {
     let args = WorkerCli::parse();
+    cairn_worker::enter_background_mode();
 
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::from_default_env())

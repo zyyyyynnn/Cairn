@@ -13,9 +13,10 @@ use crate::caller_auth::{CallerAuthorization, authenticate_pipe_client, authoriz
 use crate::security::SafeSecurityDescriptor;
 use crate::session::{QueryOwner, RowsError, SessionManager};
 use crate::sync_engine::MultiVolumeEngine;
+use cairn_core::property_store::SourceId;
 use cairn_core::query::QueryDegradedReason;
 use cairn_core::sort::SortSpec;
-use cairn_core::syntax::{MAX_CHILD_FILTERS, MAX_CONTENT_TERMS, parse_query_with};
+use cairn_core::syntax::{MAX_CHILD_FILTERS, MAX_CONTENT_TERMS, QueryDefaults, parse_query_with};
 use cairn_protocol::codec::{
     encode_frame_into, encode_frame_with_version, peek_frame_header, try_decode_frame,
 };
@@ -383,6 +384,166 @@ fn version_mismatch(server_protocol_version: u16, client_protocol_version: u32) 
     }
 }
 
+struct QueryParams {
+    query_id: u64,
+    raw_query: String,
+    defaults: QueryDefaults,
+    sort_spec: SortSpec,
+    first_page_limit: usize,
+    source_scope: Option<SourceId>,
+}
+
+fn handle_query_request(
+    engine: &Arc<MultiVolumeEngine>,
+    sessions: &SessionManager,
+    owner: &QueryOwner,
+    params: QueryParams,
+) -> ResponsePayload {
+    let QueryParams {
+        query_id,
+        raw_query,
+        defaults,
+        mut sort_spec,
+        first_page_limit,
+        source_scope,
+    } = params;
+
+    // Validation runs before `begin_query` so rejected queries do not cancel valid in-flight work.
+    if let Some(source_id) = source_scope
+        && !engine.is_known_source(source_id)
+    {
+        return ResponsePayload::Error {
+            code: ERROR_CODE_INVALID_REQUEST,
+            message: format!(
+                "query source_scope {} is not an active indexed source",
+                source_id.0
+            ),
+        };
+    }
+    let parsed = parse_query_with(&raw_query, &defaults);
+    let content_terms = parsed.content_term_count();
+    if content_terms > MAX_CONTENT_TERMS {
+        return ResponsePayload::Error {
+            code: ERROR_CODE_QUERY_TOO_COMPLEX,
+            message: format!(
+                "query carries {content_terms} content terms; the limit is {MAX_CONTENT_TERMS}"
+            ),
+        };
+    }
+    if parsed.child_filter_count() > MAX_CHILD_FILTERS {
+        return ResponsePayload::Error {
+            code: ERROR_CODE_QUERY_TOO_COMPLEX,
+            message: format!(
+                "query carries {} child filters; the limit is {MAX_CHILD_FILTERS}",
+                parsed.child_filter_count()
+            ),
+        };
+    }
+    sort_spec.keys.truncate(MAX_SORT_KEYS);
+
+    struct QueryReply {
+        session_id: u64,
+        total_matches: usize,
+        total_bytes: u64,
+        first_page: Vec<FileRowData>,
+        applied_sort: SortSpec,
+        degraded: Option<QueryDegradedReason>,
+    }
+
+    struct ActiveQueryGuard<'a> {
+        sessions: &'a SessionManager,
+        owner: &'a crate::session::QueryOwner,
+        query_id: u64,
+    }
+
+    impl Drop for ActiveQueryGuard<'_> {
+        fn drop(&mut self) {
+            self.sessions.finish_query(self.owner, self.query_id);
+        }
+    }
+
+    let query_cancel = sessions.begin_query(owner, query_id);
+    let active_guard = ActiveQueryGuard {
+        sessions,
+        owner,
+        query_id,
+    };
+    let mut answered: Option<QueryReply> = None;
+    let mut fallback: Option<QueryReply> = None;
+    for attempt in 0..2 {
+        let outcome = engine.execute_search_multi_scoped(
+            &raw_query,
+            &defaults,
+            &sort_spec,
+            &query_cancel,
+            source_scope,
+        );
+        let total_matches = outcome.total;
+        let total_bytes = outcome.total_bytes;
+        let applied_sort = outcome.applied_sort;
+        let degraded = outcome.degraded;
+        let session_id = sessions.create_session(
+            owner.clone(),
+            outcome.rows,
+            &outcome.highlight_terms,
+            outcome.snippets,
+        );
+        let first_page = engine.with_sources_for_rows(|sources| {
+            sessions.get_rows_multi(owner, session_id, 0, first_page_limit, &sources)
+        });
+        match first_page {
+            Ok(rows) => {
+                answered = Some(QueryReply {
+                    session_id,
+                    total_matches,
+                    total_bytes,
+                    first_page: rows,
+                    applied_sort,
+                    degraded,
+                });
+                break;
+            }
+            Err(err) => {
+                warn!(
+                    "query session {session_id} expired before its first page \
+                     (attempt {}): {err:?}",
+                    attempt + 1
+                );
+                sessions.invalidate(session_id);
+                fallback = Some(QueryReply {
+                    session_id,
+                    total_matches,
+                    total_bytes,
+                    first_page: Vec::new(),
+                    applied_sort,
+                    degraded,
+                });
+            }
+        }
+    }
+    drop(active_guard);
+
+    let QueryReply {
+        session_id,
+        total_matches,
+        total_bytes,
+        first_page,
+        applied_sort,
+        degraded,
+    } = answered
+        .or(fallback)
+        .expect("the first attempt always answers or falls back");
+    ResponsePayload::QueryResult {
+        query_id,
+        session_id,
+        total_matches,
+        total_bytes,
+        first_page,
+        applied_sort,
+        degraded,
+    }
+}
+
 fn process_request(
     req: ClientRequest,
     engine: &Arc<MultiVolumeEngine>,
@@ -421,128 +582,19 @@ fn process_request(
             sort_spec,
             first_page_limit,
             source_scope,
-        } => {
-            // Request validation, not evaluation: the engine stays a pure evaluator, and a query
-            // above the content-term limit is refused before any hit set is built. The check
-            // precedes begin_query, which cancels every other in-flight query. A scope that does
-            // not name an active source is refused for the same reason: the caller asked for a
-            // place the index cannot answer.
-            if let Some(source_id) = source_scope
-                && !engine.is_known_source(source_id)
-            {
-                return ResponsePayload::Error {
-                    code: ERROR_CODE_INVALID_REQUEST,
-                    message: format!(
-                        "query source_scope {} is not an active indexed source",
-                        source_id.0
-                    ),
-                };
-            }
-            let parsed = parse_query_with(&raw_query, &defaults);
-            let content_terms = parsed.content_term_count();
-            if content_terms > MAX_CONTENT_TERMS {
-                return ResponsePayload::Error {
-                    code: ERROR_CODE_QUERY_TOO_COMPLEX,
-                    message: format!(
-                        "query carries {content_terms} content terms; the limit is {MAX_CONTENT_TERMS}"
-                    ),
-                };
-            }
-            if parsed.child_filter_count() > MAX_CHILD_FILTERS {
-                return ResponsePayload::Error {
-                    code: ERROR_CODE_QUERY_TOO_COMPLEX,
-                    message: format!(
-                        "query carries {} child filters; the limit is {MAX_CHILD_FILTERS}",
-                        parsed.child_filter_count()
-                    ),
-                };
-            }
-            let mut sort_spec = sort_spec;
-            sort_spec.keys.truncate(MAX_SORT_KEYS);
-            struct QueryReply {
-                session_id: u64,
-                total_matches: usize,
-                total_bytes: u64,
-                first_page: Vec<FileRowData>,
-                applied_sort: SortSpec,
-                degraded: Option<QueryDegradedReason>,
-            }
-            let query_cancel = sessions.begin_query(owner, query_id);
-            let mut answered: Option<QueryReply> = None;
-            let mut fallback: Option<QueryReply> = None;
-            for attempt in 0..2 {
-                let outcome = engine.execute_search_multi_scoped(
-                    &raw_query,
-                    &defaults,
-                    &sort_spec,
-                    &query_cancel,
-                    source_scope,
-                );
-                let total_matches = outcome.total;
-                let total_bytes = outcome.total_bytes;
-                let applied_sort = outcome.applied_sort;
-                let degraded = outcome.degraded;
-                let session_id = sessions.create_session(
-                    owner.clone(),
-                    outcome.rows,
-                    &outcome.highlight_terms,
-                    outcome.snippets,
-                );
-                let first_page = engine.with_sources_for_rows(|sources| {
-                    sessions.get_rows_multi(owner, session_id, 0, first_page_limit, &sources)
-                });
-                match first_page {
-                    Ok(rows) => {
-                        answered = Some(QueryReply {
-                            session_id,
-                            total_matches,
-                            total_bytes,
-                            first_page: rows,
-                            applied_sort,
-                            degraded,
-                        });
-                        break;
-                    }
-                    Err(err) => {
-                        warn!(
-                            "query session {session_id} expired before its first page \
-                             (attempt {}): {err:?}",
-                            attempt + 1
-                        );
-                        sessions.invalidate(session_id);
-                        fallback = Some(QueryReply {
-                            session_id,
-                            total_matches,
-                            total_bytes,
-                            first_page: Vec::new(),
-                            applied_sort,
-                            degraded,
-                        });
-                    }
-                }
-            }
-            sessions.finish_query(owner, query_id);
-
-            let QueryReply {
-                session_id,
-                total_matches,
-                total_bytes,
-                first_page,
-                applied_sort,
-                degraded,
-            } = answered
-                .or(fallback)
-                .expect("the first attempt always answers or falls back");
-            ResponsePayload::QueryResult {
+        } => handle_query_request(
+            engine,
+            sessions,
+            owner,
+            QueryParams {
                 query_id,
-                session_id,
-                total_matches,
-                total_bytes,
-                first_page,
-                applied_sort,
-                degraded,
-            }
-        }
+                raw_query,
+                defaults,
+                sort_spec,
+                first_page_limit,
+                source_scope,
+            },
+        ),
         ClientRequest::GetRows {
             session_id,
             offset,

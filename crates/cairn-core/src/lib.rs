@@ -30,7 +30,7 @@ pub mod time;
 
 pub use arena::NamePool;
 pub use dir_size::DirectorySizeIndex;
-pub use engine::{CancellationToken, execute_query, execute_query_ordered, glob_match};
+pub use engine::{CancellationToken, execute_query, glob_match};
 pub use file_kind::FileKind;
 pub use filter::{
     AttribFilter, DateFilter, DateOp, DimensionsFilter, DupeMode, SizeFilter, SizeOp,
@@ -49,6 +49,7 @@ pub use property_store::{
     FOLDER_SOURCE_ID_BASE, PropertyKind, PropertySideTables, RecordPropertyData,
     RecordPropertyView, SourceId,
 };
+pub use query::SourceView;
 pub use sort::{
     PresortedIndices, SortColumn, SortContext, SortDirection, SortKey, SortSpec,
     compare_cross_source_records, sort_indices_with_spec,

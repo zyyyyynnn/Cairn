@@ -4,6 +4,8 @@
 
 //! Text extraction trait and implementations for plain text, Office, and PDF documents.
 
+#![forbid(unsafe_code)]
+
 use crate::detector::decode_bytes_to_string;
 use quick_xml::Reader as XmlReader;
 use quick_xml::events::Event;
@@ -64,7 +66,7 @@ pub trait TextExtractor: Send + Sync {
 /// stale (a file replaced by a symlink between indexing and extraction). Opening the reparse
 /// point itself and then checking the opened handle's attributes closes that gap: the handle that
 /// is read is the one whose attributes were checked.
-fn open_no_follow(path: &Path) -> std::io::Result<File> {
+pub fn open_no_follow(path: &Path) -> std::io::Result<File> {
     #[cfg(windows)]
     {
         use std::os::windows::fs::{MetadataExt, OpenOptionsExt};

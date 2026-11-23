@@ -9,16 +9,78 @@
 //! publishes a state machine the GUI can show. The worker is never handed the `LocalSystem`
 //! service's address space, so a malformed document cannot take the service down.
 
-use cairn_protocol::status::ContentIndexTask;
+use cairn_content::ContentSearcher;
+use cairn_protocol::status::{ContentIndexState, ContentIndexStatus, ContentIndexTask};
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 
 mod backfill;
 mod status;
 mod worker_process;
 
-pub(in crate::sync_engine) use self::status::content_dir_bytes;
-
+use self::status::content_dir_bytes;
 use self::worker_process::worker_exit_is_transient;
+
+/// Autonomous full-text content pipeline owning index directory, read-only searcher handle,
+/// published status, cancellation flag, and background command channel.
+pub(in crate::sync_engine) struct ContentPipeline {
+    dir: PathBuf,
+    searcher: RwLock<Option<Arc<ContentSearcher>>>,
+    status: RwLock<ContentIndexStatus>,
+    cancel: Arc<AtomicBool>,
+    shutdown: Arc<AtomicBool>,
+    commands: Mutex<Option<std::sync::mpsc::Sender<ContentCommand>>>,
+}
+
+impl ContentPipeline {
+    pub(in crate::sync_engine) fn new(dir: &Path, enabled: bool) -> Self {
+        let status = if enabled {
+            ContentIndexStatus {
+                state: ContentIndexState::Backfilling {
+                    processed: 0,
+                    total: 0,
+                },
+                ..Default::default()
+            }
+        } else {
+            ContentIndexStatus {
+                state: ContentIndexState::Disabled,
+                index_bytes: content_dir_bytes(dir),
+                ..Default::default()
+            }
+        };
+        Self {
+            dir: dir.to_path_buf(),
+            searcher: RwLock::new(None),
+            status: RwLock::new(status),
+            cancel: Arc::new(AtomicBool::new(false)),
+            shutdown: Arc::new(AtomicBool::new(false)),
+            commands: Mutex::new(None),
+        }
+    }
+
+    pub(in crate::sync_engine) fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    fn cancel_flag(&self) -> &Arc<AtomicBool> {
+        &self.cancel
+    }
+
+    fn shutdown_flag(&self) -> &Arc<AtomicBool> {
+        &self.shutdown
+    }
+
+    fn is_shutdown(&self) -> bool {
+        self.shutdown.load(Ordering::SeqCst)
+    }
+
+    pub(in crate::sync_engine) fn status(&self) -> ContentIndexStatus {
+        self.status.read().unwrap().clone()
+    }
+}
 
 /// Format version of the completed-backfill marker. Bump it when the content index layout
 /// changes; an old marker then forces a full rebuild instead of trusting an incompatible index.
@@ -41,29 +103,8 @@ pub enum ContentCommand {
 }
 
 impl crate::sync_engine::MultiVolumeEngine {
-    /// Delivers one command to the content thread. A receiver that is gone means the thread has
-    /// stopped; the command would never be applied, so the failure is logged and published as a
-    /// content error instead of leaving a Backfilling state or an incremental batch unapplied.
-    /// The send happens under the sender lock; the error publication happens after it is released.
-    pub(super) fn send_content_command(&self, command: ContentCommand) -> bool {
-        let sender = self.content_commands.lock().unwrap();
-        let Some(tx) = sender.as_ref() else {
-            return false;
-        };
-        // A stop cannot make the Disabled state already published untrue; every other command
-        // leaves work unapplied, which the status must show.
-        let failure_is_visible = !matches!(command, ContentCommand::Cancel);
-        let delivered = tx.send(command).is_ok();
-        drop(sender);
-        if !delivered {
-            tracing::error!(
-                "content command could not be delivered: the content thread has stopped"
-            );
-            if failure_is_visible {
-                self.set_content_error("content indexing stopped unexpectedly".to_string());
-            }
-        }
-        delivered
+    fn send_content_command(&self, command: ContentCommand) -> bool {
+        self.content_pipeline.send_command(command)
     }
 }
 

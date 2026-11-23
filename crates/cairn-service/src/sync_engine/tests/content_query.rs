@@ -20,7 +20,7 @@ fn engine_with_indexed_content() -> (MultiVolumeEngine, tempfile::TempDir) {
     };
     let engine = MultiVolumeEngine::with_index_dir_drives_and_config(dir.path(), vec![], config);
     let writer =
-        cairn_content::ContentIndex::open_or_create(&engine.content_dir).expect("content index");
+        cairn_content::ContentIndex::open_or_create(engine.content_dir()).expect("content index");
     for (frn, path, body) in [
         (101, r"C:\docs\report.txt", "resumable needle"),
         (102, r"C:\docs\report-draft.txt", "quarterly summary"),
@@ -80,7 +80,7 @@ fn engine_with_hardlinked_content() -> (MultiVolumeEngine, tempfile::TempDir) {
     };
     let engine = MultiVolumeEngine::with_index_dir_drives_and_config(dir.path(), vec![], config);
     let writer =
-        cairn_content::ContentIndex::open_or_create(&engine.content_dir).expect("content index");
+        cairn_content::ContentIndex::open_or_create(engine.content_dir()).expect("content index");
     for (frn, path, body) in [
         (201, r"C:\docs\link-a.txt", "alpha needle"),
         (202, r"C:\docs\plain.txt", "beta filler"),
