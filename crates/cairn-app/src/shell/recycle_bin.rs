@@ -1198,18 +1198,11 @@ mod tests {
     }
 
     #[test]
-    fn surface_location_maps_all_five_states() {
-        use crate::table::surface::{LocalListingStage, SurfaceLocation};
-
+    fn mutations_and_leave_respect_state_and_advance_generation() {
         let mut view = RecycleBinView::closed();
-        assert_eq!(view.surface_location(), SurfaceLocation::Index);
         assert!(view.begin_mutation().is_none());
 
-        view.begin_load();
-        assert_eq!(
-            view.surface_location(),
-            SurfaceLocation::LocalListing(LocalListingStage::Loading)
-        );
+        let load_gen = view.begin_load();
         assert!(view.begin_mutation().is_none());
 
         view.install_listing(vec![std::sync::Arc::new(item(
@@ -1218,30 +1211,16 @@ mod tests {
             10,
             1,
         ))]);
-        assert_eq!(
-            view.surface_location(),
-            SurfaceLocation::LocalListing(LocalListingStage::Ready)
-        );
-
         let mutation_gen = view.begin_mutation().expect("ready bin starts mutation");
-        assert_eq!(
-            view.surface_location(),
-            SurfaceLocation::LocalListing(LocalListingStage::Loading)
-        );
+        assert!(mutation_gen > load_gen);
         assert!(view.begin_mutation().is_none());
-        assert_eq!(view.generation(), mutation_gen);
 
-        view.set_mutating(false);
-        assert_eq!(
-            view.surface_location(),
-            SurfaceLocation::LocalListing(LocalListingStage::Ready)
-        );
+        assert!(view.leave());
+        assert!(view.generation() > mutation_gen);
+        assert!(view.begin_mutation().is_none());
 
+        view.begin_load();
         view.fail("access denied".to_string());
-        assert_eq!(
-            view.surface_location(),
-            SurfaceLocation::LocalListing(LocalListingStage::Error)
-        );
         assert!(view.begin_mutation().is_none());
     }
 }

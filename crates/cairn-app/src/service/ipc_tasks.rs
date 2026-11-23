@@ -874,16 +874,20 @@ impl CairnApp {
     }
 
     pub fn refresh_sources(&mut self, cx: &mut Context<'_, Self>) {
-        if self.service.is_refreshing_sources {
+        if self.service.in_flight_sources_refresh.is_some()
+            || self.service.folder_source_action_pending
+        {
             return;
         }
-        self.service.is_refreshing_sources = true;
         let generation = self.service.next_sources_generation();
+        self.service.in_flight_sources_refresh = Some(generation);
         self.spawn_service_task(
             cx,
             |session| async move { session.get_sources().await },
             move |this, result, cx| {
-                this.service.is_refreshing_sources = false;
+                if this.service.in_flight_sources_refresh == Some(generation) {
+                    this.service.in_flight_sources_refresh = None;
+                }
                 if this.service.sources_generation != generation {
                     return;
                 }
@@ -903,6 +907,7 @@ impl CairnApp {
             return;
         }
         self.service.folder_source_action_pending = true;
+        self.service.in_flight_sources_refresh = None;
         let generation = self.service.next_sources_generation();
         self.repaint_shell_and_overlays(cx);
         self.spawn_service_task(
@@ -910,11 +915,13 @@ impl CairnApp {
             move |session| async move { session.add_folder_source(&path).await },
             move |this, result, cx| {
                 this.service.folder_source_action_pending = false;
+                let mut reconciled = false;
                 match result {
                     Some(Ok(envelope)) => match envelope.payload {
                         ResponsePayload::SourcesResult { sources } => {
                             if this.service.sources_generation == generation {
                                 this.apply_sources_snapshot(sources, cx);
+                                reconciled = true;
                             }
                         }
                         ResponsePayload::Error { code, message } => this.report_request_failure(
@@ -943,6 +950,12 @@ impl CairnApp {
                         cx,
                     ),
                 }
+                if !reconciled
+                    && (this.service.sources_generation != generation
+                        || this.any_folder_source_loading())
+                {
+                    this.refresh_sources(cx);
+                }
                 this.repaint_shell_and_overlays(cx);
             },
         );
@@ -960,6 +973,7 @@ impl CairnApp {
             return;
         }
         self.service.folder_source_action_pending = true;
+        self.service.in_flight_sources_refresh = None;
         let generation = self.service.next_sources_generation();
         self.repaint_shell_and_overlays(cx);
         self.spawn_service_task(
@@ -967,11 +981,13 @@ impl CairnApp {
             move |session| async move { session.remove_folder_source(&path).await },
             move |this, result, cx| {
                 this.service.folder_source_action_pending = false;
+                let mut reconciled = false;
                 match result {
                     Some(Ok(envelope)) => match envelope.payload {
                         ResponsePayload::SourcesResult { sources } => {
                             if this.service.sources_generation == generation {
                                 this.apply_sources_snapshot(sources, cx);
+                                reconciled = true;
                             }
                         }
                         ResponsePayload::Error { code, message } => this.report_request_failure(
@@ -999,6 +1015,12 @@ impl CairnApp {
                         "remove folder source task stopped",
                         cx,
                     ),
+                }
+                if !reconciled
+                    && (this.service.sources_generation != generation
+                        || this.any_folder_source_loading())
+                {
+                    this.refresh_sources(cx);
                 }
                 this.repaint_shell_and_overlays(cx);
             },
@@ -1075,15 +1097,18 @@ impl CairnApp {
         cx.notify();
     }
 
-    fn start_source_status_follow_up(&mut self, cx: &mut Context<'_, Self>) {
-        let still_loading = self.service.sources.iter().any(|source| {
+    fn any_folder_source_loading(&self) -> bool {
+        self.service.sources.iter().any(|source| {
             source.kind == SourceKind::Folder
                 && matches!(
                     source.status,
                     VolumeState::CatchingUp(_) | VolumeState::Rebuilding
                 )
-        });
-        if still_loading {
+        })
+    }
+
+    fn start_source_status_follow_up(&mut self, cx: &mut Context<'_, Self>) {
+        if self.any_folder_source_loading() {
             self.schedule_delayed_refresh(cx, Self::refresh_sources);
         }
     }

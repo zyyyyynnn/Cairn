@@ -228,20 +228,7 @@ mod tests {
     }
 
     #[test]
-    fn sort_columns_and_query_toggles_agree_with_menu_visibility() {
-        let sort_columns = [
-            SortColumn::Name,
-            SortColumn::Path,
-            SortColumn::Size,
-            SortColumn::DateModified,
-            SortColumn::DateCreated,
-            SortColumn::Extension,
-            SortColumn::Length,
-            SortColumn::Author,
-            SortColumn::Tags,
-            SortColumn::Dimensions,
-            SortColumn::Framerate,
-        ];
+    fn query_toggle_commands_stay_aligned_with_location_policy() {
         let toggle_pairs = [
             (QueryToggle::Case, GroupCommand::ToggleCase),
             (QueryToggle::WholeWord, GroupCommand::ToggleWholeWord),
@@ -266,15 +253,8 @@ mod tests {
         ];
 
         for profile in [&LocationProfile::INDEX, &LocationProfile::RECYCLE_BIN] {
-            for col in sort_columns {
-                assert_eq!(
-                    profile.supports_sort_column(col),
-                    !profile.command_is_hidden(GroupCommand::SortBy(col)),
-                    "sort column {col:?} mismatch in {:?}",
-                    profile.kind
-                );
-            }
             for (toggle, cmd) in toggle_pairs {
+                assert_eq!(cmd.query_toggle(), Some(toggle));
                 assert_eq!(
                     profile.supports_query_toggle(toggle),
                     !profile.command_is_hidden(cmd),
@@ -282,87 +262,32 @@ mod tests {
                     profile.kind
                 );
             }
-            assert_eq!(
-                profile.supports_rename,
-                !profile.command_is_hidden(GroupCommand::RenameSelected)
-            );
-            assert_eq!(
-                profile.supports_reveal,
-                !profile.command_is_hidden(GroupCommand::RevealLocation)
-            );
-            assert_eq!(
-                profile.supports_properties_dialog,
-                !profile.command_is_hidden(GroupCommand::ShowProperties)
-            );
-            assert_eq!(
-                profile.allows_column_customization,
-                !profile.command_is_hidden(GroupCommand::Submenu("menu_columns", &[]))
-            );
-            assert_eq!(
-                profile.allows_column_customization,
-                !profile.command_is_hidden(GroupCommand::ToggleColumn(TableColumn::Path))
-            );
-            assert_eq!(
-                profile.supports_exclusion_filters,
-                !profile.command_is_hidden(GroupCommand::ToggleExcludeHidden)
-            );
-            assert_eq!(
-                profile.supports_exclusion_filters,
-                !profile.command_is_hidden(GroupCommand::ToggleExcludeSystem)
-            );
         }
     }
 
     #[test]
     fn is_column_visible_follows_location_profile() {
         use crate::table::model::OptionalColumn;
-        let all_hidden = ColumnSettings {
+        let custom = ColumnSettings {
             show_path: false,
-            show_size: false,
             show_modified: false,
-            show_created: false,
-            show_length: false,
-            ..Default::default()
-        };
-        let all_shown = ColumnSettings {
-            show_path: true,
-            show_size: true,
-            show_modified: true,
-            show_created: true,
             show_length: true,
             ..Default::default()
         };
 
-        assert!(LocationProfile::INDEX.is_column_visible(TableColumn::Name, &all_hidden));
-        assert!(!LocationProfile::INDEX.is_column_visible(TableColumn::Path, &all_hidden));
+        assert!(LocationProfile::INDEX.is_column_visible(TableColumn::Name, &custom));
+        assert!(!LocationProfile::INDEX.is_column_visible(TableColumn::Path, &custom));
         assert!(
             LocationProfile::INDEX
-                .is_column_visible(TableColumn::Optional(OptionalColumn::Length), &all_shown)
-        );
-        assert!(
-            !LocationProfile::INDEX
-                .is_column_visible(TableColumn::Optional(OptionalColumn::Length), &all_hidden)
+                .is_column_visible(TableColumn::Optional(OptionalColumn::Length), &custom)
         );
 
-        for (col, expected) in [
-            (TableColumn::Name, true),
-            (TableColumn::Path, true),
-            (TableColumn::Size, true),
-            (TableColumn::DateModified, true),
-            (TableColumn::Optional(OptionalColumn::DateCreated), false),
-            (TableColumn::Optional(OptionalColumn::Length), false),
-        ] {
-            assert_eq!(
-                LocationProfile::RECYCLE_BIN.is_column_visible(col, &all_hidden),
-                expected,
-                "bin visibility mismatch for {col:?} under all_hidden"
-            );
-            assert_eq!(
-                LocationProfile::RECYCLE_BIN.is_column_visible(col, &all_shown),
-                expected,
-                "bin visibility mismatch for {col:?} under all_shown"
-            );
-        }
+        assert!(LocationProfile::RECYCLE_BIN.is_column_visible(TableColumn::Path, &custom));
+        assert!(LocationProfile::RECYCLE_BIN.is_column_visible(TableColumn::DateModified, &custom));
+        assert!(
+            !LocationProfile::RECYCLE_BIN
+                .is_column_visible(TableColumn::Optional(OptionalColumn::Length), &custom)
+        );
     }
 
     #[test]

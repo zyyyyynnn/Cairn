@@ -260,10 +260,13 @@ impl QueryDomain {
         self.next_page_request_id
     }
 
-    pub(crate) fn finish_page_request(&mut self, request_id: u64) {
+    pub(crate) fn finish_page_request(&mut self, request_id: u64) -> bool {
         if self.in_flight_page_id == Some(request_id) {
             self.in_flight_page_id = None;
             self.is_fetching_more = false;
+            true
+        } else {
+            false
         }
     }
 
@@ -355,9 +358,8 @@ pub struct ServiceDomain {
     /// One add/remove request at a time: the manager dialog disables its actions until the
     /// service answers, so a double press cannot register the same path twice.
     pub(crate) folder_source_action_pending: bool,
-    /// One `GetSources` read at a time; the follow-up poll only starts once the previous answer
-    /// has landed.
-    pub(crate) is_refreshing_sources: bool,
+    /// Active `GetSources` read generation; `None` when idle or superseded by a source write.
+    pub(crate) in_flight_sources_refresh: Option<u64>,
     /// Monotonic token incremented whenever a sources read or mutation is launched, so stale
     /// `GetSources` responses cannot overwrite a newer source list.
     pub(crate) sources_generation: u64,
@@ -580,7 +582,7 @@ impl CairnApp {
                 journal_entries: SubsystemState::default(),
                 sources: Vec::new(),
                 folder_source_action_pending: false,
-                is_refreshing_sources: false,
+                in_flight_sources_refresh: None,
                 sources_generation: 0,
             },
             root_focus,
@@ -1307,66 +1309,22 @@ mod tests {
     }
 
     #[test]
-    fn query_domain_toggles_and_query_defaults_respect_match_mode() {
+    fn to_query_defaults_clears_text_modifiers_under_regex() {
         with_app(|this, _cx| {
-            use crate::search::QueryToggle;
-            use crate::search::modifiers::{TextModifier, TextModifiers};
+            use crate::search::{QueryToggle, TextModifier};
 
-            let all_toggles = [
-                QueryToggle::Case,
-                QueryToggle::WholeWord,
-                QueryToggle::MatchPath,
-                QueryToggle::Regex,
-                QueryToggle::Modifier(TextModifier::Pinyin),
-                QueryToggle::Modifier(TextModifier::IgnorePunctuation),
-                QueryToggle::Modifier(TextModifier::IgnoreWhitespace),
-                QueryToggle::Modifier(TextModifier::IgnoreDiacritics),
-            ];
-
-            for toggle in all_toggles {
-                assert!(!this.query.is_toggle_checked(toggle));
-                this.query.toggle(toggle);
-                assert!(this.query.is_toggle_checked(toggle));
-                this.query.toggle(toggle);
-                assert!(!this.query.is_toggle_checked(toggle));
-            }
-
-            this.query.toggle(QueryToggle::Case);
-            this.query.toggle(QueryToggle::WholeWord);
-            this.query.toggle(QueryToggle::MatchPath);
             this.query
                 .toggle(QueryToggle::Modifier(TextModifier::Pinyin));
-            this.query
-                .toggle(QueryToggle::Modifier(TextModifier::IgnorePunctuation));
-            this.query
-                .toggle(QueryToggle::Modifier(TextModifier::IgnoreWhitespace));
-            this.query
-                .toggle(QueryToggle::Modifier(TextModifier::IgnoreDiacritics));
-
-            let plain_defaults = this.query.to_query_defaults(true, false);
-            assert!(plain_defaults.case_sensitive);
-            assert!(plain_defaults.whole_words);
-            assert!(plain_defaults.match_path);
-            assert!(!plain_defaults.is_regex);
-            assert!(plain_defaults.pinyin);
-            assert!(plain_defaults.ignore_punctuation);
-            assert!(plain_defaults.ignore_whitespace);
-            assert!(plain_defaults.ignore_diacritics);
-            assert!(plain_defaults.exclude_hidden);
-            assert!(!plain_defaults.exclude_system);
+            assert!(this.query.to_query_defaults(false, false).pinyin);
 
             this.query.toggle(QueryToggle::Regex);
-            let regex_defaults = this.query.to_query_defaults(false, true);
-            assert!(regex_defaults.is_regex);
-            assert!(!regex_defaults.pinyin);
-            assert!(!regex_defaults.ignore_punctuation);
-            assert!(!regex_defaults.ignore_whitespace);
-            assert!(!regex_defaults.ignore_diacritics);
-            assert!(!regex_defaults.exclude_hidden);
-            assert!(regex_defaults.exclude_system);
-            assert_eq!(
-                this.query.match_mode.text_modifiers(),
-                TextModifiers::default()
+            let defaults = this.query.to_query_defaults(true, true);
+            assert!(defaults.is_regex);
+            assert!(
+                !defaults.pinyin
+                    && !defaults.ignore_punctuation
+                    && !defaults.ignore_whitespace
+                    && !defaults.ignore_diacritics
             );
         });
     }

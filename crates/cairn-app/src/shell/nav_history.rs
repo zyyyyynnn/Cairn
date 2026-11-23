@@ -42,17 +42,17 @@ impl NavHistory {
     }
 
     #[cfg(test)]
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.entries.len()
     }
 
     #[cfg(test)]
-    pub fn index(&self) -> usize {
+    pub(crate) fn index(&self) -> usize {
         self.index
     }
 
     #[cfg(test)]
-    pub fn entries(&self) -> &[NavState] {
+    pub(crate) fn entries(&self) -> &[NavState] {
         &self.entries
     }
 
@@ -324,6 +324,23 @@ mod tests {
             ]
         );
         assert_eq!(history.index(), 0);
+
+        history.prune_missing_sources(|_| true);
+        assert_eq!(history.index(), 0);
+
+        let mut all_removed = NavHistory::new(NavState {
+            text: String::new(),
+            filter: FilterCategory::All,
+            source_scope: Some(removed),
+        });
+        all_removed.record(NavState {
+            text: String::new(),
+            filter: FilterCategory::All,
+            source_scope: Some(SourceId(2000)),
+        });
+        all_removed.prune_missing_sources(|_| false);
+        assert_eq!(all_removed.entries(), &[state("", FilterCategory::All)]);
+        assert_eq!(all_removed.index(), 0);
     }
 
     #[test]

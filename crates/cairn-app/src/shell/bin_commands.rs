@@ -498,9 +498,11 @@ impl CairnApp {
             let _ = this.update(cx, |this, cx| {
                 this.delete_in_flight = false;
                 if let Ok(outcome) = received {
-                    if let Err(failure) = &outcome
-                        && !failure.is_cancelled()
-                    {
+                    if let Err(failure) = &outcome {
+                        if failure.is_cancelled() {
+                            cx.notify();
+                            return;
+                        }
                         this.notify_bin_operation_error("delete_failed_title", &names, failure, cx);
                     }
                     match this.active_location() {
@@ -508,7 +510,9 @@ impl CairnApp {
                             this.request_result_set(ResultSetChange::Replace, cx);
                         }
                         ActiveLocation::RecycleBin => {
-                            this.begin_recycle_bin_load(cx);
+                            if !this.recycle_bin.is_loading() {
+                                this.begin_recycle_bin_load(cx);
+                            }
                         }
                     }
                 }

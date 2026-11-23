@@ -447,7 +447,6 @@ impl CairnApp {
     /// bin): an index answer still in flight is cancelled and the active session
     /// released, so it cannot splice into the new rows.
     pub(crate) fn take_table_for_local_rows(&mut self) {
-        self.query.cancel_in_flight_page();
         self.supersede_index_query();
         self.query.coordinator.set_cancelled(false);
         self.query.active_session_id = None;
@@ -578,6 +577,7 @@ impl CairnApp {
         transport: QueuedTransport,
         cx: &mut Context<'_, Self>,
     ) {
+        self.query.cancel_in_flight_page();
         self.query.rejection = None;
         self.query.degraded = None;
         self.recycle_bin.leave();
@@ -665,6 +665,7 @@ impl CairnApp {
                 applied_sort,
                 degraded,
             } => {
+                self.query.cancel_in_flight_page();
                 self.query.rejection = None;
                 self.query.degraded = degraded;
                 self.results.snippet_preview = None;
@@ -690,6 +691,7 @@ impl CairnApp {
                     .set_objects_summary(total_matches, total_bytes);
             }
             cairn_protocol::message::ResponsePayload::Error { code, .. } => {
+                self.query.cancel_in_flight_page();
                 if code == cairn_protocol::message::ERROR_CODE_INVALID_REQUEST
                     && self.query.source_scope.is_some()
                 {
@@ -741,15 +743,15 @@ impl CairnApp {
 
             let res = rx.await;
             this.update(cx, |this: &mut CairnApp, cx| {
-                this.query.finish_page_request(page_req_id);
-                // A new query replaces the session. Rows from the old session belong to a result
-                // set this table no longer shows, even when the query id still matches.
-                if !page_response_is_current(
-                    current_qid,
-                    this.query.query_id(),
-                    session_id,
-                    this.query.active_session_id,
-                ) {
+                // A superseded page request or replaced session belongs to a stale result set.
+                if !this.query.finish_page_request(page_req_id)
+                    || !page_response_is_current(
+                        current_qid,
+                        this.query.query_id(),
+                        session_id,
+                        this.query.active_session_id,
+                    )
+                {
                     return;
                 }
                 match res {

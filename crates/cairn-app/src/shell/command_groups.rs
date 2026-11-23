@@ -318,14 +318,7 @@ impl GroupCommand {
         }
     }
 
-    /// The Action this item runs, when a keymap Action already owns the command. Dispatching it lets
-    /// the menu read its hint from the keymap instead of repeating a keystroke here, and keeps the
-    /// item and its shortcut on one implementation.
-    ///
-    /// A command with no Action of its own — every choice in a single-owner family such as the sort
-    /// columns, the settings choices, the headings, and `ClearQuery` — returns `None` and the view
-    /// wires its click to the owner method directly. `ClearQuery`'s key is the dismissal cascade
-    /// rather than this command, so it advertises the key through [`Self::hint_action`].
+    /// Maps query-flag menu commands onto their unified [`QueryToggle`].
     pub(crate) const fn query_toggle(self) -> Option<QueryToggle> {
         match self {
             Self::ToggleCase => Some(QueryToggle::Case),
@@ -346,6 +339,14 @@ impl GroupCommand {
         }
     }
 
+    /// The Action this item runs, when a keymap Action already owns the command. Dispatching it lets
+    /// the menu read its hint from the keymap instead of repeating a keystroke here, and keeps the
+    /// item and its shortcut on one implementation.
+    ///
+    /// A command with no Action of its own — every choice in a single-owner family such as the sort
+    /// columns, the settings choices, the headings, and `ClearQuery` — returns `None` and the view
+    /// wires its click to the owner method directly. `ClearQuery`'s key is the dismissal cascade
+    /// rather than this command, so it advertises the key through [`Self::hint_action`].
     pub fn action(self) -> Option<Box<dyn Action>> {
         match self {
             GroupCommand::OpenSelected => Some(Box::new(OpenSelected)),

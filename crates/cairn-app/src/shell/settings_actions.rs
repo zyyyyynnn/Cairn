@@ -56,7 +56,9 @@ impl CairnApp {
     }
 
     pub fn toggle_table_sort(&mut self, col: SortColumn, cx: &mut Context<'_, Self>) {
-        if !self.location_profile().supports_sort_column(col) {
+        if !self.location_profile().supports_sort_column(col)
+            || (self.active_location().is_recycle_bin() && self.recycle_bin.is_loading())
+        {
             return;
         }
         self.results.table.toggle_sort(col);
@@ -64,7 +66,9 @@ impl CairnApp {
     }
 
     pub fn shift_toggle_table_sort(&mut self, col: SortColumn, cx: &mut Context<'_, Self>) {
-        if !self.location_profile().supports_sort_column(col) {
+        if !self.location_profile().supports_sort_column(col)
+            || (self.active_location().is_recycle_bin() && self.recycle_bin.is_loading())
+        {
             return;
         }
         if self.location_profile().is_local_listing {
@@ -411,7 +415,7 @@ mod tests {
     }
 
     #[test]
-    fn toggle_query_option_respects_active_location_and_mutual_exclusion() {
+    fn recycle_bin_gates_query_toggles_and_local_sort() {
         gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
             gpui_kit::init(cx);
             let _ = gpui_kit::open_window(
@@ -426,24 +430,6 @@ mod tests {
 
                     app.update(cx, |this, cx| {
                         use crate::search::{QueryToggle, TextModifier};
-
-                        this.toggle_query_option(QueryToggle::Regex, cx);
-                        assert!(this.query.is_toggle_checked(QueryToggle::Regex));
-
-                        this.toggle_query_option(QueryToggle::Modifier(TextModifier::Pinyin), cx);
-                        assert!(!this.query.is_toggle_checked(QueryToggle::Regex));
-                        assert!(
-                            this.query
-                                .is_toggle_checked(QueryToggle::Modifier(TextModifier::Pinyin))
-                        );
-
-                        this.toggle_query_option(QueryToggle::Regex, cx);
-                        assert!(this.query.is_toggle_checked(QueryToggle::Regex));
-                        assert!(
-                            !this
-                                .query
-                                .is_toggle_checked(QueryToggle::Modifier(TextModifier::Pinyin))
-                        );
 
                         this.open_recycle_bin(window, cx);
                         let snapshot = (

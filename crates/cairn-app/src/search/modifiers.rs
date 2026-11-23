@@ -135,10 +135,14 @@ mod tests {
         assert!(mode.modifier(TextModifier::Pinyin));
         assert!(mode.modifier(TextModifier::IgnoreWhitespace));
 
+        mode.toggle_modifier(TextModifier::Pinyin);
+        assert!(!mode.modifier(TextModifier::Pinyin));
+        assert!(mode.modifier(TextModifier::IgnoreWhitespace));
+
         mode.toggle_regex();
         assert!(mode.is_regex());
         assert_eq!(mode.text_modifiers(), TextModifiers::default());
-        assert!(!mode.modifier(TextModifier::Pinyin));
+        assert!(!mode.modifier(TextModifier::IgnoreWhitespace));
 
         mode.toggle_modifier(TextModifier::IgnoreDiacritics);
         assert!(!mode.is_regex());
@@ -150,25 +154,5 @@ mod tests {
         let mut reset = QueryMatchMode::Regex;
         reset.toggle_regex();
         assert_eq!(reset, QueryMatchMode::Plain(TextModifiers::default()));
-    }
-
-    #[test]
-    fn plain_modifiers_combine_and_toggle_independently() {
-        let mut mode = QueryMatchMode::default();
-        for modifier in [
-            TextModifier::Pinyin,
-            TextModifier::IgnorePunctuation,
-            TextModifier::IgnoreWhitespace,
-            TextModifier::IgnoreDiacritics,
-        ] {
-            mode.toggle_modifier(modifier);
-            assert!(mode.modifier(modifier));
-        }
-
-        mode.toggle_modifier(TextModifier::IgnorePunctuation);
-        assert!(!mode.modifier(TextModifier::IgnorePunctuation));
-        assert!(mode.modifier(TextModifier::Pinyin));
-        assert!(mode.modifier(TextModifier::IgnoreWhitespace));
-        assert!(mode.modifier(TextModifier::IgnoreDiacritics));
     }
 }

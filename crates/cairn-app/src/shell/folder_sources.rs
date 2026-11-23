@@ -370,7 +370,6 @@ impl CairnApp {
             return;
         }
         self.prepare_for_index_location();
-        self.close_group();
         self.query.source_scope = if self.query.source_scope == Some(source_id) {
             None
         } else {
