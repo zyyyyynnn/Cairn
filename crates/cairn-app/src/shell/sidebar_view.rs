@@ -420,7 +420,8 @@ impl CairnApp {
                 .into_iter()
                 .map(|source| {
                     let source_id = source.source_id;
-                    let is_active = self.query.source_scope == Some(source_id);
+                    let is_active =
+                        self.query.source_scope == Some(source_id) && location.is_index();
                     let control = accessibility::control("sidebar-folder-source");
                     let mut args = FluentArgs::new();
                     args.set("path", source.root_path.as_str());

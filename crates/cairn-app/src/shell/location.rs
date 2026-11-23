@@ -47,26 +47,26 @@ pub(crate) const RECYCLE_BIN_CONTEXT_COMMANDS: &[GroupCommand] = &[
     GroupCommand::DeleteSelected,
 ];
 
-/// Declarative location capabilities replacing scattered `recycle_bin.is_open()` checks.
+/// Declarative location capabilities governing commands, columns, and table chrome.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct LocationProfile {
-    pub kind: ActiveLocation,
-    pub is_local_listing: bool,
-    pub allows_column_customization: bool,
-    pub preserves_selection_on_chrome_press: bool,
-    pub supports_exclusion_filters: bool,
-    pub supports_rename: bool,
-    pub supports_reveal: bool,
-    pub supports_properties_dialog: bool,
-    pub supports_snippets: bool,
-    pub supports_degraded_notice: bool,
-    pub records_nav_history: bool,
-    pub search_placeholder_key: &'static str,
-    pub search_aria_label_key: Option<&'static str>,
+    pub(crate) kind: ActiveLocation,
+    pub(crate) is_local_listing: bool,
+    pub(crate) allows_column_customization: bool,
+    pub(crate) preserves_selection_on_chrome_press: bool,
+    pub(crate) supports_exclusion_filters: bool,
+    pub(crate) supports_rename: bool,
+    pub(crate) supports_reveal: bool,
+    pub(crate) supports_properties_dialog: bool,
+    pub(crate) supports_snippets: bool,
+    pub(crate) supports_degraded_notice: bool,
+    pub(crate) records_nav_history: bool,
+    pub(crate) search_placeholder_key: &'static str,
+    pub(crate) search_aria_label_key: Option<&'static str>,
 }
 
 impl LocationProfile {
-    pub const INDEX: Self = Self {
+    pub(crate) const INDEX: Self = Self {
         kind: ActiveLocation::Index,
         is_local_listing: false,
         allows_column_customization: true,
@@ -82,7 +82,7 @@ impl LocationProfile {
         search_aria_label_key: None,
     };
 
-    pub const RECYCLE_BIN: Self = Self {
+    pub(crate) const RECYCLE_BIN: Self = Self {
         kind: ActiveLocation::RecycleBin,
         is_local_listing: true,
         allows_column_customization: false,
@@ -98,14 +98,14 @@ impl LocationProfile {
         search_aria_label_key: Some("recycle_bin_filter_label"),
     };
 
-    pub const fn for_location(kind: ActiveLocation) -> &'static Self {
+    pub(crate) const fn for_location(kind: ActiveLocation) -> &'static Self {
         match kind {
             ActiveLocation::Index => &Self::INDEX,
             ActiveLocation::RecycleBin => &Self::RECYCLE_BIN,
         }
     }
 
-    pub fn is_column_visible(&self, col: TableColumn, settings: &ColumnSettings) -> bool {
+    pub(crate) fn is_column_visible(&self, col: TableColumn, settings: &ColumnSettings) -> bool {
         if col.is_locked() {
             return true;
         }
@@ -121,7 +121,7 @@ impl LocationProfile {
         settings.is_column_shown(col)
     }
 
-    pub const fn supports_sort_column(&self, col: SortColumn) -> bool {
+    pub(crate) const fn supports_sort_column(&self, col: SortColumn) -> bool {
         match self.kind {
             ActiveLocation::Index => true,
             ActiveLocation::RecycleBin => matches!(
@@ -135,43 +135,36 @@ impl LocationProfile {
         }
     }
 
-    pub fn column_label_key(&self, col: SortColumn) -> &'static str {
+    pub(crate) fn column_label_key(&self, col: SortColumn) -> &'static str {
         match self.kind {
             ActiveLocation::Index => col.label_key(),
             ActiveLocation::RecycleBin => col.recycle_bin_label_key(),
         }
     }
 
-    pub fn command_is_hidden(&self, command: GroupCommand) -> bool {
-        match self.kind {
-            ActiveLocation::Index => matches!(
-                command,
-                GroupCommand::RestoreSelected
-                    | GroupCommand::RestoreAll
-                    | GroupCommand::EmptyRecycleBin
-            ),
-            ActiveLocation::RecycleBin => match command {
-                GroupCommand::RenameSelected
-                | GroupCommand::Submenu("menu_columns", _)
-                | GroupCommand::ToggleColumn(_)
-                | GroupCommand::RevealLocation
-                | GroupCommand::ShowProperties
-                | GroupCommand::ToggleWholeWord
-                | GroupCommand::ToggleMatchPath
-                | GroupCommand::ToggleRegex
-                | GroupCommand::TogglePinyin
-                | GroupCommand::ToggleIgnorePunctuation
-                | GroupCommand::ToggleIgnoreWhitespace
-                | GroupCommand::ToggleIgnoreDiacritics
-                | GroupCommand::ToggleExcludeHidden
-                | GroupCommand::ToggleExcludeSystem => true,
-                GroupCommand::SortBy(col) => !self.supports_sort_column(col),
-                _ => false,
-            },
+    pub(crate) fn command_is_hidden(&self, command: GroupCommand) -> bool {
+        if let Some(toggle) = command.query_toggle() {
+            return !self.supports_query_toggle(toggle);
+        }
+        match command {
+            GroupCommand::RestoreSelected
+            | GroupCommand::RestoreAll
+            | GroupCommand::EmptyRecycleBin => !self.kind.is_recycle_bin(),
+            GroupCommand::RenameSelected => !self.supports_rename,
+            GroupCommand::RevealLocation => !self.supports_reveal,
+            GroupCommand::ShowProperties => !self.supports_properties_dialog,
+            GroupCommand::Submenu("menu_columns", _) | GroupCommand::ToggleColumn(_) => {
+                !self.allows_column_customization
+            }
+            GroupCommand::ToggleExcludeHidden | GroupCommand::ToggleExcludeSystem => {
+                !self.supports_exclusion_filters
+            }
+            GroupCommand::SortBy(col) => !self.supports_sort_column(col),
+            _ => false,
         }
     }
 
-    pub fn command_label_key(&self, command: GroupCommand) -> &'static str {
+    pub(crate) fn command_label_key(&self, command: GroupCommand) -> &'static str {
         match self.kind {
             ActiveLocation::Index => command.label_key(),
             ActiveLocation::RecycleBin => match command {
@@ -183,14 +176,14 @@ impl LocationProfile {
         }
     }
 
-    pub const fn supports_query_toggle(&self, toggle: QueryToggle) -> bool {
+    pub(crate) const fn supports_query_toggle(&self, toggle: QueryToggle) -> bool {
         match self.kind {
             ActiveLocation::Index => true,
             ActiveLocation::RecycleBin => matches!(toggle, QueryToggle::Case),
         }
     }
 
-    pub const fn result_context_commands(&self) -> &'static [GroupCommand] {
+    pub(crate) const fn result_context_commands(&self) -> &'static [GroupCommand] {
         match self.kind {
             ActiveLocation::Index => INDEX_CONTEXT_COMMANDS,
             ActiveLocation::RecycleBin => RECYCLE_BIN_CONTEXT_COMMANDS,
@@ -289,6 +282,86 @@ mod tests {
                     profile.kind
                 );
             }
+            assert_eq!(
+                profile.supports_rename,
+                !profile.command_is_hidden(GroupCommand::RenameSelected)
+            );
+            assert_eq!(
+                profile.supports_reveal,
+                !profile.command_is_hidden(GroupCommand::RevealLocation)
+            );
+            assert_eq!(
+                profile.supports_properties_dialog,
+                !profile.command_is_hidden(GroupCommand::ShowProperties)
+            );
+            assert_eq!(
+                profile.allows_column_customization,
+                !profile.command_is_hidden(GroupCommand::Submenu("menu_columns", &[]))
+            );
+            assert_eq!(
+                profile.allows_column_customization,
+                !profile.command_is_hidden(GroupCommand::ToggleColumn(TableColumn::Path))
+            );
+            assert_eq!(
+                profile.supports_exclusion_filters,
+                !profile.command_is_hidden(GroupCommand::ToggleExcludeHidden)
+            );
+            assert_eq!(
+                profile.supports_exclusion_filters,
+                !profile.command_is_hidden(GroupCommand::ToggleExcludeSystem)
+            );
+        }
+    }
+
+    #[test]
+    fn is_column_visible_follows_location_profile() {
+        use crate::table::model::OptionalColumn;
+        let all_hidden = ColumnSettings {
+            show_path: false,
+            show_size: false,
+            show_modified: false,
+            show_created: false,
+            show_length: false,
+            ..Default::default()
+        };
+        let all_shown = ColumnSettings {
+            show_path: true,
+            show_size: true,
+            show_modified: true,
+            show_created: true,
+            show_length: true,
+            ..Default::default()
+        };
+
+        assert!(LocationProfile::INDEX.is_column_visible(TableColumn::Name, &all_hidden));
+        assert!(!LocationProfile::INDEX.is_column_visible(TableColumn::Path, &all_hidden));
+        assert!(
+            LocationProfile::INDEX
+                .is_column_visible(TableColumn::Optional(OptionalColumn::Length), &all_shown)
+        );
+        assert!(
+            !LocationProfile::INDEX
+                .is_column_visible(TableColumn::Optional(OptionalColumn::Length), &all_hidden)
+        );
+
+        for (col, expected) in [
+            (TableColumn::Name, true),
+            (TableColumn::Path, true),
+            (TableColumn::Size, true),
+            (TableColumn::DateModified, true),
+            (TableColumn::Optional(OptionalColumn::DateCreated), false),
+            (TableColumn::Optional(OptionalColumn::Length), false),
+        ] {
+            assert_eq!(
+                LocationProfile::RECYCLE_BIN.is_column_visible(col, &all_hidden),
+                expected,
+                "bin visibility mismatch for {col:?} under all_hidden"
+            );
+            assert_eq!(
+                LocationProfile::RECYCLE_BIN.is_column_visible(col, &all_shown),
+                expected,
+                "bin visibility mismatch for {col:?} under all_shown"
+            );
         }
     }
 

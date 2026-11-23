@@ -163,7 +163,9 @@ impl CairnApp {
         cx: &mut Context<'_, Self>,
     ) {
         if !self.location_profile().supports_snippets {
-            self.results.snippet_preview = None;
+            if self.results.snippet_preview.take().is_some() {
+                cx.notify();
+            }
             return;
         }
 

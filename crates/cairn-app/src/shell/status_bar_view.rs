@@ -9,6 +9,7 @@ use crate::search::ResultSetChange;
 use crate::shell::accessibility::{self, ControlElement};
 use crate::shell::status_bar::format_count;
 use crate::shell::theme::{self, ShellTokens};
+use crate::table::surface::{LocalListingStage, SurfaceLocation};
 use cairn_protocol::message::QueryDegradedReason;
 use fluent_bundle::FluentArgs;
 use gpui_kit::assets::IconName;
@@ -44,68 +45,77 @@ impl CairnApp {
         let mut icon_loading = false;
         let mut view_name = "table";
 
-        if self.recycle_bin.error().is_some() {
-            view_name = "recycle-bin";
-            let text = self.cached_text("status_recycle_bin_unavailable");
-            summary_aria = Some(text.to_string());
-            summary = Some(
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .text_sm()
-                    .font_features(theme::tabular_figures())
-                    .child(text)
-                    .into_any_element(),
-            );
-        } else if self.recycle_bin.is_loading() {
-            view_name = "recycle-bin";
-            summary_loading = true;
-            icon_loading = true;
-        } else if let Some(items) = self.recycle_bin.rows() {
-            view_name = "recycle-bin";
-            let count_text = {
-                let mut args = FluentArgs::new();
-                args.set("count", items.len() as i64);
-                args.set("count_text", format_count(items.len()));
-                self.i18n.get_text_with_args("status_objects_count", &args)
-            };
-            summary_aria = Some(count_text.clone());
-            summary = Some(
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .font_features(theme::tabular_figures())
-                    .child(count_text)
-                    .into_any_element(),
-            );
-        } else {
-            let index_loading = self.service.status.is_any_loading();
-            let awaiting_results = self.results.table.total_rows() == 0;
-            // The band marks only a wait that blocks what the view can show. Once rows are on
-            // screen the table is usable while a volume catches up; that volume state is not a
-            // result-band wait.
-            summary_loading = status_waiting(
-                awaiting_results,
-                index_loading,
-                self.query.is_searching(),
-                self.service.connection.is_probing(),
-            );
-            // Paging keeps the refresh control: rows already on screen are not a first-page wait.
-            icon_loading = summary_loading;
-            if !summary_loading
-                && self.service.connection.is_connected()
-                && self.service.status.has_objects_summary()
-            {
-                let text = self.service.status.objects_summary_text(&self.i18n);
-                summary_aria = Some(text.clone());
-                summary = Some(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .font_features(theme::tabular_figures())
-                        .child(text)
-                        .into_any_element(),
+        match self.recycle_bin.surface_location() {
+            SurfaceLocation::LocalListing(stage) => {
+                view_name = "recycle-bin";
+                match stage {
+                    LocalListingStage::Error => {
+                        let text = self.cached_text("status_recycle_bin_unavailable");
+                        summary_aria = Some(text.to_string());
+                        summary = Some(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_sm()
+                                .font_features(theme::tabular_figures())
+                                .child(text)
+                                .into_any_element(),
+                        );
+                    }
+                    LocalListingStage::Loading => {
+                        summary_loading = true;
+                        icon_loading = true;
+                    }
+                    LocalListingStage::Ready => {
+                        if let Some(items) = self.recycle_bin.rows() {
+                            let count_text = {
+                                let mut args = FluentArgs::new();
+                                args.set("count", items.len() as i64);
+                                args.set("count_text", format_count(items.len()));
+                                self.i18n.get_text_with_args("status_objects_count", &args)
+                            };
+                            summary_aria = Some(count_text.clone());
+                            summary = Some(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .font_features(theme::tabular_figures())
+                                    .child(count_text)
+                                    .into_any_element(),
+                            );
+                        }
+                    }
+                }
+            }
+            SurfaceLocation::Index => {
+                let index_loading = self.service.status.is_any_loading();
+                let awaiting_results = self.results.table.total_rows() == 0;
+                // The band marks only a wait that blocks what the view can show. Once rows are on
+                // screen the table is usable while a volume catches up; that volume state is not a
+                // result-band wait.
+                summary_loading = status_waiting(
+                    awaiting_results,
+                    index_loading,
+                    self.query.is_searching(),
+                    self.service.connection.is_probing(),
                 );
+                // Paging keeps the refresh control: rows already on screen are not a first-page wait.
+                icon_loading = summary_loading;
+                if !summary_loading
+                    && self.service.connection.is_connected()
+                    && self.service.status.has_objects_summary()
+                {
+                    let text = self.service.status.objects_summary_text(&self.i18n);
+                    summary_aria = Some(text.clone());
+                    summary = Some(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .font_features(theme::tabular_figures())
+                            .child(text)
+                            .into_any_element(),
+                    );
+                }
             }
         }
 

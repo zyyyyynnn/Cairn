@@ -118,7 +118,7 @@ impl CairnApp {
                                     .border_color(tokens.border),
                             )
                             .child(div().flex_1().min_h_0().when(
-                                self.results.table.total_rows() > 0,
+                                has_content && self.results.table.total_rows() > 0,
                                 |this| {
                                     this.child(
                                         Scrollbar::vertical(&self.results.rows_scroll)

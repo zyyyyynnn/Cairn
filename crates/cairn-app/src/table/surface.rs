@@ -164,6 +164,14 @@ mod tests {
             }),
             ResultSurface::Loading
         );
+        assert_eq!(
+            result_surface(ResultSurfaceInputs {
+                location: SurfaceLocation::LocalListing(LocalListingStage::Loading),
+                total_rows: 2,
+                ..Default::default()
+            }),
+            ResultSurface::Rows
+        );
     }
 
     #[test]

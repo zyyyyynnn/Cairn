@@ -878,11 +878,15 @@ impl CairnApp {
             return;
         }
         self.service.is_refreshing_sources = true;
+        let generation = self.service.next_sources_generation();
         self.spawn_service_task(
             cx,
             |session| async move { session.get_sources().await },
-            |this, result, cx| {
+            move |this, result, cx| {
                 this.service.is_refreshing_sources = false;
+                if this.service.sources_generation != generation {
+                    return;
+                }
                 if let Some(Ok(envelope)) = result
                     && let ResponsePayload::SourcesResult { sources } = envelope.payload
                 {
@@ -899,16 +903,19 @@ impl CairnApp {
             return;
         }
         self.service.folder_source_action_pending = true;
+        let generation = self.service.next_sources_generation();
         self.repaint_shell_and_overlays(cx);
         self.spawn_service_task(
             cx,
             move |session| async move { session.add_folder_source(&path).await },
-            |this, result, cx| {
+            move |this, result, cx| {
                 this.service.folder_source_action_pending = false;
                 match result {
                     Some(Ok(envelope)) => match envelope.payload {
                         ResponsePayload::SourcesResult { sources } => {
-                            this.apply_sources_snapshot(sources, cx);
+                            if this.service.sources_generation == generation {
+                                this.apply_sources_snapshot(sources, cx);
+                            }
                         }
                         ResponsePayload::Error { code, message } => this.report_request_failure(
                             "toast_folder_source_add_failed_title",
@@ -953,6 +960,7 @@ impl CairnApp {
             return;
         }
         self.service.folder_source_action_pending = true;
+        let generation = self.service.next_sources_generation();
         self.repaint_shell_and_overlays(cx);
         self.spawn_service_task(
             cx,
@@ -962,7 +970,9 @@ impl CairnApp {
                 match result {
                     Some(Ok(envelope)) => match envelope.payload {
                         ResponsePayload::SourcesResult { sources } => {
-                            this.apply_sources_snapshot(sources, cx);
+                            if this.service.sources_generation == generation {
+                                this.apply_sources_snapshot(sources, cx);
+                            }
                         }
                         ResponsePayload::Error { code, message } => this.report_request_failure(
                             "toast_folder_source_remove_failed_title",
@@ -1040,6 +1050,12 @@ impl CairnApp {
             was_loading && !is_loading
         });
         self.service.sources = sources;
+        self.nav_history.prune_missing_sources(|scope| {
+            self.service
+                .sources
+                .iter()
+                .any(|source| source.source_id == scope && source.kind == SourceKind::Folder)
+        });
 
         let scope_is_live = self.query.source_scope.is_none_or(|scope| {
             self.service

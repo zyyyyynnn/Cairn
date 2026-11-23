@@ -7,8 +7,8 @@
 //! table keyboard selection, scrolling and focus actions.
 
 use crate::app::{CairnApp, join_row_path, layout};
+use crate::search::ResultSetChange;
 use crate::search::filters::FilterCategory;
-use crate::search::{QueryToggle, ResultSetChange, TextModifier};
 use crate::shell::command_groups::{GroupCommand, MenuGroup, ZoomPreset, group_spec};
 use crate::shell::commands::*;
 use crate::shell::dialogs;
@@ -821,26 +821,13 @@ impl CairnApp {
     }
 
     pub fn command_is_checked(&self, command: GroupCommand) -> bool {
+        if let Some(toggle) = command.query_toggle() {
+            return self.query.is_toggle_checked(toggle);
+        }
         let index = self.index_menu_state();
         match command {
-            GroupCommand::ToggleCase => self.query.is_toggle_checked(QueryToggle::Case),
-            GroupCommand::ToggleWholeWord => self.query.is_toggle_checked(QueryToggle::WholeWord),
-            GroupCommand::ToggleMatchPath => self.query.is_toggle_checked(QueryToggle::MatchPath),
-            GroupCommand::ToggleRegex => self.query.is_toggle_checked(QueryToggle::Regex),
             GroupCommand::ToggleExcludeHidden => self.settings.exclude_hidden,
             GroupCommand::ToggleExcludeSystem => self.settings.exclude_system,
-            GroupCommand::TogglePinyin => self
-                .query
-                .is_toggle_checked(QueryToggle::Modifier(TextModifier::Pinyin)),
-            GroupCommand::ToggleIgnorePunctuation => self
-                .query
-                .is_toggle_checked(QueryToggle::Modifier(TextModifier::IgnorePunctuation)),
-            GroupCommand::ToggleIgnoreWhitespace => self
-                .query
-                .is_toggle_checked(QueryToggle::Modifier(TextModifier::IgnoreWhitespace)),
-            GroupCommand::ToggleIgnoreDiacritics => self
-                .query
-                .is_toggle_checked(QueryToggle::Modifier(TextModifier::IgnoreDiacritics)),
             GroupCommand::SortBy(column) => self.results.table.primary_sort().0 == column,
             GroupCommand::ReverseOrder => !self.results.table.primary_sort().1,
             GroupCommand::ToggleColumn(col) => self.settings.columns.is_column_shown(col),
@@ -926,6 +913,10 @@ impl CairnApp {
             window.dispatch_action(action, cx);
             return;
         }
+        if let Some(toggle) = command.query_toggle() {
+            self.toggle_query_option(toggle, cx);
+            return;
+        }
         match command {
             GroupCommand::ClearQuery => {
                 // A command names one action. Running the Escape cascade here would dismiss an
@@ -946,18 +937,6 @@ impl CairnApp {
             GroupCommand::SetLanguage(code) => self.set_language(code, cx),
             GroupCommand::ToggleExcludeHidden => self.toggle_exclude_hidden(cx),
             GroupCommand::ToggleExcludeSystem => self.toggle_exclude_system(cx),
-            GroupCommand::TogglePinyin => {
-                self.toggle_query_option(QueryToggle::Modifier(TextModifier::Pinyin), cx);
-            }
-            GroupCommand::ToggleIgnorePunctuation => {
-                self.toggle_query_option(QueryToggle::Modifier(TextModifier::IgnorePunctuation), cx)
-            }
-            GroupCommand::ToggleIgnoreWhitespace => {
-                self.toggle_query_option(QueryToggle::Modifier(TextModifier::IgnoreWhitespace), cx);
-            }
-            GroupCommand::ToggleIgnoreDiacritics => {
-                self.toggle_query_option(QueryToggle::Modifier(TextModifier::IgnoreDiacritics), cx);
-            }
             GroupCommand::ToggleAutostart => {
                 let enabled = !self.settings.autostart;
                 self.set_autostart(enabled, cx);
@@ -1019,8 +998,8 @@ impl CairnApp {
                     tracing::warn!("Failed to open repository URL: {err}");
                 }
             }
-            // Every variant below owns an Action and dispatched above. Listing them keeps this
-            // match exhaustive, so a new command must be classified instead of failing at click.
+            // Every variant below owns an Action or query toggle and dispatched above. Listing
+            // them keeps this match exhaustive, so a new command must be classified cleanly.
             GroupCommand::OpenSelected
             | GroupCommand::RevealLocation
             | GroupCommand::CopyPaths
@@ -1038,8 +1017,12 @@ impl CairnApp {
             | GroupCommand::ToggleCase
             | GroupCommand::ToggleWholeWord
             | GroupCommand::ToggleMatchPath
-            | GroupCommand::ToggleRegex => {
-                unreachable!("action-bearing commands dispatch through their Action")
+            | GroupCommand::ToggleRegex
+            | GroupCommand::TogglePinyin
+            | GroupCommand::ToggleIgnorePunctuation
+            | GroupCommand::ToggleIgnoreWhitespace
+            | GroupCommand::ToggleIgnoreDiacritics => {
+                unreachable!("action- or toggle-bearing commands dispatch above")
             }
         }
     }

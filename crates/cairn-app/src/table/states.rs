@@ -10,6 +10,7 @@ use crate::shell::accessibility::{self, ControlElement};
 use crate::shell::menu_rules::IndexMenuState;
 use crate::shell::state_view::{icon_action, render_state_band};
 use crate::shell::theme::ShellTokens;
+use crate::table::surface::{LocalListingStage, SurfaceLocation};
 use cairn_protocol::status::ContentIndexState;
 use fluent_bundle::FluentArgs;
 use gpui_kit::assets::IconName as AssetIconName;
@@ -54,51 +55,55 @@ impl CairnApp {
         tokens: &ShellTokens,
         cx: &mut Context<'_, Self>,
     ) -> ControlElement {
-        if self.recycle_bin.error().is_some() {
-            let control = accessibility::control("recycle-bin-error");
-            let message = self.i18n.get_text("recycle_bin_unavailable_title");
-            let retry = accessibility::control("recycle-bin-retry");
-            let retry_label = accessibility::name(retry, &self.i18n);
-            let action = icon_action(retry, AssetIconName::RotateCcw, retry_label)
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.open_recycle_bin(window, cx);
-                }))
-                .into_any_element();
-            return render_state_band(
-                tokens,
-                control,
-                message,
-                Icon::new(IconName::CircleAlert)
-                    .size_8()
-                    .text_color(tokens.danger)
-                    .into_any_element(),
-                Some(action),
-            );
+        match self.recycle_bin.surface_location() {
+            SurfaceLocation::LocalListing(LocalListingStage::Error) => {
+                let control = accessibility::control("recycle-bin-error");
+                let message = self.i18n.get_text("recycle_bin_unavailable_title");
+                let retry = accessibility::control("recycle-bin-retry");
+                let retry_label = accessibility::name(retry, &self.i18n);
+                let action = icon_action(retry, AssetIconName::RotateCcw, retry_label)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_recycle_bin(window, cx);
+                    }))
+                    .into_any_element();
+                return render_state_band(
+                    tokens,
+                    control,
+                    message,
+                    Icon::new(IconName::CircleAlert)
+                        .size_8()
+                        .text_color(tokens.danger)
+                        .into_any_element(),
+                    Some(action),
+                );
+            }
+            SurfaceLocation::LocalListing(_) => {
+                let control = accessibility::control("result-state");
+                let bin_empty = self.recycle_bin.all().is_empty();
+                let (message_key, icon) = if bin_empty {
+                    (
+                        "recycle_bin_empty_title",
+                        Icon::new(AssetIconName::Recycle)
+                            .size_8()
+                            .text_color(tokens.muted_foreground)
+                            .into_any_element(),
+                    )
+                } else {
+                    (
+                        "recycle_bin_no_matches_title",
+                        Icon::new(IconName::Search)
+                            .size_8()
+                            .text_color(tokens.muted_foreground)
+                            .into_any_element(),
+                    )
+                };
+                let message = self.i18n.get_text(message_key);
+                return render_state_band(tokens, control, message, icon, None);
+            }
+            SurfaceLocation::Index => {}
         }
 
         let control = accessibility::control("result-state");
-        if self.active_location().is_recycle_bin() {
-            let bin_empty = self.recycle_bin.all().is_empty();
-            let (message_key, icon) = if bin_empty {
-                (
-                    "recycle_bin_empty_title",
-                    Icon::new(AssetIconName::Recycle)
-                        .size_8()
-                        .text_color(tokens.muted_foreground)
-                        .into_any_element(),
-                )
-            } else {
-                (
-                    "recycle_bin_no_matches_title",
-                    Icon::new(IconName::Search)
-                        .size_8()
-                        .text_color(tokens.muted_foreground)
-                        .into_any_element(),
-                )
-            };
-            let message = self.i18n.get_text(message_key);
-            return render_state_band(tokens, control, message, icon, None);
-        }
 
         if let Some(rejection) = self.query.rejection {
             let mut args = FluentArgs::new();

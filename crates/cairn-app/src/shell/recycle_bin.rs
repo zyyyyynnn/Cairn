@@ -158,6 +158,24 @@ impl RecycleBinView {
         }
     }
 
+    /// Starts an exclusive shell write on the loaded bin, returning a fresh generation token or
+    /// `None` unless the listing is ready and idle.
+    pub(crate) fn begin_mutation(&mut self) -> Option<u64> {
+        let RecycleBinState::Open {
+            stage: BinStage::Ready { mutating, .. },
+            ..
+        } = &mut self.state
+        else {
+            return None;
+        };
+        if *mutating {
+            return None;
+        }
+        *mutating = true;
+        self.generation = self.generation.wrapping_add(1);
+        Some(self.generation)
+    }
+
     /// The token a background read must still match to be accepted.
     pub(crate) fn generation(&self) -> u64 {
         self.generation
@@ -166,6 +184,7 @@ impl RecycleBinView {
     /// Releases the view. Returns whether the bin was open.
     pub(crate) fn leave(&mut self) -> bool {
         let was_open = self.is_open();
+        self.generation = self.generation.wrapping_add(1);
         self.state = RecycleBinState::Closed;
         was_open
     }
@@ -694,7 +713,7 @@ impl CairnApp {
             Err(reason) => {
                 tracing::warn!("recycle bin load failed: {reason}");
                 self.recycle_bin.fail(reason);
-                self.install_recycle_bin_rows(true, cx);
+                self.results.table.set_rows(Vec::new(), 0);
             }
         }
         cx.notify();
@@ -1176,5 +1195,53 @@ mod tests {
         ))]);
 
         assert!(view.selected_keys().is_empty());
+    }
+
+    #[test]
+    fn surface_location_maps_all_five_states() {
+        use crate::table::surface::{LocalListingStage, SurfaceLocation};
+
+        let mut view = RecycleBinView::closed();
+        assert_eq!(view.surface_location(), SurfaceLocation::Index);
+        assert!(view.begin_mutation().is_none());
+
+        view.begin_load();
+        assert_eq!(
+            view.surface_location(),
+            SurfaceLocation::LocalListing(LocalListingStage::Loading)
+        );
+        assert!(view.begin_mutation().is_none());
+
+        view.install_listing(vec![std::sync::Arc::new(item(
+            "alpha.txt",
+            r"C:\work",
+            10,
+            1,
+        ))]);
+        assert_eq!(
+            view.surface_location(),
+            SurfaceLocation::LocalListing(LocalListingStage::Ready)
+        );
+
+        let mutation_gen = view.begin_mutation().expect("ready bin starts mutation");
+        assert_eq!(
+            view.surface_location(),
+            SurfaceLocation::LocalListing(LocalListingStage::Loading)
+        );
+        assert!(view.begin_mutation().is_none());
+        assert_eq!(view.generation(), mutation_gen);
+
+        view.set_mutating(false);
+        assert_eq!(
+            view.surface_location(),
+            SurfaceLocation::LocalListing(LocalListingStage::Ready)
+        );
+
+        view.fail("access denied".to_string());
+        assert_eq!(
+            view.surface_location(),
+            SurfaceLocation::LocalListing(LocalListingStage::Error)
+        );
+        assert!(view.begin_mutation().is_none());
     }
 }

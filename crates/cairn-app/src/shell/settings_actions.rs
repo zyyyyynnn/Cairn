@@ -56,11 +56,21 @@ impl CairnApp {
     }
 
     pub fn toggle_table_sort(&mut self, col: SortColumn, cx: &mut Context<'_, Self>) {
+        if !self.location_profile().supports_sort_column(col) {
+            return;
+        }
         self.results.table.toggle_sort(col);
         self.commit_sort_spec_change(cx);
     }
 
     pub fn shift_toggle_table_sort(&mut self, col: SortColumn, cx: &mut Context<'_, Self>) {
+        if !self.location_profile().supports_sort_column(col) {
+            return;
+        }
+        if self.location_profile().is_local_listing {
+            self.toggle_table_sort(col, cx);
+            return;
+        }
         self.results.table.shift_toggle_sort(col);
         self.commit_sort_spec_change(cx);
     }
@@ -193,6 +203,8 @@ impl CairnApp {
     }
 
     pub fn set_filter(&mut self, category: FilterCategory, cx: &mut Context<'_, Self>) {
+        // Clear any active folder scope before the no-op check so returning from a scoped folder
+        // to the same category still drops the scope and replaces the result set.
         let had_scope = self.query.source_scope.take().is_some();
         if self.query.active_filter == category && self.active_location().is_index() && !had_scope {
             self.request_result_set(ResultSetChange::Refresh, cx);
@@ -389,6 +401,87 @@ mod tests {
                         this.toggle_table_column(TableColumn::Optional(OptionalColumn::Length), cx);
                         assert!(!this.settings.columns.show_length);
                         assert_eq!(this.settings.columns.sort_spec, "size-asc");
+                    });
+
+                    cx.quit();
+                    app
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn toggle_query_option_respects_active_location_and_mutual_exclusion() {
+        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
+            gpui_kit::init(cx);
+            let _ = gpui_kit::open_window(
+                gpui_kit::gpui::WindowOptions {
+                    show: false,
+                    focus: false,
+                    ..gpui_kit::gpui::WindowOptions::default()
+                },
+                cx,
+                |window, cx| {
+                    let app = cx.new(|cx| CairnApp::new(window, cx));
+
+                    app.update(cx, |this, cx| {
+                        use crate::search::{QueryToggle, TextModifier};
+
+                        this.toggle_query_option(QueryToggle::Regex, cx);
+                        assert!(this.query.is_toggle_checked(QueryToggle::Regex));
+
+                        this.toggle_query_option(QueryToggle::Modifier(TextModifier::Pinyin), cx);
+                        assert!(!this.query.is_toggle_checked(QueryToggle::Regex));
+                        assert!(
+                            this.query
+                                .is_toggle_checked(QueryToggle::Modifier(TextModifier::Pinyin))
+                        );
+
+                        this.toggle_query_option(QueryToggle::Regex, cx);
+                        assert!(this.query.is_toggle_checked(QueryToggle::Regex));
+                        assert!(
+                            !this
+                                .query
+                                .is_toggle_checked(QueryToggle::Modifier(TextModifier::Pinyin))
+                        );
+
+                        this.open_recycle_bin(window, cx);
+                        let snapshot = (
+                            this.query.whole_word,
+                            this.query.match_path,
+                            this.query.match_mode,
+                        );
+                        let case_before = this.query.case_sensitive;
+                        this.toggle_query_option(QueryToggle::Case, cx);
+                        assert_ne!(this.query.case_sensitive, case_before);
+
+                        for blocked in [
+                            QueryToggle::WholeWord,
+                            QueryToggle::MatchPath,
+                            QueryToggle::Regex,
+                            QueryToggle::Modifier(TextModifier::Pinyin),
+                            QueryToggle::Modifier(TextModifier::IgnorePunctuation),
+                            QueryToggle::Modifier(TextModifier::IgnoreWhitespace),
+                            QueryToggle::Modifier(TextModifier::IgnoreDiacritics),
+                        ] {
+                            this.toggle_query_option(blocked, cx);
+                        }
+                        assert_eq!(
+                            (
+                                this.query.whole_word,
+                                this.query.match_path,
+                                this.query.match_mode,
+                            ),
+                            snapshot
+                        );
+
+                        this.toggle_table_sort(SortColumn::Name, cx);
+                        this.shift_toggle_table_sort(SortColumn::Size, cx);
+                        assert_eq!(this.results.table.sort_spec.keys.len(), 1);
+                        assert_eq!(this.results.table.primary_sort().0, SortColumn::Size);
+
+                        this.toggle_table_sort(SortColumn::DateCreated, cx);
+                        assert_eq!(this.results.table.primary_sort().0, SortColumn::Size);
                     });
 
                     cx.quit();

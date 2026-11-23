@@ -72,12 +72,38 @@ impl NavHistory {
         self.entries.push(state);
 
         if self.entries.len() > MAX_NAV_HISTORY {
+            // Bounded capacity guard prevents unbounded history growth over long sessions.
             let excess = self.entries.len() - MAX_NAV_HISTORY;
             self.entries.drain(0..excess);
-            self.entries.shrink_to_fit();
         }
 
         self.index = self.entries.len() - 1;
+    }
+
+    pub(crate) fn prune_missing_sources<F>(&mut self, is_valid_folder: F)
+    where
+        F: Fn(cairn_protocol::message::SourceId) -> bool,
+    {
+        for entry in &mut self.entries {
+            if let Some(scope) = entry.source_scope
+                && !is_valid_folder(scope)
+            {
+                entry.source_scope = None;
+            }
+        }
+        let mut compacted: Vec<NavState> = Vec::with_capacity(self.entries.len());
+        let mut new_index = 0;
+        for (i, entry) in self.entries.drain(..).enumerate() {
+            let duplicate_of_prev = compacted.last() == Some(&entry);
+            if !duplicate_of_prev {
+                compacted.push(entry);
+            }
+            if i == self.index {
+                new_index = compacted.len().saturating_sub(1);
+            }
+        }
+        self.entries = compacted;
+        self.index = new_index.min(self.entries.len().saturating_sub(1));
     }
 
     pub fn update_current_text(&mut self, text: &str) {
@@ -121,6 +147,9 @@ impl CairnApp {
     }
 
     pub fn record_nav_state(&mut self) {
+        if !self.location_profile().records_nav_history {
+            return;
+        }
         self.nav_history.record(NavState {
             text: self.query.search_input.text.trim().to_string(),
             filter: self.query.active_filter,
@@ -142,6 +171,7 @@ impl CairnApp {
     /// Transitions from a local listing (clearing local filter text) or an existing index query
     /// (preserving typed text into current history) into an index location.
     pub(crate) fn prepare_for_index_location(&mut self) {
+        self.close_group();
         if self.location_profile().is_local_listing {
             self.query.search_input.clear();
         } else {
@@ -150,12 +180,14 @@ impl CairnApp {
         self.recycle_bin.leave();
     }
 
-    /// Leaves the bin for the query state that was current before it.
+    /// Leaves the bin for the query state that was current before it without rewriting history,
+    /// so repeated entry/exit never accumulates duplicate steps.
     pub(crate) fn return_from_recycle_bin(
         &mut self,
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
+        self.close_group();
         self.recycle_bin.leave();
         let current = self.nav_history.current().clone();
         self.apply_nav_state(&current, cx);
@@ -169,6 +201,7 @@ impl CairnApp {
                 if !self.nav_history.can_go_back() {
                     return;
                 }
+                self.close_group();
                 self.update_current_nav_state_text();
                 if let Some(state) = self.nav_history.go_back() {
                     self.apply_nav_state(&state, cx);
@@ -181,6 +214,7 @@ impl CairnApp {
         if self.active_location().is_recycle_bin() || !self.nav_history.can_go_forward() {
             return;
         }
+        self.close_group();
         self.update_current_nav_state_text();
         if let Some(state) = self.nav_history.go_forward() {
             self.apply_nav_state(&state, cx);
@@ -235,6 +269,13 @@ mod tests {
         assert!(history.can_go_back());
         assert!(history.can_go_forward());
 
+        let forward = history.go_forward().expect("step forward");
+        assert_eq!(forward.filter, FilterCategory::Picture);
+        assert!(!history.can_go_forward());
+
+        let back = history.go_back().expect("step back again");
+        assert_eq!(back.filter, FilterCategory::Document);
+
         history.update_current_text("  edited  ");
         assert_eq!(history.current().text, "edited");
 
@@ -248,6 +289,81 @@ mod tests {
         }
         assert_eq!(history.len(), MAX_NAV_HISTORY);
         assert_eq!(history.index(), MAX_NAV_HISTORY - 1);
+        assert_eq!(history.entries()[0].text, "q10");
+        assert_eq!(history.current().text, format!("q{}", MAX_NAV_HISTORY + 9));
+    }
+
+    #[test]
+    fn prune_missing_sources_clears_removed_scopes_and_folds_adjacent_duplicates() {
+        use cairn_protocol::message::SourceId;
+        let removed = SourceId(1000);
+        let mut history = NavHistory::new(NavState {
+            text: String::new(),
+            filter: FilterCategory::All,
+            source_scope: None,
+        });
+        history.record(NavState {
+            text: String::new(),
+            filter: FilterCategory::All,
+            source_scope: Some(removed),
+        });
+        history.record(NavState {
+            text: String::new(),
+            filter: FilterCategory::Document,
+            source_scope: None,
+        });
+        let _ = history.go_back();
+        assert_eq!(history.index(), 1);
+
+        history.prune_missing_sources(|scope| scope != removed);
+        assert_eq!(
+            history.entries(),
+            &[
+                state("", FilterCategory::All),
+                state("", FilterCategory::Document),
+            ]
+        );
+        assert_eq!(history.index(), 0);
+    }
+
+    #[test]
+    fn recycle_bin_round_trip_and_prepare_for_index_location() {
+        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
+            gpui_kit::init(cx);
+            let _ = gpui_kit::open_window(
+                gpui_kit::gpui::WindowOptions {
+                    show: false,
+                    focus: false,
+                    ..gpui_kit::gpui::WindowOptions::default()
+                },
+                cx,
+                |window, cx| {
+                    let app = cx.new(|cx| CairnApp::new(window, cx));
+
+                    app.update(cx, |this, cx| {
+                        this.query.search_input.set_text("hello");
+                        this.open_recycle_bin(window, cx);
+                        assert!(this.active_location().is_recycle_bin());
+                        let hist_len = this.nav_history.len();
+
+                        this.query.search_input.set_text("bin filter");
+                        this.go_back(window, cx);
+                        assert!(this.active_location().is_index());
+                        assert_eq!(this.query.search_input.text, "hello");
+                        assert_eq!(this.nav_history.len(), hist_len);
+
+                        this.open_recycle_bin(window, cx);
+                        this.query.search_input.set_text("local only");
+                        this.prepare_for_index_location();
+                        assert!(this.active_location().is_index());
+                        assert!(this.query.search_input.text.is_empty());
+                    });
+
+                    cx.quit();
+                    app
+                },
+            );
+        });
     }
 
     #[test]

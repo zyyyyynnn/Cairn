@@ -2,20 +2,19 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Explicit query match modes and toggles replacing coupled search-flag booleans.
+//! Explicit query match modes and plain-text modifier flags.
 
 /// Text matching modifiers valid only when regex mode is disabled.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct TextModifiers {
-    pub pinyin: bool,
-    pub ignore_punctuation: bool,
-    pub ignore_whitespace: bool,
-    pub ignore_diacritics: bool,
+pub(crate) struct TextModifiers {
+    pub(crate) pinyin: bool,
+    pub(crate) ignore_punctuation: bool,
+    pub(crate) ignore_whitespace: bool,
+    pub(crate) ignore_diacritics: bool,
 }
 
 impl TextModifiers {
-    /// Reads whether `modifier` is enabled.
-    pub const fn get(self, modifier: TextModifier) -> bool {
+    pub(crate) const fn get(self, modifier: TextModifier) -> bool {
         match modifier {
             TextModifier::Pinyin => self.pinyin,
             TextModifier::IgnorePunctuation => self.ignore_punctuation,
@@ -24,8 +23,7 @@ impl TextModifiers {
         }
     }
 
-    /// Flips `modifier` in place.
-    pub fn toggle(&mut self, modifier: TextModifier) {
+    pub(crate) fn toggle(&mut self, modifier: TextModifier) {
         let slot = match modifier {
             TextModifier::Pinyin => &mut self.pinyin,
             TextModifier::IgnorePunctuation => &mut self.ignore_punctuation,
@@ -35,8 +33,7 @@ impl TextModifiers {
         *slot = !*slot;
     }
 
-    /// Returns a fresh modifier set with only `modifier` enabled.
-    pub const fn with_only(modifier: TextModifier) -> Self {
+    pub(crate) const fn with_only(modifier: TextModifier) -> Self {
         let mut out = Self {
             pinyin: false,
             ignore_punctuation: false,
@@ -55,7 +52,7 @@ impl TextModifiers {
 
 /// Individual plain-text matching modifier flags.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TextModifier {
+pub(crate) enum TextModifier {
     Pinyin,
     IgnorePunctuation,
     IgnoreWhitespace,
@@ -64,7 +61,7 @@ pub enum TextModifier {
 
 /// Mutual-exclusion state machine between plain-text modifiers and regular expressions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum QueryMatchMode {
+pub(crate) enum QueryMatchMode {
     Plain(TextModifiers),
     Regex,
 }
@@ -76,18 +73,18 @@ impl Default for QueryMatchMode {
 }
 
 impl QueryMatchMode {
-    pub const fn is_regex(self) -> bool {
+    pub(crate) const fn is_regex(self) -> bool {
         matches!(self, Self::Regex)
     }
 
-    pub const fn modifier(self, modifier: TextModifier) -> bool {
+    pub(crate) const fn modifier(self, modifier: TextModifier) -> bool {
         match self {
             Self::Plain(modifiers) => modifiers.get(modifier),
             Self::Regex => false,
         }
     }
 
-    pub const fn text_modifiers(self) -> TextModifiers {
+    pub(crate) const fn text_modifiers(self) -> TextModifiers {
         match self {
             Self::Plain(modifiers) => modifiers,
             Self::Regex => TextModifiers {
@@ -99,14 +96,14 @@ impl QueryMatchMode {
         }
     }
 
-    pub fn toggle_regex(&mut self) {
+    pub(crate) fn toggle_regex(&mut self) {
         *self = match *self {
             Self::Plain(_) => Self::Regex,
             Self::Regex => Self::Plain(TextModifiers::default()),
         };
     }
 
-    pub fn toggle_modifier(&mut self, modifier: TextModifier) {
+    pub(crate) fn toggle_modifier(&mut self, modifier: TextModifier) {
         match self {
             Self::Plain(modifiers) => modifiers.toggle(modifier),
             Self::Regex => *self = Self::Plain(TextModifiers::with_only(modifier)),
@@ -116,7 +113,7 @@ impl QueryMatchMode {
 
 /// Unified toggle action across case/word/path flags, regex mode, and plain-text modifiers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum QueryToggle {
+pub(crate) enum QueryToggle {
     Case,
     WholeWord,
     MatchPath,
@@ -149,6 +146,10 @@ mod tests {
             mode.text_modifiers(),
             TextModifiers::with_only(TextModifier::IgnoreDiacritics)
         );
+
+        let mut reset = QueryMatchMode::Regex;
+        reset.toggle_regex();
+        assert_eq!(reset, QueryMatchMode::Plain(TextModifiers::default()));
     }
 
     #[test]

@@ -12,6 +12,7 @@
 //! command; the view runs it through the same owner method the keyboard already reaches, and reads
 //! its label through Fluent at the call site.
 
+use crate::search::{QueryToggle, TextModifier};
 use crate::shell::commands::{
     CopyFileNames, CopyFullPaths, CutQueryText, DeleteSelected, EscapeQuery, OpenSelected,
     PasteQueryText, RedoQueryText, RenameSelected, RestoreAll, RestoreSelected,
@@ -325,6 +326,26 @@ impl GroupCommand {
     /// columns, the settings choices, the headings, and `ClearQuery` — returns `None` and the view
     /// wires its click to the owner method directly. `ClearQuery`'s key is the dismissal cascade
     /// rather than this command, so it advertises the key through [`Self::hint_action`].
+    pub(crate) const fn query_toggle(self) -> Option<QueryToggle> {
+        match self {
+            Self::ToggleCase => Some(QueryToggle::Case),
+            Self::ToggleWholeWord => Some(QueryToggle::WholeWord),
+            Self::ToggleMatchPath => Some(QueryToggle::MatchPath),
+            Self::ToggleRegex => Some(QueryToggle::Regex),
+            Self::TogglePinyin => Some(QueryToggle::Modifier(TextModifier::Pinyin)),
+            Self::ToggleIgnorePunctuation => {
+                Some(QueryToggle::Modifier(TextModifier::IgnorePunctuation))
+            }
+            Self::ToggleIgnoreWhitespace => {
+                Some(QueryToggle::Modifier(TextModifier::IgnoreWhitespace))
+            }
+            Self::ToggleIgnoreDiacritics => {
+                Some(QueryToggle::Modifier(TextModifier::IgnoreDiacritics))
+            }
+            _ => None,
+        }
+    }
+
     pub fn action(self) -> Option<Box<dyn Action>> {
         match self {
             GroupCommand::OpenSelected => Some(Box::new(OpenSelected)),

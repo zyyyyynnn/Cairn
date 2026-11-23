@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Result table rows, cells, placeholders, virtual painting window, and row command lists.
+//! Result table rows, cells, placeholders, and virtual painting window.
 
 use crate::app::{CairnApp, join_row_path, layout, split_name_highlights};
 use crate::shell::accessibility;

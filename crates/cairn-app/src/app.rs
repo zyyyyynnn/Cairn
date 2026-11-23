@@ -221,7 +221,7 @@ pub struct QueryDomain {
     pub case_sensitive: bool,
     pub whole_word: bool,
     pub match_path: bool,
-    pub match_mode: crate::search::QueryMatchMode,
+    pub(crate) match_mode: crate::search::QueryMatchMode,
     pub active_filter: FilterCategory,
     /// The indexed source the current query is restricted to, or `None` when the query spans
     /// every indexed source. The sidebar's folder-source rows set and clear it.
@@ -233,6 +233,8 @@ pub struct QueryDomain {
     /// Non-fatal degradation notice reported by the service for the current query.
     pub degraded: Option<cairn_protocol::message::QueryDegradedReason>,
     pub is_fetching_more: bool,
+    pub(crate) next_page_request_id: u64,
+    pub(crate) in_flight_page_id: Option<u64>,
     pub(crate) coordinator: crate::search::coordinator::SearchCoordinator,
     /// Byte offset where mouse text drag selection started, if a drag is in progress.
     pub text_selection_anchor: Option<usize>,
@@ -249,6 +251,25 @@ impl QueryDomain {
 
     pub(crate) fn is_cancelled(&self) -> bool {
         self.coordinator.is_cancelled()
+    }
+
+    pub(crate) fn begin_page_request(&mut self) -> u64 {
+        self.next_page_request_id = self.next_page_request_id.wrapping_add(1);
+        self.in_flight_page_id = Some(self.next_page_request_id);
+        self.is_fetching_more = true;
+        self.next_page_request_id
+    }
+
+    pub(crate) fn finish_page_request(&mut self, request_id: u64) {
+        if self.in_flight_page_id == Some(request_id) {
+            self.in_flight_page_id = None;
+            self.is_fetching_more = false;
+        }
+    }
+
+    pub(crate) fn cancel_in_flight_page(&mut self) {
+        self.in_flight_page_id = None;
+        self.is_fetching_more = false;
     }
 
     pub(crate) fn toggle(&mut self, toggle: crate::search::QueryToggle) {
@@ -337,6 +358,16 @@ pub struct ServiceDomain {
     /// One `GetSources` read at a time; the follow-up poll only starts once the previous answer
     /// has landed.
     pub(crate) is_refreshing_sources: bool,
+    /// Monotonic token incremented whenever a sources read or mutation is launched, so stale
+    /// `GetSources` responses cannot overwrite a newer source list.
+    pub(crate) sources_generation: u64,
+}
+
+impl ServiceDomain {
+    pub(crate) fn next_sources_generation(&mut self) -> u64 {
+        self.sources_generation = self.sources_generation.wrapping_add(1);
+        self.sources_generation
+    }
 }
 
 pub(crate) struct OpenGroupMenu {
@@ -524,6 +555,8 @@ impl CairnApp {
                 rejection: None,
                 degraded: None,
                 is_fetching_more: false,
+                next_page_request_id: 0,
+                in_flight_page_id: None,
                 coordinator: crate::search::coordinator::SearchCoordinator::default(),
                 text_selection_anchor: None,
             },
@@ -548,6 +581,7 @@ impl CairnApp {
                 sources: Vec::new(),
                 folder_source_action_pending: false,
                 is_refreshing_sources: false,
+                sources_generation: 0,
             },
             root_focus,
             zoom_level: settings.zoom_level,
@@ -638,6 +672,8 @@ impl CairnApp {
     /// Typed edits keep their rows and do not call this.
     pub(crate) fn begin_table_replacement(&mut self) {
         self.begin_table_session();
+        self.results.snippet_preview = None;
+        self.query.cancel_in_flight_page();
         self.results.rows_scroll.set_offset(Point::default());
         self.results.table.scroll_top = 0.0;
         self.results.table.set_rows(Vec::new(), 0);
@@ -1266,6 +1302,71 @@ mod tests {
                     cx.quit();
                     app
                 },
+            );
+        });
+    }
+
+    #[test]
+    fn query_domain_toggles_and_query_defaults_respect_match_mode() {
+        with_app(|this, _cx| {
+            use crate::search::QueryToggle;
+            use crate::search::modifiers::{TextModifier, TextModifiers};
+
+            let all_toggles = [
+                QueryToggle::Case,
+                QueryToggle::WholeWord,
+                QueryToggle::MatchPath,
+                QueryToggle::Regex,
+                QueryToggle::Modifier(TextModifier::Pinyin),
+                QueryToggle::Modifier(TextModifier::IgnorePunctuation),
+                QueryToggle::Modifier(TextModifier::IgnoreWhitespace),
+                QueryToggle::Modifier(TextModifier::IgnoreDiacritics),
+            ];
+
+            for toggle in all_toggles {
+                assert!(!this.query.is_toggle_checked(toggle));
+                this.query.toggle(toggle);
+                assert!(this.query.is_toggle_checked(toggle));
+                this.query.toggle(toggle);
+                assert!(!this.query.is_toggle_checked(toggle));
+            }
+
+            this.query.toggle(QueryToggle::Case);
+            this.query.toggle(QueryToggle::WholeWord);
+            this.query.toggle(QueryToggle::MatchPath);
+            this.query
+                .toggle(QueryToggle::Modifier(TextModifier::Pinyin));
+            this.query
+                .toggle(QueryToggle::Modifier(TextModifier::IgnorePunctuation));
+            this.query
+                .toggle(QueryToggle::Modifier(TextModifier::IgnoreWhitespace));
+            this.query
+                .toggle(QueryToggle::Modifier(TextModifier::IgnoreDiacritics));
+
+            let plain_defaults = this.query.to_query_defaults(true, false);
+            assert!(plain_defaults.case_sensitive);
+            assert!(plain_defaults.whole_words);
+            assert!(plain_defaults.match_path);
+            assert!(!plain_defaults.is_regex);
+            assert!(plain_defaults.pinyin);
+            assert!(plain_defaults.ignore_punctuation);
+            assert!(plain_defaults.ignore_whitespace);
+            assert!(plain_defaults.ignore_diacritics);
+            assert!(plain_defaults.exclude_hidden);
+            assert!(!plain_defaults.exclude_system);
+
+            this.query.toggle(QueryToggle::Regex);
+            let regex_defaults = this.query.to_query_defaults(false, true);
+            assert!(regex_defaults.is_regex);
+            assert!(!regex_defaults.pinyin);
+            assert!(!regex_defaults.ignore_punctuation);
+            assert!(!regex_defaults.ignore_whitespace);
+            assert!(!regex_defaults.ignore_diacritics);
+            assert!(!regex_defaults.exclude_hidden);
+            assert!(regex_defaults.exclude_system);
+            assert_eq!(
+                this.query.match_mode.text_modifiers(),
+                TextModifiers::default()
             );
         });
     }

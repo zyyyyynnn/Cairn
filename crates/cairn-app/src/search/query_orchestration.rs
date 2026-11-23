@@ -433,12 +433,12 @@ impl CairnApp {
     /// surface may have cleared the window's mirror while an answer was still
     /// on its way.
     pub(crate) fn supersede_index_query(&mut self) -> bool {
+        self.query.cancel_in_flight_page();
         if !self.query.coordinator.is_searching() {
             return false;
         }
         let mut transport = QueuedTransport::default();
         self.query.coordinator.cancel_in_flight(&mut transport);
-        self.query.is_fetching_more = false;
         self.spawn_queued_cancels(transport.cancels);
         true
     }
@@ -447,6 +447,7 @@ impl CairnApp {
     /// bin): an index answer still in flight is cancelled and the active session
     /// released, so it cannot splice into the new rows.
     pub(crate) fn take_table_for_local_rows(&mut self) {
+        self.query.cancel_in_flight_page();
         self.supersede_index_query();
         self.query.coordinator.set_cancelled(false);
         self.query.active_session_id = None;
@@ -454,17 +455,20 @@ impl CairnApp {
         self.results.snippet_preview = None;
     }
 
-    /// Local listings do not expose the created-time or property columns. Keep the direction,
-    /// but move an unsupported primary sort to the modification column they do show so the
-    /// header, sorting menu, and next launch agree.
+    /// Local listings do not expose the created-time or property columns, nor multi-column sort.
+    /// Keep the primary direction, move unsupported columns to modification time, and collapse
+    /// extra sort keys so the header, sorting menu, and next launch agree.
     pub(crate) fn normalize_local_listing_sort(&mut self) {
         let (column, ascending) = self.results.table.primary_sort();
         let supported =
             crate::shell::location::LocationProfile::RECYCLE_BIN.supports_sort_column(column);
-        if !supported {
-            self.results
-                .table
-                .set_primary_sort(crate::table::model::SortColumn::DateModified, ascending);
+        let target_col = if supported {
+            column
+        } else {
+            crate::table::model::SortColumn::DateModified
+        };
+        if !supported || self.results.table.sort_spec.keys.len() > 1 {
+            self.results.table.set_primary_sort(target_col, ascending);
             self.settings.columns.sort_spec = self.results.table.sort_spec.to_clause();
             self.save_settings();
         }
@@ -721,7 +725,7 @@ impl CairnApp {
         let Some(session_id) = self.query.active_session_id else {
             return;
         };
-        self.query.is_fetching_more = true;
+        let page_req_id = self.query.begin_page_request();
         let current_qid = self.query.query_id();
         // A page fetched after a background refresh replaces the stale window; remember which
         // offset that is so a response already in flight cannot be mistaken for it.
@@ -737,7 +741,7 @@ impl CairnApp {
 
             let res = rx.await;
             this.update(cx, |this: &mut CairnApp, cx| {
-                this.query.is_fetching_more = false;
+                this.query.finish_page_request(page_req_id);
                 // A new query replaces the session. Rows from the old session belong to a result
                 // set this table no longer shows, even when the query id still matches.
                 if !page_response_is_current(
