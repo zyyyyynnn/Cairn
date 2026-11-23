@@ -11,6 +11,7 @@ use crate::search::ResultSetChange;
 use crate::search::filters::FilterCategory;
 use crate::shell::commands::{DeleteSelected, RestoreAll, RestoreSelected};
 use crate::shell::dialogs::{self, confirmation_alert, confirmation_alert_with_variant};
+use crate::shell::location::ActiveLocation;
 use crate::shell::os::{
     BinOperationError, RecycleBinItem, delete_permanently_from_recycle_bin, delete_to_recycle_bin,
     empty_recycle_bin, restore_from_recycle_bin,
@@ -260,11 +261,12 @@ impl CairnApp {
             ) + Send
             + 'static,
     {
+        let Some(generation) = self.recycle_bin.begin_mutation() else {
+            return;
+        };
         let owner = crate::shell::os::active_window_handle();
-        let generation = self.recycle_bin.generation();
         self.sync_bin_selection_keys();
         let anchor = self.explicit_bin_selection_indices().first().copied();
-        self.recycle_bin.set_mutating(true);
         cx.notify();
         let (tx, rx) = tokio::sync::oneshot::channel();
         std::thread::spawn(move || {
@@ -273,8 +275,10 @@ impl CairnApp {
         cx.spawn(async move |this, cx| {
             let Ok((outcome, listing)) = rx.await else {
                 let _ = this.update(cx, |this, cx| {
-                    this.recycle_bin.set_mutating(false);
-                    cx.notify();
+                    if this.recycle_bin.generation() == generation {
+                        this.recycle_bin.set_mutating(false);
+                        cx.notify();
+                    }
                 });
                 return;
             };
@@ -347,7 +351,7 @@ impl CairnApp {
     /// Confirms restoring all items from the Recycle Bin through Cairn's unified dialog style
     /// before delegating to the shell's restore pipeline.
     pub(super) fn restore_all(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        if !self.recycle_bin.is_open()
+        if !self.active_location().is_recycle_bin()
             || self.recycle_bin.is_loading()
             || self.recycle_bin.all().is_empty()
         {
@@ -384,7 +388,7 @@ impl CairnApp {
 
     /// Dispatches restore of all items in the bin.
     pub fn execute_restore_all(&mut self, cx: &mut Context<'_, Self>) {
-        if !self.recycle_bin.is_open() || self.recycle_bin.is_loading() {
+        if !self.active_location().is_recycle_bin() || self.recycle_bin.is_loading() {
             return;
         }
         let items = self.recycle_bin.all().to_vec();
@@ -394,7 +398,7 @@ impl CairnApp {
     /// Confirms emptying the Recycle Bin through Cairn's unified dialog style before
     /// dispatching the operation to the shell.
     pub(super) fn empty_bin(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        if !self.recycle_bin.is_open()
+        if !self.active_location().is_recycle_bin()
             || self.recycle_bin.is_loading()
             || self.recycle_bin.all().is_empty()
         {
@@ -424,7 +428,7 @@ impl CairnApp {
     /// set before the background operation starts, so it is also the in-flight guard: a second
     /// invocation before the first listing lands must not start a second shell empty.
     pub fn execute_empty_bin(&mut self, cx: &mut Context<'_, Self>) {
-        if !self.recycle_bin.is_open() || self.recycle_bin.is_loading() {
+        if !self.active_location().is_recycle_bin() || self.recycle_bin.is_loading() {
             return;
         }
         self.spawn_bin_write(
@@ -494,12 +498,23 @@ impl CairnApp {
             let _ = this.update(cx, |this, cx| {
                 this.delete_in_flight = false;
                 if let Ok(outcome) = received {
-                    if let Err(failure) = &outcome
-                        && !failure.is_cancelled()
-                    {
+                    if let Err(failure) = &outcome {
+                        if failure.is_cancelled() {
+                            cx.notify();
+                            return;
+                        }
                         this.notify_bin_operation_error("delete_failed_title", &names, failure, cx);
                     }
-                    this.request_result_set(ResultSetChange::Replace, cx);
+                    match this.active_location() {
+                        ActiveLocation::Index => {
+                            this.request_result_set(ResultSetChange::Replace, cx);
+                        }
+                        ActiveLocation::RecycleBin => {
+                            if !this.recycle_bin.is_loading() {
+                                this.begin_recycle_bin_load(cx);
+                            }
+                        }
+                    }
                 }
                 cx.notify();
             });
@@ -573,7 +588,7 @@ mod bin_command_tests {
                         this.query.search_input.set_text("kept query");
                         this.query.coordinator.set_cancelled(true);
                         this.open_recycle_bin(window, cx);
-                        assert_eq!(this.nav_history[this.nav_history_index].text, "kept query");
+                        assert_eq!(this.nav_history.current().text, "kept query");
                         assert!(this.query.search_input.text.is_empty());
                         assert!(
                             !this.query.is_cancelled(),

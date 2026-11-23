@@ -9,6 +9,8 @@ pub(crate) mod bar_view;
 pub(crate) mod coordinator;
 pub(crate) mod filters;
 pub(crate) mod input;
+pub(crate) mod modifiers;
 pub(crate) mod query_orchestration;
 
+pub(crate) use modifiers::{QueryMatchMode, QueryToggle, TextModifier};
 pub(crate) use query_orchestration::ResultSetChange;

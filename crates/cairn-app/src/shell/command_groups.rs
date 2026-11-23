@@ -12,6 +12,7 @@
 //! command; the view runs it through the same owner method the keyboard already reaches, and reads
 //! its label through Fluent at the call site.
 
+use crate::search::{QueryToggle, TextModifier};
 use crate::shell::commands::{
     CopyFileNames, CopyFullPaths, CutQueryText, DeleteSelected, EscapeQuery, OpenSelected,
     PasteQueryText, RedoQueryText, RenameSelected, RestoreAll, RestoreSelected,
@@ -317,19 +318,24 @@ impl GroupCommand {
         }
     }
 
-    /// The Fluent message that names this command in the active location. Inside the Recycle Bin,
-    /// deletion is permanent, copying paths copies the original location, and sort columns use the
-    /// bin's column captions.
-    pub fn label_key_in(self, in_recycle_bin: bool) -> &'static str {
-        if in_recycle_bin {
-            match self {
-                GroupCommand::DeleteSelected => "ctx_delete_permanently",
-                GroupCommand::CopyPaths => "ctx_copy_original_location",
-                GroupCommand::SortBy(column) => column.label_key_in(true),
-                _ => self.label_key(),
+    /// Maps query-flag menu commands onto their unified [`QueryToggle`].
+    pub(crate) const fn query_toggle(self) -> Option<QueryToggle> {
+        match self {
+            Self::ToggleCase => Some(QueryToggle::Case),
+            Self::ToggleWholeWord => Some(QueryToggle::WholeWord),
+            Self::ToggleMatchPath => Some(QueryToggle::MatchPath),
+            Self::ToggleRegex => Some(QueryToggle::Regex),
+            Self::TogglePinyin => Some(QueryToggle::Modifier(TextModifier::Pinyin)),
+            Self::ToggleIgnorePunctuation => {
+                Some(QueryToggle::Modifier(TextModifier::IgnorePunctuation))
             }
-        } else {
-            self.label_key()
+            Self::ToggleIgnoreWhitespace => {
+                Some(QueryToggle::Modifier(TextModifier::IgnoreWhitespace))
+            }
+            Self::ToggleIgnoreDiacritics => {
+                Some(QueryToggle::Modifier(TextModifier::IgnoreDiacritics))
+            }
+            _ => None,
         }
     }
 

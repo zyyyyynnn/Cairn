@@ -62,10 +62,9 @@ impl CairnApp {
         let control = accessibility::control("search-input");
         let clear = accessibility::control("search-clear");
         let metrics = self.query.query_text_metrics.clone();
-        let accessible_name = if self.recycle_bin.is_open() {
-            self.cached_text("recycle_bin_filter_label")
-        } else {
-            self.cached_control_name(control)
+        let accessible_name = match self.location_profile().search_aria_label_key {
+            Some(key) => self.cached_text(key),
+            None => self.cached_control_name(control),
         };
 
         let clear_label = self.cached_control_name(clear);
@@ -289,11 +288,7 @@ impl CairnApp {
     /// Normal queries match names and paths; body search is the explicit `content:` term, so the
     /// placeholder does not promise content results for text that never asked for them.
     pub(crate) fn placeholder_text(&self) -> SharedString {
-        if self.recycle_bin.is_open() {
-            self.cached_text("recycle_bin_filter_placeholder")
-        } else {
-            self.cached_text("search_placeholder")
-        }
+        self.cached_text(self.location_profile().search_placeholder_key)
     }
 
     pub(crate) fn handle_search_bar_mouse_down(

@@ -188,7 +188,7 @@ pub struct HighlightSpan<'a> {
 }
 
 pub use crate::search::query_orchestration::split_name_highlights;
-pub use crate::shell::nav_history::NavState;
+pub use crate::shell::nav_history::{NavHistory, NavState};
 
 /// Joins a file name to a parent directory that may or may not carry a trailing separator.
 pub fn join_row_path(directory: &str, name: &str) -> String {
@@ -221,11 +221,7 @@ pub struct QueryDomain {
     pub case_sensitive: bool,
     pub whole_word: bool,
     pub match_path: bool,
-    pub use_regex: bool,
-    pub pinyin: bool,
-    pub ignore_punctuation: bool,
-    pub ignore_whitespace: bool,
-    pub ignore_diacritics: bool,
+    pub(crate) match_mode: crate::search::QueryMatchMode,
     pub active_filter: FilterCategory,
     /// The indexed source the current query is restricted to, or `None` when the query spans
     /// every indexed source. The sidebar's folder-source rows set and clear it.
@@ -237,6 +233,8 @@ pub struct QueryDomain {
     /// Non-fatal degradation notice reported by the service for the current query.
     pub degraded: Option<cairn_protocol::message::QueryDegradedReason>,
     pub is_fetching_more: bool,
+    pub(crate) next_page_request_id: u64,
+    pub(crate) in_flight_page_id: Option<u64>,
     pub(crate) coordinator: crate::search::coordinator::SearchCoordinator,
     /// Byte offset where mouse text drag selection started, if a drag is in progress.
     pub text_selection_anchor: Option<usize>,
@@ -253,6 +251,71 @@ impl QueryDomain {
 
     pub(crate) fn is_cancelled(&self) -> bool {
         self.coordinator.is_cancelled()
+    }
+
+    pub(crate) fn begin_page_request(&mut self) -> u64 {
+        self.next_page_request_id = self.next_page_request_id.wrapping_add(1);
+        self.in_flight_page_id = Some(self.next_page_request_id);
+        self.is_fetching_more = true;
+        self.next_page_request_id
+    }
+
+    pub(crate) fn finish_page_request(&mut self, request_id: u64) -> bool {
+        if self.in_flight_page_id == Some(request_id) {
+            self.in_flight_page_id = None;
+            self.is_fetching_more = false;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn cancel_in_flight_page(&mut self) {
+        self.in_flight_page_id = None;
+        self.is_fetching_more = false;
+    }
+
+    pub(crate) fn toggle(&mut self, toggle: crate::search::QueryToggle) {
+        use crate::search::QueryToggle;
+        match toggle {
+            QueryToggle::Case => self.case_sensitive = !self.case_sensitive,
+            QueryToggle::WholeWord => self.whole_word = !self.whole_word,
+            QueryToggle::MatchPath => self.match_path = !self.match_path,
+            QueryToggle::Regex => self.match_mode.toggle_regex(),
+            QueryToggle::Modifier(modifier) => self.match_mode.toggle_modifier(modifier),
+        }
+    }
+
+    pub(crate) fn is_toggle_checked(&self, toggle: crate::search::QueryToggle) -> bool {
+        use crate::search::QueryToggle;
+        match toggle {
+            QueryToggle::Case => self.case_sensitive,
+            QueryToggle::WholeWord => self.whole_word,
+            QueryToggle::MatchPath => self.match_path,
+            QueryToggle::Regex => self.match_mode.is_regex(),
+            QueryToggle::Modifier(modifier) => self.match_mode.modifier(modifier),
+        }
+    }
+
+    pub(crate) fn to_query_defaults(
+        &self,
+        exclude_hidden: bool,
+        exclude_system: bool,
+    ) -> cairn_protocol::message::QueryDefaults {
+        let modifiers = self.match_mode.text_modifiers();
+        cairn_protocol::message::QueryDefaults {
+            case_sensitive: self.case_sensitive,
+            whole_words: self.whole_word,
+            match_path: self.match_path,
+            is_regex: self.match_mode.is_regex(),
+            pinyin: modifiers.pinyin,
+            ignore_punctuation: modifiers.ignore_punctuation,
+            ignore_whitespace: modifiers.ignore_whitespace,
+            ignore_diacritics: modifiers.ignore_diacritics,
+            exclude_hidden,
+            exclude_system,
+            ..cairn_protocol::message::QueryDefaults::default()
+        }
     }
 }
 
@@ -295,9 +358,18 @@ pub struct ServiceDomain {
     /// One add/remove request at a time: the manager dialog disables its actions until the
     /// service answers, so a double press cannot register the same path twice.
     pub(crate) folder_source_action_pending: bool,
-    /// One `GetSources` read at a time; the follow-up poll only starts once the previous answer
-    /// has landed.
-    pub(crate) is_refreshing_sources: bool,
+    /// Active `GetSources` read generation; `None` when idle or superseded by a source write.
+    pub(crate) in_flight_sources_refresh: Option<u64>,
+    /// Monotonic token incremented whenever a sources read or mutation is launched, so stale
+    /// `GetSources` responses cannot overwrite a newer source list.
+    pub(crate) sources_generation: u64,
+}
+
+impl ServiceDomain {
+    pub(crate) fn next_sources_generation(&mut self) -> u64 {
+        self.sources_generation = self.sources_generation.wrapping_add(1);
+        self.sources_generation
+    }
 }
 
 pub(crate) struct OpenGroupMenu {
@@ -354,8 +426,7 @@ pub struct CairnApp {
     /// Records whether the keyboard drives focus, including the Tab the focus walk consumes.
     pub _keyboard_modality: Subscription,
     pub sidebar_collapsed: bool,
-    pub nav_history: Vec<NavState>,
-    pub nav_history_index: usize,
+    pub nav_history: NavHistory,
     pub sidebar_scroll: ScrollHandle,
     /// The in-place rename editor for the single selected result row.
     pub(crate) rename: RenameEditor,
@@ -479,17 +550,15 @@ impl CairnApp {
                 case_sensitive: false,
                 whole_word: false,
                 match_path: false,
-                use_regex: false,
-                pinyin: false,
-                ignore_punctuation: false,
-                ignore_whitespace: false,
-                ignore_diacritics: false,
+                match_mode: crate::search::QueryMatchMode::default(),
                 active_filter: FilterCategory::All,
                 source_scope: None,
                 active_session_id: None,
                 rejection: None,
                 degraded: None,
                 is_fetching_more: false,
+                next_page_request_id: 0,
+                in_flight_page_id: None,
                 coordinator: crate::search::coordinator::SearchCoordinator::default(),
                 text_selection_anchor: None,
             },
@@ -513,7 +582,8 @@ impl CairnApp {
                 journal_entries: SubsystemState::default(),
                 sources: Vec::new(),
                 folder_source_action_pending: false,
-                is_refreshing_sources: false,
+                in_flight_sources_refresh: None,
+                sources_generation: 0,
             },
             root_focus,
             zoom_level: settings.zoom_level,
@@ -523,12 +593,11 @@ impl CairnApp {
             _focus_lost: vec![focus_lost],
             _keyboard_modality: keyboard_modality,
             sidebar_collapsed: false,
-            nav_history: vec![NavState {
+            nav_history: NavHistory::new(NavState {
                 text: String::new(),
                 filter: FilterCategory::All,
                 source_scope: None,
-            }],
-            nav_history_index: 0,
+            }),
             sidebar_scroll: ScrollHandle::default(),
             rename: RenameEditor {
                 input: rename_input,
@@ -605,6 +674,8 @@ impl CairnApp {
     /// Typed edits keep their rows and do not call this.
     pub(crate) fn begin_table_replacement(&mut self) {
         self.begin_table_session();
+        self.results.snippet_preview = None;
+        self.query.cancel_in_flight_page();
         self.results.rows_scroll.set_offset(Point::default());
         self.results.table.scroll_top = 0.0;
         self.results.table.set_rows(Vec::new(), 0);
@@ -1233,6 +1304,27 @@ mod tests {
                     cx.quit();
                     app
                 },
+            );
+        });
+    }
+
+    #[test]
+    fn to_query_defaults_clears_text_modifiers_under_regex() {
+        with_app(|this, _cx| {
+            use crate::search::{QueryToggle, TextModifier};
+
+            this.query
+                .toggle(QueryToggle::Modifier(TextModifier::Pinyin));
+            assert!(this.query.to_query_defaults(false, false).pinyin);
+
+            this.query.toggle(QueryToggle::Regex);
+            let defaults = this.query.to_query_defaults(true, true);
+            assert!(defaults.is_regex);
+            assert!(
+                !defaults.pinyin
+                    && !defaults.ignore_punctuation
+                    && !defaults.ignore_whitespace
+                    && !defaults.ignore_diacritics
             );
         });
     }

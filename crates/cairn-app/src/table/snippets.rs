@@ -162,8 +162,10 @@ impl CairnApp {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        if self.recycle_bin.is_open() {
-            self.results.snippet_preview = None;
+        if !self.location_profile().supports_snippets {
+            if self.results.snippet_preview.take().is_some() {
+                cx.notify();
+            }
             return;
         }
 

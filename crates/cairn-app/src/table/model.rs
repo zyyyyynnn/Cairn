@@ -110,10 +110,6 @@ pub use cairn_core::sort::{SortColumn, SortDirection, SortSpec};
 pub trait SortColumnLabel {
     fn label_key(self) -> &'static str;
 
-    /// The same column in the active location. Inside the Recycle Bin, the path and
-    /// modification-time lanes hold the original location and the deletion time.
-    fn label_key_in(self, in_recycle_bin: bool) -> &'static str;
-
     /// The Recycle Bin caption for the lanes that change meaning there.
     fn recycle_bin_label_key(self) -> &'static str;
 }
@@ -132,14 +128,6 @@ impl SortColumnLabel for SortColumn {
             SortColumn::Tags => "col_tags",
             SortColumn::Dimensions => "col_dimensions",
             SortColumn::Framerate => "col_framerate",
-        }
-    }
-
-    fn label_key_in(self, in_recycle_bin: bool) -> &'static str {
-        if in_recycle_bin {
-            self.recycle_bin_label_key()
-        } else {
-            self.label_key()
         }
     }
 

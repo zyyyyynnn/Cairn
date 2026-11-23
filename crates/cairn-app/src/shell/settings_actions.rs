@@ -7,14 +7,14 @@
 //! table's sort order and column widths.
 
 use crate::app::{CairnApp, layout};
-use crate::search::ResultSetChange;
 use crate::search::filters::FilterCategory;
+use crate::search::{QueryToggle, ResultSetChange};
 use crate::shell::command_groups::ZoomPreset;
 use crate::shell::commands::{
     CycleFilterCategory, ResetZoom, ToggleCaseSensitive, ToggleMatchPath, ToggleRegex,
     ToggleSidebar, ToggleWholeWord, ZoomIn, ZoomOut,
 };
-use crate::shell::menu_actions::ToggleFlag;
+use crate::shell::location::ActiveLocation;
 use crate::shell::settings::THEME_SYSTEM;
 use crate::shell::theme;
 use crate::table::model::{ColumnBoundary, ColumnWidths, SortColumn, TableColumn};
@@ -48,22 +48,33 @@ impl CairnApp {
     fn commit_sort_spec_change(&mut self, cx: &mut Context<'_, Self>) {
         self.settings.columns.sort_spec = self.results.table.sort_spec.to_clause();
         self.save_settings();
-        if self.recycle_bin.is_open() {
-            // The bin is an in-memory listing, so its order is applied here instead
-            // of asking the service for a new page sorted by the same column.
-            self.sort_recycle_bin(cx);
-        } else {
-            self.request_result_set(ResultSetChange::InPlace, cx);
+        match self.active_location() {
+            ActiveLocation::RecycleBin => self.sort_recycle_bin(cx),
+            ActiveLocation::Index => self.request_result_set(ResultSetChange::InPlace, cx),
         }
         cx.notify();
     }
 
+    pub(crate) fn local_listing_is_busy(&self) -> bool {
+        self.location_profile().is_local_listing && self.recycle_bin.is_loading()
+    }
+
     pub fn toggle_table_sort(&mut self, col: SortColumn, cx: &mut Context<'_, Self>) {
+        if !self.location_profile().supports_sort_column(col) || self.local_listing_is_busy() {
+            return;
+        }
         self.results.table.toggle_sort(col);
         self.commit_sort_spec_change(cx);
     }
 
     pub fn shift_toggle_table_sort(&mut self, col: SortColumn, cx: &mut Context<'_, Self>) {
+        if !self.location_profile().supports_sort_column(col) || self.local_listing_is_busy() {
+            return;
+        }
+        if self.location_profile().is_local_listing {
+            self.toggle_table_sort(col, cx);
+            return;
+        }
         self.results.table.shift_toggle_sort(col);
         self.commit_sort_spec_change(cx);
     }
@@ -71,7 +82,7 @@ impl CairnApp {
     /// Shows or hides one table column in index queries. Locked columns remain visible, and hiding
     /// a sorted column prunes it from `sort_spec` so the active order stays inspectable.
     pub(crate) fn toggle_table_column(&mut self, col: TableColumn, cx: &mut Context<'_, Self>) {
-        if col.is_locked() || self.recycle_bin.is_open() {
+        if col.is_locked() || !self.location_profile().allows_column_customization {
             return;
         }
         let shown = !self.settings.columns.is_column_shown(col);
@@ -126,31 +137,18 @@ impl CairnApp {
 
     /// Reverses the direction of the column that is already sorting the results.
     pub(super) fn toggle_sort_direction(&mut self, cx: &mut Context<'_, Self>) {
+        if self.local_listing_is_busy() {
+            return;
+        }
         self.results.table.reverse_primary_sort();
         self.commit_sort_spec_change(cx);
     }
 
-    fn toggle_flag(&mut self, flag: ToggleFlag, cx: &mut Context<'_, Self>) {
-        // The bin filter honors only case sensitivity; the other flags
-        // have no effect on its rows.
-        if self.recycle_bin.is_open() && flag != ToggleFlag::Case {
+    pub(crate) fn toggle_query_option(&mut self, toggle: QueryToggle, cx: &mut Context<'_, Self>) {
+        if !self.location_profile().supports_query_toggle(toggle) {
             return;
         }
-        match flag {
-            ToggleFlag::Case => self.query.case_sensitive = !self.query.case_sensitive,
-            ToggleFlag::WholeWord => self.query.whole_word = !self.query.whole_word,
-            ToggleFlag::MatchPath => self.query.match_path = !self.query.match_path,
-            ToggleFlag::Regex => {
-                let enabling = !self.query.use_regex;
-                self.query.use_regex = enabling;
-                if enabling {
-                    self.query.pinyin = false;
-                    self.query.ignore_punctuation = false;
-                    self.query.ignore_whitespace = false;
-                    self.query.ignore_diacritics = false;
-                }
-            }
-        }
+        self.query.toggle(toggle);
         self.request_result_set(ResultSetChange::InPlace, cx);
         cx.notify();
     }
@@ -163,42 +161,8 @@ impl CairnApp {
         self.toggle_exclusion_filter(ExclusionFlag::System, cx);
     }
 
-    pub(crate) fn toggle_pinyin(&mut self, cx: &mut Context<'_, Self>) {
-        self.toggle_query_modifier(|this| &mut this.query.pinyin, cx);
-    }
-
-    pub(crate) fn toggle_ignore_punctuation(&mut self, cx: &mut Context<'_, Self>) {
-        self.toggle_query_modifier(|this| &mut this.query.ignore_punctuation, cx);
-    }
-
-    pub(crate) fn toggle_ignore_whitespace(&mut self, cx: &mut Context<'_, Self>) {
-        self.toggle_query_modifier(|this| &mut this.query.ignore_whitespace, cx);
-    }
-
-    pub(crate) fn toggle_ignore_diacritics(&mut self, cx: &mut Context<'_, Self>) {
-        self.toggle_query_modifier(|this| &mut this.query.ignore_diacritics, cx);
-    }
-
-    fn toggle_query_modifier(
-        &mut self,
-        field: impl FnOnce(&mut Self) -> &mut bool,
-        cx: &mut Context<'_, Self>,
-    ) {
-        if self.recycle_bin.is_open() {
-            return;
-        }
-        let value = field(self);
-        let enabling = !*value;
-        *value = enabling;
-        if enabling {
-            self.query.use_regex = false;
-        }
-        self.request_result_set(ResultSetChange::InPlace, cx);
-        cx.notify();
-    }
-
     fn toggle_exclusion_filter(&mut self, flag: ExclusionFlag, cx: &mut Context<'_, Self>) {
-        if self.recycle_bin.is_open() {
+        if !self.location_profile().supports_exclusion_filters {
             return;
         }
         match flag {
@@ -220,7 +184,7 @@ impl CairnApp {
         _w: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        self.toggle_flag(ToggleFlag::Case, cx);
+        self.toggle_query_option(QueryToggle::Case, cx);
     }
 
     pub fn toggle_whole_word(
@@ -229,7 +193,7 @@ impl CairnApp {
         _w: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        self.toggle_flag(ToggleFlag::WholeWord, cx);
+        self.toggle_query_option(QueryToggle::WholeWord, cx);
     }
 
     pub fn toggle_match_path(
@@ -238,35 +202,23 @@ impl CairnApp {
         _w: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        self.toggle_flag(ToggleFlag::MatchPath, cx);
+        self.toggle_query_option(QueryToggle::MatchPath, cx);
     }
 
     pub fn toggle_regex(&mut self, _: &ToggleRegex, _w: &mut Window, cx: &mut Context<'_, Self>) {
-        self.toggle_flag(ToggleFlag::Regex, cx);
+        self.toggle_query_option(QueryToggle::Regex, cx);
     }
 
     pub fn set_filter(&mut self, category: FilterCategory, cx: &mut Context<'_, Self>) {
-        // A file-type row, 所有文件 included, is a location: choosing it releases a folder-source
-        // scope. Re-selecting the same category while scoped is therefore a place change, not a
-        // refresh.
+        // Clear any active folder scope before the no-op check so returning from a scoped folder
+        // to the same category still drops the scope and replaces the result set.
         let had_scope = self.query.source_scope.take().is_some();
-        if self.query.active_filter == category && !self.recycle_bin.is_open() && !had_scope {
-            // Re-selecting the active location refreshes it, matching the
-            // recycle-bin entry.
+        if self.query.active_filter == category && self.active_location().is_index() && !had_scope {
             self.request_result_set(ResultSetChange::Refresh, cx);
             cx.notify();
             return;
         }
-        // The bin's filter is a location-local search, not a query: the
-        // category's index search and history entry must not inherit the text,
-        // and the bin's entry already holds the query that preceded it.
-        let leaving_filter = self.recycle_bin.is_open();
-        if leaving_filter {
-            self.query.search_input.clear();
-        } else {
-            self.update_current_nav_state_text();
-        }
-        self.recycle_bin.leave();
+        self.prepare_for_index_location();
         self.query.active_filter = category;
         self.record_nav_state();
         self.request_result_set(ResultSetChange::Replace, cx);
@@ -456,6 +408,88 @@ mod tests {
                         this.toggle_table_column(TableColumn::Optional(OptionalColumn::Length), cx);
                         assert!(!this.settings.columns.show_length);
                         assert_eq!(this.settings.columns.sort_spec, "size-asc");
+                    });
+
+                    cx.quit();
+                    app
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn recycle_bin_gates_query_toggles_and_local_sort() {
+        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
+            gpui_kit::init(cx);
+            let _ = gpui_kit::open_window(
+                gpui_kit::gpui::WindowOptions {
+                    show: false,
+                    focus: false,
+                    ..gpui_kit::gpui::WindowOptions::default()
+                },
+                cx,
+                |window, cx| {
+                    let app = cx.new(|cx| CairnApp::new(window, cx));
+
+                    app.update(cx, |this, cx| {
+                        use crate::search::{QueryToggle, TextModifier};
+
+                        this.open_recycle_bin(window, cx);
+                        let snapshot = (
+                            this.query.whole_word,
+                            this.query.match_path,
+                            this.query.match_mode,
+                        );
+                        let case_before = this.query.case_sensitive;
+                        this.toggle_query_option(QueryToggle::Case, cx);
+                        assert_ne!(this.query.case_sensitive, case_before);
+
+                        for blocked in [
+                            QueryToggle::WholeWord,
+                            QueryToggle::MatchPath,
+                            QueryToggle::Regex,
+                            QueryToggle::Modifier(TextModifier::Pinyin),
+                            QueryToggle::Modifier(TextModifier::IgnorePunctuation),
+                            QueryToggle::Modifier(TextModifier::IgnoreWhitespace),
+                            QueryToggle::Modifier(TextModifier::IgnoreDiacritics),
+                        ] {
+                            this.toggle_query_option(blocked, cx);
+                        }
+                        assert_eq!(
+                            (
+                                this.query.whole_word,
+                                this.query.match_path,
+                                this.query.match_mode,
+                            ),
+                            snapshot
+                        );
+
+                        use crate::shell::command_groups::GroupCommand;
+
+                        let loading_sort = this.results.table.primary_sort();
+                        assert!(this.command_is_disabled(GroupCommand::SortBy(SortColumn::Size)));
+                        assert!(this.command_is_disabled(GroupCommand::ReverseOrder));
+                        this.shift_toggle_table_sort(SortColumn::Size, cx);
+                        this.toggle_sort_direction(cx);
+                        assert_eq!(this.results.table.primary_sort(), loading_sort);
+
+                        this.recycle_bin.install_listing(Vec::new());
+                        assert!(!this.command_is_disabled(GroupCommand::SortBy(SortColumn::Size)));
+                        assert!(!this.command_is_disabled(GroupCommand::ReverseOrder));
+                        this.toggle_table_sort(SortColumn::Name, cx);
+                        this.shift_toggle_table_sort(SortColumn::Size, cx);
+                        assert_eq!(this.results.table.sort_spec.keys.len(), 1);
+                        assert_eq!(this.results.table.primary_sort(), (SortColumn::Size, true));
+
+                        this.toggle_table_sort(SortColumn::DateCreated, cx);
+                        assert_eq!(this.results.table.primary_sort(), (SortColumn::Size, true));
+
+                        assert!(this.recycle_bin.begin_mutation().is_some());
+                        assert!(this.command_is_disabled(GroupCommand::SortBy(SortColumn::Path)));
+                        assert!(this.command_is_disabled(GroupCommand::ReverseOrder));
+                        this.toggle_table_sort(SortColumn::Path, cx);
+                        this.toggle_sort_direction(cx);
+                        assert_eq!(this.results.table.primary_sort(), (SortColumn::Size, true));
                     });
 
                     cx.quit();

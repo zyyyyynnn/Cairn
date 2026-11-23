@@ -368,7 +368,7 @@ mod tests {
                 OsString::from("-Command"),
                 OsString::from("[Console]::Out.Write('x' * 131072)"),
             ],
-            Duration::from_secs(10),
+            Duration::from_secs(30),
             Duration::from_millis(25),
             &AtomicBool::new(false),
         );

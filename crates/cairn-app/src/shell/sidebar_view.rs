@@ -335,11 +335,12 @@ impl CairnApp {
         let locations_title = self.cached_control_name(locations);
         let icon_metrics = sidebar_icon_metrics(window);
 
+        let location = self.active_location();
         let quick_access: Vec<AnyElement> = FilterCategory::menu_order()
             .iter()
             .map(|category| {
                 let category = *category;
-                let is_active = self.query.active_filter == category && !self.recycle_bin.is_open();
+                let is_active = self.query.active_filter == category && location.is_index();
                 let control =
                     accessibility::control_at(&element_id("sidebar-location", category.key()));
                 let name = self.cached_control_name(control);
@@ -377,7 +378,7 @@ impl CairnApp {
 
         // 回收站 is a location, not a search category: it lists what the shell
         // has binned and restores from there, so it closes the 位置 section.
-        let bin_active = self.recycle_bin.is_open();
+        let bin_active = location.is_recycle_bin();
         let bin_control = accessibility::control("sidebar-recycle-bin");
         let bin_name = self.cached_control_name(bin_control);
         let bin_focus = window
@@ -419,7 +420,8 @@ impl CairnApp {
                 .into_iter()
                 .map(|source| {
                     let source_id = source.source_id;
-                    let is_active = self.query.source_scope == Some(source_id);
+                    let is_active =
+                        self.query.source_scope == Some(source_id) && location.is_index();
                     let control = accessibility::control("sidebar-folder-source");
                     let mut args = FluentArgs::new();
                     args.set("path", source.root_path.as_str());

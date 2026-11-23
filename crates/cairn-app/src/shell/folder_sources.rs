@@ -369,13 +369,7 @@ impl CairnApp {
         {
             return;
         }
-        if self.recycle_bin.is_open() {
-            self.query.search_input.clear();
-        } else {
-            self.update_current_nav_state_text();
-        }
-        self.recycle_bin.leave();
-        self.close_group();
+        self.prepare_for_index_location();
         self.query.source_scope = if self.query.source_scope == Some(source_id) {
             None
         } else {

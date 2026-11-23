@@ -2,11 +2,10 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Result table rows, cells, placeholders, virtual painting window, and row command lists.
+//! Result table rows, cells, placeholders, and virtual painting window.
 
 use crate::app::{CairnApp, join_row_path, layout, split_name_highlights};
 use crate::shell::accessibility;
-use crate::shell::command_groups::GroupCommand;
 use crate::shell::file_icon::file_kind_icon;
 use crate::shell::theme::{self, ShellTokens};
 use crate::table::header::ColumnLane as _;
@@ -102,26 +101,6 @@ fn result_row_icon(name: &str, resolved_extension: &str, is_dir: bool) -> AssetI
     }
     file_kind_icon(row_file_kind(name, resolved_extension))
 }
-
-pub(super) const RESULT_COMMANDS: &[GroupCommand] = &[
-    GroupCommand::OpenSelected,
-    GroupCommand::RenameSelected,
-    GroupCommand::RevealLocation,
-    GroupCommand::CopyPaths,
-    GroupCommand::CopyNames,
-    GroupCommand::SelectAll,
-    GroupCommand::DeleteSelected,
-    GroupCommand::ShowProperties,
-];
-
-pub(super) const BIN_COMMANDS: &[GroupCommand] = &[
-    GroupCommand::OpenSelected,
-    GroupCommand::RestoreSelected,
-    GroupCommand::CopyPaths,
-    GroupCommand::CopyNames,
-    GroupCommand::SelectAll,
-    GroupCommand::DeleteSelected,
-];
 
 struct RowRender<'a> {
     ix: usize,
@@ -270,8 +249,9 @@ impl CairnApp {
             .draft
             .as_ref()
             .is_some_and(|draft| draft.path == full_path);
-        let extension = if self.recycle_bin.is_open() {
-            self.recycle_bin
+        let extension = match self.active_location() {
+            crate::shell::location::ActiveLocation::RecycleBin => self
+                .recycle_bin
                 .icon_extension(crate::shell::recycle_bin::bin_icon_key(
                     &row.name,
                     &row.path,
@@ -279,9 +259,8 @@ impl CairnApp {
                     row.size,
                     row.is_dir,
                 ))
-                .unwrap_or("")
-        } else {
-            ""
+                .unwrap_or(""),
+            crate::shell::location::ActiveLocation::Index => "",
         };
 
         let cell = div()
@@ -571,8 +550,7 @@ fn result_text(text: &str, highlights: &[(usize, usize)], tokens: &ShellTokens) 
 
 #[cfg(test)]
 mod tests {
-    use super::{BIN_COMMANDS, RESULT_COMMANDS, result_row_icon};
-    use crate::shell::command_groups::GroupCommand;
+    use super::result_row_icon;
     use gpui_kit::assets::IconName as AssetIconName;
 
     #[test]
@@ -622,12 +600,6 @@ mod tests {
             result_row_icon("CMakeLists.txt", "txt", false),
             AssetIconName::FileCode
         );
-    }
-
-    #[test]
-    fn the_result_menu_offers_in_place_rename_but_the_bin_does_not() {
-        assert!(RESULT_COMMANDS.contains(&GroupCommand::RenameSelected));
-        assert!(!BIN_COMMANDS.contains(&GroupCommand::RenameSelected));
     }
 
     #[test]

@@ -8,9 +8,7 @@ use crate::app::{CairnApp, element_id, layout};
 use crate::shell::accessibility;
 use crate::shell::settings::ColumnSettings;
 use crate::shell::theme::{self, ShellTokens};
-use crate::table::model::{
-    ColumnBoundary, OptionalColumn, SortColumn, SortColumnLabel, TableColumn,
-};
+use crate::table::model::{ColumnBoundary, OptionalColumn, SortColumn, TableColumn};
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::{Icon, IconName, Sizable as _};
 use gpui_kit::gpui::*;
@@ -84,19 +82,8 @@ pub(super) fn header_context_menu_entries(cols: &ColumnSettings) -> Vec<(TableCo
 
 impl CairnApp {
     pub(super) fn show_table_column(&self, col: TableColumn) -> bool {
-        if col.is_locked() {
-            return true;
-        }
-        if self.recycle_bin.is_open() {
-            return matches!(
-                col,
-                TableColumn::Name
-                    | TableColumn::Path
-                    | TableColumn::Size
-                    | TableColumn::DateModified
-            );
-        }
-        self.settings.columns.is_column_shown(col)
+        self.location_profile()
+            .is_column_visible(col, &self.settings.columns)
     }
 
     pub(super) fn show_optional_column(&self, col: OptionalColumn) -> bool {
@@ -236,7 +223,8 @@ impl CairnApp {
         tokens: &ShellTokens,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
-        let label_key = column.label_key_in(self.recycle_bin.is_open());
+        let profile = self.location_profile();
+        let label_key = profile.column_label_key(column);
         let control = accessibility::control_at(&element_id("column-header", label_key));
         let label = accessibility::name(control, &self.i18n);
         let sort_rank = self.results.table.sort_rank(column);
@@ -262,7 +250,7 @@ impl CairnApp {
             .hover(|s| s.bg(tokens.row_hover))
             .active(|s| s.bg(tokens.row_hover))
             .on_click(cx.listener(move |this, _, window, cx| {
-                if !this.recycle_bin.is_open() {
+                if !this.location_profile().preserves_selection_on_chrome_press {
                     this.dismiss_result_selection(cx);
                 }
                 if window.modifiers().shift {
@@ -313,7 +301,7 @@ impl CairnApp {
             Some(boundary) => cell.child(self.render_column_resize_handle(boundary, tokens, cx)),
             None => cell,
         };
-        if self.recycle_bin.is_open() {
+        if !profile.allows_column_customization {
             return cell.into_any_element();
         }
         let app = cx.entity();

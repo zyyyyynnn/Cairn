@@ -60,6 +60,27 @@ impl RecycleBinView {
         matches!(self.state, RecycleBinState::Open { .. })
     }
 
+    pub(crate) fn surface_location(&self) -> crate::table::surface::SurfaceLocation {
+        use crate::table::surface::{LocalListingStage, SurfaceLocation};
+        match &self.state {
+            RecycleBinState::Closed => SurfaceLocation::Index,
+            RecycleBinState::Open {
+                stage: BinStage::Loading | BinStage::Ready { mutating: true, .. },
+                ..
+            } => SurfaceLocation::LocalListing(LocalListingStage::Loading),
+            RecycleBinState::Open {
+                stage: BinStage::Ready {
+                    mutating: false, ..
+                },
+                ..
+            } => SurfaceLocation::LocalListing(LocalListingStage::Ready),
+            RecycleBinState::Open {
+                stage: BinStage::Failed(_),
+                ..
+            } => SurfaceLocation::LocalListing(LocalListingStage::Error),
+        }
+    }
+
     /// The rows the table renders when ready, or `None` when closed, loading, or failed.
     pub(crate) fn rows(&self) -> Option<&[Arc<RecycleBinItem>]> {
         match &self.state {
@@ -137,6 +158,24 @@ impl RecycleBinView {
         }
     }
 
+    /// Starts an exclusive shell write on the loaded bin, returning a fresh generation token or
+    /// `None` unless the listing is ready and idle.
+    pub(crate) fn begin_mutation(&mut self) -> Option<u64> {
+        let RecycleBinState::Open {
+            stage: BinStage::Ready { mutating, .. },
+            ..
+        } = &mut self.state
+        else {
+            return None;
+        };
+        if *mutating {
+            return None;
+        }
+        *mutating = true;
+        self.generation = self.generation.wrapping_add(1);
+        Some(self.generation)
+    }
+
     /// The token a background read must still match to be accepted.
     pub(crate) fn generation(&self) -> u64 {
         self.generation
@@ -145,6 +184,7 @@ impl RecycleBinView {
     /// Releases the view. Returns whether the bin was open.
     pub(crate) fn leave(&mut self) -> bool {
         let was_open = self.is_open();
+        self.generation = self.generation.wrapping_add(1);
         self.state = RecycleBinState::Closed;
         was_open
     }
@@ -673,7 +713,7 @@ impl CairnApp {
             Err(reason) => {
                 tracing::warn!("recycle bin load failed: {reason}");
                 self.recycle_bin.fail(reason);
-                self.install_recycle_bin_rows(true, cx);
+                self.results.table.set_rows(Vec::new(), 0);
             }
         }
         cx.notify();
@@ -1155,5 +1195,32 @@ mod tests {
         ))]);
 
         assert!(view.selected_keys().is_empty());
+    }
+
+    #[test]
+    fn mutations_and_leave_respect_state_and_advance_generation() {
+        let mut view = RecycleBinView::closed();
+        assert!(view.begin_mutation().is_none());
+
+        let load_gen = view.begin_load();
+        assert!(view.begin_mutation().is_none());
+
+        view.install_listing(vec![std::sync::Arc::new(item(
+            "alpha.txt",
+            r"C:\work",
+            10,
+            1,
+        ))]);
+        let mutation_gen = view.begin_mutation().expect("ready bin starts mutation");
+        assert!(mutation_gen > load_gen);
+        assert!(view.begin_mutation().is_none());
+
+        assert!(view.leave());
+        assert!(view.generation() > mutation_gen);
+        assert!(view.begin_mutation().is_none());
+
+        view.begin_load();
+        view.fail("access denied".to_string());
+        assert!(view.begin_mutation().is_none());
     }
 }
