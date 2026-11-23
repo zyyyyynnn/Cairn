@@ -253,7 +253,6 @@ pub struct FolderSource {
     last_skipped: u64,
     generation: u64,
     live_count: u64,
-    has_tombstones: bool,
     volume_id_tag: u16,
 }
 
@@ -284,7 +283,6 @@ impl FolderSource {
             last_skipped: 0,
             generation: 1,
             live_count: 0,
-            has_tombstones: false,
             volume_id_tag,
         })
     }
@@ -534,7 +532,6 @@ impl FolderSource {
         self.path_to_idx = path_to_idx;
         self.path_cache.clear();
         self.live_count = live_count;
-        self.has_tombstones = false;
         self.generation = self.generation.wrapping_add(1);
         self.last_skipped = skipped;
         self.status.mark_folder_scanned(self.live_watch_enabled);
@@ -618,7 +615,6 @@ impl FolderSource {
             }
             self.records[idx as usize].mark_tombstone();
             self.live_count = self.live_count.saturating_sub(1);
-            self.has_tombstones = true;
         }
         primary_frn
     }

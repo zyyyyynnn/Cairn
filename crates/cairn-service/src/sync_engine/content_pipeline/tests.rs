@@ -1415,7 +1415,7 @@ fn a_content_command_without_a_receiver_reports_an_error() {
     let engine = MultiVolumeEngine::with_index_dir_and_drives(index.path(), vec![]);
     let (tx, rx) = std::sync::mpsc::channel();
     drop(rx);
-    engine.content_pipeline.set_test_sender(tx);
+    *engine.content_pipeline.commands.lock().unwrap() = Some(tx);
 
     assert!(
         !engine.send_content_command(ContentCommand::Start),
@@ -1859,10 +1859,7 @@ fn positive_content_conjunction_never_truncates_beyond_top_k_before_mft_filter()
         cfg,
     );
     engine.add_volume(vol);
-    let bytes = engine
-        .get_or_create_content_searcher()
-        .map_or(0, |searcher| searcher.index_size_bytes());
-    engine.set_content_ready(total_docs as u64, bytes);
+    engine.reopen_content_index_ready();
 
     let cancel = CancellationToken::new();
     let outcome = engine.execute_search_multi(
@@ -1885,5 +1882,66 @@ fn positive_content_conjunction_never_truncates_beyond_top_k_before_mft_filter()
             .get(&(item.source_id.0, total_docs as u64))
             .is_none_or(Vec::is_empty),
         "surviving low-BM25 row past top-K must still receive snippets"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn clear_content_runs_even_after_business_cancel_and_stops_on_shutdown() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let index_dir = temp.path().join("index");
+    let content_dir = temp.path().join("content");
+    std::fs::create_dir_all(&content_dir).expect("content dir");
+    std::fs::write(content_dir.join("seed.bin"), b"indexed bytes").expect("seed file");
+
+    let args_log = temp.path().join("clear-args.txt");
+    let fake_worker = temp.path().join("fake_clear_worker.cmd");
+    std::fs::write(
+        &fake_worker,
+        format!(
+            "@echo off\r\necho %* > \"{}\"\r\necho {{\"processed\":0,\"failed\":0}}\r\n",
+            args_log.display()
+        ),
+    )
+    .expect("write fake worker");
+
+    let cfg = ServiceConfig {
+        content_index_enabled: false,
+        ..Default::default()
+    };
+    let mut engine = MultiVolumeEngine::with_paths(
+        &index_dir,
+        &content_dir,
+        &temp.path().join("service.toml"),
+        vec![],
+        cfg,
+    );
+    engine.set_worker_binary(fake_worker);
+
+    // Simulate ClearContentIndex calling disable_content_index() -> cancel = true before Clear runs.
+    engine
+        .content_pipeline
+        .cancel_flag()
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    engine.run_clear_content();
+    let logged = std::fs::read_to_string(&args_log).expect("worker should have been invoked");
+    assert!(logged.contains("--clear"), "{logged}");
+    let status = engine.content_index_status();
+    assert_eq!(status.state, ContentIndexState::Disabled);
+    assert_eq!(status.indexed_documents, 0);
+    assert_eq!(status.index_bytes, 0);
+
+    // Once service shutdown begins, clear respects shutdown_flag() and aborts without spawning.
+    std::fs::remove_file(&args_log).expect("remove log");
+    engine.stop_content_worker();
+    engine.run_clear_content();
+    assert!(
+        !args_log.exists(),
+        "clear after service shutdown must not spawn worker"
+    );
+    assert_eq!(
+        engine.content_index_status().state,
+        ContentIndexState::Disabled
     );
 }

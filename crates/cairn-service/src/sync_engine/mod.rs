@@ -35,7 +35,7 @@ mod search;
 mod startup_scan;
 mod volume_index;
 mod volume_status;
-pub(crate) mod worker_runner;
+mod worker_runner;
 
 pub use journal_reconciliation::*;
 pub use post_scan::*;
@@ -60,7 +60,12 @@ fn log_safe(text: &str) -> String {
 }
 
 pub struct MultiVolumeEngine {
-    // Lock order invariant: config_apply_lock -> property_pipeline.extract_lock -> volumes -> folder_sources -> property_pipeline.(tables -> refresh -> status) -> index_journal.
+    // Lock order invariant:
+    //   config_apply_lock -> property_pipeline.extract_lock -> volumes -> folder_sources
+    //   -> property_pipeline.(tables -> refresh -> status) -> index_journal
+    // Secondary leaf edges under volumes/folder_sources:
+    //   volumes -> config | summary_cache
+    //   folder_sources -> folder_scanning
     volumes: RwLock<HashMap<char, VolumeIndex>>,
     folder_sources: Arc<RwLock<HashMap<SourceId, folder_source::FolderSource>>>,
     folder_watchers: Mutex<HashMap<SourceId, folder_source::FolderWatcherHandle>>,

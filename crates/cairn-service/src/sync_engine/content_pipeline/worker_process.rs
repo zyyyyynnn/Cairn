@@ -12,6 +12,7 @@ use crate::sync_engine::worker_runner::{
 use cairn_protocol::status::ContentIndexTask;
 use std::ffi::OsString;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 /// Upper bound for one worker batch. Cancellation is checked every 100 ms while waiting.
@@ -32,11 +33,22 @@ pub(super) trait WorkerProcessPort {
 
 pub(super) struct SubprocessWorkerPort<'a> {
     engine: &'a MultiVolumeEngine,
+    cancel: &'a AtomicBool,
 }
 
 impl<'a> SubprocessWorkerPort<'a> {
     pub(super) fn new(engine: &'a MultiVolumeEngine) -> Self {
-        Self { engine }
+        Self {
+            engine,
+            cancel: engine.content_pipeline.cancel_flag(),
+        }
+    }
+
+    pub(super) fn for_clear(engine: &'a MultiVolumeEngine) -> Self {
+        Self {
+            engine,
+            cancel: engine.content_pipeline.shutdown_flag(),
+        }
     }
 }
 
@@ -47,12 +59,13 @@ impl WorkerProcessPort for SubprocessWorkerPort<'_> {
         deletions: &[(u64, u64)],
         clear: bool,
     ) -> BatchOutcome {
-        self.engine.run_worker_process(tasks, deletions, clear)
+        self.engine
+            .run_worker_process(tasks, deletions, clear, self.cancel)
     }
 
     fn wait_before_retry(&self) -> bool {
         std::thread::sleep(Duration::from_millis(250));
-        !self.engine.content_pipeline.is_cancelled()
+        !self.cancel.load(Ordering::SeqCst)
     }
 }
 
@@ -110,7 +123,7 @@ impl MultiVolumeEngine {
             "CairnWorker hit a transient sharing error; releasing the searcher and retrying once: {err}"
         );
         self.drop_content_searcher();
-        if !port.wait_before_retry() || self.content_pipeline.is_cancelled() {
+        if !port.wait_before_retry() {
             return BatchOutcome::Cancelled;
         }
         port.run_batch(tasks, deletions, clear)
@@ -121,6 +134,7 @@ impl MultiVolumeEngine {
         tasks: &[ContentIndexTask],
         deletions: &[(u64, u64)],
         clear: bool,
+        cancel: &AtomicBool,
     ) -> BatchOutcome {
         let worker = match self.worker_path() {
             Ok(path) => path,
@@ -174,7 +188,7 @@ impl MultiVolumeEngine {
             &args,
             CONTENT_WORKER_TIMEOUT,
             Duration::from_millis(100),
-            self.content_pipeline.cancel_flag(),
+            cancel,
         ) {
             WorkerProcessOutcome::Completed { stdout, stderr } => {
                 let summary: serde_json::Value =

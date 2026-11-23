@@ -730,6 +730,7 @@ impl MultiVolumeEngine {
                 .commit_results_if_current(generation, results, |item| {
                     result_record_is_current(&volumes, &folders, item)
                 });
+        drop((folders, volumes));
         if committed {
             self.advance_property_progress(chunk_len, total, generation);
         }

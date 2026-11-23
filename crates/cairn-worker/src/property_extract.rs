@@ -9,7 +9,7 @@
 
 #![forbid(unsafe_code)]
 
-use cairn_content::open_no_follow;
+use crate::extractor::open_no_follow;
 use cairn_core::property_store::RecordPropertyData;
 use quick_xml::Reader;
 use quick_xml::events::Event;

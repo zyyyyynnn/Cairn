@@ -450,7 +450,24 @@ fn handle_query_request(
         degraded: Option<QueryDegradedReason>,
     }
 
+    struct ActiveQueryGuard<'a> {
+        sessions: &'a SessionManager,
+        owner: &'a crate::session::QueryOwner,
+        query_id: u64,
+    }
+
+    impl Drop for ActiveQueryGuard<'_> {
+        fn drop(&mut self) {
+            self.sessions.finish_query(self.owner, self.query_id);
+        }
+    }
+
     let query_cancel = sessions.begin_query(owner, query_id);
+    let active_guard = ActiveQueryGuard {
+        sessions,
+        owner,
+        query_id,
+    };
     let mut answered: Option<QueryReply> = None;
     let mut fallback: Option<QueryReply> = None;
     for attempt in 0..2 {
@@ -504,7 +521,7 @@ fn handle_query_request(
             }
         }
     }
-    sessions.finish_query(owner, query_id);
+    drop(active_guard);
 
     let QueryReply {
         session_id,

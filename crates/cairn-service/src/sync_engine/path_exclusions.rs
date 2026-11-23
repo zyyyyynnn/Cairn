@@ -29,7 +29,10 @@ impl PathExclusions {
                 volumes
                     .iter()
                     .map(|(drive, volume)| {
-                        (*drive, volume.segment_excluded_states_cached(&segments))
+                        (
+                            drive.to_ascii_uppercase(),
+                            volume.segment_excluded_states_cached(&segments),
+                        )
                     })
                     .collect()
             })
@@ -52,7 +55,7 @@ impl PathExclusions {
     pub(crate) fn drive_states(&self, drive_letter: char) -> Option<&[u8]> {
         self.states
             .as_ref()
-            .and_then(|states| states.get(&drive_letter))
+            .and_then(|states| states.get(&drive_letter.to_ascii_uppercase()))
             .map(|table| table.as_slice())
     }
 

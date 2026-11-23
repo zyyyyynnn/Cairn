@@ -4,9 +4,9 @@
 
 //! Bounded low-priority subprocess runner shared by content and property extraction pipelines.
 //!
-//! All document and media parsing happens in `CairnWorker.exe` under `BELOW_NORMAL_PRIORITY_CLASS`
-//! and background scheduling/I/O mode (SPEC IDX-03) with hard wall-clock timeouts, cooperative
-//! cancellation, and 64 KiB capped pipe drains.
+//! The host spawns `CairnWorker.exe` with `BELOW_NORMAL_PRIORITY_CLASS`, while the worker
+//! itself enters `PROCESS_MODE_BACKGROUND_BEGIN` on startup. Runs are bounded by wall-clock
+//! timeouts, cooperative cancellation, and 64 KiB capped pipe drains.
 
 use cairn_protocol::{PropertyExtractResult, PropertyExtractTask};
 use std::ffi::OsString;
@@ -21,17 +21,17 @@ use std::time::{Duration, Instant};
 const MAX_CAPTURED_PIPE_BYTES: u64 = 64 * 1024;
 static BATCH_COUNTER: AtomicU64 = AtomicU64::new(1);
 
-pub(crate) fn next_batch_seq() -> u64 {
+pub(super) fn next_batch_seq() -> u64 {
     BATCH_COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
 /// RAII cleanup guard for per-batch worker scratch files across all exit paths.
-pub(crate) struct TempFileGuard {
+pub(super) struct TempFileGuard {
     paths: Vec<PathBuf>,
 }
 
 impl TempFileGuard {
-    pub(crate) fn new(paths: Vec<PathBuf>) -> Self {
+    pub(super) fn new(paths: Vec<PathBuf>) -> Self {
         Self { paths }
     }
 }
@@ -46,7 +46,7 @@ impl Drop for TempFileGuard {
 
 /// Low-level outcome of running a single bounded subprocess.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum WorkerProcessOutcome {
+pub(super) enum WorkerProcessOutcome {
     Completed {
         stdout: String,
         stderr: String,
@@ -63,7 +63,7 @@ pub(crate) enum WorkerProcessOutcome {
 
 /// Outcome of running an isolated property extraction batch in `CairnWorker.exe`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum PropertyIsolationOutcome {
+pub(super) enum PropertyIsolationOutcome {
     Completed(Vec<PropertyExtractResult>),
     TimedOut {
         reason: String,
@@ -75,25 +75,8 @@ pub(crate) enum PropertyIsolationOutcome {
     },
 }
 
-#[cfg(windows)]
-fn lower_worker_priority(child: &Child) {
-    use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::System::Threading::{
-        OpenProcess, PROCESS_MODE_BACKGROUND_BEGIN, PROCESS_SET_INFORMATION, SetPriorityClass,
-    };
-
-    // SAFETY: the handle is opened for the child this process just spawned and is closed below.
-    let Ok(handle) = (unsafe { OpenProcess(PROCESS_SET_INFORMATION, false, child.id()) }) else {
-        return;
-    };
-    // SAFETY: the handle is live; this only lowers the child's scheduling and I/O priority.
-    let _ = unsafe { SetPriorityClass(handle, PROCESS_MODE_BACKGROUND_BEGIN) };
-    // SAFETY: paired with the successful OpenProcess above.
-    let _ = unsafe { CloseHandle(handle) };
-}
-
-/// Spawns `program` at background priority with capped pipe drains until exit, timeout, or cancel.
-pub(crate) fn run_bounded_worker(
+/// Spawns `program` at below-normal priority with capped pipe drains until exit, timeout, or cancel.
+pub(super) fn run_bounded_worker(
     program: &Path,
     args: &[OsString],
     timeout: Duration,
@@ -124,8 +107,6 @@ pub(crate) fn run_bounded_worker(
             };
         }
     };
-    #[cfg(windows)]
-    lower_worker_priority(&child);
 
     // Drain stdout and stderr concurrently up to 64 KiB, discarding excess so OS pipe buffers
     // cannot fill and deadlock the child or exhaust service memory.
@@ -184,7 +165,7 @@ pub(crate) fn run_bounded_worker(
 }
 
 /// Extracts extended properties for `tasks` via `CairnWorker --extract-properties`.
-pub(crate) fn extract_properties_isolated(
+pub(super) fn extract_properties_isolated(
     worker_binary: &Path,
     tasks: &[PropertyExtractTask],
     work_dir: &Path,
@@ -249,8 +230,11 @@ pub(crate) fn extract_properties_isolated(
     }
 }
 
-pub(crate) fn write_jsonl<T: serde::Serialize>(path: &Path, items: &[T]) -> Result<(), String> {
-    let mut file = std::fs::File::create(path)
+pub(super) fn write_jsonl<T: serde::Serialize>(path: &Path, items: &[T]) -> Result<(), String> {
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
         .map_err(|err| format!("could not create {}: {err}", path.display()))?;
     for item in items {
         let line = serde_json::to_string(item)
@@ -261,7 +245,7 @@ pub(crate) fn write_jsonl<T: serde::Serialize>(path: &Path, items: &[T]) -> Resu
     Ok(())
 }
 
-pub(crate) fn read_jsonl<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Vec<T>, String> {
+fn read_jsonl<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Vec<T>, String> {
     let file = std::fs::File::open(path)
         .map_err(|err| format!("worker output missing at {}: {err}", path.display()))?;
     let mut reader = BufReader::new(file);
@@ -309,8 +293,10 @@ fn join_reader(handle: Option<std::thread::JoinHandle<String>>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cairn_core::property_store::{RecordPropertyData, SourceId};
     use std::sync::Arc;
 
+    #[cfg(windows)]
     #[test]
     fn hung_worker_is_killed_on_timeout_cancelled_and_crash_recovers_cleanly() {
         let cancel = AtomicBool::new(false);
@@ -370,5 +356,164 @@ mod tests {
             }
             other => panic!("expected Failed, got {other:?}"),
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn excessive_pipe_output_is_drained_without_deadlock_and_capped_at_limit() {
+        let outcome = run_bounded_worker(
+            Path::new("powershell"),
+            &[
+                OsString::from("-NoProfile"),
+                OsString::from("-Command"),
+                OsString::from("[Console]::Out.Write('x' * 131072)"),
+            ],
+            Duration::from_secs(10),
+            Duration::from_millis(25),
+            &AtomicBool::new(false),
+        );
+        match outcome {
+            WorkerProcessOutcome::Completed { stdout, .. } => {
+                assert_eq!(stdout.len(), MAX_CAPTURED_PIPE_BYTES as usize);
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn extract_properties_isolated_short_circuits_empty_and_pre_cancelled() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let work_dir = dir.path().join("missing-work");
+
+        let empty = extract_properties_isolated(
+            Path::new("nonexistent-worker.exe"),
+            &[],
+            &work_dir,
+            Duration::from_secs(1),
+            &AtomicBool::new(false),
+        );
+        assert_eq!(empty, PropertyIsolationOutcome::Completed(Vec::new()));
+        assert!(
+            !work_dir.exists(),
+            "empty task batch must not create work directory"
+        );
+
+        let task = PropertyExtractTask {
+            source_id: SourceId::for_drive('C').expect("C:"),
+            record_key: 1,
+            modified_ts: 100,
+            path: r"C:\sample.png".to_string(),
+        };
+        let cancelled = extract_properties_isolated(
+            Path::new("nonexistent-worker.exe"),
+            &[task],
+            &work_dir,
+            Duration::from_secs(1),
+            &AtomicBool::new(true),
+        );
+        assert_eq!(cancelled, PropertyIsolationOutcome::Cancelled);
+        assert!(
+            !work_dir.exists(),
+            "pre-cancelled batch must not create work directory"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn extract_properties_isolated_handles_missing_malformed_and_valid_output_and_cleans_temp_files()
+     {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let work_dir = dir.path().join("work");
+        let task = PropertyExtractTask {
+            source_id: SourceId::for_drive('C').expect("C:"),
+            record_key: 42,
+            modified_ts: 900,
+            path: r"C:\clip.mp4".to_string(),
+        };
+
+        let missing_cmd = dir.path().join("missing_out.cmd");
+        std::fs::write(&missing_cmd, "@echo off\r\nexit /b 0\r\n").expect("write missing_out");
+        match extract_properties_isolated(
+            &missing_cmd,
+            std::slice::from_ref(&task),
+            &work_dir,
+            Duration::from_secs(5),
+            &AtomicBool::new(false),
+        ) {
+            PropertyIsolationOutcome::WorkerFailed { exit_code, reason } => {
+                assert_eq!(exit_code, Some(0));
+                assert!(reason.contains("worker output missing"), "{reason}");
+            }
+            other => panic!("expected WorkerFailed for missing output, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read_dir(&work_dir).expect("read work_dir").count(),
+            0,
+            "TempFileGuard must clean batch files after missing output"
+        );
+
+        let malformed_cmd = dir.path().join("malformed_out.cmd");
+        std::fs::write(&malformed_cmd, "@echo off\r\necho not-json> \"%~5\"\r\n")
+            .expect("write malformed_out");
+        match extract_properties_isolated(
+            &malformed_cmd,
+            std::slice::from_ref(&task),
+            &work_dir,
+            Duration::from_secs(5),
+            &AtomicBool::new(false),
+        ) {
+            PropertyIsolationOutcome::WorkerFailed { exit_code, reason } => {
+                assert_eq!(exit_code, Some(0));
+                assert!(reason.contains("malformed worker output line"), "{reason}");
+            }
+            other => panic!("expected WorkerFailed for malformed output, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read_dir(&work_dir).expect("read work_dir").count(),
+            0,
+            "TempFileGuard must clean batch files after malformed output"
+        );
+
+        let expected = PropertyExtractResult {
+            source_id: task.source_id,
+            record_key: task.record_key,
+            modified_ts: task.modified_ts,
+            properties: Some(RecordPropertyData {
+                length_ms: Some(1500),
+                author: Some("tester".to_string()),
+                tags: None,
+                dimensions: Some((1920, 1080)),
+                framerate_mfps: Some(30_000),
+            }),
+        };
+        let fixture = dir.path().join("valid_fixture.jsonl");
+        std::fs::write(
+            &fixture,
+            format!("{}\n", serde_json::to_string(&expected).expect("json")),
+        )
+        .expect("write fixture");
+        let valid_cmd = dir.path().join("valid_out.cmd");
+        std::fs::write(
+            &valid_cmd,
+            format!(
+                "@echo off\r\ncopy /Y \"{}\" \"%~5\" >nul\r\n",
+                fixture.display()
+            ),
+        )
+        .expect("write valid_out");
+
+        let ok = extract_properties_isolated(
+            &valid_cmd,
+            std::slice::from_ref(&task),
+            &work_dir,
+            Duration::from_secs(5),
+            &AtomicBool::new(false),
+        );
+        assert_eq!(ok, PropertyIsolationOutcome::Completed(vec![expected]));
+        assert_eq!(
+            std::fs::read_dir(&work_dir).expect("read work_dir").count(),
+            0,
+            "TempFileGuard must clean batch files after success"
+        );
     }
 }

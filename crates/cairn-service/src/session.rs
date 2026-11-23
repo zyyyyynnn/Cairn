@@ -353,9 +353,9 @@ fn rows_for_all_files(
             source_id: view.source_id,
         });
     };
+    let source = volume.view();
     let mut rows = Vec::new();
     let current = view.visit_visible(volume, offset, limit, |idx| {
-        let source = volume.view();
         if let Some(row) = build_file_row(
             &source,
             idx,

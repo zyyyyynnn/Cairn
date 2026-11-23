@@ -1256,6 +1256,7 @@ mod tests {
         let policy = crate::query::QueryPolicy {
             sort: crate::sort::SortSpec::default(),
             content_hit: Some(&content_hits),
+            skip_sort: false,
         };
 
         let query = parse_query("!content:needle");

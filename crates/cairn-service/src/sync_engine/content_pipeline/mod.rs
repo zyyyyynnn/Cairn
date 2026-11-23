@@ -30,6 +30,7 @@ pub(in crate::sync_engine) struct ContentPipeline {
     searcher: RwLock<Option<Arc<ContentSearcher>>>,
     status: RwLock<ContentIndexStatus>,
     cancel: Arc<AtomicBool>,
+    shutdown: Arc<AtomicBool>,
     commands: Mutex<Option<std::sync::mpsc::Sender<ContentCommand>>>,
 }
 
@@ -55,6 +56,7 @@ impl ContentPipeline {
             searcher: RwLock::new(None),
             status: RwLock::new(status),
             cancel: Arc::new(AtomicBool::new(false)),
+            shutdown: Arc::new(AtomicBool::new(false)),
             commands: Mutex::new(None),
         }
     }
@@ -63,8 +65,12 @@ impl ContentPipeline {
         &self.dir
     }
 
-    pub(in crate::sync_engine) fn cancel_flag(&self) -> &Arc<AtomicBool> {
+    pub(super) fn cancel_flag(&self) -> &Arc<AtomicBool> {
         &self.cancel
+    }
+
+    pub(super) fn shutdown_flag(&self) -> &Arc<AtomicBool> {
+        &self.shutdown
     }
 
     pub(in crate::sync_engine) fn status(&self) -> ContentIndexStatus {

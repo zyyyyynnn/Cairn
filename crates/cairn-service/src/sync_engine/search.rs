@@ -98,7 +98,7 @@ enum VisibilityFilter<'a> {
     },
     Full {
         exclusions: &'a PathExclusions,
-        volume: &'a VolumeIndex,
+        view: SourceView<'a>,
         records: Option<&'a [FileRecord]>,
     },
 }
@@ -123,7 +123,7 @@ impl<'a> VisibilityFilter<'a> {
         }
         Self::Full {
             exclusions: &view.exclusions,
-            volume,
+            view: volume.view(),
             records,
         }
     }
@@ -141,7 +141,7 @@ impl<'a> VisibilityFilter<'a> {
             }
             Self::Full {
                 exclusions,
-                volume,
+                view,
                 records,
             } => {
                 if let Some(recs) = records
@@ -149,7 +149,7 @@ impl<'a> VisibilityFilter<'a> {
                 {
                     return false;
                 }
-                !exclusions.excludes(&volume.view(), idx)
+                !exclusions.excludes(&view, idx)
             }
         }
     }
@@ -861,6 +861,7 @@ impl MultiVolumeEngine {
                         let policy = QueryPolicy {
                             sort: applied_sort.clone(),
                             content_hit: Some(&resolver),
+                            skip_sort: !single_source,
                         };
                         execute_query(&src.view, &properties, &query_expr, &policy, cancel).rows
                     }
@@ -889,6 +890,7 @@ impl MultiVolumeEngine {
                         let policy = QueryPolicy {
                             sort: applied_sort.clone(),
                             content_hit: Some(&resolver),
+                            skip_sort: !single_source,
                         };
                         execute_query(&src.view, &properties, &query_expr, &policy, cancel).rows
                     }
@@ -896,6 +898,7 @@ impl MultiVolumeEngine {
                         let policy = QueryPolicy {
                             sort: applied_sort.clone(),
                             content_hit: None,
+                            skip_sort: !single_source,
                         };
                         execute_query(&src.view, &properties, &query_expr, &policy, cancel).rows
                     }

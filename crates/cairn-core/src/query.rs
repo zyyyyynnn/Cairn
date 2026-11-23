@@ -22,6 +22,7 @@ use std::sync::Arc;
 #[derive(Clone, Copy)]
 pub struct SourceView<'a> {
     pub source_id: SourceId,
+    /// Canonical root prefix normalized with a trailing backslash (e.g. `C:\` or `\\server\share\`).
     pub root_prefix: &'a Arc<str>,
     pub records: &'a [FileRecord],
     pub arena: &'a NamePool,
@@ -51,6 +52,7 @@ impl<'a> SourceView<'a> {
 pub struct QueryPolicy<'a> {
     pub sort: SortSpec,
     pub content_hit: Option<ContentHitResolver<'a>>,
+    pub skip_sort: bool,
 }
 
 /// Explicit degradation reason emitted when an extended capability was requested while disabled.
@@ -131,7 +133,7 @@ pub fn execute_query(
     };
     let mut matched = execute_query_with_context(&eval_ctx, &eval_expr, cancel);
 
-    if !cancel.is_cancelled() && matched.len() > 1 {
+    if !policy.skip_sort && !cancel.is_cancelled() && matched.len() > 1 {
         let sort_ctx = source.sort_context(Some(properties));
         sort_indices_with_spec(&mut matched, &sort_ctx, &applied_sort, cancel);
     }

@@ -417,6 +417,7 @@ pub struct VolumeIndex {
 
 impl VolumeIndex {
     pub fn new(drive_letter: char) -> Self {
+        let drive_letter = drive_letter.to_ascii_uppercase();
         Self {
             drive_letter,
             root_prefix: root_path_for_drive(drive_letter),

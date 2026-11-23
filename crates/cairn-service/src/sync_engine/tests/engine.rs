@@ -952,3 +952,101 @@ fn sm5_10000_usn_operations_match_full_rebuild_with_zero_difference() {
     assert_eq!(incremental.live_count(), rebuilt.live_count());
     assert_eq!(inc_active, rebuilt_active);
 }
+
+#[test]
+fn path_exclusions_segment_mode_covers_lowercase_drive_and_folder_source_view() {
+    use crate::sync_engine::folder_source::FolderSource;
+    use crate::sync_engine::path_exclusions::PathExclusions;
+    use cairn_core::property_store::SourceId;
+    use std::collections::HashMap;
+
+    let mut vol = VolumeIndex::new('c');
+    assert_eq!(vol.drive_letter, 'C');
+    vol.ingest_items(vec![
+        index_item(10, 5, "node_modules", true),
+        index_item(11, 10, "dep.js", false),
+        index_item(12, 5, "keep.txt", false),
+    ]);
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path();
+    std::fs::create_dir_all(root.join("node_modules")).expect("mkdir");
+    std::fs::write(root.join("node_modules").join("dep.js"), b"x").expect("write excluded");
+    std::fs::write(root.join("keep.txt"), b"x").expect("write kept");
+
+    let mut folder = FolderSource::new(SourceId(100), root).expect("folder source");
+    folder.rescan(&[]).expect("rescan");
+
+    let mut volumes = HashMap::new();
+    volumes.insert('c', vol);
+    let exclusions = PathExclusions::new(&volumes, &["node_modules".to_string()]);
+    assert!(exclusions.uses_segment_table());
+
+    let vol_ref = &volumes[&'c'];
+    let vol_view = vol_ref.view();
+    let vol_excluded: Vec<_> = (0..vol_view.records.len())
+        .filter(|&i| exclusions.excludes(&vol_view, i as u32))
+        .map(|i| vol_ref.record_name(&vol_view.records[i]))
+        .collect();
+    assert!(vol_excluded.contains(&"node_modules"));
+    assert!(vol_excluded.contains(&"dep.js"));
+    assert!(!vol_excluded.contains(&"keep.txt"));
+
+    let folder_view = folder.view();
+    let folder_excluded: Vec<_> = (0..folder_view.records.len())
+        .filter(|&i| exclusions.excludes(&folder_view, i as u32))
+        .map(|i| {
+            let rec = &folder_view.records[i];
+            folder_view.arena.get_name(rec.name_offset, rec.name_len)
+        })
+        .collect();
+    assert!(folder_excluded.contains(&"node_modules"));
+    assert!(folder_excluded.contains(&"dep.js"));
+    assert!(!folder_excluded.contains(&"keep.txt"));
+}
+
+#[test]
+fn multi_source_unfiltered_query_sorts_merged_results() {
+    use cairn_core::sort::{SortDirection, SortSpec};
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let engine = MultiVolumeEngine::with_index_dir_and_drives(temp.path(), vec![]);
+
+    let mut vol_c = VolumeIndex::new('C');
+    vol_c.ingest_items(vec![
+        index_item(100, 5, "delta.txt", false),
+        index_item(101, 5, "alpha.txt", false),
+    ]);
+    let mut vol_d = VolumeIndex::new('D');
+    vol_d.ingest_items(vec![
+        index_item(200, 5, "charlie.txt", false),
+        index_item(201, 5, "bravo.txt", false),
+    ]);
+    engine.add_volume(vol_c);
+    engine.add_volume(vol_d);
+
+    let outcome = engine.execute_search_multi(
+        "",
+        &QueryDefaults::default(),
+        &SortSpec::single(SortColumn::Name, SortDirection::Ascending),
+        &CancellationToken::new(),
+    );
+    let crate::sync_engine::MatchSet::Items(items) = outcome.rows else {
+        panic!("multi-source unfiltered query must return materialized items");
+    };
+    let names = engine.with_sources_for_rows(|sources| {
+        items
+            .iter()
+            .map(|item| {
+                let drive = item.source_id.drive_letter().expect("drive");
+                let vol = &sources.volumes[&drive];
+                vol.record_name(&vol.records()[item.record_idx as usize])
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        names,
+        vec!["alpha.txt", "bravo.txt", "charlie.txt", "delta.txt"]
+    );
+}

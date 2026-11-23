@@ -355,6 +355,7 @@ fn property_queries_work_when_enabled_and_report_explicit_degradation_when_disab
             &QueryPolicy {
                 sort,
                 content_hit: None,
+                skip_sort: false,
             },
             &cancel,
         );
@@ -466,6 +467,7 @@ fn multi_key_sort_and_hidden_system_opt_in_contract() {
         &QueryPolicy {
             sort: SortSpec::single(SortColumn::DateCreated, SortDirection::Ascending),
             content_hit: None,
+            skip_sort: false,
         },
         &cancel,
     );

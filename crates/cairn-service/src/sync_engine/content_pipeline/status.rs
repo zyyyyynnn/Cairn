@@ -381,11 +381,6 @@ impl ContentPipeline {
             )),
         }
     }
-
-    #[cfg(test)]
-    pub(super) fn set_test_sender(&self, tx: std::sync::mpsc::Sender<ContentCommand>) {
-        *self.commands.lock().unwrap() = Some(tx);
-    }
 }
 
 impl MultiVolumeEngine {
@@ -405,26 +400,20 @@ impl MultiVolumeEngine {
         self.content_pipeline.clear_index_inline()
     }
 
-    /// Current content-index lifecycle.
     pub fn content_index_status(&self) -> ContentIndexStatus {
         self.content_pipeline.status()
     }
 
-    pub(in crate::sync_engine) fn set_content_state(&self, state: ContentIndexState) {
+    fn set_content_state(&self, state: ContentIndexState) {
         self.content_pipeline.set_state(state);
     }
 
-    pub(in crate::sync_engine) fn set_content_disabled(&self) {
+    pub(super) fn set_content_disabled(&self) {
         self.content_pipeline.set_disabled();
     }
 
-    pub(in crate::sync_engine) fn set_content_progress(&self, processed: u64, total: u64) {
+    pub(super) fn set_content_progress(&self, processed: u64, total: u64) {
         self.content_pipeline.set_progress(processed, total);
-    }
-
-    #[cfg(test)]
-    pub(in crate::sync_engine) fn set_content_ready(&self, documents: u64, bytes: u64) {
-        self.content_pipeline.set_ready(documents, bytes);
     }
 
     pub(super) fn set_content_error(&self, message: String) {
@@ -449,16 +438,12 @@ impl MultiVolumeEngine {
         self.content_pipeline.try_resume_index(&cfg)
     }
 
-    /// Starts the one content thread if it is not running.
     pub fn ensure_content_runtime(self: &Arc<Self>) {
         let mut guard = self.content_pipeline.commands.lock().unwrap();
         if guard.is_some() {
             return;
         }
         let (tx, rx) = std::sync::mpsc::channel();
-        *guard = Some(tx);
-        drop(guard);
-
         let engine = self.clone();
         let spawned = std::thread::Builder::new()
             .name("cairn-content".to_string())
@@ -467,9 +452,16 @@ impl MultiVolumeEngine {
                     engine.handle_content_command(command);
                 }
             });
-        if let Err(err) = spawned {
-            self.set_content_error(format!("could not start content worker thread: {err}"));
-            return;
+        match spawned {
+            Ok(_) => {
+                *guard = Some(tx);
+                drop(guard);
+            }
+            Err(err) => {
+                drop(guard);
+                self.set_content_error(format!("could not start content worker thread: {err}"));
+                return;
+            }
         }
 
         if !self.config.read().unwrap().content_index_enabled {
@@ -498,7 +490,6 @@ impl MultiVolumeEngine {
         }
     }
 
-    /// Disables the master switch and persists it.
     pub fn disable_content_index(&self) -> Result<(), String> {
         if !self.get_config().content_index_enabled {
             return Ok(());
@@ -512,11 +503,11 @@ impl MultiVolumeEngine {
 
     /// Signals any active `CairnWorker` subprocess to terminate on service shutdown.
     pub fn stop_content_worker(&self) {
+        self.content_pipeline.shutdown.store(true, Ordering::SeqCst);
         self.content_pipeline.cancel.store(true, Ordering::SeqCst);
         let _ = self.content_pipeline.commands.lock().unwrap().take();
     }
 
-    /// Accepts a clear request.
     pub fn request_clear_content_index(&self) -> bool {
         let sender = self.content_pipeline.commands.lock().unwrap();
         if let Some(tx) = sender.as_ref() {
@@ -542,8 +533,10 @@ impl MultiVolumeEngine {
         self.content_pipeline.keep_last_snapshot(error);
     }
 
-    fn run_clear_content(&self) {
-        self.run_clear_content_with(&super::worker_process::SubprocessWorkerPort::new(self));
+    pub(super) fn run_clear_content(&self) {
+        self.run_clear_content_with(&super::worker_process::SubprocessWorkerPort::for_clear(
+            self,
+        ));
     }
 
     pub(super) fn run_clear_content_with(
