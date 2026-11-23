@@ -26,6 +26,14 @@ enum ContentAction {
     Clear,
 }
 
+#[derive(Clone, Copy)]
+struct FolderSourceErrorCopy {
+    title: &'static str,
+    body: &'static str,
+    unexpected: &'static str,
+    stopped: &'static str,
+}
+
 /// Volume status is sampled every 100ms so the loading state stays fresh. Result rows
 /// are not: a query is a full index scan, so a growing index is queried once when it settles, not
 /// on every batch.
@@ -907,56 +915,25 @@ impl CairnApp {
             return;
         }
         self.service.folder_source_action_pending = true;
-        self.service.in_flight_sources_refresh = None;
+        let superseded_refresh = self.service.in_flight_sources_refresh.take().is_some();
         let generation = self.service.next_sources_generation();
         self.repaint_shell_and_overlays(cx);
         self.spawn_service_task(
             cx,
             move |session| async move { session.add_folder_source(&path).await },
             move |this, result, cx| {
-                this.service.folder_source_action_pending = false;
-                let mut reconciled = false;
-                match result {
-                    Some(Ok(envelope)) => match envelope.payload {
-                        ResponsePayload::SourcesResult { sources } => {
-                            if this.service.sources_generation == generation {
-                                this.apply_sources_snapshot(sources, cx);
-                                reconciled = true;
-                            }
-                        }
-                        ResponsePayload::Error { code, message } => this.report_request_failure(
-                            "toast_folder_source_add_failed_title",
-                            "toast_folder_source_add_failed_body",
-                            format!("{code}: {message}"),
-                            cx,
-                        ),
-                        _ => this.report_request_failure(
-                            "toast_folder_source_add_failed_title",
-                            "toast_folder_source_add_failed_body",
-                            "unexpected add folder source response",
-                            cx,
-                        ),
+                this.finish_folder_source_mutation(
+                    generation,
+                    superseded_refresh,
+                    result,
+                    FolderSourceErrorCopy {
+                        title: "toast_folder_source_add_failed_title",
+                        body: "toast_folder_source_add_failed_body",
+                        unexpected: "unexpected add folder source response",
+                        stopped: "add folder source task stopped",
                     },
-                    Some(Err(err)) => this.report_request_failure(
-                        "toast_folder_source_add_failed_title",
-                        "toast_folder_source_add_failed_body",
-                        err,
-                        cx,
-                    ),
-                    None => this.report_request_failure(
-                        "toast_folder_source_add_failed_title",
-                        "toast_folder_source_add_failed_body",
-                        "add folder source task stopped",
-                        cx,
-                    ),
-                }
-                if !reconciled
-                    && (this.service.sources_generation != generation
-                        || this.any_folder_source_loading())
-                {
-                    this.refresh_sources(cx);
-                }
-                this.repaint_shell_and_overlays(cx);
+                    cx,
+                );
             },
         );
     }
@@ -973,58 +950,66 @@ impl CairnApp {
             return;
         }
         self.service.folder_source_action_pending = true;
-        self.service.in_flight_sources_refresh = None;
+        let superseded_refresh = self.service.in_flight_sources_refresh.take().is_some();
         let generation = self.service.next_sources_generation();
         self.repaint_shell_and_overlays(cx);
         self.spawn_service_task(
             cx,
             move |session| async move { session.remove_folder_source(&path).await },
             move |this, result, cx| {
-                this.service.folder_source_action_pending = false;
-                let mut reconciled = false;
-                match result {
-                    Some(Ok(envelope)) => match envelope.payload {
-                        ResponsePayload::SourcesResult { sources } => {
-                            if this.service.sources_generation == generation {
-                                this.apply_sources_snapshot(sources, cx);
-                                reconciled = true;
-                            }
-                        }
-                        ResponsePayload::Error { code, message } => this.report_request_failure(
-                            "toast_folder_source_remove_failed_title",
-                            "toast_folder_source_remove_failed_body",
-                            format!("{code}: {message}"),
-                            cx,
-                        ),
-                        _ => this.report_request_failure(
-                            "toast_folder_source_remove_failed_title",
-                            "toast_folder_source_remove_failed_body",
-                            "unexpected remove folder source response",
-                            cx,
-                        ),
+                this.finish_folder_source_mutation(
+                    generation,
+                    superseded_refresh,
+                    result,
+                    FolderSourceErrorCopy {
+                        title: "toast_folder_source_remove_failed_title",
+                        body: "toast_folder_source_remove_failed_body",
+                        unexpected: "unexpected remove folder source response",
+                        stopped: "remove folder source task stopped",
                     },
-                    Some(Err(err)) => this.report_request_failure(
-                        "toast_folder_source_remove_failed_title",
-                        "toast_folder_source_remove_failed_body",
-                        err,
-                        cx,
-                    ),
-                    None => this.report_request_failure(
-                        "toast_folder_source_remove_failed_title",
-                        "toast_folder_source_remove_failed_body",
-                        "remove folder source task stopped",
-                        cx,
-                    ),
-                }
-                if !reconciled
-                    && (this.service.sources_generation != generation
-                        || this.any_folder_source_loading())
-                {
-                    this.refresh_sources(cx);
-                }
-                this.repaint_shell_and_overlays(cx);
+                    cx,
+                );
             },
         );
+    }
+
+    fn finish_folder_source_mutation(
+        &mut self,
+        generation: u64,
+        superseded_refresh: bool,
+        result: Option<Result<Envelope<ResponsePayload>, ClientError>>,
+        copy: FolderSourceErrorCopy,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.service.folder_source_action_pending = false;
+        let mut reconciled = false;
+        match result {
+            Some(Ok(envelope)) => match envelope.payload {
+                ResponsePayload::SourcesResult { sources } => {
+                    if self.service.sources_generation == generation {
+                        self.apply_sources_snapshot(sources, cx);
+                        reconciled = true;
+                    }
+                }
+                ResponsePayload::Error { code, message } => self.report_request_failure(
+                    copy.title,
+                    copy.body,
+                    format!("{code}: {message}"),
+                    cx,
+                ),
+                _ => self.report_request_failure(copy.title, copy.body, copy.unexpected, cx),
+            },
+            Some(Err(err)) => self.report_request_failure(copy.title, copy.body, err, cx),
+            None => self.report_request_failure(copy.title, copy.body, copy.stopped, cx),
+        }
+        if !reconciled
+            && (self.service.sources_generation != generation
+                || superseded_refresh
+                || self.any_folder_source_loading())
+        {
+            self.refresh_sources(cx);
+        }
+        self.repaint_shell_and_overlays(cx);
     }
 
     /// Installs a sources snapshot, releases a scope whose source no longer exists, refreshes a

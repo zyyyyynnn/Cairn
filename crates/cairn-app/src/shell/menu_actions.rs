@@ -886,6 +886,7 @@ impl CairnApp {
                 index.service_action_is_disabled()
             }
             GroupCommand::ClearQuery => !self.can_clear_query(),
+            GroupCommand::SortBy(_) | GroupCommand::ReverseOrder => self.local_listing_is_busy(),
             GroupCommand::ToggleColumn(col) => col.is_locked(),
             GroupCommand::CheckForUpdates => self.update_state.is_busy(),
             _ => false,

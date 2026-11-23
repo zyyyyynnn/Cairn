@@ -55,7 +55,7 @@ impl CairnApp {
         cx.notify();
     }
 
-    fn local_listing_is_busy(&self) -> bool {
+    pub(crate) fn local_listing_is_busy(&self) -> bool {
         self.location_profile().is_local_listing && self.recycle_bin.is_loading()
     }
 
@@ -464,22 +464,32 @@ mod tests {
                             snapshot
                         );
 
-                        let loading_sort = this.results.table.primary_sort().0;
+                        use crate::shell::command_groups::GroupCommand;
+
+                        let loading_sort = this.results.table.primary_sort();
+                        assert!(this.command_is_disabled(GroupCommand::SortBy(SortColumn::Size)));
+                        assert!(this.command_is_disabled(GroupCommand::ReverseOrder));
                         this.shift_toggle_table_sort(SortColumn::Size, cx);
-                        assert_eq!(this.results.table.primary_sort().0, loading_sort);
+                        this.toggle_sort_direction(cx);
+                        assert_eq!(this.results.table.primary_sort(), loading_sort);
 
                         this.recycle_bin.install_listing(Vec::new());
+                        assert!(!this.command_is_disabled(GroupCommand::SortBy(SortColumn::Size)));
+                        assert!(!this.command_is_disabled(GroupCommand::ReverseOrder));
                         this.toggle_table_sort(SortColumn::Name, cx);
                         this.shift_toggle_table_sort(SortColumn::Size, cx);
                         assert_eq!(this.results.table.sort_spec.keys.len(), 1);
-                        assert_eq!(this.results.table.primary_sort().0, SortColumn::Size);
+                        assert_eq!(this.results.table.primary_sort(), (SortColumn::Size, true));
 
                         this.toggle_table_sort(SortColumn::DateCreated, cx);
-                        assert_eq!(this.results.table.primary_sort().0, SortColumn::Size);
+                        assert_eq!(this.results.table.primary_sort(), (SortColumn::Size, true));
 
                         assert!(this.recycle_bin.begin_mutation().is_some());
+                        assert!(this.command_is_disabled(GroupCommand::SortBy(SortColumn::Path)));
+                        assert!(this.command_is_disabled(GroupCommand::ReverseOrder));
                         this.toggle_table_sort(SortColumn::Path, cx);
-                        assert_eq!(this.results.table.primary_sort().0, SortColumn::Size);
+                        this.toggle_sort_direction(cx);
+                        assert_eq!(this.results.table.primary_sort(), (SortColumn::Size, true));
                     });
 
                     cx.quit();
