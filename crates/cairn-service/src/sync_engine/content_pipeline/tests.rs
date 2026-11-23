@@ -1945,3 +1945,44 @@ fn clear_content_runs_even_after_business_cancel_and_stops_on_shutdown() {
         ContentIndexState::Disabled
     );
 }
+
+#[test]
+fn queued_start_after_stop_content_worker_does_not_run_backfill_or_restart() {
+    use super::worker_process::WorkerProcessPort;
+
+    struct PanicPort;
+    impl WorkerProcessPort for PanicPort {
+        fn run_batch(&self, _: &[ContentIndexTask], _: &[(u64, u64)], _: bool) -> BatchOutcome {
+            panic!("worker must not spawn after shutdown");
+        }
+        fn wait_before_retry(&self) -> bool {
+            false
+        }
+    }
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let cfg = ServiceConfig {
+        content_index_enabled: true,
+        ..Default::default()
+    };
+    let engine = Arc::new(MultiVolumeEngine::with_paths(
+        &temp.path().join("index"),
+        &temp.path().join("content"),
+        &temp.path().join("service.toml"),
+        vec![],
+        cfg,
+    ));
+    std::fs::create_dir_all(engine.content_dir()).expect("content dir");
+    std::fs::write(engine.backfill_marker_path(), b"{}").expect("seed marker");
+    assert!(engine.backfill_marker_path().exists());
+
+    engine.stop_content_worker();
+    engine.handle_content_command(ContentCommand::Start);
+    engine.run_full_backfill_with(&PanicPort);
+    assert!(engine.backfill_marker_path().exists());
+    assert!(engine.content_pipeline.is_cancelled());
+    assert!(!engine.request_clear_content_index());
+
+    Arc::clone(&engine).ensure_content_runtime();
+    assert!(engine.content_pipeline.commands.lock().unwrap().is_none());
+}

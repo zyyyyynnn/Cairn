@@ -21,8 +21,9 @@ graph TD
     Service --> Content[cairn-content Tantivy全文检索]
     Service --> Protocol
 
-    Worker[CairnWorker.exe 抽取进程] --> Content
+    Worker[CairnWorker.exe 文档与属性解析进程] --> Content
     Worker --> Protocol
+    Worker --> Core
 
     NTFS --> Core
 ```
@@ -45,7 +46,7 @@ flowchart TD
     subgraph Elevated [提权服务空间 (LocalSystem)]
         ServiceHost["CairnService.exe (后台服务)"]
         MFT_Engine["NTFS MFT/USN 增量引擎"]
-        WorkerProc["CairnWorker.exe (低优先级内容抽取子进程)"]
+        WorkerProc["CairnWorker.exe (低优先级文档文本与扩展属性解析子进程)"]
         DiskVol["\\.\\X: 原始 NTFS 磁盘设备句柄 (100% 只读)"]
 
         ServiceHost --> MFT_Engine

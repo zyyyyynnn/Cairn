@@ -4,6 +4,8 @@
 
 //! Text extraction trait and implementations for plain text, Office, and PDF documents.
 
+#![forbid(unsafe_code)]
+
 use crate::detector::decode_bytes_to_string;
 use quick_xml::Reader as XmlReader;
 use quick_xml::events::Event;

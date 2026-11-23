@@ -9,7 +9,7 @@
 | `Cairn.exe` | GPUI 桌面端 |
 | `CairnService.exe` | Windows 后台索引服务（LocalSystem） |
 | `CairnCli.exe` | 命令行检索工具 |
-| `CairnWorker.exe` | 隔离式内容抽取子进程 |
+| `CairnWorker.exe` | 隔离式文档文本与扩展属性解析子进程 |
 | `CairnUninstall.exe` | 卸载前端 |
 | `CairnInstallGuard.exe` | MSI 自定义动作，拒绝 Program Files 之外的安装目录 |
 | `cairn.ico` | 安装包与应用图标 |

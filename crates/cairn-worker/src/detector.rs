@@ -4,6 +4,8 @@
 
 //! Encoding detection supporting UTF-8, UTF-16, GBK, and legacy Windows encodings.
 
+#![forbid(unsafe_code)]
+
 use chardetng::EncodingDetector;
 
 /// Decodes raw file bytes into a UTF-8 String, automatically detecting BOM or legacy encoding.

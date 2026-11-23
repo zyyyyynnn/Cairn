@@ -20,6 +20,9 @@ const FORBID_UNSAFE_ENTRYPOINTS: &[&str] = &[
     "crates/cairn-client/src/lib.rs",
     "crates/cairn-cli/src/main.rs",
     "crates/cairn-worker/src/main.rs",
+    "crates/cairn-worker/src/detector.rs",
+    "crates/cairn-worker/src/extractor.rs",
+    "crates/cairn-worker/src/property_extract.rs",
     "crates/cairn-service/src/main.rs",
     "crates/cairn-setup-bin/src/bin/cairn-setup.rs",
     "crates/cairn-setup-bin/src/bin/cairn-uninstall.rs",
@@ -263,26 +266,35 @@ const FORBIDDEN_PARSER_AND_WORKER_DEPS: &[&str] = &[
 
 fn check_isolated_manifest_deps(rel: &str, parsed: &toml::Table, violations: &mut Vec<String>) {
     let mut check_dep_table = |section: &str, table: &toml::Table| {
-        for dep in FORBIDDEN_PARSER_AND_WORKER_DEPS {
-            if table.contains_key(*dep) {
-                violations.push(format!(
-                    "{rel}: forbidden isolated dependency `{dep}` in [{section}]"
-                ));
+        for (alias, spec) in table {
+            let aliased_pkg = spec
+                .as_table()
+                .and_then(|t| t.get("package"))
+                .and_then(toml::Value::as_str);
+            for forbidden in FORBIDDEN_PARSER_AND_WORKER_DEPS {
+                if alias == forbidden || aliased_pkg == Some(*forbidden) {
+                    violations.push(format!(
+                        "{rel}: forbidden isolated dependency `{forbidden}` in [{section}]"
+                    ));
+                }
             }
         }
     };
 
-    if let Some(deps) = parsed.get("dependencies").and_then(toml::Value::as_table) {
-        check_dep_table("dependencies", deps);
+    for section in ["dependencies", "dev-dependencies", "build-dependencies"] {
+        if let Some(deps) = parsed.get(section).and_then(toml::Value::as_table) {
+            check_dep_table(section, deps);
+        }
     }
     if let Some(targets) = parsed.get("target").and_then(toml::Value::as_table) {
         for (cfg, target_val) in targets {
-            if let Some(deps) = target_val
-                .as_table()
-                .and_then(|t| t.get("dependencies"))
-                .and_then(toml::Value::as_table)
-            {
-                check_dep_table(&format!("target.{cfg}.dependencies"), deps);
+            let Some(target_table) = target_val.as_table() else {
+                continue;
+            };
+            for section in ["dependencies", "dev-dependencies", "build-dependencies"] {
+                if let Some(deps) = target_table.get(section).and_then(toml::Value::as_table) {
+                    check_dep_table(&format!("target.{cfg}.{section}"), deps);
+                }
             }
         }
     }
@@ -1278,6 +1290,18 @@ mod tests {
                 "[dependencies]\ncairn-worker.workspace = true\n",
             ),
             ("cairn-content", "[dependencies]\nlopdf.workspace = true\n"),
+            (
+                "cairn-service",
+                "[dependencies]\npdf_alias = { package = \"lopdf\", workspace = true }\n",
+            ),
+            (
+                "cairn-content",
+                "[dev-dependencies]\nquick-xml.workspace = true\n",
+            ),
+            (
+                "cairn-service",
+                "[build-dependencies]\nchardetng.workspace = true\n",
+            ),
             (
                 "cairn-service",
                 "[target.'cfg(windows)'.dependencies]\nzip.workspace = true\n",

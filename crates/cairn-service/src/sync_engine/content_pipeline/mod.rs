@@ -13,7 +13,7 @@ use cairn_content::ContentSearcher;
 use cairn_protocol::status::{ContentIndexState, ContentIndexStatus, ContentIndexTask};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 mod backfill;
@@ -65,12 +65,16 @@ impl ContentPipeline {
         &self.dir
     }
 
-    pub(super) fn cancel_flag(&self) -> &Arc<AtomicBool> {
+    fn cancel_flag(&self) -> &Arc<AtomicBool> {
         &self.cancel
     }
 
-    pub(super) fn shutdown_flag(&self) -> &Arc<AtomicBool> {
+    fn shutdown_flag(&self) -> &Arc<AtomicBool> {
         &self.shutdown
+    }
+
+    fn is_shutdown(&self) -> bool {
+        self.shutdown.load(Ordering::SeqCst)
     }
 
     pub(in crate::sync_engine) fn status(&self) -> ContentIndexStatus {
@@ -99,7 +103,7 @@ pub enum ContentCommand {
 }
 
 impl crate::sync_engine::MultiVolumeEngine {
-    pub(super) fn send_content_command(&self, command: ContentCommand) -> bool {
+    fn send_content_command(&self, command: ContentCommand) -> bool {
         self.content_pipeline.send_command(command)
     }
 }

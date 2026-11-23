@@ -974,13 +974,15 @@ fn path_exclusions_segment_mode_covers_lowercase_drive_and_folder_source_view() 
     std::fs::write(root.join("node_modules").join("dep.js"), b"x").expect("write excluded");
     std::fs::write(root.join("keep.txt"), b"x").expect("write kept");
 
-    let mut folder = FolderSource::new(SourceId(100), root).expect("folder source");
+    let mut folder = FolderSource::new(SourceId(cairn_core::FOLDER_SOURCE_ID_BASE), root)
+        .expect("folder source");
     folder.rescan(&[]).expect("rescan");
 
     let mut volumes = HashMap::new();
     volumes.insert('c', vol);
     let exclusions = PathExclusions::new(&volumes, &["node_modules".to_string()]);
     assert!(exclusions.uses_segment_table());
+    assert!(exclusions.drive_states('c').is_some());
 
     let vol_ref = &volumes[&'c'];
     let vol_view = vol_ref.view();

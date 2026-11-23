@@ -476,6 +476,26 @@ fn multi_key_sort_and_hidden_system_opt_in_contract() {
         vec!["a.txt", "c.log", "b.txt"]
     );
 
+    let res_unsorted = execute_query(
+        &idx_with_tombstone,
+        &props,
+        &parse_query(""),
+        &QueryPolicy {
+            sort: SortSpec::single(SortColumn::Name, SortDirection::Ascending),
+            content_hit: None,
+            skip_sort: true,
+        },
+        &cancel,
+    );
+    assert_eq!(
+        fx.names_for(&res_unsorted.rows),
+        vec!["b.txt", "a.txt", "c.log"]
+    );
+    assert_eq!(
+        res_unsorted.applied_sort,
+        SortSpec::single(SortColumn::Name, SortDirection::Ascending)
+    );
+
     let unfiltered = execute_query(
         &idx_with_tombstone,
         &props,

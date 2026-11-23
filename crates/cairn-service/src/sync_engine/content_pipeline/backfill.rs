@@ -366,6 +366,10 @@ impl MultiVolumeEngine {
         &self,
         port: &dyn super::worker_process::WorkerProcessPort,
     ) {
+        if self.content_pipeline.is_shutdown() {
+            self.set_content_disabled();
+            return;
+        }
         self.content_pipeline.reset_cancel();
         self.drop_content_searcher();
         // A new backfill invalidates any previous completion until it reaches Ready again; a

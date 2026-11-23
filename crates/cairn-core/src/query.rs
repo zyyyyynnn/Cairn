@@ -22,7 +22,7 @@ use std::sync::Arc;
 #[derive(Clone, Copy)]
 pub struct SourceView<'a> {
     pub source_id: SourceId,
-    /// Canonical root prefix normalized with a trailing backslash (e.g. `C:\` or `\\server\share\`).
+    /// Canonical root prefix normalized with a trailing backslash (e.g. `C:\` or `D:\Projects\`).
     pub root_prefix: &'a Arc<str>,
     pub records: &'a [FileRecord],
     pub arena: &'a NamePool,
@@ -52,6 +52,7 @@ impl<'a> SourceView<'a> {
 pub struct QueryPolicy<'a> {
     pub sort: SortSpec,
     pub content_hit: Option<ContentHitResolver<'a>>,
+    /// Skip per-source sorting when the caller merges and sorts results across multiple sources.
     pub skip_sort: bool,
 }
 

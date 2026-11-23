@@ -64,6 +64,9 @@ impl ContentPipeline {
     }
 
     pub(in crate::sync_engine) fn apply_switch(&self, previous_enabled: bool, next_enabled: bool) {
+        if self.is_shutdown() {
+            return;
+        }
         if previous_enabled != next_enabled {
             if next_enabled {
                 self.cancel.store(false, Ordering::SeqCst);
@@ -440,7 +443,7 @@ impl MultiVolumeEngine {
 
     pub fn ensure_content_runtime(self: &Arc<Self>) {
         let mut guard = self.content_pipeline.commands.lock().unwrap();
-        if guard.is_some() {
+        if guard.is_some() || self.content_pipeline.is_shutdown() {
             return;
         }
         let (tx, rx) = std::sync::mpsc::channel();
@@ -468,13 +471,16 @@ impl MultiVolumeEngine {
             return;
         }
         self.cleanup_stale_content_files();
-        if self.try_resume_content_index() {
+        if self.content_pipeline.is_shutdown() || self.try_resume_content_index() {
             return;
         }
         self.send_content_command(ContentCommand::Start);
     }
 
-    fn handle_content_command(&self, command: ContentCommand) {
+    pub(super) fn handle_content_command(&self, command: ContentCommand) {
+        if self.content_pipeline.is_shutdown() {
+            return;
+        }
         match command {
             ContentCommand::Start => self.run_full_backfill(),
             ContentCommand::IndexChanges { tasks, deletions } => {
@@ -509,6 +515,9 @@ impl MultiVolumeEngine {
     }
 
     pub fn request_clear_content_index(&self) -> bool {
+        if self.content_pipeline.is_shutdown() {
+            return false;
+        }
         let sender = self.content_pipeline.commands.lock().unwrap();
         if let Some(tx) = sender.as_ref() {
             return tx.send(ContentCommand::Clear).is_ok();
