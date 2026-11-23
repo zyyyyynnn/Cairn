@@ -60,6 +60,27 @@ impl RecycleBinView {
         matches!(self.state, RecycleBinState::Open { .. })
     }
 
+    pub(crate) fn surface_location(&self) -> crate::table::surface::SurfaceLocation {
+        use crate::table::surface::{LocalListingStage, SurfaceLocation};
+        match &self.state {
+            RecycleBinState::Closed => SurfaceLocation::Index,
+            RecycleBinState::Open {
+                stage: BinStage::Loading | BinStage::Ready { mutating: true, .. },
+                ..
+            } => SurfaceLocation::LocalListing(LocalListingStage::Loading),
+            RecycleBinState::Open {
+                stage: BinStage::Ready {
+                    mutating: false, ..
+                },
+                ..
+            } => SurfaceLocation::LocalListing(LocalListingStage::Ready),
+            RecycleBinState::Open {
+                stage: BinStage::Failed(_),
+                ..
+            } => SurfaceLocation::LocalListing(LocalListingStage::Error),
+        }
+    }
+
     /// The rows the table renders when ready, or `None` when closed, loading, or failed.
     pub(crate) fn rows(&self) -> Option<&[Arc<RecycleBinItem>]> {
         match &self.state {

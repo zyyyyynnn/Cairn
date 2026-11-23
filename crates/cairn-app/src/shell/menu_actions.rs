@@ -7,11 +7,12 @@
 //! table keyboard selection, scrolling and focus actions.
 
 use crate::app::{CairnApp, join_row_path, layout};
-use crate::search::ResultSetChange;
 use crate::search::filters::FilterCategory;
+use crate::search::{QueryToggle, ResultSetChange, TextModifier};
 use crate::shell::command_groups::{GroupCommand, MenuGroup, ZoomPreset, group_spec};
 use crate::shell::commands::*;
 use crate::shell::dialogs;
+use crate::shell::location::ActiveLocation;
 use crate::shell::menu_rules::{IndexMenuState, SubsystemMenuAccess};
 use crate::shell::os::{
     open_file, open_folder_and_select, open_url, set_clipboard_text, show_properties_dialog,
@@ -27,15 +28,6 @@ use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::menu::PopupMenu;
 use gpui_kit::gpui::*;
 use std::rc::Rc;
-
-/// Which search flag a toggle command flips, so the four toggle Actions share one code path.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ToggleFlag {
-    Case,
-    WholeWord,
-    MatchPath,
-    Regex,
-}
 
 /// Which way the keyboard asks the table to move across the axis the window cannot show.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -406,7 +398,7 @@ impl CairnApp {
     /// merges the row indices into those keys. Clearing the indices on a press that is not a
     /// row would therefore delete the keys and drop the selection instead of preserving it.
     pub(crate) fn dismiss_result_selection_on_chrome_press(&mut self, cx: &mut Context<'_, Self>) {
-        if !self.recycle_bin.is_open() {
+        if !self.location_profile().preserves_selection_on_chrome_press {
             self.dismiss_result_selection(cx);
         }
     }
@@ -419,7 +411,7 @@ impl CairnApp {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        if self.recycle_bin.is_open() {
+        if self.active_location().is_recycle_bin() {
             self.clear_bin_filter(window, cx);
             return;
         }
@@ -455,7 +447,7 @@ impl CairnApp {
         if self.dismiss_snippet_preview(window, cx) {
             return;
         }
-        if self.recycle_bin.is_open() {
+        if self.active_location().is_recycle_bin() {
             if !self.query.search_input.text.trim().is_empty() {
                 self.clear_bin_filter(window, cx);
                 return;
@@ -678,7 +670,7 @@ impl CairnApp {
             GroupCommand::PropertyIndexUsage => self.property_index_usage_label(),
             _ => self
                 .i18n
-                .get_text(command.label_key_in(self.recycle_bin.is_open())),
+                .get_text(self.location_profile().command_label_key(command)),
         }
     }
 
@@ -809,6 +801,9 @@ impl CairnApp {
     /// shown disabled row after row. In particular a failed index offers one retry, not a second
     /// "enable" entry that would quietly mean the same request.
     pub fn command_is_hidden(&self, command: GroupCommand) -> bool {
+        if self.location_profile().command_is_hidden(command) {
+            return true;
+        }
         match command {
             GroupCommand::RetryContentSearch => !matches!(
                 self.service.content.value.state,
@@ -821,31 +816,6 @@ impl CairnApp {
                 matches!(content.state, ContentIndexState::Backfilling { .. })
                     || !(has_content || failed)
             }
-            GroupCommand::RestoreSelected
-            | GroupCommand::RestoreAll
-            | GroupCommand::EmptyRecycleBin => !self.recycle_bin.is_open(),
-            GroupCommand::RenameSelected => self.recycle_bin.is_open(),
-            GroupCommand::Submenu("menu_columns", _) | GroupCommand::ToggleColumn(_) => {
-                self.recycle_bin.is_open()
-            }
-            GroupCommand::SortBy(crate::table::model::SortColumn::DateCreated) => {
-                self.recycle_bin.is_open()
-            }
-            GroupCommand::RevealLocation | GroupCommand::ShowProperties => {
-                self.recycle_bin.is_open()
-            }
-            // Local listings filter in place by name/location substring; index-only search
-            // modifiers and exclusions are no-ops there, while Case Sensitive still applies.
-            GroupCommand::ToggleWholeWord
-            | GroupCommand::ToggleMatchPath
-            | GroupCommand::ToggleRegex
-            | GroupCommand::TogglePinyin
-            | GroupCommand::ToggleIgnorePunctuation
-            | GroupCommand::ToggleIgnoreWhitespace
-            | GroupCommand::ToggleIgnoreDiacritics
-            | GroupCommand::ToggleExcludeHidden
-            | GroupCommand::ToggleExcludeSystem => self.recycle_bin.is_open(),
-
             _ => false,
         }
     }
@@ -853,16 +823,24 @@ impl CairnApp {
     pub fn command_is_checked(&self, command: GroupCommand) -> bool {
         let index = self.index_menu_state();
         match command {
-            GroupCommand::ToggleCase => self.query.case_sensitive,
-            GroupCommand::ToggleWholeWord => self.query.whole_word,
-            GroupCommand::ToggleMatchPath => self.query.match_path,
-            GroupCommand::ToggleRegex => self.query.use_regex,
+            GroupCommand::ToggleCase => self.query.is_toggle_checked(QueryToggle::Case),
+            GroupCommand::ToggleWholeWord => self.query.is_toggle_checked(QueryToggle::WholeWord),
+            GroupCommand::ToggleMatchPath => self.query.is_toggle_checked(QueryToggle::MatchPath),
+            GroupCommand::ToggleRegex => self.query.is_toggle_checked(QueryToggle::Regex),
             GroupCommand::ToggleExcludeHidden => self.settings.exclude_hidden,
             GroupCommand::ToggleExcludeSystem => self.settings.exclude_system,
-            GroupCommand::TogglePinyin => self.query.pinyin,
-            GroupCommand::ToggleIgnorePunctuation => self.query.ignore_punctuation,
-            GroupCommand::ToggleIgnoreWhitespace => self.query.ignore_whitespace,
-            GroupCommand::ToggleIgnoreDiacritics => self.query.ignore_diacritics,
+            GroupCommand::TogglePinyin => self
+                .query
+                .is_toggle_checked(QueryToggle::Modifier(TextModifier::Pinyin)),
+            GroupCommand::ToggleIgnorePunctuation => self
+                .query
+                .is_toggle_checked(QueryToggle::Modifier(TextModifier::IgnorePunctuation)),
+            GroupCommand::ToggleIgnoreWhitespace => self
+                .query
+                .is_toggle_checked(QueryToggle::Modifier(TextModifier::IgnoreWhitespace)),
+            GroupCommand::ToggleIgnoreDiacritics => self
+                .query
+                .is_toggle_checked(QueryToggle::Modifier(TextModifier::IgnoreDiacritics)),
             GroupCommand::SortBy(column) => self.results.table.primary_sort().0 == column,
             GroupCommand::ReverseOrder => !self.results.table.primary_sort().1,
             GroupCommand::ToggleColumn(col) => self.settings.columns.is_column_shown(col),
@@ -888,15 +866,18 @@ impl CairnApp {
                 self.rename.in_flight || self.rename_target_ix().is_none()
             }
             GroupCommand::DeleteSelected | GroupCommand::RestoreSelected => {
-                if self.recycle_bin.is_open() {
-                    self.recycle_bin.is_loading()
-                        || self.explicit_bin_selection_indices().is_empty()
-                } else {
-                    self.delete_in_flight || self.selection_indices().is_empty()
+                match self.active_location() {
+                    ActiveLocation::RecycleBin => {
+                        self.recycle_bin.is_loading()
+                            || self.explicit_bin_selection_indices().is_empty()
+                    }
+                    ActiveLocation::Index => {
+                        self.delete_in_flight || self.selection_indices().is_empty()
+                    }
                 }
             }
             GroupCommand::RestoreAll | GroupCommand::EmptyRecycleBin => {
-                !self.recycle_bin.is_open()
+                !self.active_location().is_recycle_bin()
                     || self.recycle_bin.is_loading()
                     || self.recycle_bin.all().is_empty()
             }
@@ -927,10 +908,10 @@ impl CairnApp {
     /// Clearing a search needs something the person can see narrowing the view.
     /// A bin filter and the main query are the visible cases.
     fn can_clear_query(&self) -> bool {
-        if self.recycle_bin.is_open() {
-            return !self.query.search_input.text.trim().is_empty();
+        match self.active_location() {
+            ActiveLocation::RecycleBin => !self.query.search_input.text.trim().is_empty(),
+            ActiveLocation::Index => self.has_query(),
         }
-        self.has_query()
     }
 
     pub fn run_group_command(
@@ -965,10 +946,18 @@ impl CairnApp {
             GroupCommand::SetLanguage(code) => self.set_language(code, cx),
             GroupCommand::ToggleExcludeHidden => self.toggle_exclude_hidden(cx),
             GroupCommand::ToggleExcludeSystem => self.toggle_exclude_system(cx),
-            GroupCommand::TogglePinyin => self.toggle_pinyin(cx),
-            GroupCommand::ToggleIgnorePunctuation => self.toggle_ignore_punctuation(cx),
-            GroupCommand::ToggleIgnoreWhitespace => self.toggle_ignore_whitespace(cx),
-            GroupCommand::ToggleIgnoreDiacritics => self.toggle_ignore_diacritics(cx),
+            GroupCommand::TogglePinyin => {
+                self.toggle_query_option(QueryToggle::Modifier(TextModifier::Pinyin), cx);
+            }
+            GroupCommand::ToggleIgnorePunctuation => {
+                self.toggle_query_option(QueryToggle::Modifier(TextModifier::IgnorePunctuation), cx)
+            }
+            GroupCommand::ToggleIgnoreWhitespace => {
+                self.toggle_query_option(QueryToggle::Modifier(TextModifier::IgnoreWhitespace), cx);
+            }
+            GroupCommand::ToggleIgnoreDiacritics => {
+                self.toggle_query_option(QueryToggle::Modifier(TextModifier::IgnoreDiacritics), cx);
+            }
             GroupCommand::ToggleAutostart => {
                 let enabled = !self.settings.autostart;
                 self.set_autostart(enabled, cx);
@@ -1088,6 +1077,21 @@ impl CairnApp {
         cx.notify();
     }
 
+    fn open_target_row(&self) {
+        match self.active_location() {
+            ActiveLocation::RecycleBin => {
+                if let Some(item) = self.target_bin_item() {
+                    let _ = open_file(&item.fs_path);
+                }
+            }
+            ActiveLocation::Index => {
+                if let Some(path) = self.target_full_path() {
+                    let _ = open_file(&path);
+                }
+            }
+        }
+    }
+
     pub fn open_selected(
         &mut self,
         _: &OpenSelected,
@@ -1108,16 +1112,7 @@ impl CairnApp {
             }
             self.discard_rename(cx);
         }
-        if self.recycle_bin.is_open() {
-            if let Some(item) = self.target_bin_item() {
-                let _ = open_file(&item.fs_path);
-            }
-            cx.notify();
-            return;
-        }
-        if let Some(path) = self.target_full_path() {
-            let _ = open_file(&path);
-        }
+        self.open_target_row();
         cx.notify();
     }
 
@@ -1127,7 +1122,7 @@ impl CairnApp {
         _w: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        if self.recycle_bin.is_open() {
+        if !self.location_profile().supports_reveal {
             return;
         }
         let paths = self.collect_selected_paths();
@@ -1175,7 +1170,7 @@ impl CairnApp {
     /// The one row an in-place rename may edit. The bin is a location with its
     /// own surface, and a row outside the fetched window has no name to load into the editor.
     pub fn rename_target_ix(&self) -> Option<usize> {
-        if self.recycle_bin.is_open() {
+        if !self.location_profile().supports_rename {
             return None;
         }
         self.results.table.sole_selected_row()
@@ -1223,7 +1218,7 @@ impl CairnApp {
         // The properties sheet of a bin payload describes the `$R` file, not
         // the item Explorer shows; the bin hides this command rather than
         // presenting a misleading name and location.
-        if self.recycle_bin.is_open() {
+        if !self.location_profile().supports_properties_dialog {
             return;
         }
         if let Some(path) = self.target_full_path() {
@@ -1278,13 +1273,7 @@ impl CairnApp {
         }
         self.discard_rename_off_row(cx);
         if is_double_click {
-            if self.recycle_bin.is_open() {
-                if let Some(item) = self.target_bin_item() {
-                    let _ = open_file(&item.fs_path);
-                }
-            } else if let Some(path) = self.target_full_path() {
-                let _ = open_file(&path);
-            }
+            self.open_target_row();
         }
         self.ensure_visible_rows_loaded(row_height, cx);
         cx.notify();

@@ -288,7 +288,7 @@ impl CairnApp {
     pub fn ensure_visible_rows_loaded(&mut self, row_height: Pixels, cx: &mut Context<'_, Self>) {
         // The Recycle Bin holds its whole listing in memory; a page comes from that
         // listing, never from the service, so even a stopped service can show it.
-        if self.recycle_bin.is_open() {
+        if self.location_profile().is_local_listing {
             self.fill_recycle_bin_page(row_height, cx);
             return;
         }
@@ -325,7 +325,7 @@ impl CairnApp {
     /// post-frame ensure, so every scroll source — pointer drag, wheel, keyboard, first page — is
     /// covered without fetching from `render` itself.
     pub fn needs_visible_rows_page(&self, visible: Range<usize>) -> bool {
-        if self.recycle_bin.is_open() {
+        if self.location_profile().is_local_listing {
             return self.needs_recycle_bin_page(visible);
         }
         rows_page_ready(
@@ -346,7 +346,7 @@ impl CairnApp {
     /// and cancels superseded in-flight queries on the service before dispatching newer ones.
     pub fn schedule_text_search(&mut self, cx: &mut Context<'_, Self>) {
         self.discard_rename(cx);
-        if self.recycle_bin.is_open() {
+        if self.location_profile().is_local_listing {
             self.filter_recycle_bin(cx);
             return;
         }
@@ -369,7 +369,7 @@ impl CairnApp {
     }
 
     fn flush_debounced_search(&mut self, token: u64, cx: &mut Context<'_, Self>) {
-        if self.recycle_bin.is_open() {
+        if self.location_profile().is_local_listing {
             return;
         }
         let mut transport = QueuedTransport::default();
@@ -401,7 +401,7 @@ impl CairnApp {
         };
         // The recycle bin owns its rows; an index request must neither clear
         // them nor take the index-loading shortcut.
-        let local_surface = self.recycle_bin.is_open();
+        let local_surface = self.location_profile().is_local_listing;
         // The all-files view can only be final once the index has settled. Querying a growing
         // index would publish a partial total that climbs in steps as batches land, and each query
         // is a full index scan; the status poll asks for the one result set of the completed index
@@ -459,14 +459,8 @@ impl CairnApp {
     /// header, sorting menu, and next launch agree.
     pub(crate) fn normalize_local_listing_sort(&mut self) {
         let (column, ascending) = self.results.table.primary_sort();
-        let supported = matches!(
-            column,
-            crate::table::model::SortColumn::Name
-                | crate::table::model::SortColumn::Path
-                | crate::table::model::SortColumn::Size
-                | crate::table::model::SortColumn::DateModified
-                | crate::table::model::SortColumn::Extension
-        );
+        let supported =
+            crate::shell::location::LocationProfile::RECYCLE_BIN.supports_sort_column(column);
         if !supported {
             self.results
                 .table
@@ -518,7 +512,7 @@ impl CairnApp {
         // A cancelled query is a stop, not a pause: only explicit input asks
         // for a new one.
         if !self.query.coordinator.can_background_refresh()
-            || self.recycle_bin.is_open()
+            || self.location_profile().is_local_listing
             || self.query.rejection.is_some()
         {
             return;
@@ -527,19 +521,8 @@ impl CairnApp {
     }
 
     pub(crate) fn query_defaults(&self) -> cairn_protocol::message::QueryDefaults {
-        cairn_protocol::message::QueryDefaults {
-            case_sensitive: self.query.case_sensitive,
-            whole_words: self.query.whole_word,
-            match_path: self.query.match_path,
-            is_regex: self.query.use_regex,
-            pinyin: self.query.pinyin,
-            ignore_punctuation: self.query.ignore_punctuation,
-            ignore_whitespace: self.query.ignore_whitespace,
-            ignore_diacritics: self.query.ignore_diacritics,
-            exclude_hidden: self.settings.exclude_hidden,
-            exclude_system: self.settings.exclude_system,
-            ..cairn_protocol::message::QueryDefaults::default()
-        }
+        self.query
+            .to_query_defaults(self.settings.exclude_hidden, self.settings.exclude_system)
     }
 
     fn build_search_command(&self, reset_scroll_on_apply: bool) -> SearchCommand {
@@ -560,11 +543,7 @@ impl CairnApp {
     }
 
     fn run_query(&mut self, cx: &mut Context<'_, Self>, change: ResultSetChange) {
-        // While the bin is open the search box is an in-place filter over the
-        // shell listing, not a request for an index page. Typing, paste, undo
-        // and IME commit all arrive here, so this one branch keeps the location
-        // stable for every text path.
-        if self.recycle_bin.is_open() {
+        if self.location_profile().is_local_listing {
             self.filter_recycle_bin(cx);
             return;
         }

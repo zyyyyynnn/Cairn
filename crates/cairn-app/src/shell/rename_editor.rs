@@ -162,7 +162,7 @@ impl CairnApp {
                 match outcome {
                     Ok(Ok(())) => {
                         let editor_open = this.rename.draft.take().is_some();
-                        if !this.recycle_bin.is_open() {
+                        if this.active_location().is_index() {
                             this.results.table.rename_row(&old_path, &new_name);
                         }
                         this.dismiss_rename_error_toast(cx);

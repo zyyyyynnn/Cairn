@@ -289,7 +289,7 @@ impl CairnApp {
                                 );
                                 this.service.status.update_volumes(envelope.volumes);
                                 let now_loading = this.service.status.is_any_loading();
-                                let table_visible = !this.recycle_bin.is_open();
+                                let table_visible = !this.location_profile().is_local_listing;
                                 if visible_change {
                                     cx.notify();
                                 }
@@ -334,7 +334,7 @@ impl CairnApp {
         self.service.connection.mark_connected();
         self.service.status.update_volumes(volumes);
         self.start_status_refresh(cx);
-        if !self.recycle_bin.is_open() {
+        if !self.location_profile().is_local_listing {
             self.request_result_set(ResultSetChange::Probe, cx);
         }
         self.refresh_content_status(cx);
@@ -1051,7 +1051,7 @@ impl CairnApp {
             if !scope_is_live {
                 self.query.source_scope = None;
             }
-            if !self.recycle_bin.is_open() {
+            if !self.location_profile().is_local_listing {
                 self.request_result_set(ResultSetChange::Replace, cx);
             }
         }

@@ -7,6 +7,7 @@
 use crate::app::CairnApp;
 use crate::search::ResultSetChange;
 use crate::search::filters::FilterCategory;
+use crate::shell::location::ActiveLocation;
 use cairn_protocol::status::SourceKind;
 use gpui_kit::gpui::{Context, Window};
 
@@ -21,106 +22,172 @@ pub struct NavState {
     pub source_scope: Option<cairn_protocol::message::SourceId>,
 }
 
-impl CairnApp {
+/// Non-empty bounded navigation history cursor upholding `!entries.is_empty() && index < entries.len()`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NavHistory {
+    entries: Vec<NavState>,
+    index: usize,
+}
+
+impl NavHistory {
+    pub fn new(initial: NavState) -> Self {
+        Self {
+            entries: vec![initial],
+            index: 0,
+        }
+    }
+
+    pub fn current(&self) -> &NavState {
+        &self.entries[self.index]
+    }
+
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[cfg(test)]
+    pub fn index(&self) -> usize {
+        self.index
+    }
+
+    #[cfg(test)]
+    pub fn entries(&self) -> &[NavState] {
+        &self.entries
+    }
+
     pub fn can_go_back(&self) -> bool {
-        // The bin is one location step; Back leaves it for the query that was
-        // active before it, even when that query is the first history entry.
-        self.recycle_bin.is_open() || self.nav_history_index > 0
+        self.index > 0
     }
 
     pub fn can_go_forward(&self) -> bool {
-        // A location step has no forward meaning until it is left. Keeping the
-        // navigation Forward button disabled prevents an action that would advance the
-        // query history while the bin stays on screen.
-        if self.recycle_bin.is_open() {
-            return false;
+        self.index + 1 < self.entries.len()
+    }
+
+    pub fn record(&mut self, state: NavState) {
+        if self.entries.get(self.index) == Some(&state) {
+            return;
         }
-        self.nav_history_index + 1 < self.nav_history.len()
+        self.entries.truncate(self.index + 1);
+        self.entries.push(state);
+
+        if self.entries.len() > MAX_NAV_HISTORY {
+            let excess = self.entries.len() - MAX_NAV_HISTORY;
+            self.entries.drain(0..excess);
+            self.entries.shrink_to_fit();
+        }
+
+        self.index = self.entries.len() - 1;
+    }
+
+    pub fn update_current_text(&mut self, text: &str) {
+        if let Some(state) = self.entries.get_mut(self.index) {
+            state.text = text.trim().to_string();
+        }
+    }
+
+    pub fn go_back(&mut self) -> Option<NavState> {
+        if !self.can_go_back() {
+            return None;
+        }
+        self.index -= 1;
+        Some(self.entries[self.index].clone())
+    }
+
+    pub fn go_forward(&mut self) -> Option<NavState> {
+        if !self.can_go_forward() {
+            return None;
+        }
+        self.index += 1;
+        Some(self.entries[self.index].clone())
+    }
+}
+
+impl CairnApp {
+    pub fn can_go_back(&self) -> bool {
+        match self.active_location() {
+            // The bin is one location step; Back leaves it for the query that was
+            // active before it, even when that query is the first history entry.
+            ActiveLocation::RecycleBin => true,
+            ActiveLocation::Index => self.nav_history.can_go_back(),
+        }
+    }
+
+    pub fn can_go_forward(&self) -> bool {
+        match self.active_location() {
+            ActiveLocation::RecycleBin => false,
+            ActiveLocation::Index => self.nav_history.can_go_forward(),
+        }
     }
 
     pub fn record_nav_state(&mut self) {
-        let current = NavState {
+        self.nav_history.record(NavState {
             text: self.query.search_input.text.trim().to_string(),
             filter: self.query.active_filter,
             source_scope: self.query.source_scope,
-        };
-        if let Some(last) = self.nav_history.get(self.nav_history_index)
-            && last == &current
-        {
-            return;
-        }
-        self.nav_history.truncate(self.nav_history_index + 1);
-        self.nav_history.push(current);
-
-        // Cap history to bounded size and release excess capacity (SM-2 memory guard)
-        if self.nav_history.len() > MAX_NAV_HISTORY {
-            let excess = self.nav_history.len() - MAX_NAV_HISTORY;
-            self.nav_history.drain(0..excess);
-            self.nav_history.shrink_to_fit();
-        }
-
-        self.nav_history_index = self.nav_history.len() - 1;
+        });
     }
 
     pub fn update_current_nav_state_text(&mut self) {
-        // While the bin is open the search box filters that location in place,
+        // While a local listing is open the search box filters that location in place,
         // not the query this entry describes; writing it back would erase the
         // text the person left before entering.
-        if self.recycle_bin.is_open() {
+        if !self.location_profile().records_nav_history {
             return;
         }
-        if let Some(state) = self.nav_history.get_mut(self.nav_history_index) {
-            state.text = self.query.search_input.text.trim().to_string();
-        }
+        self.nav_history
+            .update_current_text(&self.query.search_input.text);
     }
 
-    /// Leaves the bin for the query state that was current before it. The nav
-    /// entry itself is untouched, so repeated Back/Forward does not create a
-    /// second history step for the bin.
+    /// Transitions from a local listing (clearing local filter text) or an existing index query
+    /// (preserving typed text into current history) into an index location.
+    pub(crate) fn prepare_for_index_location(&mut self) {
+        if self.location_profile().is_local_listing {
+            self.query.search_input.clear();
+        } else {
+            self.update_current_nav_state_text();
+        }
+        self.recycle_bin.leave();
+    }
+
+    /// Leaves the bin for the query state that was current before it.
     pub(crate) fn return_from_recycle_bin(
         &mut self,
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
         self.recycle_bin.leave();
-        let index = self.nav_history_index;
-        self.restore_nav_state(index, cx);
-        // The bin owned the results focus; after leaving it the query box is
-        // the next logical target, so the person can type immediately.
+        let current = self.nav_history.current().clone();
+        self.apply_nav_state(&current, cx);
         self.query.search_focus.focus(window, cx);
     }
 
     pub fn go_back(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        if self.recycle_bin.is_open() {
-            self.return_from_recycle_bin(window, cx);
-            return;
-        }
-        if self.can_go_back() {
-            self.update_current_nav_state_text();
-            self.nav_history_index -= 1;
-            self.restore_nav_state(self.nav_history_index, cx);
+        match self.active_location() {
+            ActiveLocation::RecycleBin => self.return_from_recycle_bin(window, cx),
+            ActiveLocation::Index => {
+                if !self.nav_history.can_go_back() {
+                    return;
+                }
+                self.update_current_nav_state_text();
+                if let Some(state) = self.nav_history.go_back() {
+                    self.apply_nav_state(&state, cx);
+                }
+            }
         }
     }
 
     pub fn go_forward(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) {
-        // Forward is disabled in the bin; the guard keeps a stale key or
-        // programmatic dispatch from advancing history behind the location.
-        if self.recycle_bin.is_open() {
+        if self.active_location().is_recycle_bin() || !self.nav_history.can_go_forward() {
             return;
         }
-        if self.can_go_forward() {
-            self.update_current_nav_state_text();
-            self.nav_history_index += 1;
-            self.restore_nav_state(self.nav_history_index, cx);
+        self.update_current_nav_state_text();
+        if let Some(state) = self.nav_history.go_forward() {
+            self.apply_nav_state(&state, cx);
         }
     }
 
-    /// Restores one entry's query text and filter and asks the service for its
-    /// result set.
-    fn restore_nav_state(&mut self, index: usize, cx: &mut Context<'_, Self>) {
-        let Some(state) = self.nav_history.get(index).cloned() else {
-            return;
-        };
+    fn apply_nav_state(&mut self, state: &NavState, cx: &mut Context<'_, Self>) {
         self.query.search_input.set_text(&state.text);
         self.query.active_filter = state.filter;
         self.query.source_scope = state.source_scope.filter(|scope| {
@@ -139,6 +206,50 @@ mod tests {
     use super::*;
     use gpui_kit::gpui::AppContext as _;
 
+    fn state(text: &str, filter: FilterCategory) -> NavState {
+        NavState {
+            text: text.to_string(),
+            filter,
+            source_scope: None,
+        }
+    }
+
+    #[test]
+    fn nav_history_value_handles_dedup_branching_boundaries_and_cap() {
+        let mut history = NavHistory::new(state("", FilterCategory::All));
+        assert!(!history.can_go_back());
+        assert!(!history.can_go_forward());
+        assert!(history.go_back().is_none());
+        assert!(history.go_forward().is_none());
+
+        history.record(state("", FilterCategory::All));
+        assert_eq!(history.len(), 1);
+
+        history.record(state("one", FilterCategory::Document));
+        history.record(state("two", FilterCategory::Picture));
+        assert_eq!(history.len(), 3);
+        assert_eq!(history.index(), 2);
+
+        let back = history.go_back().expect("step back");
+        assert_eq!(back.filter, FilterCategory::Document);
+        assert!(history.can_go_back());
+        assert!(history.can_go_forward());
+
+        history.update_current_text("  edited  ");
+        assert_eq!(history.current().text, "edited");
+
+        history.record(state("branch", FilterCategory::Executable));
+        assert_eq!(history.len(), 3);
+        assert_eq!(history.index(), 2);
+        assert!(!history.can_go_forward());
+
+        for idx in 0..MAX_NAV_HISTORY + 10 {
+            history.record(state(&format!("q{idx}"), FilterCategory::All));
+        }
+        assert_eq!(history.len(), MAX_NAV_HISTORY);
+        assert_eq!(history.index(), MAX_NAV_HISTORY - 1);
+    }
+
     #[test]
     fn nav_history_steps_and_truncates_on_branch() {
         gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
@@ -154,12 +265,11 @@ mod tests {
                     let app = cx.new(|cx| CairnApp::new(window, cx));
 
                     app.update(cx, |this, cx| {
-                        // Initially seeded with All at index 0
                         assert!(!this.can_go_back());
                         assert!(!this.can_go_forward());
                         assert_eq!(this.nav_history.len(), 1);
-                        assert_eq!(this.nav_history_index, 0);
-                        assert_eq!(this.nav_history[0].filter, FilterCategory::All);
+                        assert_eq!(this.nav_history.index(), 0);
+                        assert_eq!(this.nav_history.entries()[0].filter, FilterCategory::All);
 
                         this.query.active_filter = FilterCategory::Document;
                         this.record_nav_state();
@@ -167,7 +277,7 @@ mod tests {
                         assert!(this.can_go_back());
                         assert!(!this.can_go_forward());
                         assert_eq!(this.nav_history.len(), 2);
-                        assert_eq!(this.nav_history_index, 1);
+                        assert_eq!(this.nav_history.index(), 1);
 
                         this.query.active_filter = FilterCategory::Picture;
                         this.record_nav_state();
@@ -175,47 +285,52 @@ mod tests {
                         assert!(this.can_go_back());
                         assert!(!this.can_go_forward());
                         assert_eq!(this.nav_history.len(), 3);
-                        assert_eq!(this.nav_history_index, 2);
+                        assert_eq!(this.nav_history.index(), 2);
 
                         this.go_back(window, cx);
                         assert_eq!(this.query.active_filter, FilterCategory::Document);
-                        assert_eq!(this.nav_history_index, 1);
+                        assert_eq!(this.nav_history.index(), 1);
                         assert!(this.can_go_back());
                         assert!(this.can_go_forward());
 
-                        // Branching from an earlier entry truncates forward history.
                         this.query.active_filter = FilterCategory::Executable;
                         this.record_nav_state();
 
                         assert_eq!(this.nav_history.len(), 3);
-                        assert_eq!(this.nav_history_index, 2);
-                        assert_eq!(this.nav_history[0].filter, FilterCategory::All);
-                        assert_eq!(this.nav_history[1].filter, FilterCategory::Document);
-                        assert_eq!(this.nav_history[2].filter, FilterCategory::Executable);
+                        assert_eq!(this.nav_history.index(), 2);
+                        assert_eq!(this.nav_history.entries()[0].filter, FilterCategory::All);
+                        assert_eq!(
+                            this.nav_history.entries()[1].filter,
+                            FilterCategory::Document
+                        );
+                        assert_eq!(
+                            this.nav_history.entries()[2].filter,
+                            FilterCategory::Executable
+                        );
                         assert!(this.can_go_back());
                         assert!(!this.can_go_forward());
 
                         this.go_back(window, cx);
                         assert_eq!(this.query.active_filter, FilterCategory::Document);
-                        assert_eq!(this.nav_history_index, 1);
+                        assert_eq!(this.nav_history.index(), 1);
                         assert!(this.can_go_back());
                         assert!(this.can_go_forward());
 
                         this.go_back(window, cx);
                         assert_eq!(this.query.active_filter, FilterCategory::All);
-                        assert_eq!(this.nav_history_index, 0);
+                        assert_eq!(this.nav_history.index(), 0);
                         assert!(!this.can_go_back());
                         assert!(this.can_go_forward());
 
                         this.go_forward(window, cx);
                         assert_eq!(this.query.active_filter, FilterCategory::Document);
-                        assert_eq!(this.nav_history_index, 1);
+                        assert_eq!(this.nav_history.index(), 1);
                         assert!(this.can_go_back());
                         assert!(this.can_go_forward());
 
                         this.go_forward(window, cx);
                         assert_eq!(this.query.active_filter, FilterCategory::Executable);
-                        assert_eq!(this.nav_history_index, 2);
+                        assert_eq!(this.nav_history.index(), 2);
                         assert!(this.can_go_back());
                         assert!(!this.can_go_forward());
                     });

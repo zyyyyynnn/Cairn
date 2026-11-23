@@ -317,22 +317,6 @@ impl GroupCommand {
         }
     }
 
-    /// The Fluent message that names this command in the active location. Inside the Recycle Bin,
-    /// deletion is permanent, copying paths copies the original location, and sort columns use the
-    /// bin's column captions.
-    pub fn label_key_in(self, in_recycle_bin: bool) -> &'static str {
-        if in_recycle_bin {
-            match self {
-                GroupCommand::DeleteSelected => "ctx_delete_permanently",
-                GroupCommand::CopyPaths => "ctx_copy_original_location",
-                GroupCommand::SortBy(column) => column.label_key_in(true),
-                _ => self.label_key(),
-            }
-        } else {
-            self.label_key()
-        }
-    }
-
     /// The Action this item runs, when a keymap Action already owns the command. Dispatching it lets
     /// the menu read its hint from the keymap instead of repeating a keystroke here, and keeps the
     /// item and its shortcut on one implementation.

@@ -161,8 +161,7 @@ impl CairnApp {
             .child(refresh);
 
         let mut right: Option<AnyElement> = None;
-        let in_index_table = !self.recycle_bin.is_open();
-        if in_index_table
+        if self.location_profile().supports_degraded_notice
             && !summary_loading
             && let Some(degraded) = &self.query.degraded
         {
@@ -249,17 +248,20 @@ impl CairnApp {
     }
 
     pub(crate) fn refresh_current_view(&mut self, cx: &mut Context<'_, Self>) {
-        if self.recycle_bin.is_open() {
-            self.begin_recycle_bin_load(cx);
-            cx.notify();
-            return;
+        match self.active_location() {
+            crate::shell::location::ActiveLocation::RecycleBin => {
+                self.begin_recycle_bin_load(cx);
+                cx.notify();
+            }
+            crate::shell::location::ActiveLocation::Index => {
+                if !self.service.connection.is_connected() {
+                    self.check_service_connection(cx);
+                    return;
+                }
+                self.request_result_set(ResultSetChange::Refresh, cx);
+                cx.notify();
+            }
         }
-        if !self.service.connection.is_connected() {
-            self.check_service_connection(cx);
-            return;
-        }
-        self.request_result_set(ResultSetChange::Refresh, cx);
-        cx.notify();
     }
 }
 

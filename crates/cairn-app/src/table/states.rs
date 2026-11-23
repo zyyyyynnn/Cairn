@@ -77,7 +77,7 @@ impl CairnApp {
         }
 
         let control = accessibility::control("result-state");
-        if self.recycle_bin.is_open() {
+        if self.active_location().is_recycle_bin() {
             let bin_empty = self.recycle_bin.all().is_empty();
             let (message_key, icon) = if bin_empty {
                 (

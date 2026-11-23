@@ -573,7 +573,7 @@ mod bin_command_tests {
                         this.query.search_input.set_text("kept query");
                         this.query.coordinator.set_cancelled(true);
                         this.open_recycle_bin(window, cx);
-                        assert_eq!(this.nav_history[this.nav_history_index].text, "kept query");
+                        assert_eq!(this.nav_history.current().text, "kept query");
                         assert!(this.query.search_input.text.is_empty());
                         assert!(
                             !this.query.is_cancelled(),

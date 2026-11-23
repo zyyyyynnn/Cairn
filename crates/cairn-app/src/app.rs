@@ -188,7 +188,7 @@ pub struct HighlightSpan<'a> {
 }
 
 pub use crate::search::query_orchestration::split_name_highlights;
-pub use crate::shell::nav_history::NavState;
+pub use crate::shell::nav_history::{NavHistory, NavState};
 
 /// Joins a file name to a parent directory that may or may not carry a trailing separator.
 pub fn join_row_path(directory: &str, name: &str) -> String {
@@ -221,11 +221,7 @@ pub struct QueryDomain {
     pub case_sensitive: bool,
     pub whole_word: bool,
     pub match_path: bool,
-    pub use_regex: bool,
-    pub pinyin: bool,
-    pub ignore_punctuation: bool,
-    pub ignore_whitespace: bool,
-    pub ignore_diacritics: bool,
+    pub match_mode: crate::search::QueryMatchMode,
     pub active_filter: FilterCategory,
     /// The indexed source the current query is restricted to, or `None` when the query spans
     /// every indexed source. The sidebar's folder-source rows set and clear it.
@@ -253,6 +249,49 @@ impl QueryDomain {
 
     pub(crate) fn is_cancelled(&self) -> bool {
         self.coordinator.is_cancelled()
+    }
+
+    pub(crate) fn toggle(&mut self, toggle: crate::search::QueryToggle) {
+        use crate::search::QueryToggle;
+        match toggle {
+            QueryToggle::Case => self.case_sensitive = !self.case_sensitive,
+            QueryToggle::WholeWord => self.whole_word = !self.whole_word,
+            QueryToggle::MatchPath => self.match_path = !self.match_path,
+            QueryToggle::Regex => self.match_mode.toggle_regex(),
+            QueryToggle::Modifier(modifier) => self.match_mode.toggle_modifier(modifier),
+        }
+    }
+
+    pub(crate) fn is_toggle_checked(&self, toggle: crate::search::QueryToggle) -> bool {
+        use crate::search::QueryToggle;
+        match toggle {
+            QueryToggle::Case => self.case_sensitive,
+            QueryToggle::WholeWord => self.whole_word,
+            QueryToggle::MatchPath => self.match_path,
+            QueryToggle::Regex => self.match_mode.is_regex(),
+            QueryToggle::Modifier(modifier) => self.match_mode.modifier(modifier),
+        }
+    }
+
+    pub(crate) fn to_query_defaults(
+        &self,
+        exclude_hidden: bool,
+        exclude_system: bool,
+    ) -> cairn_protocol::message::QueryDefaults {
+        let modifiers = self.match_mode.text_modifiers();
+        cairn_protocol::message::QueryDefaults {
+            case_sensitive: self.case_sensitive,
+            whole_words: self.whole_word,
+            match_path: self.match_path,
+            is_regex: self.match_mode.is_regex(),
+            pinyin: modifiers.pinyin,
+            ignore_punctuation: modifiers.ignore_punctuation,
+            ignore_whitespace: modifiers.ignore_whitespace,
+            ignore_diacritics: modifiers.ignore_diacritics,
+            exclude_hidden,
+            exclude_system,
+            ..cairn_protocol::message::QueryDefaults::default()
+        }
     }
 }
 
@@ -354,8 +393,7 @@ pub struct CairnApp {
     /// Records whether the keyboard drives focus, including the Tab the focus walk consumes.
     pub _keyboard_modality: Subscription,
     pub sidebar_collapsed: bool,
-    pub nav_history: Vec<NavState>,
-    pub nav_history_index: usize,
+    pub nav_history: NavHistory,
     pub sidebar_scroll: ScrollHandle,
     /// The in-place rename editor for the single selected result row.
     pub(crate) rename: RenameEditor,
@@ -479,11 +517,7 @@ impl CairnApp {
                 case_sensitive: false,
                 whole_word: false,
                 match_path: false,
-                use_regex: false,
-                pinyin: false,
-                ignore_punctuation: false,
-                ignore_whitespace: false,
-                ignore_diacritics: false,
+                match_mode: crate::search::QueryMatchMode::default(),
                 active_filter: FilterCategory::All,
                 source_scope: None,
                 active_session_id: None,
@@ -523,12 +557,11 @@ impl CairnApp {
             _focus_lost: vec![focus_lost],
             _keyboard_modality: keyboard_modality,
             sidebar_collapsed: false,
-            nav_history: vec![NavState {
+            nav_history: NavHistory::new(NavState {
                 text: String::new(),
                 filter: FilterCategory::All,
                 source_scope: None,
-            }],
-            nav_history_index: 0,
+            }),
             sidebar_scroll: ScrollHandle::default(),
             rename: RenameEditor {
                 input: rename_input,

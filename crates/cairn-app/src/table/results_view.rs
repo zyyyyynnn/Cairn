@@ -9,7 +9,7 @@ use crate::shell::accessibility::{self, ControlElement};
 use crate::shell::command_groups::GroupCommand;
 use crate::shell::commands::RESULTS_CONTEXT;
 use crate::shell::theme::ShellTokens;
-use crate::table::rows::{BIN_COMMANDS, RESULT_COMMANDS, RowBand, rows_to_paint};
+use crate::table::rows::{RowBand, rows_to_paint};
 use crate::table::surface::{ResultSurface, ResultSurfaceInputs, result_surface};
 use crate::view::announce_shortcut;
 use gpui_kit::component::menu::ContextMenuExt;
@@ -36,9 +36,7 @@ impl CairnApp {
         let header = self.render_table_header(tokens, cx);
         let surface = result_surface(ResultSurfaceInputs {
             total_rows: self.results.table.total_rows(),
-            recycle_bin_open: self.recycle_bin.is_open(),
-            recycle_bin_loading: self.recycle_bin.is_loading(),
-            recycle_bin_error: self.recycle_bin.error().is_some(),
+            location: self.recycle_bin.surface_location(),
             query_in_flight: self.query.is_searching(),
             index_catching_up: self.service.status.is_any_loading(),
             service_connected: self.service.connection.is_connected(),
@@ -296,12 +294,8 @@ impl CairnApp {
         if !interactive || !has_rows {
             return stack.into_any_element();
         }
-        let in_bin = self.recycle_bin.is_open();
-        let commands = if in_bin {
-            BIN_COMMANDS
-        } else {
-            RESULT_COMMANDS
-        };
+        let profile = self.location_profile();
+        let commands = profile.result_context_commands();
         let i18n = Rc::clone(&self.i18n);
         let app = cx.entity();
         stack
@@ -317,7 +311,7 @@ impl CairnApp {
                     {
                         menu = menu.separator();
                     }
-                    let label = i18n.get_text(command.label_key_in(in_bin));
+                    let label = i18n.get_text(profile.command_label_key(*command));
                     let action = command
                         .action()
                         .expect("a result command is an Action the root already handles");
