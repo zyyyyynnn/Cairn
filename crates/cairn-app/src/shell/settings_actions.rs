@@ -55,10 +55,12 @@ impl CairnApp {
         cx.notify();
     }
 
+    fn local_listing_is_busy(&self) -> bool {
+        self.location_profile().is_local_listing && self.recycle_bin.is_loading()
+    }
+
     pub fn toggle_table_sort(&mut self, col: SortColumn, cx: &mut Context<'_, Self>) {
-        if !self.location_profile().supports_sort_column(col)
-            || (self.active_location().is_recycle_bin() && self.recycle_bin.is_loading())
-        {
+        if !self.location_profile().supports_sort_column(col) || self.local_listing_is_busy() {
             return;
         }
         self.results.table.toggle_sort(col);
@@ -66,9 +68,7 @@ impl CairnApp {
     }
 
     pub fn shift_toggle_table_sort(&mut self, col: SortColumn, cx: &mut Context<'_, Self>) {
-        if !self.location_profile().supports_sort_column(col)
-            || (self.active_location().is_recycle_bin() && self.recycle_bin.is_loading())
-        {
+        if !self.location_profile().supports_sort_column(col) || self.local_listing_is_busy() {
             return;
         }
         if self.location_profile().is_local_listing {
@@ -137,6 +137,9 @@ impl CairnApp {
 
     /// Reverses the direction of the column that is already sorting the results.
     pub(super) fn toggle_sort_direction(&mut self, cx: &mut Context<'_, Self>) {
+        if self.local_listing_is_busy() {
+            return;
+        }
         self.results.table.reverse_primary_sort();
         self.commit_sort_spec_change(cx);
     }
@@ -461,12 +464,21 @@ mod tests {
                             snapshot
                         );
 
+                        let loading_sort = this.results.table.primary_sort().0;
+                        this.shift_toggle_table_sort(SortColumn::Size, cx);
+                        assert_eq!(this.results.table.primary_sort().0, loading_sort);
+
+                        this.recycle_bin.install_listing(Vec::new());
                         this.toggle_table_sort(SortColumn::Name, cx);
                         this.shift_toggle_table_sort(SortColumn::Size, cx);
                         assert_eq!(this.results.table.sort_spec.keys.len(), 1);
                         assert_eq!(this.results.table.primary_sort().0, SortColumn::Size);
 
                         this.toggle_table_sort(SortColumn::DateCreated, cx);
+                        assert_eq!(this.results.table.primary_sort().0, SortColumn::Size);
+
+                        assert!(this.recycle_bin.begin_mutation().is_some());
+                        this.toggle_table_sort(SortColumn::Path, cx);
                         assert_eq!(this.results.table.primary_sort().0, SortColumn::Size);
                     });
 
