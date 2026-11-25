@@ -21,6 +21,8 @@ pub enum CodecError {
     IncompatibleVersion { received: u16 },
     #[error("Serialization error: {0}")]
     Serialization(#[from] postcard::Error),
+    #[error("Frame payload contains {0} trailing bytes")]
+    TrailingBytes(usize),
     #[error("Incomplete frame: expected {expected} bytes, got {actual}")]
     Incomplete { expected: usize, actual: usize },
 }
@@ -130,7 +132,10 @@ pub fn try_decode_frame<T: DeserializeOwned>(buf: &[u8]) -> Result<Option<(usize
         return Ok(None);
     }
 
-    let payload = postcard::from_bytes(&buf[HEADER_SIZE..total_len])?;
+    let (payload, rest) = postcard::take_from_bytes(&buf[HEADER_SIZE..total_len])?;
+    if !rest.is_empty() {
+        return Err(CodecError::TrailingBytes(rest.len()));
+    }
     Ok(Some((total_len, payload)))
 }
 
@@ -536,5 +541,18 @@ mod wire_layout {
                 .to_string()
                 .contains("unknown sort column")
         );
+    }
+
+    #[test]
+    fn try_decode_frame_rejects_trailing_bytes_after_payload() {
+        let mut frame = encode_frame(&ClientRequest::GetStatus).unwrap();
+        frame.push(0xAA);
+        let new_len = (frame.len() - HEADER_SIZE) as u32;
+        frame[0..4].copy_from_slice(&new_len.to_le_bytes());
+
+        assert!(matches!(
+            super::try_decode_frame::<ClientRequest>(&frame),
+            Err(super::CodecError::TrailingBytes(1))
+        ));
     }
 }

@@ -263,15 +263,27 @@ type SidebarActivate = dyn Fn(&mut CairnApp, &mut Window, &mut Context<'_, Cairn
 /// focused element's `on_click` into the activation. A pointer click moves focus to this row before
 /// activating it, so the ring and the next Enter belong to the row the person just pressed, not to
 /// whichever row had focus before.
-fn keyboard_row(
-    row: ControlElement,
+struct KeyboardRowChrome<'a> {
+    control: ControlElement,
     focus: FocusHandle,
-    is_focused: bool,
-    tokens: &ShellTokens,
+    keyboard_navigation: bool,
+    tokens: &'a ShellTokens,
+    window: &'a Window,
+}
+
+fn keyboard_row(
+    chrome: KeyboardRowChrome<'_>,
     content: impl IntoElement,
     activate: impl Fn(&mut CairnApp, &mut Window, &mut Context<'_, CairnApp>) + 'static,
     cx: &mut Context<'_, CairnApp>,
 ) -> AnyElement {
+    let KeyboardRowChrome {
+        control: row,
+        focus,
+        keyboard_navigation,
+        tokens,
+        window,
+    } = chrome;
     let activate: Rc<SidebarActivate> = Rc::new(activate);
     let action_activate = activate.clone();
     let click_activate = activate;
@@ -281,7 +293,6 @@ fn keyboard_row(
         .w_full()
         .flex_shrink_0()
         .rounded(tokens.radius)
-        .cursor_pointer()
         // The interactive wrapper owns the GPUI hit-test area for hover feedback; the child row
         // draws only the active fill because hover styles on a non-interactive child do not fire.
         .hover(|this| {
@@ -302,16 +313,14 @@ fn keyboard_row(
             click_activate(this, window, cx);
         }))
         .child(content)
-        .when(is_focused, |this| {
-            this.child(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .rounded(tokens.radius)
-                    .border_1()
-                    .border_color(tokens.ring),
-            )
-        })
+        .children(cairn_ui::focus::edge(
+            &focus,
+            tokens.ring,
+            tokens.radius,
+            keyboard_navigation,
+            window,
+            cx,
+        ))
         .into_any_element()
 }
 
@@ -352,8 +361,7 @@ impl CairnApp {
                     )
                     .read(cx)
                     .clone();
-                let is_focused =
-                    focus.contains_focused(window, cx) && cairn_ui::focus::keyboard_navigation(cx);
+                let keyboard_nav = cairn_ui::focus::keyboard_navigation(cx);
                 let item = sidebar_row(
                     category_icon(category),
                     self.cached_text(category.label_key()),
@@ -363,12 +371,15 @@ impl CairnApp {
                 );
 
                 keyboard_row(
-                    accessibility::element(control)
-                        .aria_label(name)
-                        .aria_selected(is_active),
-                    focus,
-                    is_focused,
-                    tokens,
+                    KeyboardRowChrome {
+                        control: accessibility::element(control)
+                            .aria_label(name)
+                            .aria_selected(is_active),
+                        focus,
+                        keyboard_navigation: keyboard_nav,
+                        tokens,
+                        window,
+                    },
                     item,
                     move |this, _window, cx| this.set_filter(category, cx),
                     cx,
@@ -387,8 +398,7 @@ impl CairnApp {
             })
             .read(cx)
             .clone();
-        let bin_is_focused =
-            bin_focus.contains_focused(window, cx) && cairn_ui::focus::keyboard_navigation(cx);
+        let bin_keyboard_nav = cairn_ui::focus::keyboard_navigation(cx);
         let bin_row = sidebar_row(
             IconName::Recycle,
             self.cached_text("sidebar_recycle_bin"),
@@ -397,12 +407,15 @@ impl CairnApp {
             icon_metrics,
         );
         let recycle_entry = keyboard_row(
-            accessibility::element(bin_control)
-                .aria_label(bin_name)
-                .aria_selected(bin_active),
-            bin_focus,
-            bin_is_focused,
-            tokens,
+            KeyboardRowChrome {
+                control: accessibility::element(bin_control)
+                    .aria_label(bin_name)
+                    .aria_selected(bin_active),
+                focus: bin_focus,
+                keyboard_navigation: bin_keyboard_nav,
+                tokens,
+                window,
+            },
             bin_row,
             Self::open_recycle_bin,
             cx,
@@ -437,8 +450,7 @@ impl CairnApp {
                         )
                         .read(cx)
                         .clone();
-                    let is_focused = focus.contains_focused(window, cx)
-                        && cairn_ui::focus::keyboard_navigation(cx);
+                    let keyboard_nav = cairn_ui::focus::keyboard_navigation(cx);
                     let row = sidebar_row_with_trailing(
                         IconName::Folder,
                         source.root_path.clone(),
@@ -448,12 +460,15 @@ impl CairnApp {
                         icon_metrics,
                     );
                     keyboard_row(
-                        accessibility::element_at(control, source_id.0 as usize)
-                            .aria_label(name)
-                            .aria_selected(is_active),
-                        focus,
-                        is_focused,
-                        tokens,
+                        KeyboardRowChrome {
+                            control: accessibility::element_at(control, source_id.0 as usize)
+                                .aria_label(name)
+                                .aria_selected(is_active),
+                            focus,
+                            keyboard_navigation: keyboard_nav,
+                            tokens,
+                            window,
+                        },
                         row,
                         move |this, _window, cx| this.select_folder_source(source_id, cx),
                         cx,
@@ -469,13 +484,15 @@ impl CairnApp {
                 })
                 .read(cx)
                 .clone();
-            let manage_is_focused = manage_focus.contains_focused(window, cx)
-                && cairn_ui::focus::keyboard_navigation(cx);
+            let manage_keyboard_nav = cairn_ui::focus::keyboard_navigation(cx);
             let manage_row = keyboard_row(
-                accessibility::element(manage_control).aria_label(manage_name.clone()),
-                manage_focus,
-                manage_is_focused,
-                tokens,
+                KeyboardRowChrome {
+                    control: accessibility::element(manage_control).aria_label(manage_name.clone()),
+                    focus: manage_focus,
+                    keyboard_navigation: manage_keyboard_nav,
+                    tokens,
+                    window,
+                },
                 sidebar_row(
                     IconName::FolderCog,
                     manage_name,

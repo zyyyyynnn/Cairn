@@ -9,7 +9,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 
-use crate::table::model::OptionalColumn;
+use crate::table::columns::OptionalColumn;
 use cairn_protocol::message::FileRowData;
 use gpui_kit::gpui::SharedString;
 

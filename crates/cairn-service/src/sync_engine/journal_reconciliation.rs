@@ -58,8 +58,51 @@ pub const fn is_device_offline_win32_error(code: u32) -> bool {
 }
 
 #[cfg(windows)]
+pub(super) trait JournalPort {
+    fn query_usn_journal(
+        &self,
+    ) -> Result<cairn_ntfs::usn::UsnJournalData, cairn_ntfs::usn::UsnError>;
+
+    fn read_usn_journal(
+        &self,
+        journal_id: u64,
+        start_usn: i64,
+        out_buf: &mut [u8],
+    ) -> Result<(i64, Vec<cairn_ntfs::usn::UsnChange>), cairn_ntfs::usn::UsnError>;
+}
+
+#[cfg(windows)]
+impl JournalPort for cairn_ntfs::RawVolumeHandle {
+    fn query_usn_journal(
+        &self,
+    ) -> Result<cairn_ntfs::usn::UsnJournalData, cairn_ntfs::usn::UsnError> {
+        Self::query_usn_journal(self)
+    }
+
+    fn read_usn_journal(
+        &self,
+        journal_id: u64,
+        start_usn: i64,
+        out_buf: &mut [u8],
+    ) -> Result<(i64, Vec<cairn_ntfs::usn::UsnChange>), cairn_ntfs::usn::UsnError> {
+        Self::read_usn_journal(self, journal_id, start_usn, out_buf)
+    }
+}
+
+#[cfg(windows)]
 pub fn replay_usn_backlog(
     handle: &cairn_ntfs::RawVolumeHandle,
+    vol: &mut VolumeIndex,
+    buf: &mut [u8],
+    journal_id: u64,
+    tail_usn: i64,
+) -> Result<(), cairn_ntfs::usn::UsnError> {
+    replay_usn_backlog_with(handle, vol, buf, journal_id, tail_usn)
+}
+
+#[cfg(windows)]
+fn replay_usn_backlog_with(
+    handle: &dyn JournalPort,
     vol: &mut VolumeIndex,
     buf: &mut [u8],
     journal_id: u64,
@@ -68,6 +111,7 @@ pub fn replay_usn_backlog(
     let start_usn = vol.last_usn;
     vol.journal_id = journal_id;
     vol.usn_enabled = true;
+    vol.usn_parse_failed = false;
     let mut resume = start_usn;
 
     for _ in 0..USN_CATCH_UP_MAX_ROUNDS {
@@ -137,6 +181,16 @@ pub fn finalize_scanned_volume(
     index_dir: &Path,
     scan_start: Option<(cairn_ntfs::RawVolumeHandle, cairn_ntfs::usn::UsnJournalData)>,
 ) -> Result<(), String> {
+    let port = scan_start.map(|(handle, t0)| (Box::new(handle) as Box<dyn JournalPort>, t0));
+    finalize_scanned_volume_with(vol, index_dir, port)
+}
+
+#[cfg(windows)]
+pub(super) fn finalize_scanned_volume_with(
+    vol: &mut VolumeIndex,
+    index_dir: &Path,
+    scan_start: Option<(Box<dyn JournalPort>, cairn_ntfs::usn::UsnJournalData)>,
+) -> Result<(), String> {
     let drive = vol.drive_letter;
     let Some((handle, t0)) = scan_start else {
         vol.usn_enabled = false;
@@ -147,6 +201,7 @@ pub fn finalize_scanned_volume(
 
     vol.journal_id = t0.journal_id;
     vol.last_usn = t0.next_usn;
+    vol.usn_parse_failed = false;
 
     let t1 = handle.query_usn_journal().ok();
     let journal_replaced = t1.is_some_and(|data| data.journal_id != t0.journal_id);
@@ -159,19 +214,37 @@ pub fn finalize_scanned_volume(
         );
     } else if let Some(t1) = t1 {
         let mut buf = vec![0u8; 65536];
-        if let Err(e) = replay_usn_backlog(&handle, vol, &mut buf, t0.journal_id, t1.next_usn) {
+        if let Err(e) = replay_usn_backlog_with(&*handle, vol, &mut buf, t0.journal_id, t1.next_usn)
+        {
             tracing::warn!(
                 "USN backlog replay for {} failed ({:?}): the snapshot is incomplete",
                 drive,
                 e
             );
+            if matches!(
+                e,
+                cairn_ntfs::usn::UsnError::UnsupportedRecordVersion(_)
+                    | cairn_ntfs::usn::UsnError::MalformedRecord(_)
+            ) {
+                vol.status.set(VolumeState::Offline);
+                vol.usn_parse_failed = true;
+                save_scanned_index(vol, index_dir);
+                return Ok(());
+            }
             replayed_to = None;
+        } else {
+            replayed_to = Some(vol.last_usn);
         }
     } else {
         tracing::warn!(
-            "USN journal tail for {} could not be read after the scan: catch-up left to polling",
+            "USN journal tail for {} could not be read after the scan",
             drive
         );
+        if !vol.usn_enabled {
+            vol.status.set(VolumeState::SnapshotMode);
+            save_scanned_index(vol, index_dir);
+            return Ok(());
+        }
     }
 
     let decision = post_scan_decision(
@@ -206,6 +279,89 @@ mod tests {
         assert!(is_device_offline_win32_error(1167));
         assert!(is_device_offline_win32_error(21));
         assert!(!is_device_offline_win32_error(0));
+    }
+
+    #[cfg(windows)]
+    struct StubJournalPort {
+        query_error: Option<u32>,
+        query_ok: Option<cairn_ntfs::usn::UsnJournalData>,
+        next_usn_step: i64,
+    }
+
+    #[cfg(windows)]
+    impl JournalPort for StubJournalPort {
+        fn query_usn_journal(
+            &self,
+        ) -> Result<cairn_ntfs::usn::UsnJournalData, cairn_ntfs::usn::UsnError> {
+            if let Some(code) = self.query_error {
+                return Err(cairn_ntfs::usn::UsnError::QueryFailed(code));
+            }
+            Ok(self.query_ok.expect("query_ok set"))
+        }
+
+        fn read_usn_journal(
+            &self,
+            _journal_id: u64,
+            start_usn: i64,
+            _out_buf: &mut [u8],
+        ) -> Result<(i64, Vec<cairn_ntfs::usn::UsnChange>), cairn_ntfs::usn::UsnError> {
+            Ok((start_usn + self.next_usn_step, Vec::new()))
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn finalize_scanned_volume_uses_replayed_usn_and_handles_missing_t1_on_non_usn_volume() {
+        let dir = tempfile::tempdir().unwrap();
+        let t0 = cairn_ntfs::usn::UsnJournalData {
+            journal_id: 7,
+            first_usn: 0,
+            next_usn: 100,
+            lowest_valid_usn: 0,
+        };
+
+        // Case 1: t1 failed while volume was not yet USN-enabled -> SnapshotMode instead of CatchingUp(0).
+        let mut non_usn_vol = VolumeIndex::new('C');
+        non_usn_vol.usn_enabled = false;
+        let port = Box::new(StubJournalPort {
+            query_error: Some(1),
+            query_ok: None,
+            next_usn_step: 0,
+        });
+        finalize_scanned_volume_with(&mut non_usn_vol, dir.path(), Some((port, t0)))
+            .expect("missing T1 on non-USN volume falls back to SnapshotMode");
+        assert_eq!(non_usn_vol.status.state(), VolumeState::SnapshotMode);
+
+        // Case 1b: t1 failed on a USN-enabled volume -> CatchingUp(0) so polling recovers it.
+        let mut usn_vol = VolumeIndex::new('E');
+        usn_vol.usn_enabled = true;
+        let port_usn = Box::new(StubJournalPort {
+            query_error: Some(1),
+            query_ok: None,
+            next_usn_step: 0,
+        });
+        finalize_scanned_volume_with(&mut usn_vol, dir.path(), Some((port_usn, t0)))
+            .expect("missing T1 on USN-enabled volume stays CatchingUp(0)");
+        assert!(usn_vol.usn_enabled);
+        assert_eq!(usn_vol.status.state(), VolumeState::CatchingUp(0));
+
+        // Case 2: replay advances last_usn to t1.next_usn -> uses updated last_usn so state reaches Synced.
+        let mut replay_vol = VolumeIndex::new('D');
+        let t1 = cairn_ntfs::usn::UsnJournalData {
+            journal_id: 7,
+            first_usn: 0,
+            next_usn: 250,
+            lowest_valid_usn: 0,
+        };
+        let replay_port = Box::new(StubJournalPort {
+            query_error: None,
+            query_ok: Some(t1),
+            next_usn_step: 150,
+        });
+        finalize_scanned_volume_with(&mut replay_vol, dir.path(), Some((replay_port, t0)))
+            .expect("full replay reconciles to Synced");
+        assert_eq!(replay_vol.last_usn, 250);
+        assert_eq!(replay_vol.status.state(), VolumeState::Synced);
     }
 
     #[test]

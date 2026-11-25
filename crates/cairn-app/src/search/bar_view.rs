@@ -262,7 +262,7 @@ impl CairnApp {
                         .left(mark_left)
                         .w(mark_width)
                         .bottom_0()
-                        .h(px(1.0))
+                        .h(HAIRLINE)
                         .bg(tokens.ring),
                 );
             }

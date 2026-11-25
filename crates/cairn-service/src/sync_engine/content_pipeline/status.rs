@@ -10,7 +10,6 @@ use super::{
 };
 use cairn_content::{ContentIndexError, ContentSearcher, ContentWriter};
 use cairn_protocol::status::{ContentIndexState, ContentIndexStatus};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -75,7 +74,7 @@ impl ContentPipeline {
                 self.set_progress(0, 0);
                 self.send_command(ContentCommand::Start);
             } else {
-                self.cancel.store(true, Ordering::SeqCst);
+                self.mark_cancelled();
                 self.set_disabled();
                 self.send_command(ContentCommand::Cancel);
             }
@@ -89,12 +88,18 @@ impl ContentPipeline {
     }
 
     pub(super) fn reset_cancel(&self) -> bool {
-        self.cancel.store(false, Ordering::SeqCst);
+        let _guard = self.cancel_lock.lock().unwrap();
         if self.is_shutdown() {
             self.cancel.store(true, Ordering::SeqCst);
             return false;
         }
+        self.cancel.store(false, Ordering::SeqCst);
         true
+    }
+
+    pub(super) fn mark_cancelled(&self) {
+        let _guard = self.cancel_lock.lock().unwrap();
+        self.cancel.store(true, Ordering::SeqCst);
     }
 
     pub(super) fn is_cancelled(&self) -> bool {
@@ -217,21 +222,12 @@ impl ContentPipeline {
             }
         };
         let path = self.backfill_marker_path();
-        let tmp = self.dir.join(CONTENT_BACKFILL_MARKER_TMP);
-        let persisted = std::fs::create_dir_all(&self.dir)
-            .and_then(|()| {
-                let mut file = std::fs::File::create(&tmp)?;
-                file.write_all(&payload)?;
-                file.sync_all()
-            })
-            .and_then(|()| std::fs::rename(&tmp, &path));
-        if let Err(err) = persisted {
+        if let Err(err) = crate::persistence::atomic_write_bytes(&path, &payload) {
             tracing::warn!(
                 "Could not persist the content backfill marker at {}: {}",
                 path.display(),
                 err
             );
-            let _ = std::fs::remove_file(&tmp);
         }
     }
 
@@ -333,7 +329,9 @@ impl ContentPipeline {
             }
             let is_batch = (name.starts_with("batch-") || name.starts_with("deletes-"))
                 && name.ends_with(".jsonl");
-            let is_stale_tmp = (name.starts_with(".tmp") || name == CONTENT_BACKFILL_MARKER_TMP)
+            let is_stale_tmp = (name.starts_with(".tmp")
+                || name == CONTENT_BACKFILL_MARKER_TMP
+                || (name.starts_with(CONTENT_BACKFILL_MARKER) && name.ends_with(".tmp")))
                 && entry
                     .metadata()
                     .ok()
@@ -466,24 +464,14 @@ impl MultiVolumeEngine {
             });
         match spawned {
             Ok(_) => {
-                *guard = Some(tx);
-                drop(guard);
+                *guard = Some(tx.clone());
+                let _ = tx.send(ContentCommand::EnsureStarted);
             }
             Err(err) => {
                 drop(guard);
                 self.set_content_error(format!("could not start content worker thread: {err}"));
-                return;
             }
         }
-
-        if !self.config.read().unwrap().content_index_enabled {
-            return;
-        }
-        self.cleanup_stale_content_files();
-        if self.content_pipeline.is_shutdown() || self.try_resume_content_index() {
-            return;
-        }
-        self.send_content_command(ContentCommand::Start);
     }
 
     pub(super) fn handle_content_command(&self, command: ContentCommand) {
@@ -491,12 +479,22 @@ impl MultiVolumeEngine {
             return;
         }
         match command {
+            ContentCommand::EnsureStarted => {
+                if !self.get_config().content_index_enabled {
+                    return;
+                }
+                self.cleanup_stale_content_files();
+                if self.content_pipeline.is_shutdown() || self.try_resume_content_index() {
+                    return;
+                }
+                self.run_full_backfill();
+            }
             ContentCommand::Start => self.run_full_backfill(),
             ContentCommand::IndexChanges { tasks, deletions } => {
                 self.run_incremental(&tasks, &deletions);
             }
             ContentCommand::Cancel => {
-                self.content_pipeline.cancel.store(true, Ordering::SeqCst);
+                self.content_pipeline.mark_cancelled();
                 self.remove_backfill_marker();
                 self.drop_content_searcher();
                 self.set_content_disabled();
@@ -518,20 +516,27 @@ impl MultiVolumeEngine {
 
     /// Signals any active `CairnWorker` subprocess to terminate on service shutdown.
     pub fn stop_content_worker(&self) {
-        self.content_pipeline.shutdown.store(true, Ordering::SeqCst);
-        self.content_pipeline.cancel.store(true, Ordering::SeqCst);
+        let _clear_guard = self.content_pipeline.inline_clear_lock.lock().unwrap();
+        {
+            let _guard = self.content_pipeline.cancel_lock.lock().unwrap();
+            self.content_pipeline.shutdown.store(true, Ordering::SeqCst);
+            self.content_pipeline.cancel.store(true, Ordering::SeqCst);
+        }
         let _ = self.content_pipeline.commands.lock().unwrap().take();
     }
 
     pub fn request_clear_content_index(&self) -> bool {
-        let sender = self.content_pipeline.commands.lock().unwrap();
+        let sender = self.content_pipeline.commands.lock().unwrap().clone();
         if self.content_pipeline.is_shutdown() {
             return false;
         }
-        if let Some(tx) = sender.as_ref() {
+        if let Some(tx) = sender {
             return tx.send(ContentCommand::Clear).is_ok();
         }
-        drop(sender);
+        let _clear_guard = self.content_pipeline.inline_clear_lock.lock().unwrap();
+        if self.content_pipeline.is_shutdown() {
+            return false;
+        }
         if self.clear_content_index().is_ok() {
             self.content_pipeline.clear_disabled();
             return true;

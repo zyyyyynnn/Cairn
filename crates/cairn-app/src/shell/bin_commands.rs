@@ -63,6 +63,38 @@ fn reconcile_empty_bin(
     }
 }
 
+struct DeleteRefreshContext {
+    location: ActiveLocation,
+    query_id: u64,
+    text: String,
+    filter: FilterCategory,
+    scope: Option<cairn_protocol::message::SourceId>,
+    bin_generation: u64,
+}
+
+fn should_refresh_after_delete(
+    origin: &DeleteRefreshContext,
+    current_location: ActiveLocation,
+    current_query_id: u64,
+    current_text: &str,
+    current_filter: FilterCategory,
+    current_scope: Option<cairn_protocol::message::SourceId>,
+    current_bin_gen: u64,
+) -> bool {
+    match current_location {
+        ActiveLocation::Index => {
+            origin.location.is_index()
+                && current_query_id == origin.query_id
+                && current_text == origin.text
+                && current_filter == origin.filter
+                && current_scope == origin.scope
+        }
+        ActiveLocation::RecycleBin => {
+            origin.location.is_recycle_bin() && current_bin_gen == origin.bin_generation
+        }
+    }
+}
+
 impl CairnApp {
     /// Opens the Recycle Bin view: the shell reports the bin's contents and
     /// the table renders them. Any query leaves the view.
@@ -451,6 +483,14 @@ impl CairnApp {
         if paths.is_empty() || self.delete_in_flight {
             return;
         }
+        let origin = DeleteRefreshContext {
+            location: self.active_location(),
+            query_id: self.query.coordinator.current_query_id(),
+            text: self.query.search_input.text.clone(),
+            filter: self.query.active_filter,
+            scope: self.query.source_scope,
+            bin_generation: self.recycle_bin.generation(),
+        };
         let names: Vec<String> = paths
             .iter()
             .map(|path| {
@@ -505,13 +545,23 @@ impl CairnApp {
                         }
                         this.notify_bin_operation_error("delete_failed_title", &names, failure, cx);
                     }
-                    match this.active_location() {
-                        ActiveLocation::Index => {
-                            this.request_result_set(ResultSetChange::Replace, cx);
-                        }
-                        ActiveLocation::RecycleBin => {
-                            if !this.recycle_bin.is_loading() {
-                                this.begin_recycle_bin_load(cx);
+                    if should_refresh_after_delete(
+                        &origin,
+                        this.active_location(),
+                        this.query.coordinator.current_query_id(),
+                        &this.query.search_input.text,
+                        this.query.active_filter,
+                        this.query.source_scope,
+                        this.recycle_bin.generation(),
+                    ) {
+                        match this.active_location() {
+                            ActiveLocation::Index => {
+                                this.request_result_set(ResultSetChange::Replace, cx);
+                            }
+                            ActiveLocation::RecycleBin => {
+                                if !this.recycle_bin.is_loading() {
+                                    this.begin_recycle_bin_load(cx);
+                                }
                             }
                         }
                     }
@@ -525,9 +575,14 @@ impl CairnApp {
 
 #[cfg(test)]
 mod bin_command_tests {
-    use super::{reconcile_bin_items, reconcile_empty_bin};
+    use super::{
+        DeleteRefreshContext, reconcile_bin_items, reconcile_empty_bin, should_refresh_after_delete,
+    };
     use crate::app::CairnApp;
+    use crate::search::filters::FilterCategory;
+    use crate::shell::location::ActiveLocation;
     use crate::shell::os::{BinOperationError, RecycleBinItem};
+    use cairn_protocol::message::SourceId;
     use gpui_kit::gpui::AppContext as _;
 
     fn item(name: &str) -> RecycleBinItem {
@@ -601,5 +656,71 @@ mod bin_command_tests {
                 },
             );
         });
+    }
+
+    #[test]
+    fn delete_skips_refresh_when_location_or_query_context_drifted() {
+        let origin = DeleteRefreshContext {
+            location: ActiveLocation::Index,
+            query_id: 7,
+            text: "report".to_string(),
+            filter: FilterCategory::Document,
+            scope: Some(SourceId(10)),
+            bin_generation: 2,
+        };
+        assert!(should_refresh_after_delete(
+            &origin,
+            ActiveLocation::Index,
+            7,
+            "report",
+            FilterCategory::Document,
+            Some(SourceId(10)),
+            2,
+        ));
+        assert!(!should_refresh_after_delete(
+            &origin,
+            ActiveLocation::RecycleBin,
+            7,
+            "report",
+            FilterCategory::Document,
+            Some(SourceId(10)),
+            2,
+        ));
+        assert!(!should_refresh_after_delete(
+            &origin,
+            ActiveLocation::Index,
+            8,
+            "other",
+            FilterCategory::Document,
+            Some(SourceId(10)),
+            2,
+        ));
+
+        let bin_origin = DeleteRefreshContext {
+            location: ActiveLocation::RecycleBin,
+            query_id: 0,
+            text: String::new(),
+            filter: FilterCategory::All,
+            scope: None,
+            bin_generation: 4,
+        };
+        assert!(should_refresh_after_delete(
+            &bin_origin,
+            ActiveLocation::RecycleBin,
+            0,
+            "",
+            FilterCategory::All,
+            None,
+            4,
+        ));
+        assert!(!should_refresh_after_delete(
+            &bin_origin,
+            ActiveLocation::RecycleBin,
+            0,
+            "",
+            FilterCategory::All,
+            None,
+            5,
+        ));
     }
 }

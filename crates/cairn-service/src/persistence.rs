@@ -11,10 +11,79 @@ use cairn_core::index_file::{
 };
 use cairn_core::model::FileRecord;
 use crc32fast::Hasher;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
+
+static TEMP_FILE_SEQ: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) struct TempFileGuard {
+    path: Option<PathBuf>,
+}
+
+impl TempFileGuard {
+    pub(crate) fn disarm(&mut self) {
+        self.path = None;
+    }
+}
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.path.take() {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+pub(crate) fn create_unique_temp_file(
+    dir: &Path,
+    stem: &str,
+) -> Result<(PathBuf, File, TempFileGuard), std::io::Error> {
+    let pid = std::process::id();
+    for _ in 0..64 {
+        let seq = TEMP_FILE_SEQ.fetch_add(1, Ordering::Relaxed);
+        let tmp_path = dir.join(format!("{stem}.{pid}.{seq}.tmp"));
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)
+        {
+            Ok(file) => {
+                let guard = TempFileGuard {
+                    path: Some(tmp_path.clone()),
+                };
+                return Ok((tmp_path, file, guard));
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "exhausted attempts to allocate unique temporary file",
+    ))
+}
+
+pub(crate) fn atomic_write_bytes(target: &Path, bytes: &[u8]) -> Result<(), std::io::Error> {
+    let parent = match target.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
+    };
+    fs::create_dir_all(parent)?;
+    let stem = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("cairn");
+    let (tmp_path, mut file, mut guard) = create_unique_temp_file(parent, stem)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    drop(file);
+    atomic_replace_file(&tmp_path, target)?;
+    guard.disarm();
+    Ok(())
+}
 
 #[derive(Error, Debug)]
 pub enum PersistenceError {
@@ -78,7 +147,7 @@ pub fn save_volume_index_atomic(
 
     let file_name = format!("vol_{}.idx", snapshot.drive_letter.to_ascii_uppercase());
     let target_path = dir.join(&file_name);
-    let tmp_path = dir.join(format!("{file_name}.tmp"));
+    let (tmp_path, raw_file, mut guard) = create_unique_temp_file(dir, &file_name)?;
 
     let (arena_bytes, folded_bytes) = snapshot.arena.raw_parts();
     let record_count = u32::try_from(snapshot.records.len())
@@ -115,18 +184,22 @@ pub fn save_volume_index_atomic(
     {
         // Records are encoded one at a time to avoid a second full-size allocation; the buffer
         // keeps the write pattern batched instead of one syscall per record.
-        let mut file = BufWriter::with_capacity(1 << 20, File::create(&tmp_path)?);
-        file.write_all(&header)?;
+        let mut writer = BufWriter::with_capacity(1 << 20, raw_file);
+        writer.write_all(&header)?;
         for record in snapshot.records {
             encode_record(record, &mut record_buf);
-            file.write_all(&record_buf)?;
+            writer.write_all(&record_buf)?;
         }
-        file.write_all(arena_bytes)?;
-        file.write_all(folded_bytes)?;
-        file.flush()?;
+        writer.write_all(arena_bytes)?;
+        writer.write_all(folded_bytes)?;
+        let file = writer
+            .into_inner()
+            .map_err(|err| PersistenceError::Io(err.into_error()))?;
+        file.sync_all()?;
     }
 
     atomic_replace_file(&tmp_path, &target_path)?;
+    guard.disarm();
 
     Ok(target_path)
 }
@@ -145,14 +218,8 @@ pub(crate) fn save_volume_guid_sidecar(
     if trimmed.is_empty() {
         return Ok(());
     }
-    fs::create_dir_all(dir)?;
     let target_path = volume_guid_sidecar_path(dir, drive_letter);
-    let tmp_path = dir.join(format!(
-        "vol_{}.guid.tmp",
-        drive_letter.to_ascii_uppercase()
-    ));
-    fs::write(&tmp_path, trimmed.as_bytes())?;
-    atomic_replace_file(&tmp_path, &target_path)
+    atomic_write_bytes(&target_path, trimmed.as_bytes())
 }
 
 /// Loads the persisted Win32 Volume GUID sidecar for `drive_letter`, if present and non-empty.
@@ -336,7 +403,7 @@ fn load_volume_index_with_len<R: Read>(
     })
 }
 
-fn atomic_replace_file(src: &Path, dst: &Path) -> Result<(), std::io::Error> {
+pub(crate) fn atomic_replace_file(src: &Path, dst: &Path) -> Result<(), std::io::Error> {
     #[cfg(windows)]
     {
         use std::os::windows::ffi::OsStrExt;
@@ -344,6 +411,8 @@ fn atomic_replace_file(src: &Path, dst: &Path) -> Result<(), std::io::Error> {
             MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
         };
         use windows::core::PCWSTR;
+
+        const MAX_REPLACE_ATTEMPTS: usize = 20;
 
         let wide_src: Vec<u16> = src
             .as_os_str()
@@ -356,19 +425,40 @@ fn atomic_replace_file(src: &Path, dst: &Path) -> Result<(), std::io::Error> {
             .chain(std::iter::once(0))
             .collect();
 
-        // SAFETY: MoveFileExW replaces destination file atomically with write through.
-        let res = unsafe {
-            MoveFileExW(
-                PCWSTR(wide_src.as_ptr()),
-                PCWSTR(wide_dst.as_ptr()),
-                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-            )
-        };
-        if res.is_err() {
-            let _ = fs::remove_file(dst);
-            fs::rename(src, dst)?;
+        for attempt in 0..MAX_REPLACE_ATTEMPTS {
+            // SAFETY: `wide_src` and `wide_dst` are NUL-terminated UTF-16 paths valid for the call.
+            let res = unsafe {
+                MoveFileExW(
+                    PCWSTR(wide_src.as_ptr()),
+                    PCWSTR(wide_dst.as_ptr()),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+                )
+            };
+            match res {
+                Ok(()) => return Ok(()),
+                Err(err) => {
+                    let last = std::io::Error::last_os_error();
+                    let os_err = if last.raw_os_error().is_some_and(|code| code != 0) {
+                        last
+                    } else {
+                        std::io::Error::other(err.to_string())
+                    };
+                    let transient = matches!(os_err.raw_os_error(), Some(5 | 32))
+                        && !fs::symlink_metadata(dst).is_ok_and(|meta| meta.is_dir());
+                    if transient && attempt + 1 < MAX_REPLACE_ATTEMPTS {
+                        if attempt < 4 {
+                            std::thread::yield_now();
+                        } else {
+                            let delay_ms = (((attempt - 3) as u64) * 5).min(50);
+                            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                        }
+                        continue;
+                    }
+                    return Err(os_err);
+                }
+            }
         }
-        Ok(())
+        unreachable!("loop returns on final attempt")
     }
     #[cfg(not(windows))]
     {
@@ -615,5 +705,45 @@ mod tests {
 
         let truncated = &raw[..raw.len() - 5];
         assert!(load_volume_index_from(std::io::Cursor::new(truncated)).is_err());
+    }
+
+    #[test]
+    fn concurrent_atomic_writes_leave_no_temp_files_and_preserve_target_on_error() {
+        let temp = tempdir().unwrap();
+        let target = temp.path().join("vol_C.guid");
+
+        std::thread::scope(|scope| {
+            for idx in 0..8 {
+                let target_ref = &target;
+                scope.spawn(move || {
+                    for iter in 0..8 {
+                        let payload = format!("guid-{idx}-{iter}");
+                        atomic_write_bytes(target_ref, payload.as_bytes()).unwrap();
+                    }
+                });
+            }
+        });
+
+        let final_content = fs::read_to_string(&target).unwrap();
+        assert!(final_content.starts_with("guid-"));
+
+        // When target is a directory, atomic replace fails without deleting the destination and
+        // drops the staged temporary file cleanly.
+        let dir_target = temp.path().join("blocked");
+        fs::create_dir_all(&dir_target).unwrap();
+        let sentinel = dir_target.join("keep.txt");
+        fs::write(&sentinel, b"intact").unwrap();
+        assert!(atomic_write_bytes(&dir_target, b"overwrite").is_err());
+        assert_eq!(fs::read(&sentinel).unwrap(), b"intact");
+
+        let leftover_temps: Vec<_> = fs::read_dir(temp.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(
+            leftover_temps.is_empty(),
+            "unexpected leftover temp files: {leftover_temps:?}"
+        );
     }
 }

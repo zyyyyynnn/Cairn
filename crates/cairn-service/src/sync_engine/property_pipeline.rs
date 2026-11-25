@@ -25,7 +25,7 @@ use cairn_protocol::status::{
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
+use std::sync::{Arc, Condvar, Mutex, RwLock, RwLockReadGuard};
 use std::time::Duration;
 
 const PROPERTY_BATCH_SIZE: usize = 64;
@@ -41,8 +41,9 @@ pub(super) struct PropertyPipeline {
     generation: AtomicU64,
     run_cancel: Mutex<Arc<AtomicBool>>,
     running: AtomicBool,
+    worker_active: Mutex<bool>,
+    worker_idle: Condvar,
     stopped: AtomicBool,
-    extract_lock: Mutex<()>,
 }
 
 impl PropertyPipeline {
@@ -70,8 +71,9 @@ impl PropertyPipeline {
             generation: AtomicU64::new(0),
             run_cancel: Mutex::new(Arc::new(AtomicBool::new(false))),
             running: AtomicBool::new(false),
+            worker_active: Mutex::new(false),
+            worker_idle: Condvar::new(),
             stopped: AtomicBool::new(false),
-            extract_lock: Mutex::new(()),
         }
     }
 
@@ -346,6 +348,18 @@ impl Drop for PropertyRunGuard<'_> {
     }
 }
 
+struct WorkerRunGuard<'a> {
+    active: &'a Mutex<bool>,
+    idle: &'a Condvar,
+}
+
+impl Drop for WorkerRunGuard<'_> {
+    fn drop(&mut self) {
+        *self.active.lock().unwrap() = false;
+        self.idle.notify_one();
+    }
+}
+
 pub fn is_property_eligible_extension(ext: &str) -> bool {
     !ext.is_empty()
         && PROPERTY_INDEX_EXTENSIONS
@@ -369,6 +383,7 @@ struct PropertyExtraction<'a> {
     cancel: &'a AtomicBool,
     failed: u64,
     launch_failures: u64,
+    fatal_error: Option<String>,
 }
 
 impl MultiVolumeEngine {
@@ -468,7 +483,20 @@ impl MultiVolumeEngine {
         worker_exe: &Path,
         timeout: Duration,
     ) -> Result<PropertyIndexStatus, String> {
-        let _extract_guard = self.property_pipeline.extract_lock.lock().unwrap();
+        let mut worker_active = self.property_pipeline.worker_active.lock().unwrap();
+        while *worker_active {
+            worker_active = self
+                .property_pipeline
+                .worker_idle
+                .wait(worker_active)
+                .unwrap();
+        }
+        *worker_active = true;
+        drop(worker_active);
+        let _worker_guard = WorkerRunGuard {
+            active: &self.property_pipeline.worker_active,
+            idle: &self.property_pipeline.worker_idle,
+        };
         if !self.property_pipeline.tables.read().unwrap().is_enabled()
             || self.property_pipeline.stopped.load(Ordering::SeqCst)
         {
@@ -511,6 +539,7 @@ impl MultiVolumeEngine {
             cancel: &cancel,
             failed: 0,
             launch_failures: 0,
+            fatal_error: None,
         };
         for chunk in tasks.chunks(PROPERTY_BATCH_SIZE) {
             if cancel.load(Ordering::SeqCst) || !self.property_pipeline.is_run_current(generation) {
@@ -526,6 +555,12 @@ impl MultiVolumeEngine {
             run.launch_failures,
             full_pass,
         );
+        if let Some(reason) = run.fatal_error {
+            self.property_pipeline
+                .update_status_if_current(generation, |_, status| {
+                    status.state = ContentIndexState::Error(reason);
+                });
+        }
         if updated && run.failed > 0 {
             tracing::warn!(
                 failed = run.failed,
@@ -660,6 +695,7 @@ impl MultiVolumeEngine {
             run.work_dir,
             run.timeout,
             run.cancel,
+            Some(&self.property_pipeline.stopped),
         ) {
             PropertyIsolationOutcome::Completed(results) => {
                 self.commit_property_results(
@@ -670,6 +706,10 @@ impl MultiVolumeEngine {
                 );
             }
             PropertyIsolationOutcome::Cancelled => {}
+            PropertyIsolationOutcome::IsolationFailed { reason } => {
+                run.fatal_error = Some(reason);
+                run.cancel.store(true, Ordering::SeqCst);
+            }
             outcome @ (PropertyIsolationOutcome::TimedOut { .. }
             | PropertyIsolationOutcome::WorkerFailed { .. }) => {
                 if chunk.len() > 1 {
@@ -689,7 +729,8 @@ impl MultiVolumeEngine {
                         PropertyIsolationOutcome::WorkerFailed { reason, .. }
                         | PropertyIsolationOutcome::TimedOut { reason } => reason,
                         PropertyIsolationOutcome::Completed(_)
-                        | PropertyIsolationOutcome::Cancelled => {
+                        | PropertyIsolationOutcome::Cancelled
+                        | PropertyIsolationOutcome::IsolationFailed { .. } => {
                             unreachable!()
                         }
                     };
@@ -1072,7 +1113,7 @@ mod tests {
         let slow_cmd = temp.path().join("slow-worker.cmd");
         std::fs::write(&slow_cmd, b"@ping -n 3 127.0.0.1 >nul\r\n@exit /b 1\r\n").unwrap();
 
-        let mut engine_val = MultiVolumeEngine::with_paths(
+        let engine_val = MultiVolumeEngine::with_paths(
             &service.join("index"),
             &service.join("content"),
             &service.join("service.toml"),
@@ -1083,8 +1124,10 @@ mod tests {
                 property_index_enabled: true,
                 ..Default::default()
             },
-        );
-        engine_val.set_worker_binary(slow_cmd);
+        )
+        .with_worker_locator(Arc::new(crate::sync_engine::FixedWorkerBinaryLocator(
+            slow_cmd,
+        )));
         let engine = Arc::new(engine_val);
 
         let sid = SourceId(1001);
@@ -1142,7 +1185,7 @@ mod tests {
         folder.rescan(&[]).unwrap();
         let folder_root = folder.display_root().to_string();
 
-        let mut engine_val = MultiVolumeEngine::with_paths(
+        let engine_val = MultiVolumeEngine::with_paths(
             &service.join("index"),
             &service.join("content"),
             &service.join("service.toml"),
@@ -1153,8 +1196,10 @@ mod tests {
                 property_index_enabled: true,
                 ..Default::default()
             },
-        );
-        engine_val.set_worker_binary(temp.path().join("missing-worker.exe"));
+        )
+        .with_worker_locator(Arc::new(crate::sync_engine::FixedWorkerBinaryLocator(
+            temp.path().join("missing-worker.exe"),
+        )));
         let engine = Arc::new(engine_val);
         engine
             .config

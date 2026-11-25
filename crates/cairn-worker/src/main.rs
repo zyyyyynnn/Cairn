@@ -15,8 +15,8 @@ use cairn_protocol::{ContentIndexTask, PropertyExtractResult, PropertyExtractTas
 use cairn_worker::extractor::CompositeExtractor;
 use cairn_worker::property_extract::extract_file_properties;
 use clap::Parser;
-use std::fs::File;
-use std::io::{BufRead, BufReader, Write};
+use std::fs::{File, OpenOptions};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -76,10 +76,13 @@ fn extract_and_index(
         .map_err(|err| err.to_string())
 }
 
-fn for_each_non_empty_line<R: BufRead>(
+fn for_each_non_empty_line<R: BufRead, E>(
     mut reader: R,
-    mut on_line: impl FnMut(&str),
-) -> std::io::Result<()> {
+    mut on_line: impl FnMut(&str) -> Result<(), E>,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    E: Into<Box<dyn std::error::Error>>,
+{
     let mut line = String::new();
     loop {
         line.clear();
@@ -88,7 +91,7 @@ fn for_each_non_empty_line<R: BufRead>(
         }
         let trimmed = line.trim();
         if !trimmed.is_empty() {
-            on_line(trimmed);
+            on_line(trimmed).map_err(Into::into)?;
         }
     }
     Ok(())
@@ -122,6 +125,7 @@ fn apply_batches<RB: BufRead, RD: BufRead>(
                     error!("Malformed deletion task: {err}");
                 }
             }
+            Ok::<(), Box<dyn std::error::Error>>(())
         })?;
         writer.delete_documents_deferred(&deletions)?;
     }
@@ -133,7 +137,7 @@ fn apply_batches<RB: BufRead, RD: BufRead>(
                 Err(err) => {
                     failed += 1;
                     error!("Malformed batch task: {err}");
-                    return;
+                    return Ok::<(), Box<dyn std::error::Error>>(());
                 }
             };
             match extract_and_index(extractor, writer, &task, max_bytes) {
@@ -143,6 +147,7 @@ fn apply_batches<RB: BufRead, RD: BufRead>(
                     info!("Skipped {}: {err}", task.path);
                 }
             }
+            Ok(())
         })?;
     }
 
@@ -223,6 +228,20 @@ fn run_worker<RB: BufRead, RD: BufRead, W: Write>(
     Ok(())
 }
 
+fn write_property_output_file(
+    out_path: &Path,
+    batch: Option<BufReader<File>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(out_path)?;
+    let mut writer = BufWriter::new(file);
+    run_property_worker(batch, &mut writer)?;
+    writer.flush()?;
+    Ok(())
+}
+
 fn run_property_worker<RB: BufRead, W: Write>(
     batch: Option<RB>,
     out: &mut W,
@@ -235,7 +254,7 @@ fn run_property_worker<RB: BufRead, W: Write>(
                 Err(err) => {
                     malformed += 1;
                     error!("Malformed property task: {err}");
-                    return;
+                    return Ok::<(), Box<dyn std::error::Error>>(());
                 }
             };
             let properties = extract_file_properties(Path::new(&task.path));
@@ -245,9 +264,9 @@ fn run_property_worker<RB: BufRead, W: Write>(
                 modified_ts: task.modified_ts,
                 properties,
             };
-            if let Ok(encoded) = serde_json::to_string(&result) {
-                let _ = writeln!(out, "{encoded}");
-            }
+            let encoded = serde_json::to_string(&result)?;
+            writeln!(out, "{encoded}")?;
+            Ok(())
         })?;
         if malformed > 0 {
             return Err(format!("{malformed} malformed property task(s)").into());
@@ -261,8 +280,7 @@ fn run(args: WorkerCli) -> Result<(), Box<dyn std::error::Error>> {
     let batch = args.batch.as_deref().map(open_buf_reader).transpose()?;
     if args.extract_properties {
         if let Some(out_path) = &args.out {
-            let mut file = File::create(out_path)?;
-            run_property_worker(batch, &mut file)?;
+            write_property_output_file(out_path, batch)?;
             let stdout = std::io::stdout();
             let mut lock = stdout.lock();
             writeln!(lock, "{{}}")?;
@@ -491,5 +509,43 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!((hits[0].volume_id, hits[0].frn), (1, 100));
         assert!(searcher.search("旧文档", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn write_property_output_file_propagates_errors_and_uses_create_new() {
+        use std::io::Cursor;
+
+        struct FailingWriter;
+        impl Write for FailingWriter {
+            fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "injected write error",
+                ))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let existing_out = temp.path().join("existing.jsonl");
+        std::fs::write(&existing_out, "prior").unwrap();
+        assert!(write_property_output_file(&existing_out, None).is_err());
+
+        let task = PropertyExtractTask {
+            source_id: cairn_core::property_store::SourceId::for_drive('C').unwrap(),
+            record_key: 1,
+            modified_ts: 10,
+            path: temp
+                .path()
+                .join("missing.txt")
+                .to_string_lossy()
+                .into_owned(),
+        };
+        let batch = format!("{}\n", serde_json::to_string(&task).unwrap());
+        let err = run_property_worker(Some(Cursor::new(batch.as_bytes())), &mut FailingWriter)
+            .expect_err("write errors must propagate instead of being discarded");
+        assert!(err.to_string().contains("injected write error"));
     }
 }

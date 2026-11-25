@@ -18,6 +18,8 @@ use zip::{ZipArchive, ZipReadOptions};
 
 const EXTRACTOR_HEADER_OVERHEAD_BYTES: usize = 4 * 1024;
 const MAX_EXTRACTOR_INPUT_BYTES: usize = 24 * 1024 * 1024;
+const MAX_PLAIN_TEXT_INPUT_BYTES: usize = 64 * 1024 * 1024;
+const MAX_ZIP_ENTRIES: usize = 10_000;
 
 fn extractor_input_budget(max_bytes: usize) -> usize {
     if max_bytes == 0 {
@@ -74,6 +76,23 @@ pub fn open_no_follow(path: &Path) -> std::io::Result<File> {
         const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
         const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
 
+        let mut ancestor = path.parent();
+        while let Some(dir) = ancestor {
+            if dir.file_name().is_some() {
+                let meta = std::fs::symlink_metadata(dir)?;
+                if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!(
+                            "refusing to traverse a reparse-point directory: {}",
+                            dir.display()
+                        ),
+                    ));
+                }
+            }
+            ancestor = dir.parent();
+        }
+
         let file = std::fs::OpenOptions::new()
             .read(true)
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
@@ -84,6 +103,7 @@ pub fn open_no_follow(path: &Path) -> std::io::Result<File> {
                 format!("refusing to read a reparse point: {}", path.display()),
             ));
         }
+        crate::validate_opened_path(&file, path)?;
         Ok(file)
     }
     #[cfg(not(windows))]
@@ -136,10 +156,8 @@ impl TextExtractor for PlainTextExtractor {
 
     fn extract(&self, path: &Path, max_bytes: usize) -> Result<String, ExtractError> {
         let file = open_no_follow(path)?;
-        let cap = file
-            .metadata()
-            .map_or(0, |m| (m.len() as usize).min(max_bytes));
-        let mut buffer = Vec::with_capacity(cap);
+        let max_bytes = max_bytes.min(MAX_PLAIN_TEXT_INPUT_BYTES);
+        let mut buffer = Vec::new();
         file.take(max_bytes as u64).read_to_end(&mut buffer)?;
         let mut text = decode_bytes_to_string(&buffer);
         truncate_to_char_boundary(&mut text, max_bytes);
@@ -158,7 +176,13 @@ impl TextExtractor for OfficeExtractor {
 
     fn extract(&self, path: &Path, max_bytes: usize) -> Result<String, ExtractError> {
         let file = open_no_follow(path)?;
+        if file.metadata()?.len() > MAX_EXTRACTOR_INPUT_BYTES as u64 {
+            return Err(ExtractError::ExpansionLimitExceeded);
+        }
         let mut archive = ZipArchive::new(BufReader::new(file))?;
+        if archive.len() > MAX_ZIP_ENTRIES {
+            return Err(ExtractError::ExpansionLimitExceeded);
+        }
         let mut extracted_text = String::new();
         let mut total_uncompressed = 0usize;
         let max_uncompressed_limit = extractor_input_budget(max_bytes);
@@ -274,17 +298,41 @@ impl TextExtractor for PdfExtractor {
             )));
         }
 
-        let doc =
-            lopdf::Document::load_mem(&buffer).map_err(|e| ExtractError::Pdf(e.to_string()))?;
+        let options = lopdf::LoadOptions::with_max_decompressed_size(budget);
+        let doc = lopdf::Document::load_mem_with_options(&buffer, options).map_err(|err| {
+            if matches!(
+                err,
+                lopdf::Error::Decompress(lopdf::DecompressError::MemoryLimitExceeded { .. })
+            ) {
+                ExtractError::ExpansionLimitExceeded
+            } else {
+                ExtractError::Pdf(err.to_string())
+            }
+        })?;
 
         let mut text = String::new();
-        for page_id in doc.get_pages().keys() {
-            if let Ok(content) = doc.extract_text(&[*page_id]) {
-                text.push_str(&content);
-                text.push('\n');
-                if text.len() >= max_bytes {
-                    break;
+        let mut allocated_budget = 0usize;
+        let page_count = doc.get_pages().len();
+        for (page_index, page_num) in doc.get_pages().into_keys().enumerate() {
+            let remaining = budget.saturating_sub(allocated_budget);
+            let pages_left = page_count.saturating_sub(page_index).max(1);
+            let page_budget = remaining / pages_left;
+            if page_budget == 0 {
+                return Err(ExtractError::ExpansionLimitExceeded);
+            }
+            match doc.extract_text_with_limit(&[page_num], page_budget) {
+                Ok(content) => {
+                    text.push_str(&content);
+                    text.push('\n');
                 }
+                Err(lopdf::Error::Decompress(lopdf::DecompressError::MemoryLimitExceeded {
+                    ..
+                })) => return Err(ExtractError::ExpansionLimitExceeded),
+                Err(_) => {}
+            }
+            allocated_budget = allocated_budget.saturating_add(page_budget);
+            if text.len() >= max_bytes {
+                break;
             }
         }
 
@@ -349,6 +397,34 @@ mod tests {
         let mut contents = String::new();
         file.read_to_string(&mut contents).expect("read target");
         assert_eq!(contents, "payload");
+
+        let real_dir = dir.path().join("real-dir");
+        std::fs::create_dir(&real_dir).unwrap();
+        std::fs::write(real_dir.join("inner.txt"), "inside").unwrap();
+        let linked_dir = dir.path().join("linked-dir");
+        let junction_ok = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&linked_dir)
+            .arg(&real_dir)
+            .output()
+            .is_ok_and(|out| out.status.success());
+        if junction_ok {
+            let dir_err = open_no_follow(&linked_dir.join("inner.txt"))
+                .expect_err("reparse ancestor junction must be rejected");
+            assert_eq!(dir_err.kind(), std::io::ErrorKind::InvalidInput);
+        }
+
+        let long_dir = dir.path().join("LongWorkerSubdirectoryName");
+        std::fs::create_dir(&long_dir).unwrap();
+        let long_file = long_dir.join("LongDocumentName.txt");
+        std::fs::write(&long_file, "short-ok").unwrap();
+        let short_dir = crate::short_path_for_test(&long_dir);
+        let short_with_dot = short_dir.join(".").join("LongDocumentName.txt");
+        let mut short_file = open_no_follow(&short_with_dot)
+            .expect("8.3 short path and dot segment should resolve to expected long path");
+        let mut short_text = String::new();
+        short_file.read_to_string(&mut short_text).unwrap();
+        assert_eq!(short_text, "short-ok");
     }
 
     #[cfg(windows)]
@@ -409,6 +485,25 @@ mod tests {
         for expected in ["quarterly report", "R&D", "don't", "A–B", "cdata_token"] {
             assert!(text.contains(expected), "missing {expected:?} in {text:?}");
         }
+    }
+
+    #[test]
+    fn office_extraction_refuses_an_oversized_archive_before_parsing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("oversized.docx");
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .expect("create sparse archive");
+        file.set_len(MAX_EXTRACTOR_INPUT_BYTES as u64 + 1)
+            .expect("set sparse length");
+        drop(file);
+
+        let err = OfficeExtractor
+            .extract(&path, 1024)
+            .expect_err("an oversized archive must be refused before ZIP parsing");
+        assert!(matches!(err, ExtractError::ExpansionLimitExceeded));
     }
 
     #[test]
@@ -515,5 +610,23 @@ mod tests {
             .expect("extract valid pdf");
         assert!(extracted.len() <= 64, "len was {}", extracted.len());
         assert!(extracted.contains("Cairn PDF test"), "{extracted:?}");
+    }
+
+    #[test]
+    fn zip_over_max_entries_is_rejected_before_extraction() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let many_entries_zip = dir.path().join("many.docx");
+        let file = std::fs::File::create(&many_entries_zip).expect("create zip");
+        let mut writer = zip::ZipWriter::new(file);
+        let opts = zip::write::SimpleFileOptions::default();
+        for idx in 0..=MAX_ZIP_ENTRIES {
+            writer.start_file(format!("e{idx}"), opts).unwrap();
+        }
+        writer.finish().unwrap();
+
+        let err = OfficeExtractor
+            .extract(&many_entries_zip, 64 * 1024)
+            .expect_err("over-limit ZIP entry count must be rejected");
+        assert!(matches!(err, ExtractError::ExpansionLimitExceeded));
     }
 }

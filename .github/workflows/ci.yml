@@ -197,7 +197,7 @@ jobs:
 
           $serviceLibTest = $artifacts | Where-Object { $_.target.name -eq 'cairn_service' } | Select-Object -Last 1
           if (-not $serviceLibTest) { throw "The cairn_service lib test binary was not produced." }
-          Invoke-IgnoredTest -Exe $serviceLibTest.executable -Filter 'sync_engine::content_pipeline::tests::a_full_backfill_reaches_ready_and_indexes_existing_files'
+          Invoke-IgnoredTest -Exe $serviceLibTest.executable -Filter 'sync_engine::content_pipeline::tests::backfill::a_full_backfill_reaches_ready_and_indexes_existing_files'
 
           $platformSeamTest = $artifacts | Where-Object { $_.target.name -eq 'platform_seam' } | Select-Object -Last 1
           if (-not $platformSeamTest) { throw "The platform_seam integration test binary was not produced." }

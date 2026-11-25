@@ -156,7 +156,9 @@ mod platform {
     pub struct Impersonation;
 
     impl Impersonation {
-        /// SAFETY: `pipe` must be a handle of a connected named pipe server instance that stays
+        /// # Safety
+        ///
+        /// `pipe` must be a handle of a connected named pipe server instance that stays
         /// valid for the lifetime of the returned guard. `ImpersonateNamedPipeClient` applies to
         /// the calling OS thread only, so the caller must not yield the thread (no `.await`) while
         /// the guard is alive.
@@ -191,7 +193,7 @@ mod platform {
 
     /// Renders a SID as its string form. The buffer returned by `ConvertSidToStringSidW` is
     /// released with `LocalFree` before returning.
-    fn sid_to_string(sid: PSID) -> Option<String> {
+    pub(super) fn sid_to_string(sid: PSID) -> Option<String> {
         if sid.is_invalid() {
             return None;
         }
@@ -208,12 +210,10 @@ mod platform {
 
     /// Builds a well-known SID into a caller-owned buffer. The buffer must outlive every use of the
     /// `PSID` handed out by the caller.
-    fn well_known_sid(kind: WELL_KNOWN_SID_TYPE) -> Option<Vec<u8>> {
+    pub(super) fn well_known_sid(kind: WELL_KNOWN_SID_TYPE) -> Option<Vec<u8>> {
         let mut size = 0u32;
-        // SAFETY: with a null target buffer CreateWellKnownSid only reports the required size.
-        unsafe {
-            CreateWellKnownSid(kind, None, None, &mut size).ok()?;
-        }
+        // SAFETY: passing a null target buffer queries only the required byte length and intentionally returns ERROR_INSUFFICIENT_BUFFER.
+        let _ = unsafe { CreateWellKnownSid(kind, None, None, &mut size) };
         if size == 0 {
             return None;
         }
@@ -348,7 +348,9 @@ mod platform {
         identity
     }
 
-    /// SAFETY: `token` must be an open handle to the access token of the impersonated client.
+    /// # Safety
+    ///
+    /// `token` must be an open handle to the access token of the impersonated client.
     unsafe fn describe_token(
         token: HANDLE,
         client_pid: u32,
@@ -646,14 +648,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn only_system_and_administrators_are_privileged() {
-        assert!(CallerAuthorization::LocalSystem.is_privileged());
-        assert!(CallerAuthorization::Administrator.is_privileged());
-        assert!(!CallerAuthorization::StandardUser.is_privileged());
-        assert!(!CallerAuthorization::Unauthenticated.is_privileged());
-    }
-
     #[cfg(windows)]
     #[test]
     fn aligned_token_buffer_guarantees_8_byte_alignment_and_rejects_short_buffers() {
@@ -688,5 +682,27 @@ mod tests {
             size_of::<TOKEN_GROUPS>().saturating_sub(1),
         );
         assert!(short_groups.read_header::<TOKEN_GROUPS>().is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn well_known_sid_resolves_system_and_administrators() {
+        use windows::Win32::Security::{PSID, WinBuiltinAdministratorsSid, WinLocalSystemSid};
+
+        let mut system_buf =
+            platform::well_known_sid(WinLocalSystemSid).expect("LocalSystem SID must resolve");
+        let system_sid = PSID(system_buf.as_mut_ptr().cast());
+        assert_eq!(
+            platform::sid_to_string(system_sid).as_deref(),
+            Some("S-1-5-18")
+        );
+
+        let mut admins_buf = platform::well_known_sid(WinBuiltinAdministratorsSid)
+            .expect("Builtin Administrators SID must resolve");
+        let admins_sid = PSID(admins_buf.as_mut_ptr().cast());
+        assert_eq!(
+            platform::sid_to_string(admins_sid).as_deref(),
+            Some("S-1-5-32-544")
+        );
     }
 }

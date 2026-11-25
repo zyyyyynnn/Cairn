@@ -45,6 +45,9 @@ pub struct SubsystemState<S> {
     pub load: LoadState,
     pub action_pending: bool,
     pub action_error: Option<String>,
+    pub generation: u64,
+    pub in_flight_load: Option<u64>,
+    pub superseded_refresh: bool,
 }
 
 impl<S> SubsystemState<S> {
@@ -60,41 +63,115 @@ impl<S> SubsystemState<S> {
         self.load.is_failed() || self.action_error.is_some()
     }
 
-    pub fn begin_load(&mut self) -> bool {
-        if self.is_loading() {
-            return false;
+    pub fn begin_load(&mut self) -> Option<u64> {
+        if self.is_loading() || self.action_pending {
+            return None;
         }
+        self.generation = self.generation.wrapping_add(1);
+        let generation = self.generation;
         self.load = LoadState::Loading;
-        true
+        self.in_flight_load = Some(generation);
+        Some(generation)
     }
 
     pub fn finish_load(&mut self, value: S) {
+        self.generation = self.generation.wrapping_add(1);
+        self.in_flight_load = None;
         self.value = value;
         self.load = LoadState::Idle;
         self.action_error = None;
     }
 
-    pub fn fail_load(&mut self, error: impl Into<String>) {
-        self.load = LoadState::Failed(error.into());
-    }
-
-    pub fn begin_action(&mut self) -> bool {
-        if self.action_pending {
+    pub fn finish_load_if_current(&mut self, generation: u64, value: S) -> bool {
+        if self.in_flight_load == Some(generation) {
+            self.in_flight_load = None;
+        }
+        if self.generation != generation {
             return false;
         }
-        self.action_pending = true;
+        self.value = value;
+        self.load = LoadState::Idle;
         self.action_error = None;
         true
     }
 
-    pub fn finish_action_ok(&mut self) {
-        self.action_pending = false;
-        self.action_error = None;
+    pub fn fail_load_if_current(&mut self, generation: u64, error: impl Into<String>) -> bool {
+        if self.in_flight_load == Some(generation) {
+            self.in_flight_load = None;
+        }
+        if self.generation != generation {
+            return false;
+        }
+        self.load = LoadState::Failed(error.into());
+        true
     }
 
-    pub fn finish_action_err(&mut self, error: impl Into<String>) {
+    pub fn supersede_load(&mut self) -> bool {
+        self.generation = self.generation.wrapping_add(1);
+        let superseded = self.in_flight_load.take().is_some();
+        if superseded {
+            self.load = LoadState::Idle;
+            self.superseded_refresh = true;
+        }
+        superseded
+    }
+
+    pub fn begin_action(&mut self) -> Option<u64> {
+        if self.action_pending {
+            return None;
+        }
+        self.action_pending = true;
+        self.action_error = None;
+        self.generation = self.generation.wrapping_add(1);
+        if self.in_flight_load.take().is_some() {
+            self.load = LoadState::Idle;
+            self.superseded_refresh = true;
+        }
+        Some(self.generation)
+    }
+
+    pub fn finish_action_ok(&mut self) -> bool {
+        self.action_pending = false;
+        self.action_error = None;
+        std::mem::take(&mut self.superseded_refresh)
+    }
+
+    pub fn finish_action_err(&mut self, error: impl Into<String>) -> bool {
         self.action_pending = false;
         self.action_error = Some(error.into());
+        std::mem::take(&mut self.superseded_refresh)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SubsystemState;
+
+    #[test]
+    fn stale_load_completion_after_action_is_discarded() {
+        let mut state = SubsystemState {
+            value: "initial",
+            ..Default::default()
+        };
+        let load_gen = state.begin_load().expect("first load starts");
+        assert!(state.is_loading());
+        assert!(state.begin_action().is_some());
+        assert!(!state.is_loading());
+        assert!(
+            !state.finish_load_if_current(load_gen, "stale"),
+            "superseded read must not overwrite newer action state"
+        );
+        assert_eq!(state.value, "initial");
+        assert!(state.finish_action_ok());
+    }
+
+    #[test]
+    fn direct_finish_load_supersedes_older_in_flight_read() {
+        let mut state = SubsystemState::default();
+        let load_gen = state.begin_load().expect("load starts");
+        state.finish_load("cleared");
+        assert!(!state.finish_load_if_current(load_gen, "resurrected"));
+        assert_eq!(state.value, "cleared");
     }
 }
 

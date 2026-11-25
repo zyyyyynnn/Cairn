@@ -46,6 +46,7 @@ pub fn quiet_setup(restart_app: bool, expected_sha256: Option<String>) -> i32 {
         .unwrap_or_else(default_install_dir);
     let app_dir = install_dir.clone();
     let Ok(log) = platform::install_log_path() else {
+        let _ = std::fs::remove_dir_all(&payload_dir);
         return EXIT_ERROR;
     };
 

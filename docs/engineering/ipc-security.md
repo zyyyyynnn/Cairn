@@ -6,8 +6,10 @@
 
 | 进程 | 权限 | 职责 |
 | --- | --- | --- |
-| `Cairn.exe` | 标准用户 | GPUI 界面、结果渲染、用户交互；不直接读取 `$MFT` |
-| `CairnService.exe`（服务） | LocalSystem | 后台索引、NTFS `$MFT`/USN Journal 读取、服务数据目录维护 |
+| `Cairn.exe` | 标准用户 | GPUI 界面、结果渲染、Win32 Shell 文件操作（`IFileOperation` / 回收站）；不直接读取 `$MFT` |
+| `CairnCli.exe` | 标准用户 | 命令行检索、JSON/CSV 导出与索引管理入口；通过同一命名管道与服务交互 |
+| `CairnService.exe`（服务） | LocalSystem | 后台索引、NTFS `$MFT`/USN Journal 读取、文件夹源监控、只读索引日志与服务数据目录维护 |
+| `CairnWorker.exe` | 低优先级隔离子进程 | Job Object（`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`）、`BELOW_NORMAL_PRIORITY_CLASS` 与后台 I/O 隔离的纯 Rust 文档文本及扩展属性解析子进程；拒绝沿路径遍历重解析点；无命名管道暴露 |
 
 - `CairnService --console` 只用于开发/测试；生产必须由 Windows 服务承载。
 - 服务名：`CairnService`。
@@ -70,14 +72,15 @@
 | **命名管道访问控制** | 管道创建时指定 `PIPE_REJECT_REMOTE_CLIENTS`；显式注入 Win32 SDDL 安全描述符 `D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)`，严格限制仅允许本地交互式登录用户连接 |
 | **管道配置权限边界** | 未认证连接禁止修改服务端配置；本地已认证用户可提交索引配置，由 LocalSystem 服务校验并原子落盘，GUI 无需提权（SVC-05）；`admin_only_query` 仅管理员可改 |
 | **索引文件存储权限** | 磁盘持久化缓存目录 `%ProgramData%\Cairn\` 严格限制仅 SYSTEM 与管理员组具备读写权限 |
-| **Unsafe 代码严格收敛** | `cairn-core` 声明 `#![forbid(unsafe_code)]`；Windows API 与裸扇区操作收敛于 `cairn-ntfs`，每个 `unsafe` 块配 `// SAFETY:` 说明 |
-| **第三方抽取进程隔离** | 富文档与外部文件内容抽取在独立 `CairnWorker.exe` 中执行，主服务不受异常格式或崩溃波及 |
-| **隐私第一原则** | 零遥测、零后台回传；除用户主动触发的更新检查外不发起网络请求；内容索引默认关闭，只有用户显式开启后才建立本地索引 |
+| **Unsafe 代码严格收敛** | 15 处纯安全入口声明 `#![forbid(unsafe_code)]`（覆盖 `cairn-core`、`cairn-protocol`、`cairn-content`、`cairn-client`、`cairn-cli`、`cairn-service` 二进制入口、`cairn-worker` 二进制与解析模块、`cairn-setup-bin` 全部入口及 `xtask`）；Win32 FFI 与裸扇区 `unsafe` 收敛于 6 个 crate（`cairn-ntfs`、`cairn-service` 库、`cairn-app`、`cairn-setup`、`cairn-ui`、`cairn-worker` 库），所有 `unsafe` 块配 `// SAFETY:` 说明、所有 `unsafe fn` 配 `# Safety` 文档 |
+| **第三方抽取进程隔离** | 富文档与外部文件内容/属性抽取在独立受限子进程 `CairnWorker.exe` 中执行；`cairn-service` 与 `cairn-content` 对工作进程及外部解析依赖（`lopdf`、`zip`、`quick-xml`、`chardetng`、`encoding_rs`）零直接及传递依赖 |
+| **隐私第一原则** | 零遥测、零后台回传；除用户主动触发的更新检查（强制 HTTPS、GitHub 主机白名单与下载体积上限校验，下载后校验 SHA-256 并经 `MoveFileExW` 原子替换）外不发起网络请求；内容索引默认关闭，只有用户显式开启后才建立本地索引 |
 
 ## 代码位置
 
 - `crates/cairn-protocol/src/message.rs`：管道名、协议版本、请求/响应类型。
-- `crates/cairn-service/src/pipe_server.rs`：管道实例、DACL、握手与请求处理。
+- `crates/cairn-service/src/pipe_server/`：管道实例、DACL、握手与请求处理。
+- `crates/cairn-service/src/sync_engine/worker_runner.rs`：`CairnWorker.exe` Job Object、低优先级与超时隔离。
 - `crates/cairn-service/src/caller_auth.rs`：基于 access token 的调用方识别与授权。
 - `crates/cairn-service/src/security.rs`：数据目录 ACL 与特权使用。
 - `crates/cairn-service/src/main.rs`：`CairnService` 的 console / service 入口。

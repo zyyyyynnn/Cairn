@@ -7,7 +7,7 @@
 use crate::app::{CairnApp, element_id, join_row_path, layout};
 use crate::search::query_orchestration::split_name_highlights;
 use crate::shell::commands::PreviewSnippet;
-use crate::shell::theme::ShellTokens;
+use crate::shell::theme::{self, ShellTokens};
 use crate::table::rows::styled_highlighted_text;
 use cairn_core::syntax::{QueryDefaults, parse_query_with};
 use gpui_kit::base::Selectable;
@@ -364,7 +364,6 @@ impl CairnApp {
                 .flex_shrink_0()
                 .px(rems(layout::SPACE_4))
                 .rounded(tokens.radius)
-                .cursor_pointer()
                 .bg(if is_open {
                     tokens.selection
                 } else {
@@ -458,7 +457,7 @@ impl CairnApp {
                             .w_full()
                             .gap(rems(layout::SPACE_8))
                             .when(idx > 0, |this| {
-                                this.child(div().h(px(0.5)).w_full().bg(tokens_copy.border))
+                                this.child(div().h(theme::HAIRLINE).w_full().bg(tokens_copy.border))
                             })
                             .child(div().w_full().child(styled))
                     }))

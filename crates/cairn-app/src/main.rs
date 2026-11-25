@@ -152,6 +152,19 @@ fn main() {
             let mut app_bundle = Some(startup);
 
             crate::shell::perf::mark("window open");
+            #[cfg(windows)]
+            {
+                let mut exit_rx = shell::tray::subscribe_exit();
+                cx.spawn(async move |cx: &mut AsyncApp| {
+                    while exit_rx.changed().await.is_ok() {
+                        if *exit_rx.borrow_and_update() {
+                            cx.update(|cx| cx.quit());
+                            break;
+                        }
+                    }
+                })
+                .detach();
+            }
             let (_handle, _app) = gpui_kit::open_window(window_options, cx, |window, cx| {
                 crate::shell::perf::mark("window factory");
                 window.activate_window();

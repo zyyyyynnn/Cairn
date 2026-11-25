@@ -464,7 +464,7 @@ impl CairnApp {
         let target_col = if supported {
             column
         } else {
-            crate::table::model::SortColumn::DateModified
+            crate::table::columns::SortColumn::DateModified
         };
         if !supported || self.results.table.sort_spec.keys.len() > 1 {
             self.results.table.set_primary_sort(target_col, ascending);

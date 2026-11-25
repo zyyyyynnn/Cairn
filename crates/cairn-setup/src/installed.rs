@@ -155,18 +155,18 @@ pub fn legacy_burn_uninstallers() -> Vec<LegacyUninstall> {
             else {
                 continue;
             };
-            let lower = command.to_ascii_lowercase();
-            if !lower.contains("cairnsetup.exe")
-                || lower.contains("cairnuninstall.exe")
-                || lower.contains("cairn-uninstall.exe")
-            {
-                continue;
-            }
             let mut parts = split_command_line(&command);
             if parts.is_empty() {
                 continue;
             }
             let program = PathBuf::from(parts.remove(0));
+            let is_legacy_setup = program
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.eq_ignore_ascii_case("CairnSetup.exe"));
+            if !is_legacy_setup {
+                continue;
+            }
             let Some(parent) = program.parent() else {
                 continue;
             };

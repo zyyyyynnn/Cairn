@@ -107,12 +107,18 @@ pub fn execute_query(
         };
     }
 
-    let hierarchy = expr
-        .uses_hierarchy()
-        .then(|| HierarchyOracle::build(source.records, source.arena, source.root_prefix, expr));
+    let hierarchy = expr.uses_hierarchy().then(|| {
+        HierarchyOracle::build(
+            source.records,
+            source.arena,
+            source.root_prefix,
+            expr,
+            cancel,
+        )
+    });
     let dupes = expr
         .uses_dupes()
-        .then(|| DupeOracle::build(source.records, source.arena, expr));
+        .then(|| DupeOracle::build(source.records, source.arena, expr, cancel));
 
     let eval_ctx = EvalContext {
         source_id: source.source_id,
@@ -329,6 +335,7 @@ fn matches_property_text(value: &str, pattern: &str) -> bool {
     }
 }
 
+#[derive(Default)]
 pub(crate) struct HierarchyOracle {
     depths: Vec<u16>,
     /// Per-record `(child_files, child_folders)`.
@@ -337,7 +344,13 @@ pub(crate) struct HierarchyOracle {
 }
 
 impl HierarchyOracle {
-    fn build(records: &[FileRecord], arena: &NamePool, root: &str, expr: &QueryExpr) -> Self {
+    fn build(
+        records: &[FileRecord],
+        arena: &NamePool,
+        root: &str,
+        expr: &QueryExpr,
+        cancel: &CancellationToken,
+    ) -> Self {
         let mut need_depth = false;
         let mut need_counts = false;
         let mut child_patterns = Vec::new();
@@ -348,8 +361,14 @@ impl HierarchyOracle {
         let len = records.len();
         let child_counts = if need_counts {
             let mut counts = vec![(0u32, 0u32); len];
-            for rec in records {
-                if rec.is_tombstone() || rec.parent_idx == FileRecord::ROOT_PARENT {
+            for (idx, rec) in records.iter().enumerate() {
+                if (idx & 0x3FFF) == 0 && cancel.is_cancelled() {
+                    return Self::default();
+                }
+                if rec.is_tombstone()
+                    || rec.parent_idx == FileRecord::ROOT_PARENT
+                    || rec.parent_idx == idx as u32
+                {
                     continue;
                 }
                 if let Some(entry) = counts.get_mut(rec.parent_idx as usize) {
@@ -370,8 +389,14 @@ impl HierarchyOracle {
             for pat in &child_patterns {
                 child_matches.insert(pat.clone(), vec![false; len]);
             }
-            for rec in records {
-                if rec.is_tombstone() || rec.parent_idx == FileRecord::ROOT_PARENT {
+            for (idx, rec) in records.iter().enumerate() {
+                if (idx & 0x3FFF) == 0 && cancel.is_cancelled() {
+                    return Self::default();
+                }
+                if rec.is_tombstone()
+                    || rec.parent_idx == FileRecord::ROOT_PARENT
+                    || rec.parent_idx == idx as u32
+                {
                     continue;
                 }
                 let p_idx = rec.parent_idx as usize;
@@ -388,8 +413,8 @@ impl HierarchyOracle {
             }
         }
 
-        let depths = if need_depth {
-            compute_depths(records, root)
+        let depths = if need_depth && !cancel.is_cancelled() {
+            compute_depths(records, root, cancel)
         } else {
             Vec::new()
         };
@@ -438,7 +463,7 @@ fn collect_hierarchy_needs(
 /// Bounds a corrupt or cyclic parent chain; real directory depth stays far below this.
 const MAX_PARENT_CHAIN: usize = 256;
 
-fn compute_depths(records: &[FileRecord], root: &str) -> Vec<u16> {
+fn compute_depths(records: &[FileRecord], root: &str, cancel: &CancellationToken) -> Vec<u16> {
     let base_depth = root
         .trim_start_matches('\\')
         .split('\\')
@@ -448,6 +473,9 @@ fn compute_depths(records: &[FileRecord], root: &str) -> Vec<u16> {
     let mut stack = Vec::with_capacity(32);
 
     for idx in 0..records.len() {
+        if (idx & 0x3FFF) == 0 && cancel.is_cancelled() {
+            return Vec::new();
+        }
         if depths[idx] != 0 || records[idx].is_tombstone() {
             continue;
         }
@@ -485,13 +513,21 @@ pub(crate) struct DupeOracle {
 }
 
 impl DupeOracle {
-    fn build(records: &[FileRecord], arena: &NamePool, expr: &QueryExpr) -> Self {
+    fn build(
+        records: &[FileRecord],
+        arena: &NamePool,
+        expr: &QueryExpr,
+        cancel: &CancellationToken,
+    ) -> Self {
         let mut requested = HashSet::new();
         collect_dupe_modes(expr, &mut requested);
 
         let mut modes = HashMap::with_capacity(requested.len());
         for mode in requested {
-            modes.insert(mode, build_dupe_bitmap(records, arena, mode));
+            if cancel.is_cancelled() {
+                break;
+            }
+            modes.insert(mode, build_dupe_bitmap(records, arena, mode, cancel));
         }
         Self { modes }
     }
@@ -521,12 +557,23 @@ fn collect_dupe_modes(expr: &QueryExpr, out: &mut HashSet<DupeMode>) {
     }
 }
 
-fn build_dupe_bitmap(records: &[FileRecord], arena: &NamePool, mode: DupeMode) -> Vec<bool> {
+fn build_dupe_bitmap(
+    records: &[FileRecord],
+    arena: &NamePool,
+    mode: DupeMode,
+    cancel: &CancellationToken,
+) -> Vec<bool> {
     let mut out = vec![false; records.len()];
+    if cancel.is_cancelled() {
+        return out;
+    }
     match mode {
         DupeMode::Name | DupeMode::UniqueName => {
             let mut counts: HashMap<&[u8], u32> = HashMap::new();
-            for rec in records {
+            for (idx, rec) in records.iter().enumerate() {
+                if (idx & 0x3FFF) == 0 && cancel.is_cancelled() {
+                    return Vec::new();
+                }
                 if rec.is_tombstone() {
                     continue;
                 }
@@ -534,6 +581,9 @@ fn build_dupe_bitmap(records: &[FileRecord], arena: &NamePool, mode: DupeMode) -
                 *counts.entry(key).or_insert(0) += 1;
             }
             for (idx, rec) in records.iter().enumerate() {
+                if (idx & 0x3FFF) == 0 && cancel.is_cancelled() {
+                    return Vec::new();
+                }
                 if rec.is_tombstone() {
                     continue;
                 }
@@ -548,13 +598,19 @@ fn build_dupe_bitmap(records: &[FileRecord], arena: &NamePool, mode: DupeMode) -
         }
         DupeMode::Size => {
             let mut counts: HashMap<u64, u32> = HashMap::new();
-            for rec in records {
+            for (idx, rec) in records.iter().enumerate() {
+                if (idx & 0x3FFF) == 0 && cancel.is_cancelled() {
+                    return Vec::new();
+                }
                 if rec.is_tombstone() || rec.is_dir() {
                     continue;
                 }
                 *counts.entry(rec.size).or_insert(0) += 1;
             }
             for (idx, rec) in records.iter().enumerate() {
+                if (idx & 0x3FFF) == 0 && cancel.is_cancelled() {
+                    return Vec::new();
+                }
                 if rec.is_tombstone() || rec.is_dir() {
                     continue;
                 }
@@ -563,7 +619,10 @@ fn build_dupe_bitmap(records: &[FileRecord], arena: &NamePool, mode: DupeMode) -
         }
         DupeMode::NamePart => {
             let mut counts: HashMap<&[u8], u32> = HashMap::new();
-            for rec in records {
+            for (idx, rec) in records.iter().enumerate() {
+                if (idx & 0x3FFF) == 0 && cancel.is_cancelled() {
+                    return Vec::new();
+                }
                 if rec.is_tombstone() {
                     continue;
                 }
@@ -571,6 +630,9 @@ fn build_dupe_bitmap(records: &[FileRecord], arena: &NamePool, mode: DupeMode) -
                 *counts.entry(key).or_insert(0) += 1;
             }
             for (idx, rec) in records.iter().enumerate() {
+                if (idx & 0x3FFF) == 0 && cancel.is_cancelled() {
+                    return Vec::new();
+                }
                 if rec.is_tombstone() {
                     continue;
                 }
@@ -580,7 +642,10 @@ fn build_dupe_bitmap(records: &[FileRecord], arena: &NamePool, mode: DupeMode) -
         }
         DupeMode::NameAndSize => {
             let mut counts: HashMap<(&[u8], u64), u32> = HashMap::new();
-            for rec in records {
+            for (idx, rec) in records.iter().enumerate() {
+                if (idx & 0x3FFF) == 0 && cancel.is_cancelled() {
+                    return Vec::new();
+                }
                 if rec.is_tombstone() || rec.is_dir() {
                     continue;
                 }
@@ -588,6 +653,9 @@ fn build_dupe_bitmap(records: &[FileRecord], arena: &NamePool, mode: DupeMode) -
                 *counts.entry(key).or_insert(0) += 1;
             }
             for (idx, rec) in records.iter().enumerate() {
+                if (idx & 0x3FFF) == 0 && cancel.is_cancelled() {
+                    return Vec::new();
+                }
                 if rec.is_tombstone() || rec.is_dir() {
                     continue;
                 }
@@ -609,4 +677,62 @@ fn folded_stem<'a>(arena: &'a NamePool, rec: &FileRecord) -> &'a [u8] {
         }
     }
     folded
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::FLAG_DIRECTORY;
+    use crate::path_cache::DirectoryPathCache;
+    use crate::syntax::parse_query;
+
+    #[test]
+    fn self_parent_cycle_and_pre_cancelled_oracle_return_cleanly() {
+        let mut arena = NamePool::default();
+        let (off, len, ext) = arena.insert("loopdir");
+        let records = vec![FileRecord {
+            frn: 10,
+            parent_idx: 0, // self-parent cycle
+            name_offset: off,
+            name_len: len,
+            ext_offset: ext,
+            volume_id: 0,
+            flags: FLAG_DIRECTORY,
+            size: 0,
+            modified_ts: 100,
+            created_ts: 100,
+        }];
+        let path_cache = DirectoryPathCache::new();
+        let root_prefix = crate::path_cache::root_path_for_drive('C');
+        let view = SourceView {
+            source_id: SourceId::for_drive('C').unwrap(),
+            root_prefix: &root_prefix,
+            records: &records,
+            arena: &arena,
+            path_cache: &path_cache,
+            generation: 0,
+        };
+        let props = PropertySideTables::default();
+        let policy = QueryPolicy::default();
+
+        let empty_dir = execute_query(
+            &view,
+            &props,
+            &parse_query("empty:"),
+            &policy,
+            &CancellationToken::new(),
+        );
+        assert_eq!(empty_dir.rows, vec![0]);
+
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let cancelled = execute_query(
+            &view,
+            &props,
+            &parse_query("dupe: depth:>0"),
+            &policy,
+            &cancel,
+        );
+        assert!(cancelled.rows.is_empty());
+    }
 }

@@ -230,6 +230,22 @@ impl FolderSourcesDialogView {
             .aria_label(row_label)
             .into_any_element()
     }
+
+    fn render_source_rows_list(
+        &self,
+        sources: &[SourceStatusSummary],
+        i18n: &I18nManager,
+        tokens: &ShellTokens,
+        busy: bool,
+        window: &Window,
+        cx: &mut Context<'_, Self>,
+    ) -> Div {
+        v_flex().w_full().children(
+            sources
+                .iter()
+                .map(|source| self.render_source_row(source, i18n, tokens, busy, window, cx)),
+        )
+    }
 }
 
 impl Render for FolderSourcesDialogView {
@@ -285,15 +301,7 @@ impl Render for FolderSourcesDialogView {
                 .use_keyed_state("folder-source-scroll", cx, |_, _| ScrollHandle::new())
                 .read(cx)
                 .clone();
-            let rows = v_flex().w_full();
-            #[cfg(test)]
-            let rows = rows.on_children_prepainted(|bounds, _, _| {
-                tests::record_folder_source_row_bounds(bounds);
-            });
-            let rows =
-                rows.children(sources.iter().map(|source| {
-                    self.render_source_row(source, &i18n, &tokens, busy, window, cx)
-                }));
+            let rows = self.render_source_rows_list(&sources, &i18n, &tokens, busy, window, cx);
             let scroll_list = v_flex()
                 .id("folder-source-list")
                 .w_full()
@@ -434,9 +442,13 @@ mod tests {
     use super::{FolderSourcesDialogView, folder_source_summaries, source_state_key};
     use crate::app::{CairnApp, layout};
     use crate::shell::i18n::I18nManager;
+    use crate::shell::theme::ShellTokens;
     use cairn_protocol::message::SourceId;
     use cairn_protocol::status::{SourceKind, SourceStatusSummary, VolumeState};
-    use gpui_kit::gpui::{AppContext as _, Bounds, Pixels, px};
+    use gpui_kit::gpui::{
+        AppContext as _, Bounds, Context, IntoElement, ParentElement as _, Pixels, Render,
+        Styled as _, Window, div, px, rems,
+    };
     use std::cell::RefCell;
 
     thread_local! {
@@ -575,11 +587,44 @@ mod tests {
         });
     }
 
+    struct SourceRowsHarness {
+        dialog: gpui_kit::gpui::Entity<FolderSourcesDialogView>,
+        i18n: I18nManager,
+        sources: Vec<SourceStatusSummary>,
+    }
+
+    impl Render for SourceRowsHarness {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+            let tokens = ShellTokens::current(cx);
+            let i18n = &self.i18n;
+            let sources = self.sources.clone();
+            let list = self
+                .dialog
+                .update(cx, |dialog, cx| {
+                    dialog.render_source_rows_list(&sources, i18n, &tokens, false, window, cx)
+                })
+                .on_children_prepainted(|bounds, _, _| {
+                    record_folder_source_row_bounds(bounds);
+                });
+            div().w(rems(32.0)).child(list)
+        }
+    }
+
     #[test]
     fn folder_source_rows_keep_the_uniform_row_height() {
         gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
             gpui_kit::init(cx);
-            let (handle, _view) = gpui_kit::open_window(
+            let sources = vec![
+                source(1000, SourceKind::Folder, VolumeState::Synced, r"D:\Work"),
+                source(
+                    1001,
+                    SourceKind::Folder,
+                    VolumeState::CatchingUp(50),
+                    r"E:\Archive",
+                ),
+                source(1002, SourceKind::Folder, VolumeState::Synced, r"F:\Media"),
+            ];
+            let (dialog_handle, dialog) = gpui_kit::open_window(
                 gpui_kit::gpui::WindowOptions {
                     show: false,
                     focus: false,
@@ -588,17 +633,9 @@ mod tests {
                 cx,
                 |window, cx| {
                     let app = cx.new(|cx| CairnApp::new(window, cx));
+                    let sources_for_app = sources.clone();
                     app.update(cx, |app, cx| {
-                        app.service.sources = vec![
-                            source(1000, SourceKind::Folder, VolumeState::Synced, r"D:\Work"),
-                            source(
-                                1001,
-                                SourceKind::Folder,
-                                VolumeState::CatchingUp(50),
-                                r"E:\Archive",
-                            ),
-                            source(1002, SourceKind::Folder, VolumeState::Synced, r"F:\Media"),
-                        ];
+                        app.service.sources = sources_for_app;
                         app.service.connection.mark_connected();
                         cx.notify();
                     });
@@ -609,7 +646,30 @@ mod tests {
                     cx.new(|cx| FolderSourcesDialogView::new(app, placeholder, window, cx))
                 },
             )
-            .expect("test window opens");
+            .expect("dialog window opens");
+
+            dialog_handle
+                .update(cx, |_, window, cx| {
+                    window.draw(cx).clear(cx);
+                })
+                .expect("dialog draw succeeds");
+
+            let (handle, _view) = gpui_kit::open_window(
+                gpui_kit::gpui::WindowOptions {
+                    show: false,
+                    focus: false,
+                    ..gpui_kit::gpui::WindowOptions::default()
+                },
+                cx,
+                |_, cx| {
+                    cx.new(|_| SourceRowsHarness {
+                        dialog,
+                        i18n: I18nManager::new("zh-CN"),
+                        sources,
+                    })
+                },
+            )
+            .expect("harness window opens");
 
             handle
                 .update(cx, |_, window, cx| {
@@ -648,7 +708,7 @@ mod tests {
                         );
                     }
                 })
-                .expect("dialog draw succeeds");
+                .expect("harness draw succeeds");
             cx.quit();
         });
     }

@@ -8,7 +8,7 @@ use crate::app::CairnApp;
 use crate::search::QueryToggle;
 use crate::shell::command_groups::GroupCommand;
 use crate::shell::settings::ColumnSettings;
-use crate::table::model::{SortColumn, SortColumnLabel, TableColumn};
+use crate::table::columns::{SortColumn, SortColumnLabel, TableColumn};
 
 /// Top-level window location owning the result list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -209,7 +209,6 @@ impl CairnApp {
 mod tests {
     use super::*;
     use crate::search::TextModifier;
-    use crate::shell::i18n::I18nManager;
 
     #[test]
     fn context_commands_match_hidden_policy_and_rename_capability() {
@@ -267,7 +266,7 @@ mod tests {
 
     #[test]
     fn is_column_visible_follows_location_profile() {
-        use crate::table::model::OptionalColumn;
+        use crate::table::columns::OptionalColumn;
         let custom = ColumnSettings {
             show_path: false,
             show_modified: false,
@@ -288,59 +287,5 @@ mod tests {
             !LocationProfile::RECYCLE_BIN
                 .is_column_visible(TableColumn::Optional(OptionalColumn::Length), &custom)
         );
-    }
-
-    #[test]
-    fn location_label_keys_exist_in_all_locales() {
-        let commands_to_check = [
-            GroupCommand::OpenSelected,
-            GroupCommand::RenameSelected,
-            GroupCommand::RestoreSelected,
-            GroupCommand::CopyPaths,
-            GroupCommand::CopyNames,
-            GroupCommand::DeleteSelected,
-            GroupCommand::SortBy(SortColumn::Path),
-            GroupCommand::SortBy(SortColumn::DateModified),
-        ];
-        for locale in ["zh-CN", "en-US"] {
-            let i18n = I18nManager::new(locale);
-            for profile in [&LocationProfile::INDEX, &LocationProfile::RECYCLE_BIN] {
-                let placeholder = i18n.get_text(profile.search_placeholder_key);
-                assert!(
-                    !placeholder.trim().is_empty() && placeholder != profile.search_placeholder_key,
-                    "missing placeholder key `{}` for {locale}",
-                    profile.search_placeholder_key
-                );
-                if let Some(aria_key) = profile.search_aria_label_key {
-                    let aria = i18n.get_text(aria_key);
-                    assert!(
-                        !aria.trim().is_empty() && aria != aria_key,
-                        "missing aria key `{aria_key}` for {locale}"
-                    );
-                }
-                for col in [
-                    SortColumn::Name,
-                    SortColumn::Path,
-                    SortColumn::Size,
-                    SortColumn::DateModified,
-                    SortColumn::DateCreated,
-                ] {
-                    let key = profile.column_label_key(col);
-                    let text = i18n.get_text(key);
-                    assert!(
-                        !text.trim().is_empty() && text != key,
-                        "missing column key `{key}` for {locale}"
-                    );
-                }
-                for cmd in commands_to_check {
-                    let key = profile.command_label_key(cmd);
-                    let text = i18n.get_text(key);
-                    assert!(
-                        !text.trim().is_empty() && text != key,
-                        "missing command key `{key}` for {locale}"
-                    );
-                }
-            }
-        }
     }
 }

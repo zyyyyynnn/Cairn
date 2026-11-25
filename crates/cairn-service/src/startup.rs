@@ -79,20 +79,49 @@ impl ServiceRuntime {
         // to the 500ms steady cadence once every volume is Synced.
         let engine_usn = engine.clone();
         let usn_task = tokio::spawn(async move {
+            let mut catching_up = match tokio::task::spawn_blocking({
+                let engine = engine_usn.clone();
+                move || engine.is_catching_up()
+            })
+            .await
+            {
+                Ok(v) => v,
+                Err(err) => {
+                    error!("USN catch-up check task failed: {err}");
+                    false
+                }
+            };
             loop {
-                let delay = if engine_usn.is_catching_up() { 50 } else { 500 };
+                let delay = if catching_up { 50 } else { 500 };
                 tokio::time::sleep(Duration::from_millis(delay)).await;
-                engine_usn.poll_usn_changes();
+                let engine = engine_usn.clone();
+                catching_up = match tokio::task::spawn_blocking(move || {
+                    engine.poll_usn_changes();
+                    engine.is_catching_up()
+                })
+                .await
+                {
+                    Ok(v) => v,
+                    Err(err) => {
+                        error!("USN poll task failed: {err}");
+                        false
+                    }
+                };
             }
         });
 
         let engine_persist = engine.clone();
         let persist_task = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(300));
+            let period = Duration::from_secs(300);
+            let mut interval =
+                tokio::time::interval_at(tokio::time::Instant::now() + period, period);
             loop {
                 interval.tick().await;
-                if let Err(e) = engine_persist.save_all_indexes() {
-                    error!("Periodic index save failed: {}", e);
+                let engine = engine_persist.clone();
+                match tokio::task::spawn_blocking(move || engine.save_all_indexes()).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => error!("Periodic index save failed: {}", e),
+                    Err(e) => error!("Periodic index save task panicked: {}", e),
                 }
             }
         });
@@ -102,10 +131,17 @@ impl ServiceRuntime {
 
         let engine_snapshot = engine.clone();
         let snapshot_task = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(300));
+            let period = Duration::from_secs(300);
+            let mut interval =
+                tokio::time::interval_at(tokio::time::Instant::now() + period, period);
             loop {
                 interval.tick().await;
-                engine_snapshot.rescan_snapshot_volumes();
+                let engine = engine_snapshot.clone();
+                if let Err(e) =
+                    tokio::task::spawn_blocking(move || engine.rescan_snapshot_volumes()).await
+                {
+                    error!("Snapshot volume rescan task panicked: {}", e);
+                }
             }
         });
 
@@ -114,14 +150,28 @@ impl ServiceRuntime {
             let mut last_rescan = tokio::time::Instant::now();
             loop {
                 tokio::time::sleep(Duration::from_secs(5)).await;
-                let secs = engine_folders.get_config().folder_rescan_interval_secs;
-                if secs == 0 {
-                    last_rescan = tokio::time::Instant::now();
-                    continue;
-                }
-                if last_rescan.elapsed() >= Duration::from_secs(secs) {
-                    engine_folders.rescan_folder_sources();
-                    last_rescan = tokio::time::Instant::now();
+                let elapsed = last_rescan.elapsed();
+                let engine = engine_folders.clone();
+                match tokio::task::spawn_blocking(move || {
+                    let secs = engine.get_config().folder_rescan_interval_secs;
+                    if secs == 0 {
+                        return Some(false);
+                    }
+                    if elapsed >= Duration::from_secs(secs) {
+                        engine.rescan_folder_sources();
+                        return Some(true);
+                    }
+                    None
+                })
+                .await
+                {
+                    Ok(Some(_reset_timer)) => {
+                        last_rescan = tokio::time::Instant::now();
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        error!("Folder rescan task panicked: {}", e);
+                    }
                 }
             }
         });

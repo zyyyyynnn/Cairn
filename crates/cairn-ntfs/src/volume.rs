@@ -49,7 +49,7 @@ pub fn enumerate_fixed_drives() -> Vec<char> {
 /// Device path format MUST be `\\.\C:` strictly without any trailing backslash.
 #[cfg(windows)]
 pub struct RawVolumeHandle {
-    pub handle: HANDLE,
+    handle: HANDLE,
     pub path: String,
 }
 
@@ -98,13 +98,19 @@ impl RawVolumeHandle {
     }
 
     /// Reads raw bytes at `offset` using `SetFilePointerEx` and `ReadFile`.
-    pub fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<usize, std::io::Error> {
+    pub fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize, std::io::Error> {
+        let signed_offset = i64::try_from(offset).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "raw volume read offset exceeds i64::MAX",
+            )
+        })?;
         let mut moved_offset = 0i64;
         // SAFETY: SetFilePointerEx moves file pointer to specified 64-bit physical offset.
         let seek_ok = unsafe {
             SetFilePointerEx(
                 self.handle,
-                offset as i64,
+                signed_offset,
                 Some(&mut moved_offset),
                 FILE_BEGIN,
             )
@@ -182,9 +188,7 @@ impl RawVolumeHandle {
             let err = unsafe { windows::Win32::Foundation::GetLastError() };
             return Err(crate::usn::UsnError::ReadFailed(err.0));
         }
-        Ok(crate::usn::parse_usn_records(
-            &out_buf[..bytes_returned as usize],
-        ))
+        crate::usn::parse_usn_records(&out_buf[..bytes_returned as usize])
     }
 }
 

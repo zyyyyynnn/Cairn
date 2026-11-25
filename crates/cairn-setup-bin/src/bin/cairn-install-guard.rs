@@ -14,6 +14,10 @@ use std::path::PathBuf;
 use cairn_setup::install_path::validate_install_path_under;
 
 fn main() {
+    if let Err(error) = cairn_setup::enable_safe_dll_search() {
+        eprintln!("failed to restrict DLL search: {error}");
+        std::process::exit(1);
+    }
     let mut install_dir = None;
     let mut program_files = None;
     let mut args = std::env::args().skip(1);

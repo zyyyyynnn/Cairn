@@ -12,14 +12,89 @@ use cairn_protocol::{PropertyExtractResult, PropertyExtractTask};
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
 #[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
+#[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 const MAX_CAPTURED_PIPE_BYTES: u64 = 64 * 1024;
 static BATCH_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+fn is_cancelled(cancel: &AtomicBool, shutdown: Option<&AtomicBool>) -> bool {
+    cancel.load(Ordering::SeqCst) || shutdown.is_some_and(|flag| flag.load(Ordering::SeqCst))
+}
+
+#[cfg(windows)]
+fn worker_job_handle() -> Result<isize, String> {
+    static JOB: OnceLock<Mutex<Option<isize>>> = OnceLock::new();
+    let mut slot = JOB.get_or_init(|| Mutex::new(None)).lock().unwrap();
+    if let Some(job) = *slot {
+        return Ok(job);
+    }
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::JobObjects::{
+        CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JobObjectExtendedLimitInformation, SetInformationJobObject,
+    };
+
+    // SAFETY: CreateJobObjectW with null security/name creates an anonymous process job.
+    let job = unsafe { CreateJobObjectW(None, None) }
+        .map_err(|error| format!("could not create worker Job Object: {error}"))?;
+    let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    // SAFETY: `info` matches `JobObjectExtendedLimitInformation` and is valid for the call.
+    let configured = unsafe {
+        SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            std::ptr::from_ref(&info).cast(),
+            size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        )
+    };
+    if let Err(error) = configured {
+        // SAFETY: `job` was opened above and is not retained after this failure.
+        unsafe {
+            let _ = CloseHandle(job);
+        }
+        return Err(format!("could not configure worker Job Object: {error}"));
+    }
+    *slot = Some(job.0 as isize);
+    Ok(job.0 as isize)
+}
+
+#[cfg(windows)]
+fn assign_child_to_job(child: &Child) -> Result<(), String> {
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::JobObjects::AssignProcessToJobObject;
+
+    let job_raw = worker_job_handle()?;
+    let job = HANDLE(job_raw as *mut core::ffi::c_void);
+    let process = HANDLE(child.as_raw_handle());
+    // SAFETY: `job` is a process-lifetime job handle and `process` is owned by `child`.
+    unsafe { AssignProcessToJobObject(job, process) }
+        .map_err(|error| format!("could not assign CairnWorker to Job Object: {error}"))
+}
+
+pub(super) fn cleanup_stale_property_work_files(work_dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(work_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let is_prop_scratch = (name.starts_with("prop-batch-") || name.starts_with("prop-out-"))
+            && name.ends_with(".jsonl");
+        if is_prop_scratch {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
 
 pub(super) fn next_batch_seq() -> u64 {
     BATCH_COUNTER.fetch_add(1, Ordering::Relaxed)
@@ -59,6 +134,9 @@ pub(super) enum WorkerProcessOutcome {
         exit_code: Option<i32>,
         reason: String,
     },
+    IsolationFailed {
+        reason: String,
+    },
 }
 
 /// Outcome of running an isolated property extraction batch in `CairnWorker.exe`.
@@ -73,6 +151,9 @@ pub(super) enum PropertyIsolationOutcome {
         exit_code: Option<i32>,
         reason: String,
     },
+    IsolationFailed {
+        reason: String,
+    },
 }
 
 /// Spawns `program` at below-normal priority with capped pipe drains until exit, timeout, or cancel.
@@ -82,8 +163,9 @@ pub(super) fn run_bounded_worker(
     timeout: Duration,
     poll_interval: Duration,
     cancel: &AtomicBool,
+    shutdown: Option<&AtomicBool>,
 ) -> WorkerProcessOutcome {
-    if cancel.load(Ordering::SeqCst) {
+    if is_cancelled(cancel, shutdown) {
         return WorkerProcessOutcome::Cancelled;
     }
 
@@ -107,15 +189,39 @@ pub(super) fn run_bounded_worker(
             };
         }
     };
+    #[cfg(windows)]
+    if let Err(error) = assign_child_to_job(&child) {
+        terminate_child(&mut child);
+        return WorkerProcessOutcome::IsolationFailed { reason: error };
+    }
 
     // Drain stdout and stderr concurrently up to 64 KiB, discarding excess so OS pipe buffers
     // cannot fill and deadlock the child or exhaust service memory.
-    let stdout_reader = child.stdout.take().map(spawn_pipe_drain);
-    let stderr_reader = child.stderr.take().map(spawn_pipe_drain);
+    let stdout_reader = match child.stdout.take().map(spawn_pipe_drain).transpose() {
+        Ok(reader) => reader,
+        Err(err) => {
+            terminate_child(&mut child);
+            return WorkerProcessOutcome::Failed {
+                exit_code: None,
+                reason: format!("could not spawn stdout drain thread: {err}"),
+            };
+        }
+    };
+    let stderr_reader = match child.stderr.take().map(spawn_pipe_drain).transpose() {
+        Ok(reader) => reader,
+        Err(err) => {
+            terminate_child(&mut child);
+            join_reader(stdout_reader);
+            return WorkerProcessOutcome::Failed {
+                exit_code: None,
+                reason: format!("could not spawn stderr drain thread: {err}"),
+            };
+        }
+    };
     let deadline = Instant::now() + timeout;
 
     loop {
-        if cancel.load(Ordering::SeqCst) {
+        if is_cancelled(cancel, shutdown) {
             terminate_child(&mut child);
             join_reader(stdout_reader);
             join_reader(stderr_reader);
@@ -171,11 +277,12 @@ pub(super) fn extract_properties_isolated(
     work_dir: &Path,
     timeout: Duration,
     cancel: &AtomicBool,
+    shutdown: Option<&AtomicBool>,
 ) -> PropertyIsolationOutcome {
     if tasks.is_empty() {
         return PropertyIsolationOutcome::Completed(Vec::new());
     }
-    if cancel.load(Ordering::SeqCst) {
+    if is_cancelled(cancel, shutdown) {
         return PropertyIsolationOutcome::Cancelled;
     }
     if let Err(err) = std::fs::create_dir_all(work_dir) {
@@ -214,6 +321,7 @@ pub(super) fn extract_properties_isolated(
         timeout,
         Duration::from_millis(25),
         cancel,
+        shutdown,
     ) {
         WorkerProcessOutcome::Completed { .. } => match read_jsonl(&out_path) {
             Ok(results) => PropertyIsolationOutcome::Completed(results),
@@ -224,6 +332,9 @@ pub(super) fn extract_properties_isolated(
         },
         WorkerProcessOutcome::TimedOut { reason } => PropertyIsolationOutcome::TimedOut { reason },
         WorkerProcessOutcome::Cancelled => PropertyIsolationOutcome::Cancelled,
+        WorkerProcessOutcome::IsolationFailed { reason } => {
+            PropertyIsolationOutcome::IsolationFailed { reason }
+        }
         WorkerProcessOutcome::Failed { exit_code, reason } => {
             PropertyIsolationOutcome::WorkerFailed { exit_code, reason }
         }
@@ -275,15 +386,19 @@ fn terminate_child(child: &mut Child) {
     let _ = child.wait();
 }
 
-fn spawn_pipe_drain<R: Read + Send + 'static>(pipe: R) -> std::thread::JoinHandle<String> {
-    std::thread::spawn(move || {
-        let mut capped = pipe.take(MAX_CAPTURED_PIPE_BYTES);
-        let mut buf = Vec::new();
-        let _ = capped.read_to_end(&mut buf);
-        let mut rest = capped.into_inner();
-        let _ = std::io::copy(&mut rest, &mut std::io::sink());
-        String::from_utf8_lossy(&buf).into_owned()
-    })
+fn spawn_pipe_drain<R: Read + Send + 'static>(
+    pipe: R,
+) -> std::io::Result<std::thread::JoinHandle<String>> {
+    std::thread::Builder::new()
+        .name("cairn-worker-pipe".to_string())
+        .spawn(move || {
+            let mut capped = pipe.take(MAX_CAPTURED_PIPE_BYTES);
+            let mut buf = Vec::new();
+            let _ = capped.read_to_end(&mut buf);
+            let mut rest = capped.into_inner();
+            let _ = std::io::copy(&mut rest, &mut std::io::sink());
+            String::from_utf8_lossy(&buf).into_owned()
+        })
 }
 
 fn join_reader(handle: Option<std::thread::JoinHandle<String>>) -> String {
@@ -311,6 +426,7 @@ mod tests {
             Duration::from_millis(250),
             Duration::from_millis(25),
             &cancel,
+            None,
         );
         assert!(
             matches!(timeout_outcome, WorkerProcessOutcome::TimedOut { .. }),
@@ -337,6 +453,7 @@ mod tests {
             Duration::from_secs(10),
             Duration::from_millis(25),
             &cancel_flag,
+            None,
         );
         assert!(
             matches!(cancelled, WorkerProcessOutcome::Cancelled),
@@ -349,6 +466,7 @@ mod tests {
             Duration::from_secs(5),
             Duration::from_millis(25),
             &AtomicBool::new(false),
+            None,
         );
         match crashed {
             WorkerProcessOutcome::Failed { exit_code, .. } => {
@@ -371,6 +489,7 @@ mod tests {
             Duration::from_secs(30),
             Duration::from_millis(25),
             &AtomicBool::new(false),
+            None,
         );
         match outcome {
             WorkerProcessOutcome::Completed { stdout, .. } => {
@@ -391,6 +510,7 @@ mod tests {
             &work_dir,
             Duration::from_secs(1),
             &AtomicBool::new(false),
+            None,
         );
         assert_eq!(empty, PropertyIsolationOutcome::Completed(Vec::new()));
         assert!(
@@ -406,16 +526,43 @@ mod tests {
         };
         let cancelled = extract_properties_isolated(
             Path::new("nonexistent-worker.exe"),
-            &[task],
+            std::slice::from_ref(&task),
             &work_dir,
             Duration::from_secs(1),
             &AtomicBool::new(true),
+            None,
         );
         assert_eq!(cancelled, PropertyIsolationOutcome::Cancelled);
+        let shutdown_cancelled = extract_properties_isolated(
+            Path::new("nonexistent-worker.exe"),
+            &[task],
+            &work_dir,
+            Duration::from_secs(1),
+            &AtomicBool::new(false),
+            Some(&AtomicBool::new(true)),
+        );
+        assert_eq!(shutdown_cancelled, PropertyIsolationOutcome::Cancelled);
         assert!(
             !work_dir.exists(),
             "pre-cancelled batch must not create work directory"
         );
+    }
+
+    #[test]
+    fn cleanup_stale_property_work_files_removes_only_prop_jsonl_scratch() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let batch = dir.path().join("prop-batch-1-2.jsonl");
+        let out = dir.path().join("prop-out-1-2.jsonl");
+        let unrelated = dir.path().join("keep.txt");
+        std::fs::write(&batch, "{}").unwrap();
+        std::fs::write(&out, "{}").unwrap();
+        std::fs::write(&unrelated, "ok").unwrap();
+
+        cleanup_stale_property_work_files(dir.path());
+
+        assert!(!batch.exists());
+        assert!(!out.exists());
+        assert!(unrelated.exists());
     }
 
     #[cfg(windows)]
@@ -439,6 +586,7 @@ mod tests {
             &work_dir,
             Duration::from_secs(5),
             &AtomicBool::new(false),
+            None,
         ) {
             PropertyIsolationOutcome::WorkerFailed { exit_code, reason } => {
                 assert_eq!(exit_code, Some(0));
@@ -461,6 +609,7 @@ mod tests {
             &work_dir,
             Duration::from_secs(5),
             &AtomicBool::new(false),
+            None,
         ) {
             PropertyIsolationOutcome::WorkerFailed { exit_code, reason } => {
                 assert_eq!(exit_code, Some(0));
@@ -508,6 +657,7 @@ mod tests {
             &work_dir,
             Duration::from_secs(5),
             &AtomicBool::new(false),
+            None,
         );
         assert_eq!(ok, PropertyIsolationOutcome::Completed(vec![expected]));
         assert_eq!(

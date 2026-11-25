@@ -21,7 +21,22 @@ pub(crate) mod installed;
 pub(crate) mod model;
 #[cfg(feature = "gui")]
 pub(crate) mod msi;
-/// The payload format is a contract between the packaging step that writes it and this crate
+/// Loads Win32 setup binaries with DLL search restricted to System32.
+#[cfg(all(windows, feature = "gui"))]
+pub fn enable_safe_dll_search() -> std::io::Result<()> {
+    use windows::Win32::System::LibraryLoader::{
+        LOAD_LIBRARY_SEARCH_SYSTEM32, SetDefaultDllDirectories,
+    };
+
+    // SAFETY: `LOAD_LIBRARY_SEARCH_SYSTEM32` is a bitmask flag with no pointer arguments.
+    unsafe { SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32) }
+        .map_err(|error| std::io::Error::other(error.to_string()))
+}
+
+#[cfg(not(all(windows, feature = "gui")))]
+pub fn enable_safe_dll_search() -> std::io::Result<()> {
+    Ok(())
+}
 /// that reads it, so both ends stay published: `xtask` packaging calls the writer, and the setup
 /// binary and the packaging test call the reader.
 pub mod payload;

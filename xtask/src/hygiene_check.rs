@@ -6,11 +6,12 @@
 //! `#[ignore]` registry parity with `docs/engineering/testing.md`, clean source comments,
 //! and UI/product copy symbol restrictions across `.ftl` and product specifications.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 const TESTING_DOC: &str = "docs/engineering/testing.md";
+const CI_WORKFLOW_DOC: &str = ".github/workflows/ci.yml";
 const IGNORED_SECTION_HEADER: &str = "## 被忽略的测试";
 
 const FORBID_UNSAFE_ENTRYPOINTS: &[&str] = &[
@@ -168,14 +169,22 @@ fn check_workspace_lints(workspace: &Path, violations: &mut Vec<String>) -> Resu
 
     for entry_rel in FORBID_UNSAFE_ENTRYPOINTS {
         let path = workspace.join(entry_rel);
-        if path.is_file() {
-            let text =
-                fs::read_to_string(&path).map_err(|err| format!("{}: {err}", path.display()))?;
-            if !text.contains("#![forbid(unsafe_code)]") {
-                violations.push(format!(
-                    "{entry_rel}: safe-by-contract entrypoint must declare `#![forbid(unsafe_code)]`"
-                ));
-            }
+        if !path.is_file() {
+            violations.push(format!(
+                "{entry_rel}: required safe-by-contract entrypoint is missing"
+            ));
+            continue;
+        }
+        let text = fs::read_to_string(&path).map_err(|err| format!("{}: {err}", path.display()))?;
+        let scanned = scan_rust_source(&text);
+        if !scanned
+            .code_lines
+            .iter()
+            .any(|(_, line)| line.contains("#![forbid(unsafe_code)]"))
+        {
+            violations.push(format!(
+                "{entry_rel}: safe-by-contract entrypoint must declare `#![forbid(unsafe_code)]`"
+            ));
         }
     }
 
@@ -223,6 +232,8 @@ fn check_workspace_lints(workspace: &Path, violations: &mut Vec<String>) -> Resu
     }
     manifests.sort();
 
+    let workspace_dep_packages = extract_workspace_dep_packages(workspace_table);
+
     for manifest in &manifests {
         let content =
             fs::read_to_string(manifest).map_err(|err| format!("{}: {err}", manifest.display()))?;
@@ -243,9 +254,11 @@ fn check_workspace_lints(workspace: &Path, violations: &mut Vec<String>) -> Resu
             violations.push(format!("{rel}: missing `[lints] workspace = true`"));
         }
         if ISOLATED_SERVICE_CONTENT_MANIFESTS.contains(&rel.as_str()) {
-            check_isolated_manifest_deps(&rel, &parsed, violations);
+            check_isolated_manifest_deps(&rel, &parsed, &workspace_dep_packages, violations);
         }
     }
+
+    check_isolated_lockfile_deps(workspace, violations)?;
 
     Ok(manifests.len())
 }
@@ -254,6 +267,8 @@ const ISOLATED_SERVICE_CONTENT_MANIFESTS: &[&str] = &[
     "crates/cairn-service/Cargo.toml",
     "crates/cairn-content/Cargo.toml",
 ];
+
+const ISOLATED_LOCKFILE_ROOTS: &[&str] = &["cairn-service", "cairn-content"];
 
 const FORBIDDEN_PARSER_AND_WORKER_DEPS: &[&str] = &[
     "cairn-worker",
@@ -268,19 +283,59 @@ fn normalize_crate_name(name: &str) -> String {
     name.replace('_', "-").to_ascii_lowercase()
 }
 
-fn check_isolated_manifest_deps(rel: &str, parsed: &toml::Table, violations: &mut Vec<String>) {
+fn is_forbidden_isolated_crate(normalized: &str) -> bool {
+    FORBIDDEN_PARSER_AND_WORKER_DEPS
+        .iter()
+        .any(|forbidden| normalize_crate_name(forbidden) == normalized)
+}
+
+fn extract_workspace_dep_packages(
+    workspace_table: Option<&toml::Table>,
+) -> BTreeMap<String, String> {
+    let mut map = BTreeMap::new();
+    let Some(deps) = workspace_table
+        .and_then(|ws| ws.get("dependencies"))
+        .and_then(toml::Value::as_table)
+    else {
+        return map;
+    };
+    for (alias, spec) in deps {
+        let pkg = spec
+            .as_table()
+            .and_then(|t| t.get("package"))
+            .and_then(toml::Value::as_str)
+            .unwrap_or(alias.as_str());
+        map.insert(normalize_crate_name(alias), normalize_crate_name(pkg));
+    }
+    map
+}
+
+fn check_isolated_manifest_deps(
+    rel: &str,
+    parsed: &toml::Table,
+    workspace_dep_packages: &BTreeMap<String, String>,
+    violations: &mut Vec<String>,
+) {
     let mut check_dep_table = |section: &str, table: &toml::Table| {
         for (alias, spec) in table {
-            let actual_pkg = spec
+            let explicit_pkg = spec
                 .as_table()
                 .and_then(|t| t.get("package"))
-                .and_then(toml::Value::as_str)
-                .unwrap_or(alias.as_str());
-            let normalized = normalize_crate_name(actual_pkg);
-            if FORBIDDEN_PARSER_AND_WORKER_DEPS
-                .iter()
-                .any(|forbidden| normalize_crate_name(forbidden) == normalized)
+                .and_then(toml::Value::as_str);
+            let actual_pkg = if let Some(pkg) = explicit_pkg {
+                normalize_crate_name(pkg)
+            } else if spec
+                .as_table()
+                .and_then(|t| t.get("workspace"))
+                .and_then(toml::Value::as_bool)
+                == Some(true)
             {
+                let key = normalize_crate_name(alias);
+                workspace_dep_packages.get(&key).cloned().unwrap_or(key)
+            } else {
+                normalize_crate_name(alias)
+            };
+            if is_forbidden_isolated_crate(&actual_pkg) {
                 violations.push(format!(
                     "{rel}: forbidden isolated dependency `{actual_pkg}` in [{section}]"
                 ));
@@ -305,6 +360,88 @@ fn check_isolated_manifest_deps(rel: &str, parsed: &toml::Table, violations: &mu
             }
         }
     }
+}
+
+fn check_isolated_lockfile_deps(
+    workspace: &Path,
+    violations: &mut Vec<String>,
+) -> Result<(), String> {
+    let lock_path = workspace.join("Cargo.lock");
+    if !lock_path.is_file() {
+        return Ok(());
+    }
+    let content =
+        fs::read_to_string(&lock_path).map_err(|err| format!("{}: {err}", lock_path.display()))?;
+    let parsed = match content.parse::<toml::Table>() {
+        Ok(table) => table,
+        Err(err) => {
+            violations.push(format!("Cargo.lock: invalid TOML: {err}"));
+            return Ok(());
+        }
+    };
+    let Some(packages) = parsed.get("package").and_then(toml::Value::as_array) else {
+        return Ok(());
+    };
+
+    let mut deps_by_pkg: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for package in packages {
+        let Some(pkg_table) = package.as_table() else {
+            continue;
+        };
+        let Some(name) = pkg_table.get("name").and_then(toml::Value::as_str) else {
+            continue;
+        };
+        let entry = deps_by_pkg.entry(normalize_crate_name(name)).or_default();
+        if let Some(deps) = pkg_table
+            .get("dependencies")
+            .and_then(toml::Value::as_array)
+        {
+            for dep in deps {
+                if let Some(dep_name) = dep.as_str().and_then(|s| s.split_whitespace().next()) {
+                    entry.insert(normalize_crate_name(dep_name));
+                }
+            }
+        }
+    }
+
+    for &root in ISOLATED_LOCKFILE_ROOTS {
+        if !deps_by_pkg.contains_key(root) {
+            continue;
+        }
+        let mut queue = VecDeque::from([root.to_string()]);
+        let mut visited = BTreeSet::from([root.to_string()]);
+        let mut parent: BTreeMap<String, String> = BTreeMap::new();
+        let mut reported = BTreeSet::new();
+
+        while let Some(curr) = queue.pop_front() {
+            let Some(next_deps) = deps_by_pkg.get(&curr) else {
+                continue;
+            };
+            for next in next_deps {
+                if is_forbidden_isolated_crate(next) && reported.insert(next.clone()) {
+                    let mut chain = vec![next.as_str()];
+                    let mut cursor = curr.as_str();
+                    chain.push(cursor);
+                    while let Some(prev) = parent.get(cursor) {
+                        chain.push(prev.as_str());
+                        cursor = prev.as_str();
+                    }
+                    chain.reverse();
+                    violations.push(format!(
+                        "Cargo.lock: forbidden isolated dependency `{next}` reachable from `{root}` via `{}`",
+                        chain.join(" -> ")
+                    ));
+                    continue;
+                }
+                if visited.insert(next.clone()) {
+                    parent.insert(next.clone(), curr.clone());
+                    queue.push_back(next.clone());
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn inherits_workspace_key(manifest: &toml::Table, path: &[&str]) -> bool {
@@ -348,11 +485,14 @@ fn check_sources(
 
         for (idx, (line_no, code)) in scanned.code_lines.iter().enumerate() {
             let trimmed = code.trim();
-            if trimmed.contains(concat!("clippy::", "too_many_arguments"))
-                || trimmed.contains(concat!("clippy::", "large_enum_variant"))
+            if let Some(forbidden_lint) = REQUIRED_CLIPPY_LINTS
+                .iter()
+                .filter(|&&(_, level)| level == "deny")
+                .map(|&(lint, _)| lint)
+                .find(|lint| trimmed.contains(&format!("clippy::{lint}")))
             {
                 violations.push(format!(
-                    "{rel}:{line_no}: forbidden clippy suppression `{trimmed}`"
+                    "{rel}:{line_no}: forbidden clippy suppression `{trimmed}` (`clippy::{forbidden_lint}`)"
                 ));
             }
             if trimmed.contains(concat!("core::prelude::", "rust_"))
@@ -373,7 +513,18 @@ fn check_sources(
             }
             match find_next_fn_name(&scanned.code_lines[idx + 1..]) {
                 Some(fn_name) => {
-                    actual.insert((crate_name.clone(), fn_name));
+                    let inline_modules = inline_module_prefix(&scanned.code_lines, idx);
+                    let fn_path = if inline_modules.is_empty() {
+                        fn_name
+                    } else {
+                        format!("{inline_modules}::{fn_name}")
+                    };
+                    let qualified = qualified_test_name(&rel, &fn_path);
+                    if !actual.insert((crate_name.clone(), qualified.clone())) {
+                        violations.push(format!(
+                            "{rel}:{line_no}: duplicate #[ignore] test `{crate_name}` `{qualified}`"
+                        ));
+                    }
                 }
                 None => {
                     violations.push(format!(
@@ -403,8 +554,76 @@ fn check_sources(
             "{TESTING_DOC}: stale ignored-test entry `{crate_name}` `{fn_name}` (no matching #[ignore] test found)"
         ));
     }
+    check_ci_ignored_test_filters(workspace, &actual, violations)?;
 
     Ok(actual.len())
+}
+
+fn check_ci_ignored_test_filters(
+    workspace: &Path,
+    actual: &BTreeSet<(String, String)>,
+    violations: &mut Vec<String>,
+) -> Result<(), String> {
+    let ci_path = workspace.join(CI_WORKFLOW_DOC);
+    if !ci_path.is_file() {
+        return Ok(());
+    }
+    let ci_text =
+        fs::read_to_string(&ci_path).map_err(|err| format!("{}: {err}", ci_path.display()))?;
+    let valid_filters: BTreeSet<&str> = actual
+        .iter()
+        .map(|(_, name)| runtime_test_name(name))
+        .collect();
+    for (line_no, filter) in extract_ci_ignored_test_filters(&ci_text) {
+        if !valid_filters.contains(filter.as_str()) {
+            violations.push(format!(
+                "{CI_WORKFLOW_DOC}:{line_no}: stale CI ignored-test filter `{filter}` (no matching #[ignore] test found)"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn runtime_test_name(qualified: &str) -> &str {
+    if let Some(rest) = qualified.strip_prefix("tests::")
+        && let Some((_, inner)) = rest.split_once("::")
+    {
+        return inner;
+    }
+    qualified
+}
+
+fn extract_ci_ignored_test_filters(ci_yml: &str) -> Vec<(usize, String)> {
+    let mut filters = Vec::new();
+    for (line_idx, raw) in ci_yml.lines().enumerate() {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if trimmed.contains("Invoke-IgnoredTest")
+            && let Some((_, after_flag)) = trimmed.split_once("-Filter")
+        {
+            if let Some(tok) = after_flag.split_whitespace().next() {
+                let filter = tok.trim_matches(['\'', '"']);
+                if !filter.is_empty() && !filter.contains('$') {
+                    filters.push((line_idx + 1, filter.to_string()));
+                }
+            }
+            continue;
+        }
+        if trimmed.contains("--ignored") && trimmed.contains("--exact") {
+            let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+            for i in 1..tokens.len() {
+                if tokens[i].trim_matches(['\'', '"', ',']) == "--ignored" {
+                    let filter = tokens[i - 1].trim_matches(['\'', '"', ',', ';', '(', ')']);
+                    if !filter.is_empty() && !filter.starts_with('-') && !filter.contains('$') {
+                        filters.push((line_idx + 1, filter.to_string()));
+                    }
+                }
+            }
+        }
+    }
+    filters
 }
 
 fn has_ignore_reason(attr_line: &str) -> bool {
@@ -507,7 +726,15 @@ fn parse_ignored_table(
                 ticks[1]
             ));
         }
-        entries.insert((ticks[0].to_string(), ticks[1].to_string()));
+        let key = (ticks[0].to_string(), ticks[1].to_string());
+        if !entries.insert(key.clone()) {
+            violations.push(format!(
+                "{TESTING_DOC}:{}: duplicate ignored-test entry `{}` `{}`",
+                line_idx + 1,
+                key.0,
+                key.1
+            ));
+        }
     }
 
     if !in_section || !saw_table {
@@ -985,6 +1212,69 @@ fn collect_rs_recursive(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), Stri
     Ok(())
 }
 
+fn inline_module_prefix(lines: &[(usize, String)], end: usize) -> String {
+    let mut depth = 0i32;
+    let mut modules: Vec<(String, i32)> = Vec::new();
+    for (_, line) in &lines[..end] {
+        let trimmed = line.trim();
+        if let Some(name) = inline_module_name(trimmed) {
+            modules.push((name, depth));
+        }
+        depth += line.matches('{').count() as i32 - line.matches('}').count() as i32;
+        while modules
+            .last()
+            .is_some_and(|(_, module_depth)| depth <= *module_depth)
+        {
+            modules.pop();
+        }
+    }
+    modules
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect::<Vec<_>>()
+        .join("::")
+}
+
+fn inline_module_name(line: &str) -> Option<String> {
+    let rest = if let Some(rest) = line.strip_prefix("pub(") {
+        let close = rest.find(')')?;
+        rest[close + 1..].trim_start()
+    } else {
+        ["pub "]
+            .iter()
+            .find_map(|prefix| line.strip_prefix(prefix))
+            .unwrap_or(line)
+    };
+    let rest = rest.strip_prefix("mod ")?;
+    if !rest.contains('{') {
+        return None;
+    }
+    let name: String = rest
+        .chars()
+        .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+        .collect();
+    (!name.is_empty()).then_some(name)
+}
+
+fn qualified_test_name(rel_path: &str, fn_name: &str) -> String {
+    let rest = rel_path
+        .strip_prefix("crates/")
+        .and_then(|tail| tail.split_once('/').map(|(_, tail)| tail))
+        .or_else(|| rel_path.split_once('/').map(|(_, tail)| tail))
+        .unwrap_or(rel_path);
+    if matches!(rest, "src/lib.rs" | "src/main.rs") {
+        return fn_name.to_string();
+    }
+    let without_src = rest.strip_prefix("src/").unwrap_or(rest);
+    let stem = without_src.strip_suffix(".rs").unwrap_or(without_src);
+    let module_path = stem.strip_suffix("/mod").unwrap_or(stem).replace('/', "::");
+    if module_path.is_empty() {
+        fn_name.to_string()
+    } else {
+        format!("{module_path}::{fn_name}")
+    }
+}
+
 fn crate_name_for(rel_path: &str) -> String {
     let mut parts = rel_path.split('/');
     match (parts.next(), parts.next()) {
@@ -1023,7 +1313,13 @@ mod tests {
         )
         .expect("root cargo");
         fs::write(root.join("rustfmt.toml"), "edition = \"2024\"\n").expect("rustfmt");
-        fs::write(root.join("xtask/src/lib.rs"), "#![forbid(unsafe_code)]\n").expect("xtask lib");
+        for entry_rel in FORBID_UNSAFE_ENTRYPOINTS {
+            let path = root.join(entry_rel);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("entrypoint parent");
+            }
+            fs::write(path, "#![forbid(unsafe_code)]\n").expect("forbid unsafe entrypoint");
+        }
         fs::write(
             root.join("crates/demo/Cargo.toml"),
             "[package]\nname = \"demo\"\nedition.workspace = true\n[lints]\nworkspace = true\n",
@@ -1343,5 +1639,190 @@ mod tests {
         )
         .expect("write benign alias");
         check_hygiene(temp_alias.path()).expect("benign crate aliased as zip must pass");
+    }
+
+    #[test]
+    fn missing_or_commented_forbid_unsafe_entrypoint_fails() {
+        let missing = tempfile::tempdir().expect("tempdir");
+        seed_valid_workspace(missing.path());
+        fs::remove_file(missing.path().join("crates/cairn-core/src/lib.rs"))
+            .expect("remove entrypoint");
+        let err = check_hygiene(missing.path()).expect_err("missing entrypoint must fail");
+        assert!(
+            err.contains(
+                "crates/cairn-core/src/lib.rs: required safe-by-contract entrypoint is missing"
+            ),
+            "{err}"
+        );
+
+        let commented = tempfile::tempdir().expect("tempdir");
+        seed_valid_workspace(commented.path());
+        fs::write(
+            commented.path().join("crates/cairn-core/src/lib.rs"),
+            "// #![forbid(unsafe_code)]\npub fn f() {}\n",
+        )
+        .expect("commented forbid");
+        let err = check_hygiene(commented.path()).expect_err("commented forbid must fail");
+        assert!(
+            err.contains("crates/cairn-core/src/lib.rs: safe-by-contract entrypoint must declare"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn workspace_renamed_and_lockfile_transitive_forbidden_deps_fail() {
+        let renamed = tempfile::tempdir().expect("tempdir");
+        seed_valid_workspace(renamed.path());
+        let root_cargo = fs::read_to_string(renamed.path().join("Cargo.toml"))
+            .expect("read root cargo")
+            + "\n[workspace.dependencies]\npdf_alias = { package = \"lopdf\", version = \"0.47\" }\n";
+        fs::write(renamed.path().join("Cargo.toml"), root_cargo).expect("write root cargo");
+        fs::write(
+            renamed.path().join("crates/cairn-service/Cargo.toml"),
+            "[package]\nname = \"cairn-service\"\nedition.workspace = true\n[lints]\nworkspace = true\n[dependencies]\npdf_alias.workspace = true\n",
+        )
+        .expect("write cairn-service");
+        let err = check_hygiene(renamed.path()).expect_err("workspace alias to lopdf must fail");
+        assert!(err.contains("forbidden isolated dependency"), "{err}");
+
+        let lock = tempfile::tempdir().expect("tempdir");
+        seed_valid_workspace(lock.path());
+        fs::write(
+            lock.path().join("Cargo.lock"),
+            "version = 4\n\n[[package]]\nname = \"cairn-content\"\nversion = \"0.1.0\"\ndependencies = [\"helper\"]\n\n[[package]]\nname = \"helper\"\nversion = \"0.1.0\"\ndependencies = [\"quick_xml 0.42.0\"]\n\n[[package]]\nname = \"quick_xml\"\nversion = \"0.42.0\"\n",
+        )
+        .expect("write lockfile");
+        let err = check_hygiene(lock.path()).expect_err("transitive lockfile dep must fail");
+        assert!(
+            err.contains("Cargo.lock: forbidden isolated dependency"),
+            "{err}"
+        );
+        assert!(
+            err.contains("cairn-content -> helper -> quick-xml"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn inline_modules_keep_distinct_ignored_test_keys() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        seed_valid_workspace(temp.path());
+        fs::write(
+            temp.path().join("crates/demo/src/lib.rs"),
+            "mod alpha {\n    #[test]\n    #[ignore = \"alpha\"]\n    fn same_name() {}\n}\n\
+             pub(in crate::foo) mod beta {\n    #[test]\n    #[ignore = \"beta\"]\n    fn same_name() {}\n}\n",
+        )
+        .expect("inline modules");
+        fs::write(
+            temp.path().join("docs/engineering/testing.md"),
+            "# Testing\n\n## 被忽略的测试\n\n| 测试 | 忽略理由 | 运行方式与前条件 |\n| --- | --- | --- |\n| `demo` `alpha::same_name` | Alpha | Local |\n",
+        )
+        .expect("testing doc");
+
+        let err = check_hygiene(temp.path()).expect_err("beta test must not be hidden");
+        assert!(err.contains("beta::same_name"), "{err}");
+    }
+
+    #[test]
+    fn all_deny_clippy_suppressions_and_duplicate_ignores_fail() {
+        for lint in [
+            "undocumented_unsafe_blocks",
+            "missing_safety_doc",
+            "await_holding_lock",
+            "too_many_arguments",
+            "large_enum_variant",
+            "dbg_macro",
+            "todo",
+            "unimplemented",
+        ] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            seed_valid_workspace(temp.path());
+            let source = format!("#[allow(clippy::{lint})]\nfn helper() {{}}\n");
+            fs::write(temp.path().join("crates/demo/src/lib.rs"), source).expect("write lint");
+            let err = check_hygiene(temp.path()).expect_err("deny clippy suppression must fail");
+            assert!(err.contains("forbidden clippy suppression"), "{err}");
+        }
+
+        let distinct = tempfile::tempdir().expect("tempdir");
+        seed_valid_workspace(distinct.path());
+        fs::create_dir_all(distinct.path().join("crates/demo/src/alpha")).expect("alpha");
+        fs::create_dir_all(distinct.path().join("crates/demo/src/beta")).expect("beta");
+        fs::write(
+            distinct.path().join("crates/demo/src/lib.rs"),
+            "#[cfg(test)]\nmod alpha;\n#[cfg(test)]\nmod beta;\n",
+        )
+        .expect("demo lib");
+        fs::write(
+            distinct.path().join("crates/demo/src/alpha/mod.rs"),
+            "#[test]\n#[ignore = \"alpha\"]\nfn same_name() {}\n",
+        )
+        .expect("alpha mod");
+        fs::write(
+            distinct.path().join("crates/demo/src/beta/mod.rs"),
+            "#[test]\n#[ignore = \"beta\"]\nfn same_name() {}\n",
+        )
+        .expect("beta mod");
+        fs::write(
+            distinct.path().join("docs/engineering/testing.md"),
+            "# Testing\n\n## 被忽略的测试\n\n| 测试 | 忽略理由 | 运行方式与前条件 |\n| --- | --- | --- |\n| `demo` `alpha::same_name` | Alpha | Local |\n| `demo` `beta::same_name` | Beta | Local |\n",
+        )
+        .expect("testing doc");
+        check_hygiene(distinct.path()).expect("distinct module paths must pass");
+
+        fs::write(
+            distinct.path().join("docs/engineering/testing.md"),
+            "# Testing\n\n## 被忽略的测试\n\n| 测试 | 忽略理由 | 运行方式与前条件 |\n| --- | --- | --- |\n| `demo` `alpha::same_name` | Alpha | Local |\n| `demo` `alpha::same_name` | Dup | Local |\n| `demo` `beta::same_name` | Beta | Local |\n",
+        )
+        .expect("dup testing doc");
+        let err = check_hygiene(distinct.path()).expect_err("duplicate doc row must fail");
+        assert!(err.contains("duplicate ignored-test entry"), "{err}");
+    }
+
+    #[test]
+    fn ci_workflow_ignored_test_filters_must_match_actual_tests() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        seed_valid_workspace(temp.path());
+        fs::create_dir_all(temp.path().join("crates/demo/src/sub")).expect("sub dir");
+        fs::create_dir_all(temp.path().join("crates/demo/tests")).expect("tests dir");
+        fs::create_dir_all(temp.path().join(".github/workflows")).expect("workflows dir");
+
+        fs::write(
+            temp.path().join("crates/demo/src/lib.rs"),
+            "#[cfg(test)]\nmod sub;\n",
+        )
+        .expect("demo lib");
+        fs::write(
+            temp.path().join("crates/demo/src/sub/mod.rs"),
+            "#[test]\n#[ignore = \"requires hardware\"]\nfn hardware_round_trip() {}\n",
+        )
+        .expect("sub mod");
+        fs::write(
+            temp.path().join("crates/demo/tests/seam.rs"),
+            "#[test]\n#[ignore = \"requires seam\"]\nfn seam_round_trip() {}\n",
+        )
+        .expect("seam test");
+        fs::write(
+            temp.path().join("docs/engineering/testing.md"),
+            "# Testing\n\n## 被忽略的测试\n\n| 测试 | 忽略理由 | 运行方式与前条件 |\n| --- | --- | --- |\n| `demo` `sub::hardware_round_trip` | Hardware | Local |\n| `demo` `tests::seam::seam_round_trip` | Seam | Local |\n",
+        )
+        .expect("testing doc");
+
+        let valid_ci = "\
+function Invoke-IgnoredTest {
+  $testArgs = @($Filter, '--ignored', '--nocapture', '--exact')
+}
+Invoke-IgnoredTest -Exe $demoLib -Filter 'sub::hardware_round_trip'
+Invoke-IgnoredTest -Exe $seamBin -Filter 'seam_round_trip'
+$output = & package-test.exe sub::hardware_round_trip --ignored --nocapture --exact 2>&1
+";
+        fs::write(temp.path().join(".github/workflows/ci.yml"), valid_ci).expect("valid ci");
+        check_hygiene(temp.path()).expect("matching CI ignored-test filters pass");
+
+        let stale_ci =
+            valid_ci.replace("'sub::hardware_round_trip'", "'stale::hardware_round_trip'");
+        fs::write(temp.path().join(".github/workflows/ci.yml"), stale_ci).expect("stale ci");
+        let err = check_hygiene(temp.path()).expect_err("stale CI filter must fail");
+        assert!(err.contains("stale CI ignored-test filter"), "{err}");
+        assert!(err.contains("stale::hardware_round_trip"), "{err}");
     }
 }

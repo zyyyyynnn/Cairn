@@ -168,16 +168,32 @@ pub fn start_uninstall_with(
 
 pub(crate) fn append_cleanup_failures(log: &Path, failures: &[String]) {
     use std::io::Write as _;
-    let Ok(mut file) = std::fs::OpenOptions::new()
+    let mut file = match std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(log)
-    else {
-        return;
+    {
+        Ok(file) => file,
+        Err(error) => {
+            tracing::warn!("could not open uninstall log {}: {error}", log.display());
+            return;
+        }
     };
-    let _ = writeln!(file, "Cairn uninstall cleanup incomplete:");
+    if let Err(error) = writeln!(file, "Cairn uninstall cleanup incomplete:") {
+        tracing::warn!(
+            "could not write to uninstall log {}: {error}",
+            log.display()
+        );
+        return;
+    }
     for failure in failures {
-        let _ = writeln!(file, "  {failure}");
+        if let Err(error) = writeln!(file, "  {failure}") {
+            tracing::warn!(
+                "could not append to uninstall log {}: {error}",
+                log.display()
+            );
+            break;
+        }
     }
 }
 
@@ -191,12 +207,19 @@ pub fn start_cleanup(
     let (sender, events) = mpsc::channel();
     std::thread::spawn(move || {
         use std::io::Write as _;
-        if let Ok(mut file) = std::fs::OpenOptions::new()
+        match std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&log)
         {
-            let _ = writeln!(file, "Cairn uninstall cleanup");
+            Ok(mut file) => {
+                if let Err(error) = writeln!(file, "Cairn uninstall cleanup") {
+                    tracing::warn!("could not write to cleanup log {}: {error}", log.display());
+                }
+            }
+            Err(error) => {
+                tracing::warn!("could not open cleanup log {}: {error}", log.display());
+            }
         }
         match cleanup() {
             Ok(warnings) => {
@@ -504,6 +527,9 @@ pub fn package_product_code(package: &std::path::Path) -> Option<String> {
     }
 }
 
+/// # Safety
+///
+/// `record` must be a valid open Windows Installer `MSIHANDLE` readable by `MsiRecordGetStringW`.
 unsafe fn record_string(record: MSIHANDLE, field: u32) -> Option<String> {
     let mut buffer = vec![0u16; 512];
     let mut length = buffer.len() as u32;

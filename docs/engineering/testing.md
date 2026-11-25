@@ -14,7 +14,7 @@
 
 一个行为只在一层测一次，放在最接近用户的那一层；下层不重复上层已经断言过的结果。
 
-`cairn-app` 的公开入口在 `src` 内以 `CairnApp` 上下文覆盖：就地重命名的打开、替换与取消（`rename_selected` / `cancel_rename`），查询历史后退（`go_back`），停止查询后的状态与 id（`cancel_in_flight_query`），以及取消后的状态刷新不发起查询（`refresh_results`）；启动去重、搜索防抖取消与每帧渲染缓存通过对应 Seam（`StartupCoordinator`、`SearchCoordinator`、`RowPresentationCache`）以无 OS 真弹窗方式验证。
+`cairn-app` 的公开入口在 `src` 内以 `CairnApp` 上下文覆盖：启动通过 `StartupCoordinator` 与 `TestBootstrapPorts` / `AppRuntimePorts` 注入免副作用端口；就地重命名的打开、替换与取消（`rename_selected` / `cancel_rename`），查询历史后退（`go_back`），停止查询后的状态与 id（`cancel_in_flight_query`），以及取消后的状态刷新不发起查询（`refresh_results`）；启动去重、搜索防抖取消与每帧渲染缓存通过对应 Seam（`StartupCoordinator`、`SearchCoordinator`、`RowPresentationCache`）以无 OS 真弹窗方式验证；列表几何测试通过 `#[cfg(test)]` 渲染夹具（`SourceRowsHarness`、`JournalHeaderHarness`、`JournalRowsHarness`）在无生产后门的情况下测量真实排布bounds。
 
 ## 价值判定
 
@@ -56,13 +56,13 @@
 
 | 测试 | 忽略理由 | 运行方式与前条件 |
 | --- | --- | --- |
-| `cairn-service` `a_full_backfill_reaches_ready_and_indexes_existing_files` | 测试 spawn 真实 `CairnWorker`，需要先构建 Worker；测试通过引擎的 worker 路径 seam 注入工作区构建的二进制，生产仍只在服务可执行文件旁查找。 | CI 的 `Test / Engine & Tooling` 作业在编译引擎与工具测试集后直接运行已产出的测试二进制；本地先 `cargo build -p cairn-worker` 再运行 `cargo test -p cairn-service a_full_backfill_reaches_ready_and_indexes_existing_files -- --ignored`。 |
-| `cairn-service` `property_index_extracts_through_real_worker_and_recovers_from_corrupt_files` | 测试 spawn 真实 `CairnWorker` 进行扩展属性抽取与损坏文件隔离，需要先构建 Worker。 | CI 的 `Test / Engine & Tooling` 作业在编译引擎与工具测试集后直接运行已产出的测试二进制；本地先 `cargo build -p cairn-worker` 再运行 `cargo test -p cairn-service --test platform_seam property_index_extracts_through_real_worker_and_recovers_from_corrupt_files -- --ignored`。 |
-| `cairn-service` `test_live_scan_reconciles_with_the_real_change_journal` | 需要启用 USN 日志的真实 NTFS 卷，并以管理员身份读取裸卷。 | 提权后执行 `cargo test -p cairn-service test_live_scan_reconciles_with_the_real_change_journal -- --ignored`；`C:` 必须已启用 USN 日志。 |
-| `cairn-app` `a_deleted_file_lists_and_restores_through_the_shell` | 手工验证：经 Shell 在真实回收站创建并恢复一个探针文件。 | 仅在改动 Shell 管道时执行 `cargo test -p cairn-app a_deleted_file_lists_and_restores_through_the_shell -- --ignored`；探针限定为临时目录中的 `cairn-bin-round-trip.txt`，不得操作其他回收站项。 |
-| `cairn-app` `the_update_check_reaches_the_release_api` | 需要访问 GitHub releases API 的真实网络；CI 不保证出网。 | 在网络可用时执行 `cargo test -p cairn-app the_update_check_reaches_the_release_api -- --ignored`；HTTP/TLS 依赖升级后用它确认请求能穿过 TLS 后端与系统代理。 |
-| `cairn-setup` `staging_root_is_locked_to_administrators` | 需要管理员权限对安装包暂存目录写入 `SYSTEM` 与 `Administrators` 受保护 DACL。 | 提权后执行 `cargo test -p cairn-setup staging_root_is_locked_to_administrators -- --ignored`。 |
-| `xtask` `real_package_builds_msi_and_setup` | 需要 WiX 5、`mt.exe` 与 `target/release` 下的发布二进制。 | CI `Installer Package` 作业用 `package-test.exe package::tests::real_package_builds_msi_and_setup --ignored --nocapture --exact` 执行；本地构建 release 资产后执行 `cargo test -p xtask real_package_builds_msi_and_setup -- --ignored`。 |
+| `cairn-service` `sync_engine::content_pipeline::tests::backfill::a_full_backfill_reaches_ready_and_indexes_existing_files` | 测试 spawn 真实 `CairnWorker`，需要先构建 Worker；测试通过 `FixedWorkerBinaryLocator` 注入工作区构建的二进制，生产通过 `AdjacentWorkerBinaryLocator` 在服务可执行文件旁查找。 | CI 的 `Test / Engine & Tooling` 作业在编译引擎与工具测试集后直接运行已产出的测试二进制；本地先 `cargo build -p cairn-worker` 再运行 `cargo test -p cairn-service a_full_backfill_reaches_ready_and_indexes_existing_files -- --ignored`。 |
+| `cairn-service` `tests::platform_seam::property_index_extracts_through_real_worker_and_recovers_from_corrupt_files` | 测试 spawn 真实 `CairnWorker` 进行扩展属性抽取与损坏文件隔离，需要先构建 Worker。 | CI 的 `Test / Engine & Tooling` 作业在编译引擎与工具测试集后直接运行已产出的测试二进制；本地先 `cargo build -p cairn-worker` 再运行 `cargo test -p cairn-service --test platform_seam property_index_extracts_through_real_worker_and_recovers_from_corrupt_files -- --ignored`。 |
+| `cairn-service` `sync_engine::journal_reconciliation::tests::test_live_scan_reconciles_with_the_real_change_journal` | 需要启用 USN 日志的真实 NTFS 卷，并以管理员身份读取裸卷。 | 提权后执行 `cargo test -p cairn-service test_live_scan_reconciles_with_the_real_change_journal -- --ignored`；`C:` 必须已启用 USN 日志。 |
+| `cairn-app` `shell::os::tests::a_deleted_file_lists_and_restores_through_the_shell` | 手工验证：经 Shell 在真实回收站创建并恢复一个探针文件。 | 仅在改动 Shell 管道时执行 `cargo test -p cairn-app a_deleted_file_lists_and_restores_through_the_shell -- --ignored`；探针限定为临时目录中的 `cairn-bin-round-trip.txt`，不得操作其他回收站项。 |
+| `cairn-app` `shell::update::tests::the_update_check_reaches_the_release_api` | 需要访问 GitHub releases API 的真实网络；CI 不保证出网。 | 在网络可用时执行 `cargo test -p cairn-app the_update_check_reaches_the_release_api -- --ignored`；HTTP/TLS 依赖升级后用它确认请求能穿过 TLS 后端与系统代理。 |
+| `cairn-setup` `platform::tests::staging_root_is_locked_to_administrators` | 需要管理员权限对安装包暂存目录写入 `SYSTEM` 与 `Administrators` 受保护 DACL。 | 提权后执行 `cargo test -p cairn-setup staging_root_is_locked_to_administrators -- --ignored`。 |
+| `xtask` `package::tests::real_package_builds_msi_and_setup` | 需要 WiX 5、`mt.exe` 与 `target/release` 下的发布二进制。 | CI `Installer Package` 作业用 `package-test.exe package::tests::real_package_builds_msi_and_setup --ignored --nocapture --exact` 执行；本地构建 release 资产后执行 `cargo test -p xtask real_package_builds_msi_and_setup -- --ignored`。 |
 
 ## CI 门禁
 

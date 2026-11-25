@@ -4,7 +4,7 @@
 
 //! Client user preferences persistence in `%APPDATA%\Cairn\settings.toml` (SET-01, UI-02).
 
-use crate::table::model::{OptionalColumn, TableColumn};
+use crate::table::columns::{OptionalColumn, TableColumn};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -308,25 +308,60 @@ impl AppSettings {
         Ok(settings)
     }
 
-    #[cfg_attr(test, allow(dead_code))]
     pub fn save(&self) -> std::io::Result<()> {
         let path = default_settings_path();
         self.save_to_path(&path)
     }
 
     pub fn save_to_path(&self, path: &Path) -> std::io::Result<()> {
-        if let Some(parent) = path.parent() {
+        use std::io::Write as _;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
             fs::create_dir_all(parent)?;
         }
         let toml_str =
             toml::to_string_pretty(self).map_err(|e| std::io::Error::other(e.to_string()))?;
 
-        // Write to temporary file in same directory and atomic rename (NFR-09)
-        let temp_path = path.with_extension(format!("tmp.{}", std::process::id()));
-        fs::write(&temp_path, toml_str)?;
-        if let Err(_e) = fs::rename(&temp_path, path) {
-            let _ = fs::remove_file(path);
-            fs::rename(&temp_path, path)?;
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let file_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("settings.toml");
+
+        let temp_path = loop {
+            let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+            let candidate = parent.join(format!("{file_name}.{}.{seq}.tmp", std::process::id()));
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&candidate)
+            {
+                Ok(mut file) => {
+                    let write_res = (|| -> std::io::Result<()> {
+                        file.write_all(toml_str.as_bytes())?;
+                        file.flush()?;
+                        file.sync_all()
+                    })();
+                    drop(file);
+                    if let Err(err) = write_res {
+                        let _ = fs::remove_file(&candidate);
+                        return Err(err);
+                    }
+                    break candidate;
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(err) => return Err(err),
+            }
+        };
+
+        if let Err(err) = crate::shell::os::atomic_replace_file(&temp_path, path) {
+            let _ = fs::remove_file(&temp_path);
+            return Err(err);
         }
 
         Ok(())
@@ -339,7 +374,7 @@ mod tests {
 
     #[test]
     fn defaults_and_empty_toml_keep_compatible_settings() {
-        use crate::table::model::OptionalColumn;
+        use crate::table::columns::OptionalColumn;
 
         let default_settings = AppSettings::default();
         assert_eq!(default_settings.language, LANGUAGE_SYSTEM);
@@ -360,7 +395,7 @@ mod tests {
 
     #[test]
     fn save_and_load_roundtrips_all_custom_fields() {
-        use crate::table::model::OptionalColumn;
+        use crate::table::columns::OptionalColumn;
 
         let dir = tempfile::tempdir().unwrap();
         let settings_path = dir.path().join("Cairn").join("settings.toml");
@@ -430,7 +465,7 @@ mod tests {
 
     #[test]
     fn base_columns_default_visible_and_name_stays_locked() {
-        use crate::table::model::TableColumn;
+        use crate::table::columns::TableColumn;
 
         let mut cols = ColumnSettings::default();
         assert!(cols.show_path);
@@ -450,5 +485,26 @@ mod tests {
 
         let parsed: ColumnSettings = toml::from_str("").unwrap();
         assert!(parsed.show_path && parsed.show_size && parsed.show_modified);
+    }
+
+    #[test]
+    fn repeated_atomic_saves_leave_no_temp_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        for zoom in [0.9f32, 1.0, 1.1] {
+            let settings = AppSettings {
+                zoom_level: zoom,
+                ..AppSettings::default()
+            };
+            settings.save_to_path(&path).unwrap();
+        }
+        let loaded = AppSettings::load_from_path(&path).unwrap();
+        assert_eq!(loaded.zoom_level, 1.1);
+        let leftovers: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "leftover temp files: {leftovers:?}");
     }
 }

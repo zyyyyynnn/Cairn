@@ -8,8 +8,8 @@ use crate::app::{CairnApp, join_row_path, layout, split_name_highlights};
 use crate::shell::accessibility;
 use crate::shell::file_icon::file_kind_icon;
 use crate::shell::theme::{self, ShellTokens};
+use crate::table::columns::{OptionalColumn, TableColumn};
 use crate::table::header::ColumnLane as _;
-use crate::table::model::{OptionalColumn, TableColumn};
 use crate::table::presentation::{format_optional_cell, format_timestamp_cached};
 use cairn_core::FileKind;
 use cairn_core::format_size_bytes;
@@ -292,8 +292,8 @@ impl CairnApp {
                     .appearance(false)
                     .bordered(false)
                     .focus_bordered(false)
-                    .text_size(rems(0.875))
-                    .line_height(rems(1.25))
+                    .text_size(rems(theme::SMALL_TEXT_SIZE))
+                    .line_height(rems(layout::INLINE_INPUT_LINE_HEIGHT))
                     .p(rems(0.0))
                     .h_full()
                     .flex_1()

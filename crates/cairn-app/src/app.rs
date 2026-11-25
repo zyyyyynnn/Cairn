@@ -24,7 +24,8 @@ use crate::shell::i18n::I18nManager;
 use crate::shell::settings::AppSettings;
 use crate::shell::status_bar::StatusBarModel;
 use crate::shell::window_resize::Observed;
-use crate::table::model::{ColumnBoundary, ColumnWidths, TableState};
+use crate::table::columns::{ColumnBoundary, ColumnWidths};
+use crate::table::model::TableState;
 use cairn_protocol::status::{
     ContentIndexStatus, IndexJournalEntry, IndexJournalStatus, PropertyIndexStatus,
     SourceStatusSummary,
@@ -74,6 +75,7 @@ pub mod layout {
     pub const CONTROL_HEIGHT: f32 = SPACE_32;
     /// Virtualization math requires a fixed row height per frame; sidebar rows share this step.
     pub const ROW_HEIGHT: f32 = 7.0 * STEP;
+    pub const INLINE_INPUT_LINE_HEIGHT: f32 = 1.25;
 
     pub const INNER_SPACING: f32 = SPACE_8;
     pub const SEARCH_BAND_HEIGHT: f32 = ROW_HEIGHT + 2.0 * TIGHT_LEAD;
@@ -344,6 +346,9 @@ pub struct ResultsDomain {
 /// The indexer this window talks to, and everything it reports back.
 pub struct ServiceDomain {
     pub(crate) connection: ServiceConnection,
+    /// Active connection probe/start generation; prevents duplicate probes and discards stale completions.
+    pub(crate) probe_generation: u64,
+    pub(crate) active_probe: Option<u64>,
     /// One status-refresh loop while a volume is building or catching up; it stops at the first
     /// all-Synced answer so the sidebar index status line can disappear.
     pub(crate) is_refreshing_status: bool,
@@ -366,6 +371,11 @@ pub struct ServiceDomain {
 }
 
 impl ServiceDomain {
+    pub(crate) fn next_probe_generation(&mut self) -> u64 {
+        self.probe_generation = self.probe_generation.wrapping_add(1);
+        self.probe_generation
+    }
+
     pub(crate) fn next_sources_generation(&mut self) -> u64 {
         self.sources_generation = self.sources_generation.wrapping_add(1);
         self.sources_generation
@@ -449,13 +459,14 @@ pub struct CairnApp {
     pub(crate) window_resize: crate::shell::window_resize::WindowResizeTracker,
     /// Keeps the bounds observer alive for the window's lifetime.
     window_resize_subscription: Option<Subscription>,
+    pub(crate) runtime_ports: Arc<dyn crate::startup::AppRuntimePorts>,
 }
 
 impl CairnApp {
     #[cfg(test)]
     pub fn new(window: &mut Window, cx: &mut Context<'_, Self>) -> Self {
         let bundle =
-            crate::startup::StartupCoordinator::prepare(&[], &crate::startup::SystemBootstrapPorts);
+            crate::startup::StartupCoordinator::prepare(&[], &crate::startup::TestBootstrapPorts);
         Self::new_with_startup(bundle, window, cx)
     }
 
@@ -471,13 +482,15 @@ impl CairnApp {
             system_dark,
             i18n,
             session,
+            runtime_ports,
         } = startup;
 
         // `TableState` keeps its fetched window private, so the restored sort state is assigned
         // through its public fields instead of a struct literal.
         let mut table = TableState::default();
-        table.sort_spec = crate::table::model::SortSpec::parse_clause(&settings.columns.sort_spec)
-            .unwrap_or_default();
+        table.sort_spec =
+            crate::table::columns::SortSpec::parse_clause(&settings.columns.sort_spec)
+                .unwrap_or_default();
         let column_widths = ColumnWidths {
             name: (settings.columns.name_width / COLUMN_WIDTH_STORAGE_UNIT)
                 .max(layout::NAME_MIN_COLUMN),
@@ -526,16 +539,16 @@ impl CairnApp {
             },
         );
 
-        #[cfg(all(windows, not(test)))]
-        let hotkey = crate::shell::hotkey::register()
-            .map_err(|err| tracing::warn!("global hotkey unavailable: {err}"))
-            .ok();
-        // Unit tests never register a real system-wide chord or read the real
-        // update marker; both are process-level side effects, not view state.
-        #[cfg(all(windows, test))]
-        let hotkey: Option<crate::shell::hotkey::GlobalHotkey> = None;
-        #[cfg(all(windows, not(test)))]
-        let hotkey_unavailable = hotkey.is_none();
+        #[cfg(windows)]
+        let (hotkey, hotkey_unavailable) = match runtime_ports.register_hotkey() {
+            Ok(hotkey) => (hotkey, false),
+            Err(err) => {
+                tracing::warn!("global hotkey unavailable: {err}");
+                (None, true)
+            }
+        };
+        #[cfg(not(windows))]
+        let hotkey_unavailable = false;
 
         crate::shell::theme::ensure_shell_tokens(cx);
         cairn_ui::locale::init_layout_direction(cx);
@@ -573,6 +586,8 @@ impl CairnApp {
             },
             service: ServiceDomain {
                 connection: ServiceConnection::initial(),
+                probe_generation: 0,
+                active_probe: None,
                 is_refreshing_status: false,
                 status: StatusBarModel::default(),
                 session,
@@ -615,6 +630,7 @@ impl CairnApp {
             update_state: crate::shell::update::UpdateState::Idle,
             window_resize: Default::default(),
             window_resize_subscription: None,
+            runtime_ports,
         };
         window.focus(&app.query.search_focus, cx);
         // The window's own bounds event is the only trustworthy signal that a resize is
@@ -632,13 +648,7 @@ impl CairnApp {
                     cx.notify();
                 }
             }));
-        #[cfg(not(test))]
-        {
-            #[cfg(windows)]
-            app.schedule_startup_notices(hotkey_unavailable, cx);
-            #[cfg(not(windows))]
-            app.schedule_startup_notices(false, cx);
-        }
+        app.schedule_startup_notices(hotkey_unavailable, cx);
         app.check_service_connection(cx);
         app
     }

@@ -196,6 +196,22 @@ fn query_supports_pinyin_diacritics_punctuation_and_whitespace_modifiers() {
         vec!["快乐.txt"]
     );
     assert!(run("py:wenb", &QueryDefaults::default()).is_empty());
+    assert_eq!(
+        run("^:pinyin:csbg", &QueryDefaults::default()),
+        vec!["测试报告.md"]
+    );
+    assert!(
+        run("^:pinyin:bg", &QueryDefaults::default()).is_empty(),
+        "pinyin match must honor the start anchor"
+    );
+    assert!(
+        run("$:pinyin:bg", &QueryDefaults::default()).is_empty(),
+        "pinyin match must honor the end anchor"
+    );
+    assert_eq!(
+        run("$:pinyin:bg.md", &QueryDefaults::default()),
+        vec!["测试报告.md"]
+    );
 
     assert_eq!(
         run("nopunc:cafefoobar", &QueryDefaults::default()),

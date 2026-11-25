@@ -38,13 +38,19 @@
 22. **Sidebar 的辅助功能边界**：`Sidebar<E>` 不提供独立 a11y 树；不要把它的根节点当成可靠的导航 landmark。需要可访问交互时，由应用层建立显式 role/name/focus 结构。
 23. **初始化后固定 LTR 布局方向**：`gpui_kit::init(cx)` 会按系统语言自动初始化 `LayoutDirection`；仅提供 `zh-CN`/`en-US` 界面的应用须在 `init` 后显式调用 `cairn_ui::locale::init_layout_direction(cx)` 固定 `LayoutDirection::Ltr`。
 24. **Windows 滚动条外观映射**：在 Windows 上 `Theme::sync_scrollbar_appearance` 将系统自动隐藏滚动条设置映射为 `ScrollbarMode::Hover`（开启自动隐藏）或 `ScrollbarMode::Always`（关闭自动隐藏）。
+25. **显式状态机**：搜索匹配模式使用 `QueryMatchMode::{Plain(TextModifiers), Regex}` 表达互斥转换；导航历史使用 `NavHistory` 维护非空历史与游标；工作区位置与结果表面使用 `ActiveLocation::{Index, RecycleBin}`、`LocationProfile` 与 `SurfaceLocation::{Index, LocalListing(LocalListingStage)}` 约束命令、排序回退与列显隐。
+26. **异步代次守卫**：`ServiceDomain::probe_generation`、`SubsystemState::generation`（配合 `begin_load`/`finish_load_if_current`/`supersede_load`/`begin_action`）与回收站删除后的 `DeleteRefreshContext` 代次/查询校验隔离并发异步回调，防止过期任务覆盖当前状态；`schedule_delayed_refresh` 仅在服务已连接时调度。
+27. **运行时端口与系统边界**：`AppRuntimePorts` 注入设置持久化、全局热键注册与更新状态读取；应用内更新仅接受 `https://` 且命中 GitHub 主机白名单的重定向/下载链路、限制下载体量并通过唯一临时文件 `sync_all()` + `MoveFileExW` 原子落盘；配置持久化采用 `create_new(true)` + `sync_all()` + `MoveFileExW`；定位文件经 Shell COM `SHParseDisplayName` + `SHOpenFolderAndSelectItems` 执行；托盘退出通过 `tokio::sync::watch` 通知主循环调用 `cx.quit()`，窗口查找限定为当前 PID 或校验进程映像路径。
 
 ## 相关代码
 
-- `crates/cairn-app/src/app.rs`：布局阶梯、窗口尺寸。
+- `crates/cairn-app/src/app.rs`、`crates/cairn-app/src/startup.rs`：布局阶梯、窗口尺寸与 `AppRuntimePorts`。
 - `crates/cairn-app/src/shell/theme.rs`：字号、主题、等宽数字。
-- `crates/cairn-app/src/search/bar_view.rs`：搜索框与光标。
-- `crates/cairn-app/src/main.rs`：单实例唤醒与托盘。
+- `crates/cairn-app/src/shell/location.rs`、`crates/cairn-app/src/shell/nav_history.rs`：`ActiveLocation` / `LocationProfile` 与 `NavHistory`。
+- `crates/cairn-app/src/search/modifiers.rs`、`crates/cairn-app/src/search/bar_view.rs`：`QueryMatchMode`、搜索框与光标。
+- `crates/cairn-app/src/table/columns.rs`、`crates/cairn-app/src/table/surface.rs`：列定义、排序回退与 `SurfaceLocation`。
+- `crates/cairn-app/src/shell/menu_popup.rs`、`crates/cairn-app/src/shell/selection_actions.rs`：顶栏弹层与选区动作。
+- `crates/cairn-app/src/service/mod.rs`、`crates/cairn-app/src/shell/update.rs`、`crates/cairn-app/src/shell/tray.rs`：`SubsystemState` 代次守卫、原子更新与单实例/托盘退出。
 - `crates/cairn-app/src/shell/accessibility.rs`：可观察控件注册。
 
 ---

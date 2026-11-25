@@ -510,6 +510,9 @@ pub fn parse_query_with(input: &str, defaults: &QueryDefaults) -> QueryExpr {
     }
 }
 
+/// Maximum nested `<...>` group depth before deeper groups stop recursing and fail closed.
+const MAX_GROUP_DEPTH: usize = 64;
+
 struct QueryParser<'a> {
     chars: Vec<char>,
     pos: usize,
@@ -637,6 +640,21 @@ impl<'a> QueryParser<'a> {
         self.skip_whitespace();
         if self.peek() == Some('<') {
             self.next(); // consume '<'
+            if self.group_depth >= MAX_GROUP_DEPTH {
+                // Skip remaining nested tokens inside the over-deep group cleanly and match nothing.
+                let mut depth = 1usize;
+                while let Some(ch) = self.next() {
+                    if ch == '<' {
+                        depth += 1;
+                    } else if ch == '>' {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                }
+                return QueryExpr::term(SearchTerm::match_nothing());
+            }
             self.group_depth += 1;
             let expr = self.parse_expression();
             if self.peek() == Some('>') {
@@ -1694,5 +1712,12 @@ mod tests {
     /// Size operator carried by a single-term expression, so the assertions above stay short.
     fn size_op(expr: &QueryExpr) -> Option<SizeOp> {
         term_of(expr).size_filter.as_ref().map(|f| f.op.clone())
+    }
+
+    #[test]
+    fn deeply_nested_angle_groups_do_not_overflow_stack() {
+        let deep = format!("{}foo{}", "<".repeat(512), ">".repeat(512));
+        let parsed = parse_query(&deep);
+        assert!(!parsed.is_empty());
     }
 }

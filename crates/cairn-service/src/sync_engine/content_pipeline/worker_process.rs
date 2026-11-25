@@ -34,6 +34,7 @@ pub(super) trait WorkerProcessPort {
 pub(super) struct SubprocessWorkerPort<'a> {
     engine: &'a MultiVolumeEngine,
     cancel: &'a AtomicBool,
+    shutdown: &'a AtomicBool,
 }
 
 impl<'a> SubprocessWorkerPort<'a> {
@@ -41,6 +42,7 @@ impl<'a> SubprocessWorkerPort<'a> {
         Self {
             engine,
             cancel: engine.content_pipeline.cancel_flag(),
+            shutdown: engine.content_pipeline.shutdown_flag(),
         }
     }
 
@@ -48,6 +50,7 @@ impl<'a> SubprocessWorkerPort<'a> {
         Self {
             engine,
             cancel: engine.content_pipeline.shutdown_flag(),
+            shutdown: engine.content_pipeline.shutdown_flag(),
         }
     }
 }
@@ -60,39 +63,18 @@ impl WorkerProcessPort for SubprocessWorkerPort<'_> {
         clear: bool,
     ) -> BatchOutcome {
         self.engine
-            .run_worker_process(tasks, deletions, clear, self.cancel)
+            .run_worker_process(tasks, deletions, clear, self.cancel, self.shutdown)
     }
 
     fn wait_before_retry(&self) -> bool {
         std::thread::sleep(Duration::from_millis(250));
-        !self.cancel.load(Ordering::SeqCst)
+        !(self.cancel.load(Ordering::SeqCst) || self.shutdown.load(Ordering::SeqCst))
     }
 }
 
 impl MultiVolumeEngine {
     pub(crate) fn worker_path(&self) -> Result<PathBuf, String> {
-        #[cfg(test)]
-        if let Some(worker) = &self.worker_binary {
-            return Ok(worker.clone());
-        }
-        let exe = std::env::current_exe()
-            .map_err(|err| format!("could not locate the service executable: {err}"))?;
-        let dir = exe
-            .parent()
-            .ok_or_else(|| "service executable has no parent directory".to_string())?;
-        // Production ships both binaries side by side; that is the only place the
-        // service looks, so a copy in a parent directory can never shadow the
-        // packaged worker.
-        for name in ["CairnWorker.exe", "CairnWorker"] {
-            let candidate = dir.join(name);
-            if candidate.exists() {
-                return Ok(candidate);
-            }
-        }
-        Err(format!(
-            "CairnWorker executable not found beside {}",
-            exe.display()
-        ))
+        self.worker_locator.locate()
     }
 
     /// Runs one worker batch, retrying once when the failure looks like a transient sharing
@@ -135,6 +117,7 @@ impl MultiVolumeEngine {
         deletions: &[(u64, u64)],
         clear: bool,
         cancel: &AtomicBool,
+        shutdown: &AtomicBool,
     ) -> BatchOutcome {
         let worker = match self.worker_path() {
             Ok(path) => path,
@@ -189,6 +172,7 @@ impl MultiVolumeEngine {
             CONTENT_WORKER_TIMEOUT,
             Duration::from_millis(100),
             cancel,
+            Some(shutdown),
         ) {
             WorkerProcessOutcome::Completed { stdout, stderr } => {
                 let summary: serde_json::Value =
@@ -209,6 +193,7 @@ impl MultiVolumeEngine {
             }
             WorkerProcessOutcome::Cancelled => BatchOutcome::Cancelled,
             WorkerProcessOutcome::TimedOut { .. } => BatchOutcome::failed("CairnWorker timed out"),
+            WorkerProcessOutcome::IsolationFailed { reason } => BatchOutcome::failed(reason),
             WorkerProcessOutcome::Failed { exit_code, reason } => match exit_code {
                 Some(_) => BatchOutcome::worker_failed(reason, exit_code),
                 None => BatchOutcome::failed(reason),

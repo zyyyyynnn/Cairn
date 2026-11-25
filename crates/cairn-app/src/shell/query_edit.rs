@@ -9,7 +9,7 @@ use crate::app::CairnApp;
 use crate::shell::commands::{
     CopyFileNames, CopyTextOrPaths, CutQueryText, PasteQueryText, RedoQueryText, UndoQueryText,
 };
-use crate::shell::menu_actions::copy_lines;
+use crate::shell::os::copy_lines;
 use gpui_kit::gpui::*;
 
 impl CairnApp {

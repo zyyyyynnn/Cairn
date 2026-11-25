@@ -224,10 +224,7 @@ fn inset_action(button: Button, inset: bool, surface: Hsla, cx: &App) -> AnyElem
         .child(
             div()
                 .absolute()
-                .top(px(0.))
-                .left(px(0.))
-                .right(px(0.))
-                .bottom(px(0.))
+                .inset_0()
                 .rounded(radius)
                 .border(HAIRLINE)
                 .border_color(surface),

@@ -18,7 +18,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// The locales every crate that owns a `locales/` directory must provide.
 const LOCALE_NAMES: [&str; 2] = ["zh-CN", "en-US"];
@@ -30,7 +30,7 @@ pub fn check_i18n(workspace: &Path) -> Result<(), String> {
 
     for crate_dir in crate_dirs(workspace) {
         let locales = crate_dir.join("locales");
-        if !locales.join(format!("{}.ftl", LOCALE_NAMES[0])).exists() {
+        if !locales.is_dir() {
             continue;
         }
         checked += 1;
@@ -78,20 +78,22 @@ fn check_crate(crate_dir: &Path, locales_dir: &Path) -> Result<(), String> {
         |name| name.to_string_lossy().to_string(),
     );
 
-    let mut keys_by_locale: Vec<BTreeSet<String>> = Vec::new();
+    let mut messages_by_locale: Vec<BTreeMap<String, BTreeSet<String>>> = Vec::new();
     for locale in LOCALE_NAMES {
         let path = locales_dir.join(format!("{locale}.ftl"));
         let source =
             fs::read_to_string(&path).map_err(|e| format!("{crate_name}: {path:?}: {e}"))?;
-        keys_by_locale.push(extract_keys(&source));
+        messages_by_locale.push(extract_messages(&source));
     }
 
-    let zh = &keys_by_locale[0];
-    let en = &keys_by_locale[1];
+    let zh_messages = &messages_by_locale[0];
+    let en_messages = &messages_by_locale[1];
+    let zh: BTreeSet<String> = zh_messages.keys().cloned().collect();
+    let en: BTreeSet<String> = en_messages.keys().cloned().collect();
     let mut problems = String::new();
 
-    let missing_in_en: Vec<&String> = zh.difference(en).collect();
-    let missing_in_zh: Vec<&String> = en.difference(zh).collect();
+    let missing_in_en: Vec<&String> = zh.difference(&en).collect();
+    let missing_in_zh: Vec<&String> = en.difference(&zh).collect();
     if !missing_in_en.is_empty() || !missing_in_zh.is_empty() {
         let _ = writeln!(
             problems,
@@ -101,8 +103,29 @@ fn check_crate(crate_dir: &Path, locales_dir: &Path) -> Result<(), String> {
         return Err(problems);
     }
 
+    let mut var_mismatches = Vec::new();
+    for (key, zh_vars) in zh_messages {
+        if let Some(en_vars) = en_messages.get(key)
+            && zh_vars != en_vars
+        {
+            var_mismatches.push(format!(
+                "  {key}: {} has {:?}, {} has {:?}",
+                LOCALE_NAMES[0], zh_vars, LOCALE_NAMES[1], en_vars
+            ));
+        }
+    }
+    if !var_mismatches.is_empty() {
+        let _ = writeln!(
+            problems,
+            "{crate_name}: placeholder variables differ between {} and {}:\n{}",
+            LOCALE_NAMES[0],
+            LOCALE_NAMES[1],
+            var_mismatches.join("\n")
+        );
+    }
+
     let literals = collect_literals(&crate_dir.join("src"));
-    let namespaces = namespaces(zh);
+    let namespaces = namespaces(&zh);
 
     // A message id the code asks for, that no locale defines, renders as the raw id.
     let undefined: Vec<&String> = literals
@@ -147,28 +170,75 @@ fn check_crate(crate_dir: &Path, locales_dir: &Path) -> Result<(), String> {
     }
 }
 
-/// The message ids a locale file defines.
-fn extract_keys(content: &str) -> BTreeSet<String> {
-    let mut keys = BTreeSet::new();
-    for line in content.lines() {
-        // A Fluent message id starts the line; an indented line continues a value.
-        if line.is_empty() || line.starts_with('#') || line.starts_with(char::is_whitespace) {
+/// Extracts each Fluent message id and its `{ $var }` placeholder set (excluding select
+/// expression discriminators `{ $var -> ... }`, which plural-inflected locales may add).
+fn extract_messages(content: &str) -> BTreeMap<String, BTreeSet<String>> {
+    let mut messages: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut current_key: Option<String> = None;
+
+    for raw_line in content.lines() {
+        let line = raw_line.trim_end_matches('\r');
+        if line.starts_with('#') {
             continue;
         }
-        let Some((key, _)) = line.split_once('=') else {
-            continue;
-        };
-        let key = key.trim();
-        if !key.is_empty()
-            && key
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-            && key.starts_with(|c: char| c.is_ascii_alphabetic())
+        if !line.is_empty()
+            && !line.starts_with(char::is_whitespace)
+            && let Some((raw_key, rhs)) = line.split_once('=')
         {
-            keys.insert(key.to_string());
+            let key = raw_key.trim();
+            if !key.is_empty()
+                && key
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                && key.starts_with(|c: char| c.is_ascii_alphabetic())
+            {
+                let vars = messages.entry(key.to_string()).or_default();
+                collect_line_placeholders(rhs, vars);
+                current_key = Some(key.to_string());
+                continue;
+            }
+        }
+        if let Some(key) = &current_key
+            && let Some(vars) = messages.get_mut(key)
+        {
+            collect_line_placeholders(line, vars);
         }
     }
-    keys
+    messages
+}
+
+fn collect_line_placeholders(line: &str, vars: &mut BTreeSet<String>) {
+    let bytes = line.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] != b'{' {
+            i += 1;
+            continue;
+        }
+        let mut j = i + 1;
+        while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+            j += 1;
+        }
+        if j < bytes.len() && bytes[j] == b'$' {
+            j += 1;
+            let start = j;
+            while j < bytes.len()
+                && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_' || bytes[j] == b'-')
+            {
+                j += 1;
+            }
+            if j > start {
+                let mut k = j;
+                while k < bytes.len() && bytes[k].is_ascii_whitespace() {
+                    k += 1;
+                }
+                if !bytes[k..].starts_with(b"->") {
+                    vars.insert(line[start..j].to_string());
+                }
+            }
+        }
+        i += 1;
+    }
 }
 
 /// The namespaces the crate's messages live in: the first segment of every message id. A literal
@@ -213,18 +283,42 @@ fn composition_prefixes(literals: &BTreeMap<String, Vec<String>>) -> Vec<String>
     prefixes
 }
 
-/// Every string literal in the crate's Rust sources, with the file it came from.
+/// Every string literal in the crate's non-test Rust sources, with the file it came from.
 fn collect_literals(src_dir: &Path) -> BTreeMap<String, Vec<String>> {
-    let mut literals: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut scanned_files = Vec::new();
+    let mut excluded_files = BTreeSet::new();
+    let mut excluded_dirs = BTreeSet::new();
+
     for path in rust_sources(src_dir) {
         let Ok(text) = fs::read_to_string(&path) else {
             continue;
         };
-        for literal in scan_literals(&text) {
+        let scan = scan_source(&path, &text);
+        if scan.whole_file_is_test {
+            excluded_files.insert(normalize_path(&path));
+            continue;
+        }
+        for mod_path in scan.excluded_modules {
+            if mod_path.extension().is_some_and(|ext| ext == "rs") {
+                excluded_files.insert(mod_path);
+            } else {
+                excluded_dirs.insert(mod_path);
+            }
+        }
+        scanned_files.push((path, scan.literals));
+    }
+
+    let mut literals: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (path, file_literals) in scanned_files {
+        let norm = normalize_path(&path);
+        if excluded_files.contains(&norm) || excluded_dirs.iter().any(|dir| norm.starts_with(dir)) {
+            continue;
+        }
+        let location = path.to_string_lossy().to_string();
+        for literal in file_literals {
             let entry = literals.entry(literal).or_default();
-            let location = path.to_string_lossy().to_string();
             if !entry.contains(&location) {
-                entry.push(location);
+                entry.push(location.clone());
             }
         }
     }
@@ -249,54 +343,453 @@ fn rust_sources(dir: &Path) -> Vec<PathBuf> {
     files
 }
 
-/// The string literals in a Rust source file. Comments are skipped, so a message id mentioned in
-/// prose does not count as a use of it.
-fn scan_literals(text: &str) -> Vec<String> {
+struct ScannedLiterals {
+    literals: Vec<String>,
+    excluded_modules: Vec<PathBuf>,
+    whole_file_is_test: bool,
+}
+
+fn scan_source(file_path: &Path, text: &str) -> ScannedLiterals {
     let chars: Vec<char> = text.chars().collect();
     let mut literals = Vec::new();
+    let mut excluded_modules = Vec::new();
     let mut i = 0usize;
 
     while i < chars.len() {
-        match chars[i] {
-            '/' if chars.get(i + 1) == Some(&'/') => {
-                while i < chars.len() && chars[i] != '\n' {
-                    i += 1;
-                }
+        if let Some(next) = try_skip_comment(&chars, i) {
+            i = next;
+            continue;
+        }
+        if chars[i] == '#'
+            && chars.get(i + 1) == Some(&'!')
+            && chars.get(i + 2) == Some(&'[')
+            && let Some((attr, after)) = parse_attribute_body(&chars, i + 2)
+        {
+            if is_cfg_test_attr(&attr) {
+                return ScannedLiterals {
+                    literals: Vec::new(),
+                    excluded_modules: Vec::new(),
+                    whole_file_is_test: true,
+                };
             }
-            '/' if chars.get(i + 1) == Some(&'*') => {
+            i = after;
+            continue;
+        }
+        if chars[i] == '#'
+            && chars.get(i + 1) == Some(&'[')
+            && let Some((attr, after)) = parse_attribute_body(&chars, i + 1)
+            && is_cfg_test_attr(&attr)
+        {
+            i = skip_cfg_test_item(&chars, after, file_path, &mut excluded_modules);
+            continue;
+        }
+        if let Some((after_open, hashes)) = match_raw_string_start(&chars, i) {
+            let (raw, next) = scan_raw_string(&chars, after_open, hashes);
+            literals.push(raw);
+            i = next;
+            continue;
+        }
+        if let Some(after_prefix) = match_quoted_string_prefix(&chars, i) {
+            let (lit, next) = scan_quoted_string(&chars, after_prefix);
+            literals.push(lit);
+            i = next;
+            continue;
+        }
+        if let Some(next) = try_skip_char_literal(&chars, i) {
+            i = next;
+            continue;
+        }
+        i += 1;
+    }
+
+    ScannedLiterals {
+        literals,
+        excluded_modules,
+        whole_file_is_test: false,
+    }
+}
+
+fn is_ident_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
+}
+
+fn prev_is_boundary(chars: &[char], idx: usize) -> bool {
+    idx == 0 || !is_ident_char(chars[idx - 1])
+}
+
+fn try_skip_comment(chars: &[char], idx: usize) -> Option<usize> {
+    if chars[idx] != '/' {
+        return None;
+    }
+    if chars.get(idx + 1) == Some(&'/') {
+        let mut i = idx + 2;
+        while i < chars.len() && chars[i] != '\n' {
+            i += 1;
+        }
+        return Some(i);
+    }
+    if chars.get(idx + 1) == Some(&'*') {
+        let mut i = idx + 2;
+        let mut depth = 1usize;
+        while i < chars.len() && depth > 0 {
+            if chars[i] == '/' && chars.get(i + 1) == Some(&'*') {
+                depth += 1;
                 i += 2;
-                while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
-                    i += 1;
-                }
-                i = (i + 2).min(chars.len());
-            }
-            '"' => {
+            } else if chars[i] == '*' && chars.get(i + 1) == Some(&'/') {
+                depth -= 1;
+                i += 2;
+            } else {
                 i += 1;
-                let mut literal = String::new();
-                while i < chars.len() && chars[i] != '"' {
-                    if chars[i] == '\\' && i + 1 < chars.len() {
-                        literal.push(chars[i + 1]);
-                        i += 2;
-                        continue;
-                    }
-                    literal.push(chars[i]);
-                    i += 1;
-                }
-                i += 1;
-                literals.push(literal);
             }
-            // A character literal or a lifetime; neither is a message id.
-            '\'' => {
-                if chars.get(i + 1) == Some(&'\\') || chars.get(i + 2) == Some(&'\'') {
-                    i += 3;
-                } else {
-                    i += 1;
-                }
-            }
-            _ => i += 1,
+        }
+        return Some(i);
+    }
+    None
+}
+
+fn skip_ws_and_comments(chars: &[char], i: &mut usize) {
+    while *i < chars.len() {
+        if chars[*i].is_whitespace() {
+            *i += 1;
+        } else if let Some(next) = try_skip_comment(chars, *i) {
+            *i = next;
+        } else {
+            break;
         }
     }
-    literals
+}
+
+fn match_raw_string_start(chars: &[char], idx: usize) -> Option<(usize, usize)> {
+    if !prev_is_boundary(chars, idx) {
+        return None;
+    }
+    let mut pos = idx;
+    if matches!(chars[pos], 'b' | 'c') {
+        pos += 1;
+    }
+    if pos >= chars.len() || chars[pos] != 'r' {
+        return None;
+    }
+    pos += 1;
+    let mut hashes = 0usize;
+    while pos < chars.len() && chars[pos] == '#' {
+        hashes += 1;
+        pos += 1;
+    }
+    (pos < chars.len() && chars[pos] == '"').then_some((pos + 1, hashes))
+}
+
+fn scan_raw_string(chars: &[char], mut i: usize, hashes: usize) -> (String, usize) {
+    let mut literal = String::new();
+    while i < chars.len() {
+        if chars[i] == '"' {
+            let mut matched = 0usize;
+            while matched < hashes && i + 1 + matched < chars.len() && chars[i + 1 + matched] == '#'
+            {
+                matched += 1;
+            }
+            if matched == hashes {
+                return (literal, i + 1 + hashes);
+            }
+        }
+        literal.push(chars[i]);
+        i += 1;
+    }
+    (literal, i)
+}
+
+fn match_quoted_string_prefix(chars: &[char], idx: usize) -> Option<usize> {
+    if chars[idx] == '"' {
+        return Some(idx + 1);
+    }
+    if matches!(chars[idx], 'b' | 'c')
+        && chars.get(idx + 1) == Some(&'"')
+        && prev_is_boundary(chars, idx)
+    {
+        return Some(idx + 2);
+    }
+    None
+}
+
+fn scan_quoted_string(chars: &[char], mut i: usize) -> (String, usize) {
+    let mut literal = String::new();
+    while i < chars.len() && chars[i] != '"' {
+        if chars[i] == '\\' && i + 1 < chars.len() {
+            literal.push(chars[i + 1]);
+            i += 2;
+            continue;
+        }
+        literal.push(chars[i]);
+        i += 1;
+    }
+    if i < chars.len() && chars[i] == '"' {
+        i += 1;
+    }
+    (literal, i)
+}
+
+fn try_skip_char_literal(chars: &[char], idx: usize) -> Option<usize> {
+    let apos = if chars[idx] == '\'' {
+        idx
+    } else if chars[idx] == 'b' && chars.get(idx + 1) == Some(&'\'') && prev_is_boundary(chars, idx)
+    {
+        idx + 1
+    } else {
+        return None;
+    };
+
+    let &next = chars.get(apos + 1)?;
+    if next == '\\' {
+        let mut i = apos + 2;
+        if i < chars.len() && chars[i] != '\n' {
+            i += 1;
+        }
+        while i < chars.len() && chars[i] != '\'' && chars[i] != '\n' {
+            i += 1;
+        }
+        if i < chars.len() && chars[i] == '\'' {
+            return Some(i + 1);
+        }
+        return Some(i);
+    }
+    if next != '\'' && next != '\n' && chars.get(apos + 2) == Some(&'\'') {
+        return Some(apos + 3);
+    }
+    None
+}
+
+/// Parses an attribute starting at `[` and returns `(inner_text, index_after_closing_bracket)`.
+fn parse_attribute_body(chars: &[char], open_bracket: usize) -> Option<(String, usize)> {
+    if chars.get(open_bracket) != Some(&'[') {
+        return None;
+    }
+    let mut i = open_bracket + 1;
+    let mut depth = 1usize;
+    let mut body = String::new();
+
+    while i < chars.len() && depth > 0 {
+        if let Some(next) = try_skip_comment(chars, i) {
+            i = next;
+            continue;
+        }
+        if let Some((after_open, hashes)) = match_raw_string_start(chars, i) {
+            let (raw, next) = scan_raw_string(chars, after_open, hashes);
+            body.push('"');
+            body.push_str(&raw);
+            body.push('"');
+            i = next;
+            continue;
+        }
+        if let Some(after_prefix) = match_quoted_string_prefix(chars, i) {
+            let (lit, next) = scan_quoted_string(chars, after_prefix);
+            body.push('"');
+            body.push_str(&lit);
+            body.push('"');
+            i = next;
+            continue;
+        }
+        if let Some(next) = try_skip_char_literal(chars, i) {
+            i = next;
+            continue;
+        }
+        match chars[i] {
+            '[' => {
+                depth += 1;
+                body.push('[');
+            }
+            ']' => {
+                depth -= 1;
+                if depth > 0 {
+                    body.push(']');
+                }
+            }
+            ch => body.push(ch),
+        }
+        i += 1;
+    }
+
+    (depth == 0).then_some((body, i))
+}
+
+fn is_cfg_test_attr(attr_body: &str) -> bool {
+    let compact: String = attr_body.chars().filter(|ch| !ch.is_whitespace()).collect();
+    compact == "cfg(test)"
+}
+
+fn extract_path_attr(attr_body: &str) -> Option<String> {
+    let trimmed = attr_body.trim();
+    let rest = trimmed.strip_prefix("path")?.trim_start();
+    let rest = rest.strip_prefix('=')?.trim();
+    let inner = rest.strip_prefix('"')?.strip_suffix('"')?;
+    Some(inner.to_string())
+}
+
+fn skip_cfg_test_item(
+    chars: &[char],
+    mut i: usize,
+    file_path: &Path,
+    excluded_modules: &mut Vec<PathBuf>,
+) -> usize {
+    let mut path_attr: Option<String> = None;
+    loop {
+        skip_ws_and_comments(chars, &mut i);
+        if i < chars.len()
+            && chars[i] == '#'
+            && chars.get(i + 1) == Some(&'[')
+            && let Some((attr, after)) = parse_attribute_body(chars, i + 1)
+        {
+            if let Some(p) = extract_path_attr(&attr) {
+                path_attr = Some(p);
+            }
+            i = after;
+            continue;
+        }
+        break;
+    }
+
+    let mut brace_depth = 0usize;
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut saw_brace = false;
+    let mut needs_semicolon_after_brace = false;
+    let mut header_idents: Vec<String> = Vec::new();
+    let mut cur_ident = String::new();
+
+    while i < chars.len() {
+        if let Some(next) = try_skip_comment(chars, i) {
+            i = next;
+            continue;
+        }
+        if let Some((after_open, hashes)) = match_raw_string_start(chars, i) {
+            let (_, next) = scan_raw_string(chars, after_open, hashes);
+            i = next;
+            continue;
+        }
+        if let Some(after_prefix) = match_quoted_string_prefix(chars, i) {
+            let (_, next) = scan_quoted_string(chars, after_prefix);
+            i = next;
+            continue;
+        }
+        if let Some(next) = try_skip_char_literal(chars, i) {
+            i = next;
+            continue;
+        }
+
+        let ch = chars[i];
+        if brace_depth == 0 && paren_depth == 0 && bracket_depth == 0 && !saw_brace {
+            if is_ident_char(ch) {
+                cur_ident.push(ch);
+                i += 1;
+                continue;
+            }
+            if !cur_ident.is_empty() {
+                header_idents.push(std::mem::take(&mut cur_ident));
+            }
+        }
+
+        match ch {
+            '(' => paren_depth += 1,
+            ')' => paren_depth = paren_depth.saturating_sub(1),
+            '[' => bracket_depth += 1,
+            ']' => bracket_depth = bracket_depth.saturating_sub(1),
+            '{' => {
+                if brace_depth == 0 && paren_depth == 0 && bracket_depth == 0 {
+                    saw_brace = true;
+                    needs_semicolon_after_brace = starts_value_or_type_alias(&header_idents);
+                }
+                brace_depth += 1;
+            }
+            '}' => {
+                brace_depth = brace_depth.saturating_sub(1);
+                if saw_brace && brace_depth == 0 && paren_depth == 0 && bracket_depth == 0 {
+                    i += 1;
+                    if !needs_semicolon_after_brace {
+                        return i;
+                    }
+                    continue;
+                }
+            }
+            ';' if brace_depth == 0 && paren_depth == 0 && bracket_depth == 0 => {
+                if !saw_brace
+                    && header_idents.len() >= 2
+                    && header_idents[header_idents.len() - 2] == "mod"
+                {
+                    let mod_name = &header_idents[header_idents.len() - 1];
+                    record_excluded_module(
+                        file_path,
+                        mod_name,
+                        path_attr.as_deref(),
+                        excluded_modules,
+                    );
+                }
+                return i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    i
+}
+
+fn starts_value_or_type_alias(idents: &[String]) -> bool {
+    let mut idx = 0usize;
+    if idents.get(idx).is_some_and(|w| w == "pub") {
+        idx += 1;
+        if idents
+            .get(idx)
+            .is_some_and(|w| matches!(w.as_str(), "crate" | "super" | "self"))
+        {
+            idx += 1;
+        }
+    }
+    match idents.get(idx).map(String::as_str) {
+        Some("static" | "type") => true,
+        Some("const") => !matches!(
+            idents.get(idx + 1).map(String::as_str),
+            Some("fn" | "unsafe" | "extern")
+        ),
+        _ => false,
+    }
+}
+
+fn record_excluded_module(
+    parent_file: &Path,
+    mod_name: &str,
+    path_attr: Option<&str>,
+    excluded: &mut Vec<PathBuf>,
+) {
+    let Some(parent_dir) = parent_file.parent() else {
+        return;
+    };
+    if let Some(rel) = path_attr {
+        excluded.push(normalize_path(&parent_dir.join(rel)));
+        return;
+    }
+    let stem = parent_file.file_stem().and_then(|s| s.to_str());
+    let base_dir = match stem {
+        Some("lib" | "main" | "mod") => parent_dir.to_path_buf(),
+        Some(other) => parent_dir.join(other),
+        None => parent_dir.to_path_buf(),
+    };
+    excluded.push(normalize_path(&base_dir.join(format!("{mod_name}.rs"))));
+    excluded.push(normalize_path(&base_dir.join(mod_name)));
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    out.push(comp.as_os_str());
+                }
+            }
+            _ => out.push(comp.as_os_str()),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -392,5 +885,57 @@ mod tests {
         let report = check_i18n(dir.path()).expect_err("the unused ids must still be reported");
         assert!(report.contains("menu_about"), "{report}");
         assert!(!report.contains("default_language"), "{report}");
+    }
+
+    #[test]
+    fn locales_dir_missing_zh_cn_is_reported_not_skipped() {
+        let dir = TempDir::new().expect("tempdir");
+        let crate_dir = dir.path().join("crates").join("demo");
+        fs::create_dir_all(crate_dir.join("locales")).expect("locales");
+        fs::create_dir_all(crate_dir.join("src")).expect("src");
+        fs::write(crate_dir.join("locales/en-US.ftl"), EN).expect("en");
+        fs::write(crate_dir.join("src/main.rs"), ASKS_FOR_BOTH).expect("src");
+
+        let report = check_i18n(dir.path()).expect_err("missing zh-CN.ftl must fail");
+        assert!(report.contains("zh-CN.ftl"), "{report}");
+    }
+
+    #[test]
+    fn cfg_test_and_external_test_modules_do_not_mask_orphan_keys() {
+        let dir = workspace(
+            ZH,
+            EN,
+            "fn main() { let _ = \"menu_scope\"; }\n#[cfg(test)]\nmod tests {\n    fn f() { let _ = \"menu_about\"; }\n}\n#[cfg(test)]\n#[path = \"extra_tests.rs\"]\nmod extra;\n",
+        );
+        fs::write(
+            dir.path().join("crates/demo/src/extra_tests.rs"),
+            "fn g() { let _ = \"menu_about\"; }\n",
+        )
+        .expect("extra_tests");
+
+        let report = check_i18n(dir.path()).expect_err("test-only usage must not keep orphan key");
+        assert!(report.contains("menu_about"), "{report}");
+    }
+
+    #[test]
+    fn raw_strings_nested_comments_and_escaped_char_literals_scan_accurately() {
+        let dir = workspace(
+            ZH,
+            EN,
+            "fn main() {\n    let _ = '\\'';\n    let _ = '\\u{27}';\n    /* outer /* inner \"menu_about\" */ */\n    let _ = r#\"\"menu_scope\"\"#;\n    let _ = r\"menu_scope\";\n    let _ = \"menu_about\";\n}\n",
+        );
+        check_i18n(dir.path()).expect("raw string and nested comment lexing must succeed");
+    }
+
+    #[test]
+    fn fluent_variable_placeholder_mismatch_is_reported() {
+        let dir = workspace(
+            "menu_scope = 范围 { $count } ({ $unit })\n",
+            "menu_scope = Scope { $count }\n",
+            "fn main() { let _ = \"menu_scope\"; }\n",
+        );
+        let report = check_i18n(dir.path()).expect_err("placeholder mismatch must fail");
+        assert!(report.contains("placeholder variables differ"), "{report}");
+        assert!(report.contains("menu_scope"), "{report}");
     }
 }

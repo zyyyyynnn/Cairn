@@ -51,8 +51,10 @@ fn default_content_index_extensions() -> Vec<String> {
     .collect()
 }
 
+pub const MAX_CONTENT_INDEX_MAX_BYTES: u64 = 64 * 1024 * 1024;
+
 fn default_content_index_max_bytes() -> u64 {
-    10 * 1024 * 1024 // 10MB
+    10 * 1024 * 1024
 }
 
 fn default_true() -> bool {
@@ -110,8 +112,18 @@ impl Default for ServiceConfig {
 impl ServiceConfig {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
         let content = fs::read_to_string(path.as_ref())?;
-        let cfg = toml::from_str(&content)?;
+        let cfg: ServiceConfig = toml::from_str(&content)?;
+        cfg.validate()?;
         Ok(cfg)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.content_index_max_bytes > MAX_CONTENT_INDEX_MAX_BYTES {
+            return Err(format!(
+                "content_index_max_bytes must not exceed {MAX_CONTENT_INDEX_MAX_BYTES} bytes"
+            ));
+        }
+        Ok(())
     }
 
     pub fn load_or_default<P: AsRef<Path>>(path: P) -> Self {
@@ -120,20 +132,8 @@ impl ServiceConfig {
 
     pub fn save_atomic<P: AsRef<Path>>(&self, path: P) -> Result<(), std::io::Error> {
         let path = path.as_ref();
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
         let serialized = toml::to_string_pretty(self).map_err(std::io::Error::other)?;
-
-        let tmp_path = path.with_extension("tmp");
-        fs::write(&tmp_path, serialized)?;
-        if path.exists() {
-            let _ = fs::remove_file(path);
-        }
-        fs::rename(&tmp_path, path)?;
-
-        Ok(())
+        crate::persistence::atomic_write_bytes(path, serialized.as_bytes())
     }
 
     /// Writes the privileged service configuration (SPEC SET-02): the file is replaced
@@ -151,6 +151,20 @@ impl ServiceConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn content_index_size_limit_accepts_the_boundary_and_rejects_larger_values() {
+        let cfg = ServiceConfig {
+            content_index_max_bytes: MAX_CONTENT_INDEX_MAX_BYTES,
+            ..ServiceConfig::default()
+        };
+        assert!(cfg.validate().is_ok());
+        let too_large = ServiceConfig {
+            content_index_max_bytes: MAX_CONTENT_INDEX_MAX_BYTES + 1,
+            ..cfg
+        };
+        assert!(too_large.validate().is_err());
+    }
 
     #[test]
     fn test_service_config_load_and_error_handling() {
@@ -176,5 +190,26 @@ mod tests {
 
         let def = ServiceConfig::load_or_default(&missing_path);
         assert!(!def.admin_only_query);
+
+        std::thread::scope(|scope| {
+            for idx in 0..6 {
+                let path_ref = &valid_path;
+                scope.spawn(move || {
+                    let next = ServiceConfig {
+                        admin_only_query: idx % 2 == 0,
+                        content_index_enabled: idx % 2 == 1,
+                        ..Default::default()
+                    };
+                    next.save_atomic(path_ref).unwrap();
+                });
+            }
+        });
+        assert!(ServiceConfig::load(&valid_path).is_ok());
+        let leftover_temps: Vec<_> = fs::read_dir(temp.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftover_temps.is_empty());
     }
 }

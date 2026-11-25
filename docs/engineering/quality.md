@@ -19,9 +19,9 @@
 ### 1.2 静态检查与回归门禁
 代码变更合入与构建交付必须无条件通过：
 1. `cargo fmt --all --check`（遵循根目录 `rustfmt.toml`）
-2. `cargo clippy --workspace --all-targets -- -D warnings`（继承根目录 `[workspace.lints]`，含 `unsafe_op_in_unsafe_fn = "deny"`、`elided_lifetimes_in_paths = "warn"`、`clippy::undocumented_unsafe_blocks = "deny"`、`clippy::missing_safety_doc = "deny"`、`clippy::await_holding_lock = "deny"`、`clippy::uninlined_format_args = "warn"`、`clippy::redundant_closure_for_method_calls = "warn"`、`clippy::unnested_or_patterns = "warn"`、`clippy::manual_let_else = "warn"` 与 `rustdoc` 断链检查，零警告）
+2. `cargo clippy --workspace --all-targets -- -D warnings`（继承根目录 `[workspace.lints]`，含 `unsafe_op_in_unsafe_fn = "deny"`、`elided_lifetimes_in_paths = "warn"`、全部 8 项 clippy `deny` 规则 `undocumented_unsafe_blocks`/`missing_safety_doc`/`await_holding_lock`/`too_many_arguments`/`large_enum_variant`/`dbg_macro`/`todo`/`unimplemented`、4 项 clippy `warn` 规则 `uninlined_format_args`/`redundant_closure_for_method_calls`/`unnested_or_patterns`/`manual_let_else` 与 `rustdoc` 断链检查，零警告）
 3. `cargo doc --workspace --no-deps`（`RUSTDOCFLAGS=-D warnings` 零警告）
-4. `cargo run -p xtask -- check`（CI 的 `Repository Gates` 使用 `--no-default-features` 在 `ubuntu-latest` 上统一执行 `check-i18n`、`check-docs`、`check-size` 与 `check-hygiene`，覆盖本地化对齐、文档相对链接、2000 行上限、`[workspace.lints]` 继承、纯安全 crate 的 `#![forbid(unsafe_code)]`、`#[ignore]` 登记一致性及全仓非调研文档/注释/文案规范）
+4. `cargo run -p xtask -- check`（CI 的 `Repository Gates` 使用 `--no-default-features` 在 `ubuntu-latest` 上统一执行 `check-i18n`、`check-docs`、`check-size` 与 `check-hygiene`，覆盖排除 `#[cfg(test)]` 后的本地化键值及 `{ $var }` 插值变量对齐、核心文档集与根相对/工作区相对链接、2000 行上限、`[workspace.lints]` 继承、15 处纯安全入口 `#![forbid(unsafe_code)]`、`cairn-service`/`cairn-content` 的 manifest 与 `Cargo.lock` 传递依赖隔离、8 项 `deny` lint 反抑制、按模块限定名登记的 `#[ignore]` 测试台账及全仓非调研文档/注释/文案规范）
 5. `cargo deny check`（许可证、安全漏洞与 yanked 检查；仓库已提供 `deny.toml`）
 6. `cargo run --release -p xtask -- bench-query --check`（CI `Release / Engine` 在 release 编译后直接运行同机 `CairnXtask.exe bench-query --check`，执行全账本内存与查询延迟回归门禁）
 
