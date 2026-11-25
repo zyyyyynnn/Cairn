@@ -41,7 +41,16 @@ fn current_version() -> String {
 }
 const CHECK_TIMEOUT: Duration = Duration::from_secs(20);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
+const MAX_API_RESPONSE_BYTES: usize = 512 * 1024;
+const MAX_SUMS_BYTES: usize = 1024 * 1024;
+const MAX_SETUP_BYTES: u64 = 256 * 1024 * 1024;
 const PENDING_VERSION_FILE: &str = "update-target.txt";
+const TRUSTED_API_HOSTS: &[&str] = &["api.github.com"];
+const TRUSTED_RELEASE_HOSTS: &[&str] = &[
+    "github.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+];
 
 #[derive(Clone, Debug, Deserialize)]
 struct GitHubRelease {
@@ -91,20 +100,93 @@ enum UpdateError {
     Verify,
 }
 
-fn client_with_timeout(timeout: Duration) -> Result<reqwest::Client, UpdateError> {
+fn validate_trusted_url(url: &str, allowed_hosts: &[&str]) -> Result<reqwest::Url, UpdateError> {
+    let parsed = reqwest::Url::parse(url).map_err(|_| UpdateError::Data)?;
+    if parsed.scheme() != "https"
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.port().is_some()
+    {
+        return Err(UpdateError::Data);
+    }
+    let host = parsed
+        .host_str()
+        .map(str::to_ascii_lowercase)
+        .ok_or(UpdateError::Data)?;
+    if !allowed_hosts
+        .iter()
+        .any(|allowed| host.eq_ignore_ascii_case(allowed))
+    {
+        return Err(UpdateError::Data);
+    }
+    Ok(parsed)
+}
+
+fn validate_release_url(url: &str) -> Result<reqwest::Url, UpdateError> {
+    validate_trusted_url(url, TRUSTED_RELEASE_HOSTS)
+}
+
+fn host_is_trusted(url: &reqwest::Url, allowed_hosts: &[&str]) -> bool {
+    url.scheme() == "https"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port().is_none()
+        && url.host_str().is_some_and(|host| {
+            allowed_hosts
+                .iter()
+                .any(|allowed| host.eq_ignore_ascii_case(allowed))
+        })
+}
+
+fn client_with_timeout(
+    timeout: Duration,
+    allowed_hosts: &'static [&'static str],
+) -> Result<reqwest::Client, UpdateError> {
+    let policy = reqwest::redirect::Policy::custom(move |attempt| {
+        if attempt.previous().len() >= 8 {
+            attempt.error("too many update redirects")
+        } else if !host_is_trusted(attempt.url(), allowed_hosts) {
+            attempt.error("untrusted update redirect target")
+        } else {
+            attempt.follow()
+        }
+    });
     reqwest::Client::builder()
         .user_agent(format!("Cairn/{}", current_version()))
         .timeout(timeout)
+        .redirect(policy)
         .build()
         .map_err(|_| UpdateError::Network)
 }
 
-fn client() -> Result<reqwest::Client, UpdateError> {
-    client_with_timeout(CHECK_TIMEOUT)
+fn api_client() -> Result<reqwest::Client, UpdateError> {
+    client_with_timeout(CHECK_TIMEOUT, TRUSTED_API_HOSTS)
+}
+
+async fn read_bounded_text(
+    mut response: reqwest::Response,
+    max_bytes: usize,
+    size_error: UpdateError,
+) -> Result<String, UpdateError> {
+    if response
+        .content_length()
+        .is_some_and(|len| len > max_bytes as u64)
+    {
+        return Err(size_error);
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|_| size_error)? {
+        if bytes.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(size_error);
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    String::from_utf8(bytes).map_err(|_| UpdateError::Data)
 }
 
 async fn check_latest() -> Result<Option<ReleaseInfo>, UpdateError> {
-    let response = client()?
+    let _ = validate_trusted_url(RELEASES_API, TRUSTED_API_HOSTS)?;
+    let response = api_client()?
         .get(RELEASES_API)
         .header(reqwest::header::ACCEPT, "application/vnd.github+json")
         .send()
@@ -117,7 +199,7 @@ async fn check_latest() -> Result<Option<ReleaseInfo>, UpdateError> {
         _ => return Err(UpdateError::Response),
     }
 
-    let body = response.text().await.map_err(|_| UpdateError::Network)?;
+    let body = read_bounded_text(response, MAX_API_RESPONSE_BYTES, UpdateError::Network).await?;
     release_from_json(&body).map(Some)
 }
 
@@ -137,56 +219,86 @@ fn release_from_json(body: &str) -> Result<ReleaseInfo, UpdateError> {
         .iter()
         .find(|asset| asset.name == SUMS_ASSET)
         .ok_or(UpdateError::Incomplete)?;
+    let setup_url = validate_release_url(&setup.browser_download_url)?;
+    let sums_url = validate_release_url(&sums.browser_download_url)?;
     Ok(ReleaseInfo {
         version,
-        setup_url: setup.browser_download_url.clone(),
-        sums_url: sums.browser_download_url.clone(),
+        setup_url: setup_url.into(),
+        sums_url: sums_url.into(),
     })
 }
 
 async fn download_and_verify(release: &ReleaseInfo) -> Result<(PathBuf, String), UpdateError> {
-    let client = client_with_timeout(DOWNLOAD_TIMEOUT)?;
-    let sums = client
-        .get(&release.sums_url)
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use tokio::io::AsyncWriteExt as _;
+
+    static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+    let sums_url = validate_release_url(&release.sums_url).map_err(|_| UpdateError::Download)?;
+    let setup_url = validate_release_url(&release.setup_url).map_err(|_| UpdateError::Download)?;
+    let client = client_with_timeout(DOWNLOAD_TIMEOUT, TRUSTED_RELEASE_HOSTS)?;
+    let sums_response = client
+        .get(sums_url)
         .send()
         .await
         .map_err(|_| UpdateError::Download)?
         .error_for_status()
-        .map_err(|_| UpdateError::Download)?
-        .text()
-        .await
         .map_err(|_| UpdateError::Download)?;
+    let sums = read_bounded_text(sums_response, MAX_SUMS_BYTES, UpdateError::Download).await?;
     let expected = parse_checksum(&sums, SETUP_ASSET).ok_or(UpdateError::Data)?;
 
     let dir = updates_dir();
     std::fs::create_dir_all(&dir).map_err(|_| UpdateError::Download)?;
-    let setup_path = dir.join(format!(
-        "{}-{}.exe",
+    let stem = format!(
+        "{}-{}",
         SETUP_ASSET.trim_end_matches(".exe"),
         safe_version(&release.version)
-    ));
+    );
+    let setup_path = dir.join(format!("{stem}.exe"));
+
+    let (mut file, temp_path) = loop {
+        let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let candidate = dir.join(format!("{stem}.{}.{seq}.tmp", std::process::id()));
+        match tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+            .await
+        {
+            Ok(file) => break (file, candidate),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return Err(UpdateError::Download),
+        }
+    };
 
     let result = async {
         let mut response = client
-            .get(&release.setup_url)
+            .get(setup_url)
             .send()
             .await
             .map_err(|_| UpdateError::Download)?
             .error_for_status()
             .map_err(|_| UpdateError::Download)?;
-        let mut file = tokio::fs::File::create(&setup_path)
-            .await
-            .map_err(|_| UpdateError::Download)?;
+        if response
+            .content_length()
+            .is_some_and(|len| len > MAX_SETUP_BYTES)
+        {
+            return Err(UpdateError::Download);
+        }
+        let mut downloaded_bytes = 0u64;
         let mut hasher = Sha256::new();
         while let Some(chunk) = response.chunk().await.map_err(|_| UpdateError::Download)? {
+            downloaded_bytes = downloaded_bytes
+                .checked_add(chunk.len() as u64)
+                .filter(|&len| len <= MAX_SETUP_BYTES)
+                .ok_or(UpdateError::Download)?;
             hasher.update(&chunk);
-            tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
+            file.write_all(&chunk)
                 .await
                 .map_err(|_| UpdateError::Download)?;
         }
-        tokio::io::AsyncWriteExt::flush(&mut file)
-            .await
-            .map_err(|_| UpdateError::Download)?;
+        file.flush().await.map_err(|_| UpdateError::Download)?;
+        file.sync_all().await.map_err(|_| UpdateError::Download)?;
 
         let actual: String = hasher
             .finalize()
@@ -200,10 +312,42 @@ async fn download_and_verify(release: &ReleaseInfo) -> Result<(PathBuf, String),
     }
     .await;
 
-    if result.is_err() {
-        let _ = std::fs::remove_file(&setup_path);
+    drop(file);
+    if let Err(err) = result {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(err);
     }
-    result.map(|()| (setup_path, expected))
+    if atomic_replace_update(&temp_path, &setup_path).is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(UpdateError::Download);
+    }
+    Ok((setup_path, expected))
+}
+
+#[cfg(windows)]
+fn atomic_replace_update(src: &Path, dst: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+    use windows::core::PCWSTR;
+
+    let src_w: Vec<u16> = src.as_os_str().encode_wide().chain(Some(0)).collect();
+    let dst_w: Vec<u16> = dst.as_os_str().encode_wide().chain(Some(0)).collect();
+    // SAFETY: both paths are NUL-terminated UTF-16 strings kept alive for the synchronous Win32 call.
+    unsafe {
+        MoveFileExW(
+            PCWSTR(src_w.as_ptr()),
+            PCWSTR(dst_w.as_ptr()),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    }
+    .map_err(|err| std::io::Error::from_raw_os_error(err.code().0))
+}
+
+#[cfg(not(windows))]
+fn atomic_replace_update(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::rename(src, dst)
 }
 
 fn normalize_version(tag: &str) -> String {
@@ -273,8 +417,7 @@ fn remove_pending_version() {
     let _ = std::fs::remove_file(pending_version_path());
 }
 
-#[cfg(not(test))]
-fn take_pending_update_target() -> Option<String> {
+pub(crate) fn take_pending_update_target() -> Option<String> {
     let path = pending_version_path();
     let target = std::fs::read_to_string(&path).ok()?;
     let _ = std::fs::remove_file(path);
@@ -290,15 +433,15 @@ impl CairnApp {
     /// Schedules the startup update marker read off the UI thread so the first frame paints
     /// immediately; if no update toast applies and the global hotkey failed to bind, shows the
     /// hotkey notice in the shared toast slot.
-    #[cfg(not(test))]
     pub(crate) fn schedule_startup_notices(
         &mut self,
         hotkey_unavailable: bool,
         cx: &mut Context<'_, Self>,
     ) {
+        let runtime_ports = self.runtime_ports.clone();
         let (tx, rx) = tokio::sync::oneshot::channel();
         get_tokio_runtime().spawn_blocking(move || {
-            let _ = tx.send(take_pending_update_target());
+            let _ = tx.send(runtime_ports.take_pending_update_target());
         });
         cx.spawn(async move |this, cx| {
             let target = rx.await.ok().flatten();
@@ -317,7 +460,6 @@ impl CairnApp {
         .detach();
     }
 
-    #[cfg(not(test))]
     fn show_update_notice_for(&mut self, target: &str, cx: &mut Context<'_, Self>) -> bool {
         if target.is_empty() {
             return false;
@@ -574,7 +716,7 @@ fn version_args(version: &str) -> FluentArgs<'_> {
 mod tests {
     use super::{
         UpdateError, check_latest, is_newer, normalize_version, parse_checksum, release_from_json,
-        safe_version,
+        safe_version, validate_release_url,
     };
     use crate::shell::i18n::I18nManager;
     use fluent_bundle::FluentArgs;
@@ -625,10 +767,10 @@ mod tests {
     fn a_github_release_deserializes_with_its_assets() {
         let body = r#"{
             "tag_name":"v0.2.0",
-            "html_url":"https://example.invalid/release",
+            "html_url":"https://github.com/zyyyyynnn/Cairn/releases/tag/v0.2.0",
             "assets":[
-                {"name":"CairnSetup.exe","browser_download_url":"https://example.invalid/CairnSetup.exe"},
-                {"name":"SHA256SUMS.txt","browser_download_url":"https://example.invalid/SHA256SUMS.txt"}
+                {"name":"CairnSetup.exe","browser_download_url":"https://github.com/zyyyyynnn/Cairn/releases/download/v0.2.0/CairnSetup.exe"},
+                {"name":"SHA256SUMS.txt","browser_download_url":"https://objects.githubusercontent.com/github-production-release-asset/SHA256SUMS.txt"}
             ]
         }"#;
         let release = release_from_json(body).expect("valid release");
@@ -642,8 +784,8 @@ mod tests {
         let malformed = r#"{
             "tag_name":"v0.2",
             "assets":[
-                {"name":"CairnSetup.exe","browser_download_url":"https://example.invalid/CairnSetup.exe"},
-                {"name":"SHA256SUMS.txt","browser_download_url":"https://example.invalid/SHA256SUMS.txt"}
+                {"name":"CairnSetup.exe","browser_download_url":"https://github.com/zyyyyynnn/Cairn/releases/download/v0.2/CairnSetup.exe"},
+                {"name":"SHA256SUMS.txt","browser_download_url":"https://github.com/zyyyyynnn/Cairn/releases/download/v0.2/SHA256SUMS.txt"}
             ]
         }"#;
         assert!(matches!(
@@ -654,7 +796,7 @@ mod tests {
         let missing_sums = r#"{
             "tag_name":"v0.2.0",
             "assets":[
-                {"name":"CairnSetup.exe","browser_download_url":"https://example.invalid/CairnSetup.exe"}
+                {"name":"CairnSetup.exe","browser_download_url":"https://github.com/zyyyyynnn/Cairn/releases/download/v0.2.0/CairnSetup.exe"}
             ]
         }"#;
         assert!(matches!(
@@ -665,12 +807,46 @@ mod tests {
         let missing_setup = r#"{
             "tag_name":"v0.2.0",
             "assets":[
-                {"name":"SHA256SUMS.txt","browser_download_url":"https://example.invalid/SHA256SUMS.txt"}
+                {"name":"SHA256SUMS.txt","browser_download_url":"https://github.com/zyyyyynnn/Cairn/releases/download/v0.2.0/SHA256SUMS.txt"}
             ]
         }"#;
         assert!(matches!(
             release_from_json(missing_setup),
             Err(UpdateError::Incomplete)
+        ));
+    }
+
+    #[test]
+    fn untrusted_or_non_https_release_urls_are_rejected() {
+        assert!(
+            validate_release_url(
+                "https://release-assets.githubusercontent.com/assets/CairnSetup.exe"
+            )
+            .is_ok()
+        );
+        for bad in [
+            "http://github.com/zyyyyynnn/Cairn/releases/download/v0.2.0/CairnSetup.exe",
+            "https://example.invalid/CairnSetup.exe",
+            "https://evil-github.com/CairnSetup.exe",
+            "https://user@github.com/CairnSetup.exe",
+            "https://github.com:8443/CairnSetup.exe",
+        ] {
+            assert!(
+                matches!(validate_release_url(bad), Err(UpdateError::Data)),
+                "{bad} must be rejected"
+            );
+        }
+
+        let untrusted_asset = r#"{
+            "tag_name":"v0.2.0",
+            "assets":[
+                {"name":"CairnSetup.exe","browser_download_url":"https://example.invalid/CairnSetup.exe"},
+                {"name":"SHA256SUMS.txt","browser_download_url":"https://github.com/zyyyyynnn/Cairn/releases/download/v0.2.0/SHA256SUMS.txt"}
+            ]
+        }"#;
+        assert!(matches!(
+            release_from_json(untrusted_asset),
+            Err(UpdateError::Data)
         ));
     }
 

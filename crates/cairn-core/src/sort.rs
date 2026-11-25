@@ -658,11 +658,9 @@ fn packed_sort_by_key<K: Send + Sync>(
         })
         .collect();
     entries.par_sort_unstable_by(|(ka, na), (kb, nb)| {
-        apply_sort_dir(
-            cmp_key(ka, kb).then_with(|| cmp_name_entries(na, nb, arena)),
-            dir,
-        )
-        .then_with(|| na.idx.cmp(&nb.idx))
+        apply_sort_dir(cmp_key(ka, kb), dir)
+            .then_with(|| cmp_name_entries(na, nb, arena))
+            .then_with(|| na.idx.cmp(&nb.idx))
     });
     for (dst, (_, n)) in indices.iter_mut().zip(entries) {
         *dst = n.idx;
@@ -914,14 +912,18 @@ fn sort_single_column(
     }
 
     indices.par_sort_unstable_by(|&a, &b| {
-        let ord = cmp_column_only(ctx, col, SortDirection::Ascending, a, b).then_with(|| {
+        apply_sort_dir(
+            cmp_column_only(ctx, col, SortDirection::Ascending, a, b),
+            dir,
+        )
+        .then_with(|| {
             if col == SortColumn::Name {
                 Ordering::Equal
             } else {
                 cmp_name_only(ctx.records, ctx.arena, a, b)
             }
-        });
-        apply_sort_dir(ord, dir).then_with(|| a.cmp(&b))
+        })
+        .then_with(|| a.cmp(&b))
     });
 }
 
@@ -1194,36 +1196,41 @@ mod tests {
                     let na = arena.get_name(ra.name_offset, ra.name_len);
                     let nb = arena.get_name(rb.name_offset, rb.name_len);
                     let ord = match col {
-                        SortColumn::Name => natural_cmp(na, nb),
-                        SortColumn::Size => ra.size.cmp(&rb.size).then_with(|| natural_cmp(na, nb)),
-                        SortColumn::DateModified => ra
-                            .modified_ts
-                            .cmp(&rb.modified_ts)
+                        SortColumn::Name => apply_sort_dir(natural_cmp(na, nb), dir),
+                        SortColumn::Size => apply_sort_dir(ra.size.cmp(&rb.size), dir)
                             .then_with(|| natural_cmp(na, nb)),
-                        SortColumn::DateCreated => ra
-                            .created_ts
-                            .cmp(&rb.created_ts)
-                            .then_with(|| natural_cmp(na, nb)),
-                        SortColumn::Extension => cmp_ascii_ignore_case(
-                            arena.get_ext(ra.name_offset, ra.name_len, ra.ext_offset),
-                            arena.get_ext(rb.name_offset, rb.name_len, rb.ext_offset),
+                        SortColumn::DateModified => {
+                            apply_sort_dir(ra.modified_ts.cmp(&rb.modified_ts), dir)
+                                .then_with(|| natural_cmp(na, nb))
+                        }
+                        SortColumn::DateCreated => {
+                            apply_sort_dir(ra.created_ts.cmp(&rb.created_ts), dir)
+                                .then_with(|| natural_cmp(na, nb))
+                        }
+                        SortColumn::Extension => apply_sort_dir(
+                            cmp_ascii_ignore_case(
+                                arena.get_ext(ra.name_offset, ra.name_len, ra.ext_offset),
+                                arena.get_ext(rb.name_offset, rb.name_len, rb.ext_offset),
+                            ),
+                            dir,
                         )
                         .then_with(|| natural_cmp(na, nb)),
                         SortColumn::Path => {
                             let root = crate::path_cache::root_path_for_drive('C');
-                            cache
-                                .get_parent_path_with_root(&records, &arena, &root, a)
-                                .cmp(&cache.get_parent_path_with_root(&records, &arena, &root, b))
-                                .then_with(|| natural_cmp(na, nb))
+                            apply_sort_dir(
+                                cache
+                                    .get_parent_path_with_root(&records, &arena, &root, a)
+                                    .cmp(
+                                        &cache
+                                            .get_parent_path_with_root(&records, &arena, &root, b),
+                                    ),
+                                dir,
+                            )
+                            .then_with(|| natural_cmp(na, nb))
                         }
                         _ => unreachable!("loop covers non-property columns"),
                     };
-                    let primary = if dir == SortDirection::Descending {
-                        ord.reverse()
-                    } else {
-                        ord
-                    };
-                    primary.then_with(|| a.cmp(&b))
+                    ord.then_with(|| a.cmp(&b))
                 });
                 assert_eq!(got, expected, "mismatch for col={col:?} dir={dir:?}");
             }

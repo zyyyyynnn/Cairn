@@ -222,11 +222,11 @@ struct JournalTitleRow {
     refresh_loading: bool,
 }
 
-fn render_journal_title_row(
+fn build_journal_header_parts(
     view: &Entity<CairnApp>,
     props: JournalTitleRow,
     window: &Window,
-) -> AnyElement {
+) -> (Div, AnyElement) {
     let JournalTitleRow {
         title_text,
         switch_label,
@@ -273,32 +273,37 @@ fn render_journal_title_row(
                     });
                 }),
         );
-    #[cfg(test)]
-    let leading = leading.on_children_prepainted(|bounds, _, _| {
-        tests::record_journal_header_leading_bounds(bounds);
-    });
 
-    let row = h_flex()
+    let close = Button::new("index-journal-close")
+        .ghost()
+        .small()
+        .icon(AssetIconName::X)
+        .accessibility_label(close_label.clone())
+        .tooltip(close_label)
+        .on_click(|_, window, cx| window.close_dialog(cx))
+        .into_any_element();
+
+    (leading, close)
+}
+
+fn build_journal_header_row(leading: Div, close: AnyElement) -> Div {
+    h_flex()
         .w_full()
         .pl(rems(layout::SPACE_8))
         .items_center()
         .justify_between()
         .gap(rems(layout::SPACE_8))
         .child(leading)
-        .child(
-            Button::new("index-journal-close")
-                .ghost()
-                .small()
-                .icon(AssetIconName::X)
-                .accessibility_label(close_label.clone())
-                .tooltip(close_label)
-                .on_click(|_, window, cx| window.close_dialog(cx)),
-        );
-    #[cfg(test)]
-    let row = row.on_children_prepainted(|bounds, _, _| {
-        tests::record_journal_header_row_bounds(bounds);
-    });
-    row.into_any_element()
+        .child(close)
+}
+
+fn render_journal_title_row(
+    view: &Entity<CairnApp>,
+    props: JournalTitleRow,
+    window: &Window,
+) -> AnyElement {
+    let (leading, close) = build_journal_header_parts(view, props, window);
+    build_journal_header_row(leading, close).into_any_element()
 }
 
 fn empty_panel(message: String, tokens: &ShellTokens) -> AnyElement {
@@ -384,6 +389,21 @@ struct JournalColumns<'a> {
     path: &'a str,
 }
 
+fn build_journal_rows_list(
+    entries: &[IndexJournalEntry],
+    i18n: &I18nManager,
+    time_col_w: Rems,
+    kind_col_w: Rems,
+    tokens: &ShellTokens,
+) -> Div {
+    v_flex().w_full().children(
+        entries
+            .iter()
+            .enumerate()
+            .map(|(ix, entry)| render_journal_row(ix, entry, i18n, time_col_w, kind_col_w, tokens)),
+    )
+}
+
 fn render_journal_rows(
     entries: &[IndexJournalEntry],
     i18n: &I18nManager,
@@ -422,20 +442,11 @@ fn render_journal_rows(
         )
         .child(div().flex_1().min_w_0().child(columns.path.to_string()));
 
-    let scroll_list = v_flex();
-    #[cfg(test)]
-    let scroll_list = scroll_list.on_children_prepainted(|bounds, _, _| {
-        tests::record_journal_row_bounds(bounds);
-    });
-    let scroll_list = scroll_list
+    let scroll_list = build_journal_rows_list(entries, i18n, time_col_w, kind_col_w, tokens)
         .id("index-journal-entries")
-        .w_full()
         .h(list_height)
         .overflow_y_scroll()
-        .track_scroll(scroll_handle)
-        .children(entries.iter().enumerate().map(|(ix, entry)| {
-            render_journal_row(ix, entry, i18n, time_col_w, kind_col_w, tokens)
-        }));
+        .track_scroll(scroll_handle);
 
     let scroller = h_flex()
         .w_full()
@@ -461,7 +472,10 @@ fn render_journal_rows(
 
 #[cfg(test)]
 mod tests {
-    use super::{change_kind_label_key, journal_summary_text, render_journal_row};
+    use super::{
+        JournalTitleRow, build_journal_header_parts, build_journal_header_row,
+        change_kind_label_key, journal_summary_text, render_journal_row,
+    };
     use crate::app::{CairnApp, layout};
     use crate::shell::i18n::I18nManager;
     use crate::shell::theme::ShellTokens;
@@ -469,8 +483,8 @@ mod tests {
     use cairn_protocol::status::{IndexJournalEntry, IndexJournalStatus, JournalChangeKind};
     use gpui_kit::component::v_flex;
     use gpui_kit::gpui::{
-        AppContext as _, Bounds, Context, IntoElement, ParentElement as _, Pixels, Render, Styled,
-        Window, div, px, rems,
+        AppContext as _, Bounds, Context, Entity, IntoElement, ParentElement as _, Pixels, Render,
+        Styled, Window, div, px, rems,
     };
     use std::cell::RefCell;
 
@@ -693,6 +707,37 @@ mod tests {
         });
     }
 
+    struct JournalHeaderHarness {
+        app: Entity<CairnApp>,
+    }
+
+    impl Render for JournalHeaderHarness {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+            window.set_rem_size(gpui_kit::gpui::px(crate::shell::theme::BASE_FONT_PX));
+            let rem = window.rem_size();
+            let app_ref = self.app.read(cx);
+            let props = JournalTitleRow {
+                title_text: app_ref.i18n.get_text("journal_dialog_title"),
+                switch_label: app_ref.i18n.get_text("journal_dialog_record_toggle"),
+                switch_checked: true,
+                switch_disabled: false,
+                refresh_label: app_ref.i18n.get_text("journal_dialog_refresh"),
+                close_label: app_ref.i18n.get_text("window_close"),
+                refresh_disabled: false,
+                refresh_loading: false,
+            };
+            let (leading, close) = build_journal_header_parts(&self.app, props, window);
+            let leading = leading.on_children_prepainted(|bounds, _, _| {
+                record_journal_header_leading_bounds(bounds);
+            });
+            let row =
+                build_journal_header_row(leading, close).on_children_prepainted(|bounds, _, _| {
+                    record_journal_header_row_bounds(bounds);
+                });
+            div().w(rem * layout::DIALOG_WIDE_WIDTH).child(row)
+        }
+    }
+
     #[test]
     fn journal_header_keeps_title_switch_refresh_and_close_on_one_center_line() {
         gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
@@ -735,6 +780,23 @@ mod tests {
                         this.service.journal_entries.finish_load(entries);
                         cx.notify();
                     });
+                    window.draw(cx).clear(cx);
+                })
+                .expect("dialog draw succeeds");
+
+            let (header_handle, _harness) = gpui_kit::open_window(
+                gpui_kit::gpui::WindowOptions {
+                    show: false,
+                    focus: false,
+                    ..gpui_kit::gpui::WindowOptions::default()
+                },
+                cx,
+                |_, cx| cx.new(|_| JournalHeaderHarness { app }),
+            )
+            .expect("header harness opens");
+
+            header_handle
+                .update(cx, |_, window, cx| {
                     take_journal_header_bounds();
                     window.draw(cx).clear(cx);
                     let (row, leading) = take_journal_header_bounds();
@@ -773,7 +835,7 @@ mod tests {
                         "close control must trail the leading group"
                     );
                 })
-                .expect("dialog draw succeeds");
+                .expect("header draw succeeds");
             cx.quit();
         });
     }

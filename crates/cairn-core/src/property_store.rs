@@ -169,14 +169,30 @@ fn rewrite_string_offset(off: &mut u32, len: &mut u16, source: &[u8], target: &m
     *off = new_off;
 }
 
+const INITIAL_COMPACT_BYTES: usize = 64 * 1024 * 1024;
+
 /// Sparse side-table storage for `length`, `author`, `tags`, `dimensions`, and `framerate`.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct PropertySideTables {
     enabled: bool,
     index: HashMap<(u32, u64), u32>,
     slots: Vec<PackedPropertySlot>,
     free_slots: Vec<u32>,
     strings: Vec<u8>,
+    next_compact_bytes: usize,
+}
+
+impl Default for PropertySideTables {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            index: HashMap::new(),
+            slots: Vec::new(),
+            free_slots: Vec::new(),
+            strings: Vec::new(),
+            next_compact_bytes: INITIAL_COMPACT_BYTES,
+        }
+    }
 }
 
 impl PropertySideTables {
@@ -210,6 +226,7 @@ impl PropertySideTables {
         self.slots = Vec::new();
         self.free_slots = Vec::new();
         self.strings = Vec::new();
+        self.next_compact_bytes = INITIAL_COMPACT_BYTES;
     }
 
     pub fn record_count(&self) -> usize {
@@ -238,7 +255,7 @@ impl PropertySideTables {
         if let Some(&idx) = self.index.get(&(source.0, record_key)) {
             self.slots[idx as usize] = PackedPropertySlot::default();
         }
-        if self.strings.len() > 64 * 1024 * 1024 {
+        if self.strings.len() > self.next_compact_bytes {
             self.compact_strings();
         }
 
@@ -351,6 +368,7 @@ impl PropertySideTables {
     /// full extractions and source pruning so repeated overwrites do not grow memory without bound.
     pub fn compact_strings(&mut self) {
         if self.strings.is_empty() {
+            self.next_compact_bytes = INITIAL_COMPACT_BYTES;
             return;
         }
         let mut compacted = Vec::with_capacity(self.strings.len());
@@ -369,6 +387,11 @@ impl PropertySideTables {
             );
         }
         self.strings = compacted;
+        self.next_compact_bytes = self
+            .strings
+            .len()
+            .saturating_mul(2)
+            .max(INITIAL_COMPACT_BYTES);
     }
 
     #[inline]

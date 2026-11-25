@@ -13,14 +13,12 @@ pub(crate) struct GlobalHotkey {
 }
 
 /// Ctrl+Alt+Space summons or hides the main window from anywhere.
-#[cfg_attr(test, allow(dead_code))]
 fn default_hotkey() -> HotKey {
     HotKey::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::Space)
 }
 
 /// Registers the default chord and listens for it on a dedicated thread. The error is returned
 /// when another application already owns the chord; the caller keeps the window usable without it.
-#[cfg_attr(test, allow(dead_code))]
 pub(crate) fn register() -> Result<GlobalHotkey, String> {
     let manager = GlobalHotKeyManager::new().map_err(|err| format!("hotkey manager: {err}"))?;
     let hotkey = default_hotkey();

@@ -36,6 +36,10 @@ pub enum UsnError {
     ReadFailed(u32),
     #[error("Buffer too small: {0} bytes")]
     BufferTooSmall(usize),
+    #[error("Unsupported USN record version: {0}")]
+    UnsupportedRecordVersion(u16),
+    #[error("Malformed USN record at byte offset {0}")]
+    MalformedRecord(usize),
 }
 
 /// Metadata queried from the volume's USN journal.
@@ -113,25 +117,34 @@ pub enum UsnChange {
 /// Parses raw USN records from `FSCTL_READ_USN_JOURNAL` output buffer.
 ///
 /// Returns `(next_usn_to_query, list_of_parsed_changes)`.
-pub fn parse_usn_records(buf: &[u8]) -> (i64, Vec<UsnChange>) {
+pub fn parse_usn_records(buf: &[u8]) -> Result<(i64, Vec<UsnChange>), UsnError> {
     if buf.len() < 8 {
-        return (0, Vec::new());
+        return Err(UsnError::MalformedRecord(0));
     }
 
     // The first 8 bytes of the buffer contain the NextUsn to use for subsequent queries
     let next_usn = i64::from_le_bytes(buf[0..8].try_into().unwrap());
     let mut changes = Vec::new();
     let mut utf16_scratch: Vec<u16> = Vec::with_capacity(256);
-    let mut cursor = 8;
+    let mut cursor: usize = 8;
 
-    while cursor + 60 <= buf.len() {
+    while cursor < buf.len() {
+        if buf.len() - cursor < 8 {
+            return Err(UsnError::MalformedRecord(cursor));
+        }
         let record_len = u32::from_le_bytes(buf[cursor..cursor + 4].try_into().unwrap()) as usize;
-        if record_len == 0 || cursor + record_len > buf.len() {
-            break;
+        let Some(record_end) = cursor.checked_add(record_len) else {
+            return Err(UsnError::MalformedRecord(cursor));
+        };
+        if record_len < 8 || record_end > buf.len() {
+            return Err(UsnError::MalformedRecord(cursor));
         }
 
         let major_ver = u16::from_le_bytes(buf[cursor + 4..cursor + 6].try_into().unwrap());
-        if major_ver == 2 || major_ver == 3 {
+        if major_ver == 2 {
+            if record_len < 60 {
+                return Err(UsnError::MalformedRecord(cursor));
+            }
             let reason = u32::from_le_bytes(buf[cursor + 40..cursor + 44].try_into().unwrap());
             // SPEC IDX-03: Process only final CLOSE records or rename pair records before
             // touching parent/name fields so intermediate unclosed churn costs a single branch.
@@ -139,7 +152,7 @@ pub fn parse_usn_records(buf: &[u8]) -> (i64, Vec<UsnChange>) {
             let is_rename =
                 (reason & (USN_REASON_RENAME_NEW_NAME | USN_REASON_RENAME_OLD_NAME)) != 0;
             if !is_close && !is_rename {
-                cursor += record_len;
+                cursor = record_end;
                 continue;
             }
 
@@ -149,25 +162,36 @@ pub fn parse_usn_records(buf: &[u8]) -> (i64, Vec<UsnChange>) {
             let file_attrs = u32::from_le_bytes(buf[cursor + 52..cursor + 56].try_into().unwrap());
             let is_dir = (file_attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
 
-            let decode_name = |scratch: &mut Vec<u16>| -> String {
+            let decode_name = |scratch: &mut Vec<u16>| -> Result<String, UsnError> {
                 let fn_len =
                     u16::from_le_bytes(buf[cursor + 56..cursor + 58].try_into().unwrap()) as usize;
                 let fn_offset =
                     u16::from_le_bytes(buf[cursor + 58..cursor + 60].try_into().unwrap()) as usize;
-                if cursor + fn_offset + fn_len <= cursor + record_len {
-                    let name_bytes = &buf[cursor + fn_offset..cursor + fn_offset + fn_len];
-                    scratch.clear();
-                    scratch.extend(
-                        name_bytes
-                            .as_chunks::<2>()
-                            .0
-                            .iter()
-                            .map(|&pair| u16::from_le_bytes(pair)),
-                    );
-                    String::from_utf16_lossy(scratch)
-                } else {
-                    String::new()
+                let Some(fn_end) = fn_offset.checked_add(fn_len) else {
+                    return Err(UsnError::MalformedRecord(cursor));
+                };
+                if fn_len == 0 || !fn_len.is_multiple_of(2) || fn_offset < 60 || fn_end > record_len
+                {
+                    return Err(UsnError::MalformedRecord(cursor));
                 }
+                let name_bytes = &buf[cursor + fn_offset..cursor + fn_end];
+                scratch.clear();
+                scratch.extend(
+                    name_bytes
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|&pair| u16::from_le_bytes(pair)),
+                );
+                let name =
+                    String::from_utf16(scratch).map_err(|_| UsnError::MalformedRecord(cursor))?;
+                if name
+                    .chars()
+                    .any(|ch| ch == '\0' || ch == '/' || ch == '\\' || ch.is_control())
+                {
+                    return Err(UsnError::MalformedRecord(cursor));
+                }
+                Ok(name)
             };
 
             // MUST prioritize USN_REASON_FILE_DELETE
@@ -177,7 +201,7 @@ pub fn parse_usn_records(buf: &[u8]) -> (i64, Vec<UsnChange>) {
                 changes.push(UsnChange::Created {
                     frn,
                     parent_frn,
-                    name: decode_name(&mut utf16_scratch),
+                    name: decode_name(&mut utf16_scratch)?,
                     is_dir,
                     attributes: file_attrs,
                     ts: timestamp,
@@ -186,7 +210,7 @@ pub fn parse_usn_records(buf: &[u8]) -> (i64, Vec<UsnChange>) {
                 changes.push(UsnChange::Renamed {
                     frn,
                     parent_frn,
-                    name: decode_name(&mut utf16_scratch),
+                    name: decode_name(&mut utf16_scratch)?,
                     is_dir,
                     is_new_name: true,
                 });
@@ -194,7 +218,7 @@ pub fn parse_usn_records(buf: &[u8]) -> (i64, Vec<UsnChange>) {
                 changes.push(UsnChange::Renamed {
                     frn,
                     parent_frn,
-                    name: decode_name(&mut utf16_scratch),
+                    name: decode_name(&mut utf16_scratch)?,
                     is_dir,
                     is_new_name: false,
                 });
@@ -210,12 +234,14 @@ pub fn parse_usn_records(buf: &[u8]) -> (i64, Vec<UsnChange>) {
                     attributes: file_attrs,
                 });
             }
+        } else {
+            return Err(UsnError::UnsupportedRecordVersion(major_ver));
         }
 
-        cursor += record_len;
+        cursor = record_end;
     }
 
-    (next_usn, changes)
+    Ok((next_usn, changes))
 }
 
 #[cfg(test)]
@@ -237,10 +263,55 @@ mod tests {
         let reason = USN_REASON_FILE_CREATE | USN_REASON_FILE_DELETE | USN_REASON_CLOSE;
         buf[48..52].copy_from_slice(&reason.to_le_bytes());
 
-        let (next, changes) = parse_usn_records(&buf);
+        let (next, changes) = parse_usn_records(&buf).unwrap();
         assert_eq!(next, 1000);
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0], UsnChange::Deleted { frn: 42 });
+    }
+
+    #[test]
+    fn unsupported_v3_records_fail_instead_of_advancing_the_cursor() {
+        let record_len = 76usize;
+        let mut buf = vec![0u8; 8 + record_len];
+        buf[0..8].copy_from_slice(&1000i64.to_le_bytes());
+        buf[8..12].copy_from_slice(&(record_len as u32).to_le_bytes());
+        buf[12..14].copy_from_slice(&3u16.to_le_bytes());
+
+        assert!(matches!(
+            parse_usn_records(&buf),
+            Err(UsnError::UnsupportedRecordVersion(3))
+        ));
+    }
+
+    #[test]
+    fn truncated_record_fails_instead_of_advancing_the_cursor() {
+        let mut buf = vec![0u8; 24];
+        buf[0..8].copy_from_slice(&1000i64.to_le_bytes());
+        buf[8..12].copy_from_slice(&100u32.to_le_bytes());
+        buf[12..14].copy_from_slice(&2u16.to_le_bytes());
+
+        assert!(matches!(
+            parse_usn_records(&buf),
+            Err(UsnError::MalformedRecord(8))
+        ));
+    }
+
+    #[test]
+    fn invalid_utf16_or_path_separator_in_name_fails() {
+        let record_len = 64usize;
+        let mut buf = vec![0u8; 8 + record_len];
+        buf[0..8].copy_from_slice(&1000i64.to_le_bytes());
+        buf[8..12].copy_from_slice(&(record_len as u32).to_le_bytes());
+        buf[12..14].copy_from_slice(&2u16.to_le_bytes());
+        buf[48..52].copy_from_slice(&(USN_REASON_FILE_CREATE | USN_REASON_CLOSE).to_le_bytes());
+        buf[64..66].copy_from_slice(&[4, 0]);
+        buf[66..68].copy_from_slice(&[60, 0]);
+        buf[68..72].copy_from_slice(&[b'A', 0, 0, 0]);
+
+        assert!(matches!(
+            parse_usn_records(&buf),
+            Err(UsnError::MalformedRecord(8))
+        ));
     }
 
     #[test]
@@ -266,7 +337,7 @@ mod tests {
             buf[at..at + 2].copy_from_slice(&unit.to_le_bytes());
         }
 
-        let (next, changes) = parse_usn_records(&buf);
+        let (next, changes) = parse_usn_records(&buf).unwrap();
         assert_eq!(next, 2000);
         assert_eq!(
             changes,
@@ -403,7 +474,7 @@ mod tests {
             &new_bytes,
         );
 
-        let (next, changes) = parse_usn_records(&buf);
+        let (next, changes) = parse_usn_records(&buf).unwrap();
         assert_eq!(next, 5000);
         assert_eq!(
             changes,
@@ -439,5 +510,23 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn malformed_v2_and_trailing_record_headers_fail() {
+        let mut buf = vec![0u8; 8 + 16];
+        buf[0..8].copy_from_slice(&4000i64.to_le_bytes());
+        buf[8..12].copy_from_slice(&16u32.to_le_bytes());
+        buf[12..14].copy_from_slice(&2u16.to_le_bytes());
+        assert!(matches!(
+            parse_usn_records(&buf),
+            Err(UsnError::MalformedRecord(8))
+        ));
+
+        buf.truncate(12);
+        assert!(matches!(
+            parse_usn_records(&buf),
+            Err(UsnError::MalformedRecord(8))
+        ));
     }
 }

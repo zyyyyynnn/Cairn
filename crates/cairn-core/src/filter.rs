@@ -117,6 +117,17 @@ pub fn parse_duration_filter(s: &str) -> Option<SizeFilter> {
     SizeFilter::parse_with(s, parse_duration_ms)
 }
 
+fn finite_scaled_u64(val: f64, scale: f64) -> Option<u64> {
+    if !val.is_finite() || val < 0.0 || !scale.is_finite() || scale < 0.0 {
+        return None;
+    }
+    let scaled = (val * scale).round();
+    if !scaled.is_finite() || scaled < 0.0 || scaled >= u64::MAX as f64 {
+        return None;
+    }
+    Some(scaled as u64)
+}
+
 fn parse_duration_ms(s: &str) -> Option<u64> {
     let trimmed = s.trim();
     if trimmed.is_empty() {
@@ -131,22 +142,31 @@ fn parse_duration_ms(s: &str) -> Option<u64> {
         let mut total_secs = secs_f;
         if parts.len() == 2 {
             let mins: f64 = parts[0].trim().parse().ok()?;
+            if !mins.is_finite() || mins < 0.0 || !secs_f.is_finite() || secs_f < 0.0 {
+                return None;
+            }
             total_secs += mins * 60.0;
         } else {
             let hrs: f64 = parts[0].trim().parse().ok()?;
             let mins: f64 = parts[1].trim().parse().ok()?;
+            if !hrs.is_finite()
+                || hrs < 0.0
+                || !mins.is_finite()
+                || mins < 0.0
+                || !secs_f.is_finite()
+                || secs_f < 0.0
+            {
+                return None;
+            }
             total_secs += hrs * 3600.0 + mins * 60.0;
         }
-        if total_secs < 0.0 || !total_secs.is_finite() {
-            return None;
-        }
-        return Some((total_secs * 1000.0).round() as u64);
+        return finite_scaled_u64(total_secs, 1000.0);
     }
 
     let lower = trimmed.to_ascii_lowercase();
     if let Some(num) = lower.strip_suffix("ms") {
         let v: f64 = num.trim().parse().ok()?;
-        return (v >= 0.0 && v.is_finite()).then_some(v.round() as u64);
+        return finite_scaled_u64(v, 1.0);
     }
 
     // Support compound forms such as `1m30s` or `1h2m3s`.
@@ -180,14 +200,14 @@ fn parse_duration_ms(s: &str) -> Option<u64> {
                 i += 1;
             }
         }
-        if num_start == bytes.len() && total_ms.is_finite() {
-            return Some(total_ms.round() as u64);
+        if num_start == bytes.len() {
+            return finite_scaled_u64(total_ms, 1.0);
         }
         return None;
     }
 
     let bare_secs: f64 = lower.parse().ok()?;
-    (bare_secs >= 0.0 && bare_secs.is_finite()).then_some((bare_secs * 1000.0).round() as u64)
+    finite_scaled_u64(bare_secs, 1000.0)
 }
 
 /// Parses framerate filters (`framerate:`, `fps:`) scaled by 1000 (`milli-fps`).
@@ -199,10 +219,7 @@ fn parse_framerate_mfps(s: &str) -> Option<u64> {
     let lower = s.trim().to_ascii_lowercase();
     let num = lower.strip_suffix("fps").unwrap_or(&lower).trim();
     let fps: f64 = num.parse().ok()?;
-    if fps < 0.0 || !fps.is_finite() {
-        return None;
-    }
-    Some((fps * 1000.0).round() as u64)
+    finite_scaled_u64(fps, 1000.0)
 }
 
 /// Bitmask attribute matcher for `attrib:` queries (`R`, `H`, `S`, `D`, `A`, `C`, `P`, `L`).
@@ -394,8 +411,12 @@ fn parse_size_val(s: &str) -> Option<u64> {
         (s.as_str(), 1u64)
     };
 
-    let num: f64 = num_part.trim().parse().ok()?;
-    Some((num * multiplier as f64) as u64)
+    let num_part = num_part.trim();
+    if let Ok(exact) = num_part.parse::<u64>() {
+        return exact.checked_mul(multiplier);
+    }
+    let num: f64 = num_part.parse().ok()?;
+    finite_scaled_u64(num, multiplier as f64)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -580,23 +601,28 @@ pub fn parse_date_span(s: &str, now_sec: i64) -> Option<(i64, i64)> {
 
     if let Some(n_str) = s.strip_suffix("years").or_else(|| s.strip_suffix("year")) {
         let n: i64 = n_str.trim().parse().ok()?;
-        return Some((now_sec - n * 365 * 86400, now_sec));
+        let delta = (n >= 0).then(|| n.checked_mul(365 * 86400)).flatten()?;
+        return Some((now_sec.checked_sub(delta)?, now_sec));
     }
     if let Some(n_str) = s.strip_suffix("months").or_else(|| s.strip_suffix("month")) {
         let n: i64 = n_str.trim().parse().ok()?;
-        return Some((now_sec - n * 30 * 86400, now_sec));
+        let delta = (n >= 0).then(|| n.checked_mul(30 * 86400)).flatten()?;
+        return Some((now_sec.checked_sub(delta)?, now_sec));
     }
     if let Some(n_str) = s.strip_suffix("weeks").or_else(|| s.strip_suffix("week")) {
         let n: i64 = n_str.trim().parse().ok()?;
-        return Some((now_sec - n * 7 * 86400, now_sec));
+        let delta = (n >= 0).then(|| n.checked_mul(7 * 86400)).flatten()?;
+        return Some((now_sec.checked_sub(delta)?, now_sec));
     }
     if let Some(n_str) = s.strip_suffix("days").or_else(|| s.strip_suffix("day")) {
         let n: i64 = n_str.trim().parse().ok()?;
-        return Some((now_sec - n * 86400, now_sec));
+        let delta = (n >= 0).then(|| n.checked_mul(86400)).flatten()?;
+        return Some((now_sec.checked_sub(delta)?, now_sec));
     }
     if let Some(n_str) = s.strip_suffix("hours").or_else(|| s.strip_suffix("hour")) {
         let n: i64 = n_str.trim().parse().ok()?;
-        return Some((now_sec - n * 3600, now_sec));
+        let delta = (n >= 0).then(|| n.checked_mul(3600)).flatten()?;
+        return Some((now_sec.checked_sub(delta)?, now_sec));
     }
     if let Some(n_str) = s
         .strip_suffix("minutes")
@@ -605,7 +631,8 @@ pub fn parse_date_span(s: &str, now_sec: i64) -> Option<(i64, i64)> {
         .or_else(|| s.strip_suffix("min"))
     {
         let n: i64 = n_str.trim().parse().ok()?;
-        return Some((now_sec - n * 60, now_sec));
+        let delta = (n >= 0).then(|| n.checked_mul(60)).flatten()?;
+        return Some((now_sec.checked_sub(delta)?, now_sec));
     }
     if let Some(n_str) = s
         .strip_suffix("seconds")
@@ -614,13 +641,16 @@ pub fn parse_date_span(s: &str, now_sec: i64) -> Option<(i64, i64)> {
         .or_else(|| s.strip_suffix("sec"))
     {
         let n: i64 = n_str.trim().parse().ok()?;
-        return Some((now_sec - n, now_sec));
+        return (n >= 0)
+            .then(|| now_sec.checked_sub(n))
+            .flatten()
+            .map(|start| (start, now_sec));
     }
 
     if let Some((m_str, y_str)) = s.split_once('/')
         && let (Ok(m), Ok(y)) = (m_str.trim().parse::<i64>(), y_str.trim().parse::<i64>())
         && (1..=12).contains(&m)
-        && y > 0
+        && (1601..=9999).contains(&y)
     {
         let start = ymd_to_timestamp(y, m, 1);
         let end = if m == 12 {
@@ -635,7 +665,7 @@ pub fn parse_date_span(s: &str, now_sec: i64) -> Option<(i64, i64)> {
         let year: i64 = s[0..4].parse().ok()?;
         let month: i64 = s[5..7].parse().ok()?;
         let day: i64 = s[8..10].parse().ok()?;
-        if (1..=12).contains(&month) && (1..=31).contains(&day) {
+        if (1601..=9999).contains(&year) && (1..=12).contains(&month) && (1..=31).contains(&day) {
             let start = ymd_to_timestamp(year, month, day);
             return Some((start, start + 86400));
         }
@@ -655,6 +685,7 @@ pub fn parse_date_span(s: &str, now_sec: i64) -> Option<(i64, i64)> {
     if s.len() == 4
         && s.chars().all(|c| c.is_ascii_digit())
         && let Ok(year) = s.parse::<i64>()
+        && (1601..=9999).contains(&year)
     {
         let start = ymd_to_timestamp(year, 1, 1);
         let end = ymd_to_timestamp(year + 1, 1, 1);
@@ -723,8 +754,9 @@ fn days_to_ymd(mut days: i64) -> (i64, i64, i64) {
 }
 
 fn ymd_to_timestamp(year: i64, month: i64, day: i64) -> i64 {
-    let mut total_days =
-        (year - 1970) * 365 + (year - 1969) / 4 - (year - 1901) / 100 + (year - 1601) / 400;
+    let mut total_days = (year - 1970) * 365 + (year - 1969).div_euclid(4)
+        - (year - 1901).div_euclid(100)
+        + (year - 1601).div_euclid(400);
     let days_in_month = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
     let is_leap = is_leap_year(year);
 
@@ -836,5 +868,36 @@ mod tests {
         let f_filetime = DateFilter::parse("2025-07-01").unwrap();
         assert!(f_filetime.matches(unix_sec));
         assert!(f_filetime.matches(ft));
+    }
+
+    #[test]
+    fn rejects_non_finite_sizes_durations_and_out_of_range_dates() {
+        assert!(SizeFilter::parse("NaN").is_none());
+        assert!(SizeFilter::parse("inf").is_none());
+        assert!(SizeFilter::parse("-5mb").is_none());
+        assert!(parse_duration_filter("inf").is_none());
+        assert!(parse_duration_filter("NaNs").is_none());
+        assert!(parse_framerate_filter("inf").is_none());
+        assert!(SizeFilter::parse("18446744073709551616b").is_none());
+        assert_eq!(
+            SizeFilter::parse("18446744073709551615b"),
+            Some(SizeFilter {
+                op: SizeOp::Eq(u64::MAX)
+            })
+        );
+        assert!(finite_scaled_u64(u64::MAX as f64, 1.0).is_none());
+        assert!(finite_scaled_u64((u64::MAX as f64) - 2048.0, 1.0).is_some());
+
+        assert!(parse_date_span("0000-01-01", 0).is_none());
+        assert!(parse_date_span("999999999999years", 1_000_000_000).is_none());
+        // Check pre-1969 leap year math with negative offset from 1970 using div_euclid.
+        assert_eq!(
+            ymd_to_timestamp(1968, 3, 1) - ymd_to_timestamp(1968, 2, 28),
+            2 * 86400
+        );
+        assert_eq!(
+            ymd_to_timestamp(1900, 3, 1) - ymd_to_timestamp(1900, 2, 28),
+            86400
+        );
     }
 }

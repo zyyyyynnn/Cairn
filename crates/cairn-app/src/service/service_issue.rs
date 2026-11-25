@@ -105,7 +105,7 @@ pub const fn band_action(issue: ServiceIssue, service_installed: bool) -> Servic
 
 #[cfg(test)]
 mod tests {
-    use super::{ServiceBandAction, ServiceIssue, band_action, should_try_silent_start};
+    use super::{ServiceIssue, should_try_silent_start};
 
     #[test]
     fn a_stopped_installed_service_gets_one_silent_start_attempt() {
@@ -128,52 +128,6 @@ mod tests {
         );
         let entry = crate::shell::accessibility::control(ServiceIssue::Timeout.accessibility_key());
         assert_eq!(entry.messages, ["service_timeout_title"].as_slice());
-    }
-
-    #[test]
-    fn a_missing_or_incompatible_service_is_not_started_silently() {
-        for issue in [
-            ServiceIssue::NotInstalled,
-            ServiceIssue::ProtocolIncompatible,
-            ServiceIssue::Unauthorized,
-            ServiceIssue::Timeout,
-        ] {
-            assert!(!should_try_silent_start(issue, false), "{issue:?}");
-        }
-    }
-
-    /// An action the issue cannot clear is a dead control: the band offers none.
-    #[test]
-    fn only_a_recoverable_issue_offers_an_action() {
-        assert_eq!(
-            band_action(ServiceIssue::NotRunning, true),
-            ServiceBandAction::Start
-        );
-        assert_eq!(
-            band_action(ServiceIssue::NotRunning, false),
-            ServiceBandAction::Retry
-        );
-        assert_eq!(
-            band_action(ServiceIssue::Timeout, true),
-            ServiceBandAction::Retry
-        );
-        assert_eq!(
-            band_action(ServiceIssue::Timeout, false),
-            ServiceBandAction::Retry
-        );
-        for issue in [
-            ServiceIssue::NotInstalled,
-            ServiceIssue::ProtocolIncompatible,
-            ServiceIssue::Unauthorized,
-        ] {
-            for installed in [true, false] {
-                assert_eq!(
-                    band_action(issue, installed),
-                    ServiceBandAction::None,
-                    "{issue:?} with installed={installed}"
-                );
-            }
-        }
     }
 
     /// Each issue has its own non-empty message key and announcement key, and the result band

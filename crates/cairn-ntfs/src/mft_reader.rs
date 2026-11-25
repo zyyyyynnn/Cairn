@@ -175,8 +175,16 @@ fn read_non_resident_bitmap<R: BlockReader + ?Sized>(
     record_buf: &[u8],
     span: &NonResidentAttrSpan,
 ) -> Result<Vec<u8>, VolumeError> {
-    let runlist_bytes =
-        &record_buf[span.attr_offset + span.runlist_offset..span.attr_offset + span.attr_len];
+    let Some(runlist_start) = span.attr_offset.checked_add(span.runlist_offset) else {
+        return Err(VolumeError::Runlist(RunlistError::UnexpectedEnd(0)));
+    };
+    let Some(attr_end) = span.attr_offset.checked_add(span.attr_len) else {
+        return Err(VolumeError::Runlist(RunlistError::UnexpectedEnd(0)));
+    };
+    if span.runlist_offset > span.attr_len || attr_end > record_buf.len() {
+        return Err(VolumeError::Runlist(RunlistError::UnexpectedEnd(0)));
+    }
+    let runlist_bytes = &record_buf[runlist_start..attr_end];
     let runs = parse_runlist(runlist_bytes, 0)?;
     let target_len = usize::try_from(span.real_size)
         .unwrap_or(MAX_BITMAP_BYTES)
@@ -234,6 +242,12 @@ fn parse_record0_data_runs(
     data_offset: usize,
     rec_size: usize,
 ) -> Result<Vec<DataRun>, VolumeError> {
+    if data_offset
+        .checked_add(34)
+        .is_none_or(|end| end > record0_buf.len())
+    {
+        return Err(VolumeError::Runlist(RunlistError::UnexpectedEnd(0)));
+    }
     let runlist_offset =
         u16::from_le_bytes([record0_buf[data_offset + 32], record0_buf[data_offset + 33]]) as usize;
     let attr_len = u32::from_le_bytes(
@@ -242,14 +256,21 @@ fn parse_record0_data_runs(
             .unwrap(),
     ) as usize;
 
-    if data_offset + runlist_offset >= rec_size
-        || data_offset + attr_len > rec_size
+    let Some(runlist_start) = data_offset.checked_add(runlist_offset) else {
+        return Err(VolumeError::Runlist(RunlistError::UnexpectedEnd(0)));
+    };
+    let Some(attr_end) = data_offset.checked_add(attr_len) else {
+        return Err(VolumeError::Runlist(RunlistError::UnexpectedEnd(0)));
+    };
+    if runlist_start >= rec_size
+        || attr_end > rec_size
+        || attr_end > record0_buf.len()
         || runlist_offset >= attr_len
     {
         return Err(VolumeError::Runlist(RunlistError::UnexpectedEnd(0)));
     }
 
-    let runlist_bytes = &record0_buf[data_offset + runlist_offset..data_offset + attr_len];
+    let runlist_bytes = &record0_buf[runlist_start..attr_end];
     Ok(parse_runlist(runlist_bytes, 0)?)
 }
 
@@ -446,11 +467,17 @@ fn scan_contiguous_range<R: BlockReader + ?Sized>(
     result: &mut MftScanResult,
 ) -> Result<bool, VolumeError> {
     let record_size = range.record_size;
+    if record_size == 0 {
+        return Err(VolumeError::BootSector(BootSectorError::InvalidGeometry));
+    }
     let sector_size = range.sector_size;
     let options = range.options;
     let bitmap = range.bitmap;
     let chunk_records = options.chunk_records.max(1) as u64;
-    let chunk_bytes = (chunk_records as usize) * record_size;
+    let chunk_bytes = usize::try_from(chunk_records)
+        .ok()
+        .and_then(|n| n.checked_mul(record_size))
+        .ok_or(VolumeError::BootSector(BootSectorError::InvalidGeometry))?;
     if buffer.len() < chunk_bytes {
         buffer.resize(chunk_bytes, 0);
     }
@@ -646,4 +673,30 @@ pub fn scan_mft_from_file(
 ) -> Result<MftScanResult, VolumeError> {
     let mut reader = FileBlockReader::open(path)?;
     scan_mft_from_reader(&mut reader, options)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn corrupt_record0_runlist_and_non_resident_bitmap_fail_without_panicking() {
+        let bad_span = NonResidentAttrSpan {
+            attr_offset: 1000,
+            runlist_offset: 16,
+            attr_len: 100,
+            real_size: 64,
+        };
+        let mut reader = SliceBlockReader::new(&[]);
+        assert!(read_non_resident_bitmap(&mut reader, 4096, &[0u8; 512], &bad_span).is_err());
+
+        assert!(parse_record0_data_runs(&[0u8; 64], 40, 64).is_err());
+
+        let mut malformed_file = vec![0u8; 1024];
+        malformed_file[0..4].copy_from_slice(b"FILE");
+        malformed_file[4..6].copy_from_slice(&48u16.to_le_bytes());
+        malformed_file[6..8].copy_from_slice(&99u16.to_le_bytes()); // out of bounds USA count
+        let mut reader = SliceBlockReader::new(&malformed_file);
+        assert!(scan_mft_from_reader(&mut reader, MftScanOptions::default()).is_err());
+    }
 }

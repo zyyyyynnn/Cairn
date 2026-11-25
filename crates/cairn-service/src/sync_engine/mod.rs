@@ -59,13 +59,51 @@ fn log_safe(text: &str) -> String {
         .collect()
 }
 
+pub trait WorkerBinaryLocator: Send + Sync {
+    fn locate(&self) -> Result<PathBuf, String>;
+}
+
+pub struct AdjacentWorkerBinaryLocator;
+
+impl WorkerBinaryLocator for AdjacentWorkerBinaryLocator {
+    fn locate(&self) -> Result<PathBuf, String> {
+        let exe = std::env::current_exe()
+            .map_err(|err| format!("could not locate the service executable: {err}"))?;
+        let dir = exe
+            .parent()
+            .ok_or_else(|| "service executable has no parent directory".to_string())?;
+        // Production ships both binaries side by side; locating adjacent to the service binary
+        // prevents copies in a parent directory from shadowing the packaged worker.
+        for name in ["CairnWorker.exe", "CairnWorker"] {
+            let candidate = dir.join(name);
+            if candidate.exists() {
+                return Ok(candidate);
+            }
+        }
+        Err(format!(
+            "CairnWorker executable not found beside {}",
+            exe.display()
+        ))
+    }
+}
+
+pub struct FixedWorkerBinaryLocator(pub PathBuf);
+
+impl WorkerBinaryLocator for FixedWorkerBinaryLocator {
+    fn locate(&self) -> Result<PathBuf, String> {
+        Ok(self.0.clone())
+    }
+}
+
 pub struct MultiVolumeEngine {
     // Lock order invariant:
-    //   config_apply_lock -> property_pipeline.extract_lock -> volumes -> folder_sources
-    //   -> property_pipeline.(tables -> refresh -> status) -> index_journal
-    // Secondary leaf edges under volumes/folder_sources:
+    //   persist_lock -> config_apply_lock -> volumes -> folder_sources
+    //   -> folder_watchers -> property_pipeline.(tables -> refresh -> status) -> index_journal
+    // Secondary leaf edges:
     //   volumes -> config | summary_cache
     //   folder_sources -> folder_scanning
+    //   usn_read_buf, volume.exclusion_cache, content_pipeline.(commands, cancel_lock, indexing_paths) are leaf locks
+    persist_lock: Mutex<()>,
     volumes: RwLock<HashMap<char, VolumeIndex>>,
     folder_sources: Arc<RwLock<HashMap<SourceId, folder_source::FolderSource>>>,
     folder_watchers: Mutex<HashMap<SourceId, folder_source::FolderWatcherHandle>>,
@@ -91,11 +129,7 @@ pub struct MultiVolumeEngine {
     /// Reused across 50ms USN journal polls so cold/hot polling avoids repeated 512 KiB heap churn.
     #[cfg_attr(not(windows), allow(dead_code))]
     usn_read_buf: Mutex<Vec<u8>>,
-    /// A worker binary injected by the backfill test. The production build has
-    /// no such field: it always resolves the worker beside the service
-    /// executable.
-    #[cfg(test)]
-    worker_binary: Option<std::path::PathBuf>,
+    worker_locator: Arc<dyn WorkerBinaryLocator>,
     /// Whether the configuration on disk was authenticated at startup. A rejected file must not
     /// become trusted merely because a later reload reads it again.
     config_trusted: AtomicBool,
@@ -112,11 +146,9 @@ impl MultiVolumeEngine {
         Self::with_config(ServiceConfig::default())
     }
 
-    /// Test seam for the content worker: the test supplies the workspace-built
-    /// binary directly instead of placing a copy beside the harness.
-    #[cfg(test)]
-    pub(crate) fn set_worker_binary(&mut self, worker: std::path::PathBuf) {
-        self.worker_binary = Some(worker);
+    pub fn with_worker_locator(mut self, locator: Arc<dyn WorkerBinaryLocator>) -> Self {
+        self.worker_locator = locator;
+        self
     }
 
     pub fn with_config(config: ServiceConfig) -> Self {
@@ -178,6 +210,7 @@ impl MultiVolumeEngine {
         drives: Vec<char>,
         config: ServiceConfig,
     ) -> Self {
+        worker_runner::cleanup_stale_property_work_files(&index_dir.join("property-work"));
         let mut self_data_dirs = Vec::new();
         Self::push_self_data_dir(&mut self_data_dirs, content_dir);
         Self::push_self_data_dir(&mut self_data_dirs, index_dir);
@@ -492,12 +525,12 @@ impl MultiVolumeEngine {
             self_data_dirs,
             config_path: config_path.to_path_buf(),
             config: RwLock::new(config),
+            persist_lock: Mutex::new(()),
             config_apply_lock: Mutex::new(()),
             content_pipeline: content_pipeline::ContentPipeline::new(content_dir, content_enabled),
             summary_cache: Mutex::new(Vec::new()),
             usn_read_buf: Mutex::new(Vec::new()),
-            #[cfg(test)]
-            worker_binary: None,
+            worker_locator: Arc::new(AdjacentWorkerBinaryLocator),
             config_trusted: AtomicBool::new(true),
         };
         engine.ensure_folder_sources_loaded();
@@ -736,7 +769,7 @@ impl MultiVolumeEngine {
             desired.truncate(MAX_FOLDER_SOURCES);
         }
 
-        let (removed_ids, present_keys) = {
+        let (removed_ids, dropped_handles, present_keys) = {
             let mut folders = self.folder_sources.write().unwrap();
             let mut removed = Vec::new();
             folders.retain(|&sid, src| {
@@ -751,19 +784,21 @@ impl MultiVolumeEngine {
                 src.set_excluded_paths(excluded_paths);
                 present.insert(src.display_root().to_ascii_lowercase());
             }
-            (removed, present)
-        };
-
-        if !removed_ids.is_empty() {
-            self.property_pipeline.clear_sources(&removed_ids);
-            let dropped_handles: Vec<folder_source::FolderWatcherHandle> = {
+            let dropped_handles: Vec<folder_source::FolderWatcherHandle> = if removed.is_empty() {
+                Vec::new()
+            } else {
                 let mut watchers = self.folder_watchers.lock().unwrap();
-                removed_ids
+                removed
                     .iter()
                     .filter_map(|sid| watchers.remove(sid))
                     .collect()
             };
-            drop(dropped_handles);
+            (removed, dropped_handles, present)
+        };
+
+        drop(dropped_handles);
+        if !removed_ids.is_empty() {
+            self.property_pipeline.clear_sources(&removed_ids);
         }
 
         for (root_path, display) in desired {
@@ -927,21 +962,22 @@ impl MultiVolumeEngine {
                 "folder watcher could not start; source stays snapshot-only"
             );
         }
-        {
+        let (previous, orphan) = {
             let mut folders = self.folder_sources.write().unwrap();
+            let mut watchers = self.folder_watchers.lock().unwrap();
             if let Some(src) = folders.get_mut(&source_id) {
                 src.set_live_watch_enabled(active);
-            }
-        }
-        let previous = {
-            let mut watchers = self.folder_watchers.lock().unwrap();
-            if let Some(handle) = handle_opt {
-                watchers.insert(source_id, handle)
+                let prev = if let Some(handle) = handle_opt {
+                    watchers.insert(source_id, handle)
+                } else {
+                    watchers.remove(&source_id)
+                };
+                (prev, None)
             } else {
-                watchers.remove(&source_id)
+                (watchers.remove(&source_id), handle_opt)
             }
         };
-        drop(previous);
+        drop((previous, orphan));
     }
 
     pub fn add_folder_source(

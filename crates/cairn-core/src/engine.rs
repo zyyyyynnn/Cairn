@@ -7,14 +7,14 @@
 use crate::arena::NamePool;
 use crate::model::FileRecord;
 use crate::path_cache::{DirectoryPathCache, root_path_for_drive};
-use crate::pinyin::pinyin_matches_with_options;
+use crate::pinyin::pinyin_matches_anchored;
 use crate::property_store::{PropertySideTables, SourceId};
 use crate::query::{DupeOracle, HierarchyOracle};
 use crate::syntax::{QueryExpr, SearchTerm};
 use crate::text_match::{TextMatchOptions, normalize_for_match};
 use memchr::memmem::Finder;
 use rayon::prelude::*;
-use regex::Regex;
+use regex::{Regex, RegexBuilder};
 use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -415,7 +415,10 @@ impl CompiledTermPlan {
             .iter()
             .any(|pattern| pattern.contains('*') || pattern.contains('?'));
         let regex = if term.is_regex {
-            Regex::new(&term.text).ok()
+            RegexBuilder::new(&term.text)
+                .case_insensitive(!term.case_sensitive)
+                .build()
+                .ok()
         } else {
             None
         };
@@ -779,7 +782,13 @@ fn match_compiled_text(target: &str, folded_bytes: Option<&[u8]>, plan: &Compile
     let query = term.text.as_str();
 
     if term.pinyin {
-        return pinyin_matches_with_options(target, query, plan.text_opts);
+        return pinyin_matches_anchored(
+            target,
+            query,
+            plan.text_opts,
+            term.start_with,
+            term.end_with,
+        );
     }
 
     if plan.text_opts.needs_custom_normalization() {
@@ -1493,5 +1502,10 @@ mod tests {
         assert_eq!(run("*.rk"), vec![10]);
         assert_eq!(run("wfn:exact.txt"), vec![11]);
         assert_eq!(run("size:>1mb"), vec![0, 4]);
+        assert_eq!(run("regex:^cairn_.*[.]rs$"), vec![4]);
+        assert_eq!(run("regex:^CAIRN_.*[.]RS$"), vec![4]);
+        assert_eq!(run("case:regex:^CAIRN_.*[.]RS$"), Vec::<u32>::new());
+        assert_eq!(run("pinyin:zg"), Vec::<u32>::new());
+        assert_eq!(run("pinyin:zwmk"), vec![2]);
     }
 }

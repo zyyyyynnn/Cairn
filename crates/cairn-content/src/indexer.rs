@@ -533,7 +533,10 @@ impl ContentWriter {
         path: &str,
         body: &str,
     ) -> Result<(), ContentIndexError> {
-        let mut writer = self.writer.lock().unwrap();
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|_| ContentIndexError::WriterPoisoned)?;
 
         // Remove the previous document for this (volume_id, frn). Deleting by FRN alone would
         // remove a same-numbered record on another volume, whose IDs are only unique per volume.
@@ -565,7 +568,10 @@ impl ContentWriter {
         if documents.is_empty() {
             return Ok(());
         }
-        let mut writer = self.writer.lock().unwrap();
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|_| ContentIndexError::WriterPoisoned)?;
         for &(volume_id, frn) in documents {
             Self::delete_from(
                 &mut writer,
@@ -602,7 +608,10 @@ impl ContentWriter {
 
     /// Commits everything added since the previous commit.
     pub fn commit(&self) -> Result<(), ContentIndexError> {
-        let mut writer = self.writer.lock().unwrap();
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|_| ContentIndexError::WriterPoisoned)?;
         writer.commit()?;
         Ok(())
     }
@@ -610,7 +619,10 @@ impl ContentWriter {
     /// Removes every document without committing. The worker issues one clear, one delete batch
     /// and one document batch per process and commits them together.
     pub fn clear_deferred(&self) -> Result<(), ContentIndexError> {
-        let writer = self.writer.lock().unwrap();
+        let writer = self
+            .writer
+            .lock()
+            .map_err(|_| ContentIndexError::WriterPoisoned)?;
         writer.delete_all_documents()?;
         Ok(())
     }

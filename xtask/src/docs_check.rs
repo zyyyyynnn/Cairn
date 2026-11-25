@@ -12,9 +12,14 @@ const REQUIRED: &[&str] = &[
     "README.md",
     "docs/SPEC.md",
     "docs/product/ui.md",
+    "docs/product/search-syntax.md",
     "docs/product/brand.md",
     "docs/engineering/architecture.md",
+    "docs/engineering/indexing.md",
     "docs/engineering/index-platform.md",
+    "docs/engineering/ipc-security.md",
+    "docs/engineering/frontend.md",
+    "docs/engineering/performance.md",
     "docs/engineering/quality.md",
     "docs/engineering/release.md",
     "docs/engineering/testing.md",
@@ -150,7 +155,10 @@ fn link_target(raw: &str) -> Option<String> {
 }
 
 fn resolve_link(workspace: &Path, source: &Path, target: &str) -> Option<PathBuf> {
-    let target = target.trim_start_matches(['/', '\\']);
+    if target.starts_with(['/', '\\']) {
+        let target = target.trim_start_matches(['/', '\\']);
+        return (!target.is_empty()).then(|| workspace.join(target));
+    }
     if target.is_empty() {
         return None;
     }
@@ -186,11 +194,35 @@ mod tests {
             std::fs::write(&path, "# page\n").expect("required page");
         }
         std::fs::write(temp.path().join("README.md"), "[spec](docs/SPEC.md)\n").expect("readme");
-        check_docs(temp.path()).expect("a valid relative link");
+        std::fs::write(
+            temp.path().join("docs/engineering/architecture.md"),
+            "[root-spec](/docs/SPEC.md)\n",
+        )
+        .expect("root-relative link");
+        check_docs(temp.path()).expect("valid relative and root-relative links");
 
         std::fs::write(temp.path().join("README.md"), "[gone](docs/missing.md)\n").expect("readme");
         let error = check_docs(temp.path()).expect_err("the missing link must fail");
         assert!(error.contains("docs/missing.md"), "{error}");
+    }
+
+    #[test]
+    fn root_relative_link_checks_from_workspace_root() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        for required in REQUIRED {
+            let path = temp.path().join(required);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("parent");
+            }
+            std::fs::write(&path, "# page\n").expect("required page");
+        }
+        std::fs::write(
+            temp.path().join("docs/engineering/architecture.md"),
+            "[broken-root](/docs/engineering/not-there.md)\n",
+        )
+        .expect("broken root-relative link");
+        let error = check_docs(temp.path()).expect_err("broken root-relative link must fail");
+        assert!(error.contains("/docs/engineering/not-there.md"), "{error}");
     }
 
     #[test]

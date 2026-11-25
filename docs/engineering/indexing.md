@@ -17,7 +17,8 @@
 
 ## 3. 并发、内存与流式查询
 
-- 不跨线程共享可变状态；索引用锁范围要有明确边界。
+- 不跨线程共享可变状态；`MultiVolumeEngine` 遵循全局锁序（`persist_lock -> config_apply_lock -> volumes -> folder_sources -> folder_watchers -> property_pipeline.(tables -> refresh -> status) -> index_journal`），不在持锁区间等待外部子进程或磁盘扫描。
+- 查询求值通过只读借用投影 [`SourceView`](../../crates/cairn-core/src/query.rs) 与 `EvalContext` 执行，使多卷索引与文件夹源共享同一过滤、评分及排序语义。
 - 管道查询使用超时、背压、取消和分页；不在一次响应中构造全量结果。
 - 结果表使用虚拟列表，只渲染可见行；文件记录保持紧凑，文件名进入共享池，避免每节点独立堆分配。
 - UI 分页拉取不得在 `render` 中触发；使用偏移钩子或 `defer`，并设置防重入标记。
@@ -51,6 +52,6 @@
 
 ## 代码位置
 
-- `crates/cairn-service/src/sync_engine/`：USN、索引日志、内容索引与卷同步。
-- `crates/cairn-core/src/engine.rs`、`crates/cairn-core/src/syntax.rs`：查询与过滤。
+- `crates/cairn-service/src/sync_engine/`：USN、索引日志、内容/属性双管线、`worker_runner.rs`、`folder_source.rs` 与 `volume_index/`（`mod.rs`、`presort.rs`、`refresh.rs`）。
+- `crates/cairn-core/src/engine.rs`、`crates/cairn-core/src/query.rs`、`crates/cairn-core/src/syntax.rs`：`SourceView`、`EvalContext`、语法解析与查询过滤。
 - `crates/cairn-core/src/dir_size.rs`、`crates/cairn-core/src/file_kind.rs`：目录后代大小聚合与文件类别判定。卷索引在构建与增量更新后按 `parent_idx` 链维护目录大小，表格的大小列、排序与 `size:` 过滤共用同一值。

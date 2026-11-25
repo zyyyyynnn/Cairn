@@ -19,6 +19,9 @@ use std::path::Path;
 const MAX_CONTAINER_READ_BYTES: usize = 8 * 1024 * 1024;
 const MAX_HEADER_READ_BYTES: usize = 256 * 1024;
 const MAX_XML_ENTRY_BYTES: u64 = 512 * 1024;
+const MAX_MP4_BOX_DEPTH: usize = 32;
+const MAX_MP4_TRAK_ATOMS: usize = 4096;
+const MAX_ZIP_ENTRIES: usize = 10_000;
 
 /// Extracts extended properties (`length_ms`, `author`, `tags`, `dimensions`, `framerate_mfps`)
 /// from a file on disk using the in-repo parsers.
@@ -530,13 +533,13 @@ fn parse_mp4_file(path: &Path) -> Option<RecordPropertyData> {
     let mut pos = 0u64;
     let mut header = [0u8; 16];
 
-    while pos + 8 <= file_len {
+    while pos.checked_add(8).is_some_and(|end| end <= file_len) {
         file.seek(SeekFrom::Start(pos)).ok()?;
         file.read_exact(&mut header[..8]).ok()?;
         let size32 = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
         let kind: [u8; 4] = [header[4], header[5], header[6], header[7]];
         let (box_size, header_len) = if size32 == 1 {
-            if pos + 16 > file_len {
+            if pos.checked_add(16).is_none_or(|end| end > file_len) {
                 break;
             }
             file.read_exact(&mut header[8..16]).ok()?;
@@ -547,7 +550,10 @@ fn parse_mp4_file(path: &Path) -> Option<RecordPropertyData> {
         } else {
             (u64::from(size32), 8u64)
         };
-        if box_size < header_len || pos + box_size > file_len {
+        let Some(box_end) = pos.checked_add(box_size) else {
+            break;
+        };
+        if box_size < header_len || box_end > file_len {
             break;
         }
         if &kind == b"moov" {
@@ -557,48 +563,56 @@ fn parse_mp4_file(path: &Path) -> Option<RecordPropertyData> {
             file.read_exact(&mut buf).ok()?;
             return parse_mp4_moov(&buf);
         }
-        pos += box_size;
+        pos = box_end;
     }
     None
 }
 
 fn parse_mp4_moov(bytes: &[u8]) -> Option<RecordPropertyData> {
     let mut out = RecordPropertyData::default();
-    walk_mp4_atoms(bytes, &mut out);
+    walk_mp4_atoms(bytes, &mut out, 0);
     (!out.is_empty()).then_some(out)
 }
 
-fn walk_mp4_atoms(bytes: &[u8], out: &mut RecordPropertyData) {
+fn walk_mp4_atoms(bytes: &[u8], out: &mut RecordPropertyData, depth: usize) {
+    if depth >= MAX_MP4_BOX_DEPTH {
+        return;
+    }
     let mut pos = 0usize;
-    while pos + 8 <= bytes.len() {
-        let size = match read_u32_be(bytes, pos) {
-            Some(0) => bytes.len() - pos,
-            Some(1) => {
-                if pos + 16 > bytes.len() {
+    while pos.checked_add(8).is_some_and(|end| end <= bytes.len()) {
+        let Some(size32) = read_u32_be(bytes, pos) else {
+            break;
+        };
+        let (size, hdr) = match size32 {
+            0 => (bytes.len() - pos, 8usize),
+            1 => {
+                let Some(ext_end) = pos.checked_add(16) else {
+                    break;
+                };
+                if ext_end > bytes.len() {
                     break;
                 }
-                usize::try_from(u64::from_be_bytes(
-                    bytes[pos + 8..pos + 16].try_into().unwrap_or([0; 8]),
-                ))
-                .unwrap_or(0)
+                let Ok(ext) = usize::try_from(u64::from_be_bytes(
+                    bytes[pos + 8..ext_end].try_into().unwrap(),
+                )) else {
+                    break;
+                };
+                (ext, 16usize)
             }
-            Some(n) => n as usize,
-            None => break,
+            n => (n as usize, 8usize),
         };
-        let hdr = if read_u32_be(bytes, pos) == Some(1) {
-            16
-        } else {
-            8
+        let Some(atom_end) = pos.checked_add(size) else {
+            break;
         };
-        if size < hdr || pos.saturating_add(size) > bytes.len() {
+        if size < hdr || atom_end > bytes.len() {
             break;
         }
         let kind = &bytes[pos + 4..pos + 8];
-        let body = &bytes[pos + hdr..pos + size];
+        let body = &bytes[pos + hdr..atom_end];
         match kind {
-            b"moov" | b"udta" | b"ilst" => walk_mp4_atoms(body, out),
-            b"meta" if body.len() > 4 => walk_mp4_atoms(&body[4..], out),
-            b"trak" => parse_mp4_trak(body, out),
+            b"moov" | b"udta" | b"ilst" => walk_mp4_atoms(body, out, depth + 1),
+            b"meta" if body.len() > 4 => walk_mp4_atoms(&body[4..], out, depth + 1),
+            b"trak" => parse_mp4_trak(body, out, depth + 1),
             b"mvhd" => parse_mp4_mvhd(body, out),
             b"\xa9ART" | b"aART" if out.author.is_none() => {
                 out.author = extract_mp4_ilst_text(body);
@@ -608,7 +622,7 @@ fn walk_mp4_atoms(bytes: &[u8], out: &mut RecordPropertyData) {
             }
             _ => {}
         }
-        pos += size;
+        pos = atom_end;
     }
 }
 
@@ -634,24 +648,35 @@ fn parse_mp4_mvhd(body: &[u8], out: &mut RecordPropertyData) {
     }
 }
 
-fn parse_mp4_trak(trak: &[u8], out: &mut RecordPropertyData) {
+fn parse_mp4_trak(trak: &[u8], out: &mut RecordPropertyData, base_depth: usize) {
     let mut dims = None;
     let mut timescale = None;
     let mut sample_delta = None;
     let mut is_video = false;
 
-    let mut stack = vec![trak];
-    while let Some(slice) = stack.pop() {
+    let mut stack = vec![(trak, base_depth)];
+    let mut atoms_seen = 0usize;
+    while let Some((slice, depth)) = stack.pop() {
+        if depth >= MAX_MP4_BOX_DEPTH {
+            continue;
+        }
         let mut pos = 0usize;
-        while pos + 8 <= slice.len() {
+        while pos.checked_add(8).is_some_and(|end| end <= slice.len()) {
+            atoms_seen += 1;
+            if atoms_seen > MAX_MP4_TRAK_ATOMS {
+                return;
+            }
             let size = read_u32_be(slice, pos).unwrap_or(0) as usize;
-            if size < 8 || pos.saturating_add(size) > slice.len() {
+            let Some(atom_end) = pos.checked_add(size) else {
+                break;
+            };
+            if size < 8 || atom_end > slice.len() {
                 break;
             }
             let kind = &slice[pos + 4..pos + 8];
-            let body = &slice[pos + 8..pos + size];
+            let body = &slice[pos + 8..atom_end];
             match kind {
-                b"mdia" | b"minf" | b"stbl" => stack.push(body),
+                b"mdia" | b"minf" | b"stbl" => stack.push((body, depth + 1)),
                 b"tkhd" => {
                     if let Some(&ver) = body.first() {
                         let off = if ver == 1 { 88 } else { 76 };
@@ -683,7 +708,7 @@ fn parse_mp4_trak(trak: &[u8], out: &mut RecordPropertyData) {
                 }
                 _ => {}
             }
-            pos += size;
+            pos = atom_end;
         }
     }
 
@@ -702,22 +727,33 @@ fn parse_mp4_trak(trak: &[u8], out: &mut RecordPropertyData) {
 
 fn extract_mp4_ilst_text(atom: &[u8]) -> Option<String> {
     let mut pos = 0usize;
-    while pos + 8 <= atom.len() {
+    while pos.checked_add(8).is_some_and(|end| end <= atom.len()) {
         let size = read_u32_be(atom, pos)? as usize;
-        if size < 8 || pos.saturating_add(size) > atom.len() {
+        let Some(atom_end) = pos.checked_add(size) else {
+            break;
+        };
+        if size < 8 || atom_end > atom.len() {
             break;
         }
         if &atom[pos + 4..pos + 8] == b"data" && size > 16 {
-            let text = String::from_utf8_lossy(&atom[pos + 16..pos + size]);
+            let text = String::from_utf8_lossy(&atom[pos + 16..atom_end]);
             return clean_opt_text(&text);
         }
-        pos += size;
+        pos = atom_end;
     }
     None
 }
 
-fn parse_zip_office<R: Read + Seek>(reader: R) -> Option<RecordPropertyData> {
+fn parse_zip_office<R: Read + Seek>(mut reader: R) -> Option<RecordPropertyData> {
+    let file_len = reader.seek(SeekFrom::End(0)).ok()?;
+    if file_len > MAX_CONTAINER_READ_BYTES as u64 {
+        return None;
+    }
+    reader.seek(SeekFrom::Start(0)).ok()?;
     let mut archive = zip::ZipArchive::new(reader).ok()?;
+    if archive.len() > MAX_ZIP_ENTRIES {
+        return None;
+    }
     let read_options = zip::read::ZipReadOptions::new().enforce_header_consistency(true);
     let mut xml_bytes = Vec::new();
     for entry_name in ["docProps/core.xml", "meta.xml"] {
@@ -826,7 +862,8 @@ fn parse_core_properties_xml(xml: &str) -> RecordPropertyData {
 }
 
 fn parse_pdf(bytes: &[u8]) -> Option<RecordPropertyData> {
-    let doc = lopdf::Document::load_mem(bytes).ok()?;
+    let options = lopdf::LoadOptions::with_max_decompressed_size(MAX_CONTAINER_READ_BYTES);
+    let doc = lopdf::Document::load_mem_with_options(bytes, options).ok()?;
     let info_obj = doc.trailer.get(b"Info").ok()?;
     let dict = match info_obj {
         lopdf::Object::Reference(id) => doc.get_dictionary(*id).ok()?,
@@ -875,6 +912,12 @@ mod tests {
             writer.finish().expect("finish zip");
         }
         cursor.into_inner()
+    }
+
+    #[test]
+    fn oversized_office_container_is_rejected_before_zip_parsing() {
+        let bytes = vec![0u8; MAX_CONTAINER_READ_BYTES + 1];
+        assert_eq!(parse_properties_from_bytes("docx", &bytes), None);
     }
 
     #[test]
@@ -971,5 +1014,34 @@ mod tests {
         );
         assert_eq!(unclosed.author.as_deref(), Some("Alice"));
         assert_eq!(unclosed.tags, None);
+    }
+
+    #[test]
+    fn deeply_nested_and_oversized_mp4_boxes_terminate_cleanly() {
+        // 40 nested `udta` boxes exceed MAX_MP4_BOX_DEPTH (32) with an inner `mvhd`.
+        let mut inner = Vec::new();
+        inner.extend_from_slice(&28u32.to_be_bytes());
+        inner.extend_from_slice(b"mvhd");
+        inner.extend_from_slice(&[0u8; 12]);
+        inner.extend_from_slice(&1000u32.to_be_bytes());
+        inner.extend_from_slice(&5000u32.to_be_bytes());
+
+        let mut nested = inner;
+        for _ in 0..40 {
+            let total = u32::try_from(8 + nested.len()).unwrap();
+            let mut wrap = Vec::with_capacity(8 + nested.len());
+            wrap.extend_from_slice(&total.to_be_bytes());
+            wrap.extend_from_slice(b"udta");
+            wrap.extend_from_slice(&nested);
+            nested = wrap;
+        }
+        assert_eq!(parse_mp4_moov(&nested), None);
+
+        // Extended 64-bit box size overflow must exit cleanly.
+        let mut overflow = Vec::new();
+        overflow.extend_from_slice(&1u32.to_be_bytes());
+        overflow.extend_from_slice(b"udta");
+        overflow.extend_from_slice(&u64::MAX.to_be_bytes());
+        assert_eq!(parse_mp4_moov(&overflow), None);
     }
 }

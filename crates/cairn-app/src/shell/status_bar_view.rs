@@ -265,7 +265,7 @@ impl CairnApp {
             }
             crate::shell::location::ActiveLocation::Index => {
                 if !self.service.connection.is_connected() {
-                    self.check_service_connection(cx);
+                    self.retry_service_connection(cx);
                     return;
                 }
                 self.request_result_set(ResultSetChange::Refresh, cx);

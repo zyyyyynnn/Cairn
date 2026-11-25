@@ -58,7 +58,10 @@ pub fn parse_attributes(
     let mut result = ParsedAttributes::default();
     let mut cursor = first_attr_offset;
 
-    while cursor + 8 <= buf.len() {
+    while cursor
+        .checked_add(8)
+        .is_some_and(|head_end| head_end <= buf.len())
+    {
         let type_id = u32::from_le_bytes([
             buf[cursor],
             buf[cursor + 1],
@@ -77,7 +80,10 @@ pub fn parse_attributes(
             buf[cursor + 7],
         ]) as usize;
 
-        if attr_len == 0 || cursor + attr_len > buf.len() {
+        let Some(attr_end) = cursor.checked_add(attr_len) else {
+            break;
+        };
+        if attr_len < 16 || attr_end > buf.len() {
             break;
         }
 
@@ -86,11 +92,12 @@ pub fn parse_attributes(
 
         match type_id {
             ATTR_STANDARD_INFORMATION => {
-                if !non_resident && cursor + 24 <= buf.len() {
+                if !non_resident && cursor + 24 <= attr_end {
                     let val_offset =
                         u16::from_le_bytes([buf[cursor + 20], buf[cursor + 21]]) as usize;
-                    let val_start = cursor + val_offset;
-                    if val_start + 48 <= cursor + attr_len && val_start + 48 <= buf.len() {
+                    if let Some(val_start) = cursor.checked_add(val_offset)
+                        && val_start.checked_add(48).is_some_and(|end| end <= attr_end)
+                    {
                         let created =
                             i64::from_le_bytes(buf[val_start..val_start + 8].try_into().unwrap());
                         let modified = i64::from_le_bytes(
@@ -107,11 +114,12 @@ pub fn parse_attributes(
                 }
             }
             ATTR_FILE_NAME => {
-                if !non_resident && cursor + 24 <= buf.len() {
+                if !non_resident && cursor + 24 <= attr_end {
                     let val_offset =
                         u16::from_le_bytes([buf[cursor + 20], buf[cursor + 21]]) as usize;
-                    let val_start = cursor + val_offset;
-                    if val_start + 66 <= cursor + attr_len && val_start + 66 <= buf.len() {
+                    if let Some(val_start) = cursor.checked_add(val_offset)
+                        && val_start.checked_add(66).is_some_and(|end| end <= attr_end)
+                    {
                         let parent_frn =
                             u64::from_le_bytes(buf[val_start..val_start + 8].try_into().unwrap());
                         let created = i64::from_le_bytes(
@@ -127,11 +135,14 @@ pub fn parse_attributes(
                         let namespace = buf[val_start + 65];
 
                         // Skip pure DOS 8.3 short names (NAMESPACE_DOS = 0x02)
-                        if namespace != NAMESPACE_DOS {
+                        if namespace != NAMESPACE_DOS
+                            && let Some(name_bytes_len) = fn_len.checked_mul(2)
+                        {
                             let name_bytes_start = val_start + 66;
-                            let name_bytes_end = name_bytes_start + fn_len * 2;
-
-                            if name_bytes_end <= cursor + attr_len && name_bytes_end <= buf.len() {
+                            if let Some(name_bytes_end) =
+                                name_bytes_start.checked_add(name_bytes_len)
+                                && name_bytes_end <= attr_end
+                            {
                                 let u16_chars: Vec<u16> = buf[name_bytes_start..name_bytes_end]
                                     .as_chunks::<2>()
                                     .0
@@ -157,7 +168,7 @@ pub fn parse_attributes(
                 if name_len == 0 {
                     if !non_resident {
                         // Resident $DATA
-                        if cursor + 20 <= buf.len() {
+                        if cursor + 24 <= attr_end {
                             let val_len = u32::from_le_bytes([
                                 buf[cursor + 16],
                                 buf[cursor + 17],
@@ -168,7 +179,7 @@ pub fn parse_attributes(
                         }
                     } else {
                         // Non-resident $DATA
-                        if cursor + 56 <= buf.len() {
+                        if cursor + 56 <= attr_end {
                             let real_size = u64::from_le_bytes([
                                 buf[cursor + 48],
                                 buf[cursor + 49],
@@ -187,23 +198,19 @@ pub fn parse_attributes(
             }
             ATTR_BITMAP => {
                 if name_len == 0 {
-                    if !non_resident && cursor + 24 <= buf.len() {
+                    if !non_resident && cursor + 24 <= attr_end {
                         let val_len =
                             u32::from_le_bytes(buf[cursor + 16..cursor + 20].try_into().unwrap())
                                 as usize;
                         let val_offset =
                             u16::from_le_bytes([buf[cursor + 20], buf[cursor + 21]]) as usize;
-                        let val_start = cursor + val_offset;
-                        if let Some(val_end) = val_start.checked_add(val_len)
-                            && val_end <= cursor + attr_len
-                            && val_end <= buf.len()
+                        if let Some(val_start) = cursor.checked_add(val_offset)
+                            && let Some(val_end) = val_start.checked_add(val_len)
+                            && val_end <= attr_end
                         {
                             result.bitmap_resident = Some(buf[val_start..val_end].to_vec());
                         }
-                    } else if non_resident
-                        && cursor + 56 <= cursor + attr_len
-                        && cursor + 56 <= buf.len()
-                    {
+                    } else if non_resident && cursor + 56 <= attr_end {
                         let runlist_offset =
                             u16::from_le_bytes([buf[cursor + 32], buf[cursor + 33]]) as usize;
                         if runlist_offset < attr_len {
@@ -226,8 +233,31 @@ pub fn parse_attributes(
             _ => {}
         }
 
-        cursor += attr_len;
+        cursor = attr_end;
     }
 
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_attributes_ignores_corrupt_length_and_out_of_bounds_value_spans() {
+        // Attribute length overflows buf.len() -> stops cleanly without panic.
+        let mut buf = vec![0u8; 64];
+        buf[0..4].copy_from_slice(&ATTR_STANDARD_INFORMATION.to_le_bytes());
+        buf[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(parse_attributes(&buf, 0).is_ok());
+
+        // Resident $FILE_NAME with oversized fn_len that overruns attr_len must be skipped safely.
+        let mut fn_buf = vec![0u8; 96];
+        fn_buf[0..4].copy_from_slice(&ATTR_FILE_NAME.to_le_bytes());
+        fn_buf[4..8].copy_from_slice(&92u32.to_le_bytes());
+        fn_buf[20..22].copy_from_slice(&24u16.to_le_bytes());
+        fn_buf[24 + 64] = 250; // 250 * 2 = 500 bytes, well past attr_end
+        let parsed = parse_attributes(&fn_buf, 0).unwrap();
+        assert!(parsed.file_names.is_empty());
+    }
 }

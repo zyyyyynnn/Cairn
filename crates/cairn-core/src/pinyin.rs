@@ -131,6 +131,34 @@ pub fn pinyin_matches(haystack: &str, query: &str) -> bool {
 
 /// Variant of [`pinyin_matches`] honoring punctuation, whitespace, diacritics, and case options.
 pub fn pinyin_matches_with_options(haystack: &str, query: &str, opts: TextMatchOptions) -> bool {
+    pinyin_matches_anchored(haystack, query, opts, false, false)
+}
+
+fn relevant_match_char(ch: char, opts: TextMatchOptions) -> Option<char> {
+    if opts.ignore_diacritics && is_combining_mark(ch) {
+        return None;
+    }
+    let mapped = if opts.ignore_diacritics {
+        strip_diacritics_char(ch)
+    } else {
+        ch
+    };
+    if opts.ignore_whitespace && mapped.is_whitespace() {
+        return None;
+    }
+    if opts.ignore_punctuation && is_punctuation_char(mapped) {
+        return None;
+    }
+    Some(mapped)
+}
+
+pub fn pinyin_matches_anchored(
+    haystack: &str,
+    query: &str,
+    opts: TextMatchOptions,
+    start_with: bool,
+    end_with: bool,
+) -> bool {
     let q_norm = normalize_for_match(query, opts);
     if q_norm.is_empty() {
         return true;
@@ -150,27 +178,24 @@ pub fn pinyin_matches_with_options(haystack: &str, query: &str, opts: TextMatchO
         (&mut heap_curr[..=m], &mut heap_next[..=m])
     };
 
+    let mut remaining = haystack
+        .chars()
+        .filter_map(|ch| relevant_match_char(ch, opts))
+        .count();
+    let mut first = true;
     for ch in haystack.chars() {
-        if opts.ignore_diacritics && is_combining_mark(ch) {
+        let Some(mapped) = relevant_match_char(ch, opts) else {
             continue;
-        }
-        let mapped = if opts.ignore_diacritics {
-            strip_diacritics_char(ch)
-        } else {
-            ch
         };
-        if opts.ignore_whitespace && mapped.is_whitespace() {
-            continue;
-        }
-        if opts.ignore_punctuation && is_punctuation_char(mapped) {
-            continue;
-        }
+        remaining -= 1;
+        let is_last = remaining == 0;
 
         let mut lit_buf = [0u8; 16];
         let lit_len = encode_char_for_match(mapped, opts.case_sensitive, &mut lit_buf);
         let lit = &lit_buf[..lit_len];
 
-        curr[0] = true;
+        curr[0] = !start_with || first;
+        first = false;
         next.fill(false);
 
         let primary = primary_syllable(mapped);
@@ -183,29 +208,31 @@ pub fn pinyin_matches_with_options(haystack: &str, query: &str, opts: TextMatchO
             let rem = &q_bytes[q_pos..];
             if rem.starts_with(lit) {
                 let npos = q_pos + lit.len();
-                if npos == m {
+                if npos == m && (!end_with || is_last) {
                     return true;
                 }
                 next[npos] = true;
             }
 
             if let Some(p) = primary {
-                if advance_syllable(p, rem, q_pos, next) {
+                if advance_syllable(p, rem, q_pos, next) && (!end_with || is_last) {
                     return true;
                 }
                 if let Some(alias) = umlaut_alias(p)
                     && advance_syllable(alias, rem, q_pos, next)
+                    && (!end_with || is_last)
                 {
                     return true;
                 }
             }
             for &extra in extras {
                 if Some(extra) != primary {
-                    if advance_syllable(extra, rem, q_pos, next) {
+                    if advance_syllable(extra, rem, q_pos, next) && (!end_with || is_last) {
                         return true;
                     }
                     if let Some(alias) = umlaut_alias(extra)
                         && advance_syllable(alias, rem, q_pos, next)
+                        && (!end_with || is_last)
                     {
                         return true;
                     }

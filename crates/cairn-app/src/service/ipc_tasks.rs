@@ -134,10 +134,11 @@ async fn wait_for_service_pipe(
 
 fn finish_subsystem_load<S>(
     state: &mut crate::service::SubsystemState<S>,
+    generation: u64,
     result: Option<Result<Envelope<ResponsePayload>, ClientError>>,
     task_label: &str,
     extract: impl FnOnce(ResponsePayload) -> Result<S, String>,
-) -> bool {
+) -> Option<bool> {
     match result {
         Some(Ok(envelope)) => match envelope.payload {
             ResponsePayload::Error { code, message } => {
@@ -147,30 +148,31 @@ fn finish_subsystem_load<S>(
                     error = %message,
                     "service request failed"
                 );
-                state.fail_load(message);
-                false
+                state
+                    .fail_load_if_current(generation, message)
+                    .then_some(false)
             }
             payload => match extract(payload) {
-                Ok(value) => {
-                    state.finish_load(value);
-                    true
-                }
+                Ok(value) => state
+                    .finish_load_if_current(generation, value)
+                    .then_some(true),
                 Err(msg) => {
                     tracing::warn!(task = task_label, error = %msg, "service request failed");
-                    state.fail_load(msg);
-                    false
+                    state.fail_load_if_current(generation, msg).then_some(false)
                 }
             },
         },
         Some(Err(err)) => {
             tracing::warn!(task = task_label, error = %err, "service request failed");
-            state.fail_load(err.to_string());
-            false
+            state
+                .fail_load_if_current(generation, err.to_string())
+                .then_some(false)
         }
         None => {
             tracing::warn!(task = task_label, "service request stopped");
-            state.fail_load(format!("{task_label} task stopped"));
-            false
+            state
+                .fail_load_if_current(generation, format!("{task_label} task stopped"))
+                .then_some(false)
         }
     }
 }
@@ -178,8 +180,13 @@ fn finish_subsystem_load<S>(
 impl CairnApp {
     /// Probes service reachability without requesting UAC elevation.
     pub fn check_service_connection(&mut self, cx: &mut Context<'_, Self>) {
+        if self.service.active_probe.is_some() {
+            return;
+        }
         let runtime = get_tokio_runtime();
         let session = self.service.session.clone();
+        let probe_gen = self.service.next_probe_generation();
+        self.service.active_probe = Some(probe_gen);
         self.service.connection.set_probing(true);
         cx.spawn(async move |this, cx: &mut AsyncApp| {
             let (tx, rx) = tokio::sync::oneshot::channel();
@@ -200,6 +207,12 @@ impl CairnApp {
 
             let outcome = rx.await;
             let _ = this.update(cx, |this: &mut CairnApp, cx| {
+                if this.service.active_probe == Some(probe_gen) {
+                    this.service.active_probe = None;
+                }
+                if this.service.probe_generation != probe_gen {
+                    return;
+                }
                 this.service.connection.set_probing(false);
                 match outcome {
                     Ok(Ok(envelope)) => {
@@ -212,12 +225,12 @@ impl CairnApp {
                         this.service
                             .connection
                             .mark_disconnected(installed, issue, false, attempted);
-                        this.handle_probe_failure(issue, cx);
+                        this.handle_probe_failure(probe_gen, issue, cx);
                     }
                     Err(e) => {
                         tracing::warn!("Cairn connection probe task lost: {e}");
                         this.service.connection.mark_lost_running();
-                        this.handle_probe_failure(ServiceIssue::NotRunning, cx);
+                        this.handle_probe_failure(probe_gen, ServiceIssue::NotRunning, cx);
                     }
                 }
                 cx.notify();
@@ -352,7 +365,15 @@ impl CairnApp {
     }
 
     /// Checks SCM registration off the main UI thread and attempts one silent start when stopped.
-    fn handle_probe_failure(&mut self, issue: ServiceIssue, cx: &mut Context<'_, Self>) {
+    fn handle_probe_failure(
+        &mut self,
+        probe_gen: u64,
+        issue: ServiceIssue,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.service.probe_generation != probe_gen {
+            return;
+        }
         if issue != ServiceIssue::NotRunning {
             let installed = self.service.connection.is_installed();
             let probing = self.service.connection.is_probing();
@@ -365,6 +386,7 @@ impl CairnApp {
         }
         let try_silent = !self.service.connection.silent_start_attempted();
         let installed = self.service.connection.is_installed();
+        self.service.active_probe = Some(probe_gen);
         self.service
             .connection
             .mark_disconnected(installed, ServiceIssue::NotRunning, true, true);
@@ -383,6 +405,12 @@ impl CairnApp {
             });
             let (installed, silent_started) = rx.await.unwrap_or((false, false));
             let _ = this.update(cx, |this: &mut CairnApp, cx| {
+                if this.service.active_probe == Some(probe_gen) {
+                    this.service.active_probe = None;
+                }
+                if this.service.probe_generation != probe_gen {
+                    return;
+                }
                 this.service.connection.set_probing(false);
                 if silent_started {
                     this.poll_service_until_ready(cx);
@@ -403,7 +431,7 @@ impl CairnApp {
     }
 
     pub fn retry_service_connection(&mut self, cx: &mut Context<'_, Self>) {
-        if self.service.connection.is_probing() {
+        if self.service.active_probe.is_some() {
             return;
         }
         self.check_service_connection(cx);
@@ -412,9 +440,11 @@ impl CairnApp {
 
     /// Asks SCM to start the installed service through one UAC elevation, then polls for its pipe.
     pub fn start_service(&mut self, cx: &mut Context<'_, Self>) {
-        if self.service.connection.is_probing() {
+        if self.service.active_probe.is_some() {
             return;
         }
+        let probe_gen = self.service.next_probe_generation();
+        self.service.active_probe = Some(probe_gen);
         self.service.connection.set_probing(true);
         cx.notify();
         cx.spawn(async move |this, cx: &mut AsyncApp| {
@@ -424,6 +454,12 @@ impl CairnApp {
             });
             let installed = rx.await.unwrap_or(false);
             let _ = this.update(cx, |this: &mut CairnApp, cx| {
+                if this.service.active_probe == Some(probe_gen) {
+                    this.service.active_probe = None;
+                }
+                if this.service.probe_generation != probe_gen {
+                    return;
+                }
                 if !installed {
                     let attempted = this.service.connection.silent_start_attempted();
                     this.service.connection.mark_disconnected(
@@ -478,6 +514,8 @@ impl CairnApp {
             + Send
             + 'static,
     {
+        let probe_gen = self.service.next_probe_generation();
+        self.service.active_probe = Some(probe_gen);
         self.service.connection.set_probing(true);
         cx.notify();
 
@@ -491,6 +529,12 @@ impl CairnApp {
 
             let outcome = rx.await;
             let _ = this.update(cx, |this: &mut CairnApp, cx| {
+                if this.service.active_probe == Some(probe_gen) {
+                    this.service.active_probe = None;
+                }
+                if this.service.probe_generation != probe_gen {
+                    return;
+                }
                 this.service.connection.set_probing(false);
                 match outcome {
                     Ok((Ok(volumes), _)) => {
@@ -550,28 +594,35 @@ impl CairnApp {
             cx.background_executor()
                 .timer(SUBSYSTEM_BACKFILL_POLL_INTERVAL)
                 .await;
-            let _ = this.update(cx, |this: &mut CairnApp, cx| refresh(this, cx));
+            let _ = this.update(cx, |this: &mut CairnApp, cx| {
+                if this.service.connection.is_connected() {
+                    refresh(this, cx);
+                }
+            });
         })
         .detach();
     }
 
     pub fn refresh_content_status(&mut self, cx: &mut Context<'_, Self>) {
-        if !self.service.content.begin_load() {
+        let Some(generation) = self.service.content.begin_load() else {
             return;
-        }
+        };
         self.spawn_service_task(
             cx,
             |session| async move { session.get_content_index_status().await },
-            |this, result, cx| {
-                let ok = finish_subsystem_load(
+            move |this, result, cx| {
+                let Some(ok) = finish_subsystem_load(
                     &mut this.service.content,
+                    generation,
                     result,
                     "content-index status",
                     |payload| match payload {
                         ResponsePayload::ContentIndexStatus { status } => Ok(status),
                         _ => Err("the service answered with a different payload".to_string()),
                     },
-                );
+                ) else {
+                    return;
+                };
                 let follow_up = ok
                     && matches!(
                         this.service.content.value.state,
@@ -594,9 +645,9 @@ impl CairnApp {
     }
 
     fn run_content_action(&mut self, action: ContentAction, cx: &mut Context<'_, Self>) {
-        if !self.service.content.begin_action() {
+        let Some(_action_gen) = self.service.content.begin_action() else {
             return;
-        }
+        };
         self.repaint_shell_and_overlays(cx);
 
         let session = self.service.session.clone();
@@ -639,18 +690,22 @@ impl CairnApp {
             this.update(cx, |this: &mut CairnApp, cx| {
                 match outcome {
                     Ok(Ok(())) => {
-                        this.service.content.finish_action_ok();
+                        let _ = this.service.content.finish_action_ok();
                         this.refresh_content_status(cx);
                     }
                     Ok(Err(err)) => {
                         tracing::warn!("content index action failed: {err}");
-                        this.service.content.finish_action_err(err);
+                        if this.service.content.finish_action_err(err) {
+                            this.schedule_delayed_refresh(cx, Self::refresh_content_status);
+                        }
                     }
                     Err(panic) => {
                         tracing::warn!("content index action task stopped: {panic}");
-                        this.service.content.finish_action_err(format!(
+                        if this.service.content.finish_action_err(format!(
                             "the content-index action task stopped: {panic}"
-                        ));
+                        )) {
+                            this.schedule_delayed_refresh(cx, Self::refresh_content_status);
+                        }
                     }
                 }
                 this.repaint_shell_and_overlays(cx);
@@ -676,22 +731,25 @@ impl CairnApp {
     }
 
     pub fn refresh_property_index_status(&mut self, cx: &mut Context<'_, Self>) {
-        if !self.service.property.begin_load() {
+        let Some(generation) = self.service.property.begin_load() else {
             return;
-        }
+        };
         self.spawn_service_task(
             cx,
             |session| async move { session.get_property_index_status().await },
-            |this, result, cx| {
-                let ok = finish_subsystem_load(
+            move |this, result, cx| {
+                let Some(ok) = finish_subsystem_load(
                     &mut this.service.property,
+                    generation,
                     result,
                     "property index status",
                     |payload| match payload {
                         ResponsePayload::PropertyIndexStatus { status } => Ok(status),
                         _ => Err("unexpected property index status payload".to_string()),
                     },
-                );
+                ) else {
+                    return;
+                };
                 let follow_up = ok
                     && matches!(
                         this.service.property.value.state,
@@ -706,26 +764,30 @@ impl CairnApp {
     }
 
     pub fn set_property_index_enabled(&mut self, enabled: bool, cx: &mut Context<'_, Self>) {
-        if !self.service.property.begin_action() {
+        let Some(action_gen) = self.service.property.begin_action() else {
             return;
-        }
+        };
         self.repaint_shell_and_overlays(cx);
         self.spawn_service_task(
             cx,
             move |session| async move { session.set_property_index_enabled(enabled).await },
-            |this, result, cx| {
-                this.service.property.action_pending = false;
+            move |this, result, cx| {
+                let superseded = this.service.property.finish_action_ok();
+                let mut reconciled = false;
                 let res = match result {
                     Some(Ok(envelope)) => match envelope.payload {
                         ResponsePayload::PropertyIndexStatus { status } => {
-                            let backfill =
-                                matches!(status.state, ContentIndexState::Backfilling { .. });
-                            this.service.property.finish_load(status);
-                            if backfill {
-                                this.schedule_delayed_refresh(
-                                    cx,
-                                    Self::refresh_property_index_status,
-                                );
+                            if this.service.property.generation == action_gen {
+                                let backfill =
+                                    matches!(status.state, ContentIndexState::Backfilling { .. });
+                                this.service.property.finish_load(status);
+                                reconciled = true;
+                                if backfill {
+                                    this.schedule_delayed_refresh(
+                                        cx,
+                                        Self::refresh_property_index_status,
+                                    );
+                                }
                             }
                             Ok(())
                         }
@@ -743,21 +805,25 @@ impl CairnApp {
                         cx,
                     );
                 }
+                if !reconciled && superseded {
+                    this.refresh_property_index_status(cx);
+                }
                 this.repaint_shell_and_overlays(cx);
             },
         );
     }
 
     pub fn refresh_index_journal_status(&mut self, cx: &mut Context<'_, Self>) {
-        if !self.service.journal.begin_load() {
+        let Some(generation) = self.service.journal.begin_load() else {
             return;
-        }
+        };
         self.spawn_service_task(
             cx,
             |session| async move { session.get_index_journal(0, 0).await },
-            |this, result, cx| {
-                finish_subsystem_load(
+            move |this, result, cx| {
+                if finish_subsystem_load(
                     &mut this.service.journal,
+                    generation,
                     result,
                     "index journal status",
                     |payload| match payload {
@@ -765,7 +831,11 @@ impl CairnApp {
                         | ResponsePayload::IndexJournalStatus { status } => Ok(status),
                         _ => Err("unexpected index journal payload".to_string()),
                     },
-                );
+                )
+                .is_none()
+                {
+                    return;
+                }
                 this.repaint_shell_and_overlays(cx);
             },
         );
@@ -774,9 +844,10 @@ impl CairnApp {
     pub fn refresh_index_journal_dialog(&mut self, cx: &mut Context<'_, Self>) {
         const JOURNAL_DIALOG_LIMIT: usize = 200;
 
-        if !self.service.journal_entries.begin_load() {
+        let Some(entries_gen) = self.service.journal_entries.begin_load() else {
             return;
-        }
+        };
+        let journal_gen = self.service.journal.generation;
         let initial_after = self
             .service
             .journal
@@ -805,60 +876,78 @@ impl CairnApp {
                 }
                 Ok(envelope)
             },
-            |this, result, cx| {
-                match result {
+            move |this, result, cx| {
+                let updated = match result {
                     Some(Ok(envelope)) => match envelope.payload {
                         ResponsePayload::IndexJournalResult {
                             status,
                             mut entries,
                         } => {
                             entries.reverse();
-                            this.service.journal.finish_load(status);
-                            this.service.journal_entries.finish_load(entries);
-                        }
-                        ResponsePayload::Error { message, .. } => {
-                            this.service.journal_entries.fail_load(message);
-                        }
-                        _ => {
-                            this.service
+                            let applied = this
+                                .service
                                 .journal_entries
-                                .fail_load("unexpected index journal payload");
+                                .finish_load_if_current(entries_gen, entries);
+                            if applied
+                                && !this.service.journal.action_pending
+                                && this.service.journal.generation == journal_gen
+                            {
+                                this.service.journal.finish_load(status);
+                            }
+                            applied
                         }
-                    },
-                    Some(Err(err)) => {
-                        this.service.journal_entries.fail_load(err.to_string());
-                    }
-                    None => {
-                        this.service
+                        ResponsePayload::Error { message, .. } => this
+                            .service
                             .journal_entries
-                            .fail_load("index journal task stopped");
-                    }
+                            .fail_load_if_current(entries_gen, message),
+                        _ => this
+                            .service
+                            .journal_entries
+                            .fail_load_if_current(entries_gen, "unexpected index journal payload"),
+                    },
+                    Some(Err(err)) => this
+                        .service
+                        .journal_entries
+                        .fail_load_if_current(entries_gen, err.to_string()),
+                    None => this
+                        .service
+                        .journal_entries
+                        .fail_load_if_current(entries_gen, "index journal task stopped"),
+                };
+                if updated {
+                    this.repaint_shell_and_overlays(cx);
                 }
-                this.repaint_shell_and_overlays(cx);
             },
         );
     }
 
     pub fn set_index_journal_enabled(&mut self, enabled: bool, cx: &mut Context<'_, Self>) {
-        if !self.service.journal.begin_action() {
+        let Some(action_gen) = self.service.journal.begin_action() else {
             return;
-        }
+        };
+        let _ = self.service.journal_entries.supersede_load();
         self.repaint_shell_and_overlays(cx);
         self.spawn_service_task(
             cx,
             move |session| async move { session.set_index_journal_enabled(enabled).await },
-            |this, result, cx| {
-                this.service.journal.action_pending = false;
+            move |this, result, cx| {
+                let superseded_status = this.service.journal.finish_action_ok();
+                let superseded_entries =
+                    std::mem::take(&mut this.service.journal_entries.superseded_refresh);
+                let mut reconciled = false;
                 let res = match result {
                     Some(Ok(envelope)) => match envelope.payload {
                         ResponsePayload::IndexJournalStatus { status }
                         | ResponsePayload::IndexJournalResult { status, .. } => {
-                            let is_enabled = status.enabled;
-                            this.service.journal.finish_load(status);
-                            if is_enabled {
-                                this.refresh_index_journal_dialog(cx);
-                            } else {
-                                this.service.journal_entries.finish_load(Vec::new());
+                            if this.service.journal.generation == action_gen {
+                                let is_enabled = status.enabled;
+                                this.service.journal.finish_load(status);
+                                if is_enabled {
+                                    this.refresh_index_journal_dialog(cx);
+                                } else {
+                                    this.service.journal_entries.finish_load(Vec::new());
+                                }
+                                reconciled = true;
                             }
                             Ok(())
                         }
@@ -875,6 +964,13 @@ impl CairnApp {
                         err,
                         cx,
                     );
+                }
+                if !reconciled {
+                    if superseded_entries {
+                        this.refresh_index_journal_dialog(cx);
+                    } else if superseded_status {
+                        this.refresh_index_journal_status(cx);
+                    }
                 }
                 this.repaint_shell_and_overlays(cx);
             },

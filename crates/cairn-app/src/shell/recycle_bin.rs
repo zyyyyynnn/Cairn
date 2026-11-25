@@ -11,7 +11,7 @@
 
 use crate::app::{CairnApp, layout};
 use crate::shell::os::{BinErrorKind, RecycleBinItem};
-use crate::table::model::SortColumn;
+use crate::table::columns::SortColumn;
 use cairn_protocol::message::FileRowData;
 use gpui_kit::gpui::{Context, Pixels, Point, Window, px};
 use std::collections::{HashMap, HashSet};
@@ -850,7 +850,7 @@ mod tests {
     };
     use crate::shell::i18n::I18nManager;
     use crate::shell::os::{BinErrorKind, RecycleBinItem};
-    use crate::table::model::SortColumn;
+    use crate::table::columns::SortColumn;
 
     fn item(name: &str, dir: &str, ts: i64, size: u64) -> RecycleBinItem {
         RecycleBinItem {

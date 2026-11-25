@@ -194,6 +194,7 @@ impl MultiVolumeEngine {
 
     /// Atomically saves all non-empty volume indexes to disk.
     pub fn save_all_indexes(&self) -> Result<(), persistence::PersistenceError> {
+        let _persist = self.persist_lock.lock().unwrap();
         let vols = self.volumes.read().unwrap();
         for vol in vols.values() {
             if !vol.records().is_empty() {
@@ -279,16 +280,21 @@ impl MultiVolumeEngine {
                     continue;
                 }
 
-                let (journal_id, last_usn, usn_enabled) = {
+                let (journal_id, last_usn, usn_enabled, usn_parse_failed) = {
                     let lock = self.volumes.read().unwrap();
                     if let Some(vol) = lock.get(&drive) {
-                        (vol.journal_id, vol.last_usn, vol.usn_enabled)
+                        (
+                            vol.journal_id,
+                            vol.last_usn,
+                            vol.usn_enabled,
+                            vol.usn_parse_failed,
+                        )
                     } else {
                         continue;
                     }
                 };
 
-                if !usn_enabled {
+                if !usn_enabled || usn_parse_failed {
                     continue;
                 }
 
@@ -378,6 +384,30 @@ impl MultiVolumeEngine {
                                 vol.status.reconcile_poll(previous_usn, next_usn, tail_usn);
                             }
                         }
+                    }
+                    Err(cairn_ntfs::usn::UsnError::UnsupportedRecordVersion(version)) => {
+                        tracing::warn!(
+                            "USN journal for {drive} returned unsupported record version {version}; \
+                             marking the volume offline"
+                        );
+                        let mut lock = self.volumes.write().unwrap();
+                        if let Some(vol) = lock.get_mut(&drive) {
+                            vol.status.set(VolumeState::Offline);
+                            vol.usn_parse_failed = true;
+                        }
+                        continue;
+                    }
+                    Err(cairn_ntfs::usn::UsnError::MalformedRecord(offset)) => {
+                        tracing::warn!(
+                            "USN journal for {drive} returned a malformed record at byte {offset}; \
+                             marking the volume offline"
+                        );
+                        let mut lock = self.volumes.write().unwrap();
+                        if let Some(vol) = lock.get_mut(&drive) {
+                            vol.status.set(VolumeState::Offline);
+                            vol.usn_parse_failed = true;
+                        }
+                        continue;
                     }
                     Err(cairn_ntfs::usn::UsnError::ReadFailed(code))
                         if is_device_offline_win32_error(code) =>

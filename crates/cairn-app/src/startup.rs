@@ -7,6 +7,7 @@
 //! the first window paints.
 
 use std::rc::Rc;
+use std::sync::Arc;
 
 use cairn_client::ServiceSession;
 
@@ -47,10 +48,37 @@ impl LaunchPlan {
     }
 }
 
+/// Runtime side-effect port injected at application construction.
+pub(crate) trait AppRuntimePorts: Send + Sync {
+    fn save_settings(&self, settings: &AppSettings) -> std::io::Result<()>;
+    #[cfg(windows)]
+    fn register_hotkey(&self) -> Result<Option<crate::shell::hotkey::GlobalHotkey>, String>;
+    fn take_pending_update_target(&self) -> Option<String>;
+}
+
+/// Production runtime ports backed by persisted settings, Win32 global hotkeys, and update markers.
+pub(crate) struct SystemRuntimePorts;
+
+impl AppRuntimePorts for SystemRuntimePorts {
+    fn save_settings(&self, settings: &AppSettings) -> std::io::Result<()> {
+        settings.save()
+    }
+
+    #[cfg(windows)]
+    fn register_hotkey(&self) -> Result<Option<crate::shell::hotkey::GlobalHotkey>, String> {
+        crate::shell::hotkey::register().map(Some)
+    }
+
+    fn take_pending_update_target(&self) -> Option<String> {
+        crate::shell::update::take_pending_update_target()
+    }
+}
+
 /// External host reads required during application startup.
 pub(crate) trait BootstrapPorts {
     fn load_settings(&self) -> AppSettings;
     fn system_prefers_dark(&self) -> bool;
+    fn runtime_ports(&self) -> Arc<dyn AppRuntimePorts>;
 }
 
 /// Production host ports backed by persisted settings and Windows theme settings.
@@ -64,6 +92,47 @@ impl BootstrapPorts for SystemBootstrapPorts {
     fn system_prefers_dark(&self) -> bool {
         theme::system_prefers_dark()
     }
+
+    fn runtime_ports(&self) -> Arc<dyn AppRuntimePorts> {
+        Arc::new(SystemRuntimePorts)
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct TestRuntimePorts;
+
+#[cfg(test)]
+impl AppRuntimePorts for TestRuntimePorts {
+    fn save_settings(&self, _settings: &AppSettings) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn register_hotkey(&self) -> Result<Option<crate::shell::hotkey::GlobalHotkey>, String> {
+        Ok(None)
+    }
+
+    fn take_pending_update_target(&self) -> Option<String> {
+        None
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct TestBootstrapPorts;
+
+#[cfg(test)]
+impl BootstrapPorts for TestBootstrapPorts {
+    fn load_settings(&self) -> AppSettings {
+        AppSettings::default()
+    }
+
+    fn system_prefers_dark(&self) -> bool {
+        false
+    }
+
+    fn runtime_ports(&self) -> Arc<dyn AppRuntimePorts> {
+        Arc::new(TestRuntimePorts)
+    }
 }
 
 /// Consolidated startup artifacts shared across tray initialization, theming, and `CairnApp`.
@@ -73,6 +142,7 @@ pub(crate) struct StartupBundle {
     pub system_dark: bool,
     pub i18n: Rc<I18nManager>,
     pub session: ServiceSession,
+    pub runtime_ports: Arc<dyn AppRuntimePorts>,
 }
 
 impl StartupBundle {
@@ -91,12 +161,14 @@ impl StartupCoordinator {
         let system_dark = ports.system_prefers_dark();
         let i18n = Rc::new(I18nManager::new(&settings.effective_language()));
         let session = ServiceSession::new();
+        let runtime_ports = ports.runtime_ports();
         StartupBundle {
             plan,
             settings,
             system_dark,
             i18n,
             session,
+            runtime_ports,
         }
     }
 }
@@ -138,6 +210,10 @@ mod tests {
         fn system_prefers_dark(&self) -> bool {
             self.dark_calls.set(self.dark_calls.get() + 1);
             self.dark
+        }
+
+        fn runtime_ports(&self) -> Arc<dyn AppRuntimePorts> {
+            Arc::new(TestRuntimePorts)
         }
     }
 

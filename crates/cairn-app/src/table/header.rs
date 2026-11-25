@@ -8,7 +8,7 @@ use crate::app::{CairnApp, element_id, layout};
 use crate::shell::accessibility;
 use crate::shell::settings::ColumnSettings;
 use crate::shell::theme::{self, ShellTokens};
-use crate::table::model::{ColumnBoundary, OptionalColumn, SortColumn, TableColumn};
+use crate::table::columns::{ColumnBoundary, OptionalColumn, SortColumn, TableColumn};
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::{Icon, IconName, Sizable as _};
 use gpui_kit::gpui::*;
@@ -343,7 +343,11 @@ fn sort_indicator(
     multi_sort: bool,
     tokens: &ShellTokens,
 ) -> impl IntoElement {
-    let mut row = div().flex().items_center().gap(px(2.0)).flex_shrink_0();
+    let mut row = div()
+        .flex()
+        .items_center()
+        .gap(rems(crate::app::layout::STEP * 0.5))
+        .flex_shrink_0();
     if multi_sort {
         row = row.child(
             div()
@@ -367,7 +371,7 @@ fn sort_indicator(
 #[cfg(test)]
 mod tests {
     use crate::shell::settings::ColumnSettings;
-    use crate::table::model::{ColumnBoundary, TableColumn};
+    use crate::table::columns::{ColumnBoundary, TableColumn};
 
     #[test]
     fn header_context_menu_starts_with_locked_name_and_base_columns() {

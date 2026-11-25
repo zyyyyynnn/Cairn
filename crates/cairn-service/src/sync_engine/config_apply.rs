@@ -37,6 +37,7 @@ impl MultiVolumeEngine {
         let (previous_enabled, property_scope_changed, applied) = {
             let mut cfg = self.config.write().unwrap();
             let next = build(&cfg)?;
+            next.validate()?;
             if persist {
                 next.save_atomic_secure(&path)
                     .map_err(|e| format!("could not persist {}: {e}", path.display()))?;

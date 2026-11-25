@@ -28,10 +28,15 @@ use windows::Win32::Security::{
     PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED,
 };
 use windows::Win32::Storage::FileSystem::{
-    BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, CreateFileW, FILE_ATTRIBUTE_DIRECTORY,
-    FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FileAttributeTagInfo,
-    GetFileInformationByHandle, GetFileInformationByHandleEx, OPEN_EXISTING, READ_CONTROL,
+    BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, CreateFileW, DELETE, FILE_ATTRIBUTE_DIRECTORY,
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_DISPOSITION_FLAG_DELETE,
+    FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
+    FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX, FILE_DISPOSITION_INFO_EX_FLAGS,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_NAME_NORMALIZED,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileAttributeTagInfo,
+    FileDispositionInfo, FileDispositionInfoEx, GETFINALPATHNAMEBYHANDLE_FLAGS,
+    GetFileInformationByHandle, GetFileInformationByHandleEx, GetFinalPathNameByHandleW,
+    OPEN_EXISTING, READ_CONTROL, SYNCHRONIZE, SetFileInformationByHandle, VOLUME_NAME_DOS,
     WRITE_DAC, WRITE_OWNER,
 };
 use windows::Win32::System::Com::{
@@ -138,6 +143,10 @@ pub fn activate_window(window_title: &str) -> bool {
         found: Option<windows::Win32::Foundation::HWND>,
     }
 
+    /// # Safety
+    ///
+    /// `EnumWindows` must invoke this callback synchronously with a valid top-level `hwnd` and a
+    /// non-null `lparam` pointing to a live `Context` for the duration of enumeration.
     unsafe extern "system" fn enum_proc(
         hwnd: windows::Win32::Foundation::HWND,
         lparam: LPARAM,
@@ -362,7 +371,19 @@ fn staging_root() -> std::io::Result<PathBuf> {
         }
     }
     let fallback = std::env::temp_dir().join("CairnSetup");
+    if is_reparse_point(&fallback).unwrap_or(false) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "refusing fallback staging directory because {} is a reparse point",
+                fallback.display()
+            ),
+        ));
+    }
     std::fs::create_dir_all(&fallback)?;
+    open_staging_directory(&fallback, false)
+        .and_then(|h| staging_attributes(h.0))
+        .and_then(check_staging_attributes)?;
     sweep_stale_staging(&fallback);
     Ok(fallback)
 }
@@ -452,6 +473,127 @@ impl Drop for OwnedHandle {
             }
         }
     }
+}
+
+fn open_cleanup_handle(path: &Path) -> std::io::Result<OwnedHandle> {
+    let wide_path = wide(path.as_os_str());
+    // SAFETY: `wide_path` is null-terminated; the returned handle is owned by the guard.
+    let handle = unsafe {
+        CreateFileW(
+            PCWSTR(wide_path.as_ptr()),
+            DELETE.0 | SYNCHRONIZE.0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+    }
+    .map_err(|error| std::io::Error::from_raw_os_error(error.code().0))?;
+    Ok(OwnedHandle(handle))
+}
+
+fn normalized_cleanup_path(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('/', "\\")
+        .trim_start_matches(r"\\?\")
+        .to_lowercase()
+}
+
+fn verify_cleanup_handle(handle: HANDLE, expected: &Path) -> std::io::Result<u32> {
+    let attributes = staging_attributes(handle)?;
+    let mut buf = vec![0u16; 32_768];
+    let actual = loop {
+        // SAFETY: the handle remains open and `buf` is writable for its full length.
+        let len = unsafe {
+            GetFinalPathNameByHandleW(
+                handle,
+                &mut buf,
+                GETFINALPATHNAMEBYHANDLE_FLAGS(FILE_NAME_NORMALIZED.0 | VOLUME_NAME_DOS.0),
+            )
+        };
+        if len == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if len < buf.len() as u32 {
+            break normalized_cleanup_path(Path::new(&String::from_utf16_lossy(
+                &buf[..len as usize],
+            )));
+        }
+        buf.resize(len as usize + 1, 0);
+    };
+    if actual != normalized_cleanup_path(expected) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "cleanup handle for {} resolved to {}",
+                expected.display(),
+                actual
+            ),
+        ));
+    }
+    Ok(attributes)
+}
+
+fn delete_cleanup_handle(handle: HANDLE, is_dir: bool) -> std::io::Result<()> {
+    // SAFETY: the handle is owned by the caller and the information structure matches the class.
+    let result = unsafe {
+        if is_dir {
+            let info = FILE_DISPOSITION_INFO_EX {
+                Flags: FILE_DISPOSITION_INFO_EX_FLAGS(
+                    FILE_DISPOSITION_FLAG_DELETE.0
+                        | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS.0
+                        | FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE.0,
+                ),
+            };
+            SetFileInformationByHandle(
+                handle,
+                FileDispositionInfoEx,
+                std::ptr::from_ref(&info).cast(),
+                std::mem::size_of::<FILE_DISPOSITION_INFO_EX>() as u32,
+            )
+        } else {
+            let info = FILE_DISPOSITION_INFO { DeleteFile: true };
+            SetFileInformationByHandle(
+                handle,
+                FileDispositionInfo,
+                std::ptr::from_ref(&info).cast(),
+                std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
+            )
+        }
+    };
+    result.map_err(|error| std::io::Error::from_raw_os_error(error.code().0))
+}
+
+fn remove_opened_tree(
+    handle: OwnedHandle,
+    path: &Path,
+    allow_reparse: bool,
+) -> std::io::Result<()> {
+    let attributes = verify_cleanup_handle(handle.0, path)?;
+    let is_reparse = attributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0;
+    let is_dir = attributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0;
+    if is_reparse {
+        if !allow_reparse {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "refusing to recurse into reparse directory {}",
+                    path.display()
+                ),
+            ));
+        }
+        return delete_cleanup_handle(handle.0, is_dir);
+    }
+    if !is_dir {
+        return delete_cleanup_handle(handle.0, false);
+    }
+    for entry in std::fs::read_dir(path)? {
+        let child = entry?;
+        let child_handle = open_cleanup_handle(&child.path())?;
+        remove_opened_tree(child_handle, &child.path(), true)?;
+    }
+    delete_cleanup_handle(handle.0, true)
 }
 
 fn open_staging_directory(path: &Path, write: bool) -> std::io::Result<OwnedHandle> {
@@ -667,10 +809,11 @@ pub fn create_payload_dir() -> std::io::Result<PathBuf> {
 /// Data that belongs to the product but not to the MSI's component tree. The installer is
 /// machine-wide, so uninstalling removes every profile's Cairn data, not just the profile of the
 /// account that happened to provide the administrator token.
-fn product_data_dirs(profiles: &[(String, PathBuf)]) -> Vec<PathBuf> {
+fn product_data_dirs(profiles: &[(String, PathBuf)]) -> Vec<(PathBuf, PathBuf)> {
     let mut dirs = Vec::new();
     if let Ok(base) = program_data_root() {
-        push_unique(&mut dirs, base.join("Cairn"));
+        let target = base.join("Cairn");
+        push_unique_pair(&mut dirs, base, target);
     }
     for (_, profile) in profiles {
         push_user_data_dirs(&mut dirs, profile);
@@ -678,21 +821,57 @@ fn product_data_dirs(profiles: &[(String, PathBuf)]) -> Vec<PathBuf> {
     dirs
 }
 
-fn push_user_data_dirs(dirs: &mut Vec<PathBuf>, profile: &Path) {
+fn push_user_data_dirs(dirs: &mut Vec<(PathBuf, PathBuf)>, profile: &Path) {
     let app_data = profile.join("AppData");
-    push_unique(dirs, app_data.join("Roaming").join("Cairn"));
-    push_unique(dirs, app_data.join("Local").join("Cairn"));
+    push_unique_pair(
+        dirs,
+        profile.to_path_buf(),
+        app_data.join("Roaming").join("Cairn"),
+    );
+    push_unique_pair(
+        dirs,
+        profile.to_path_buf(),
+        app_data.join("Local").join("Cairn"),
+    );
 }
 
-fn push_unique(dirs: &mut Vec<PathBuf>, path: PathBuf) {
-    let key = path.to_string_lossy().to_ascii_lowercase();
+fn push_unique_pair(dirs: &mut Vec<(PathBuf, PathBuf)>, root: PathBuf, target: PathBuf) {
+    let key = target.to_string_lossy().to_ascii_lowercase();
     if dirs
         .iter()
-        .any(|existing| existing.to_string_lossy().to_ascii_lowercase() == key)
+        .any(|(_, existing)| existing.to_string_lossy().to_ascii_lowercase() == key)
     {
         return;
     }
-    dirs.push(path);
+    dirs.push((root, target));
+}
+
+fn is_reparse_point(path: &Path) -> std::io::Result<bool> {
+    use std::os::windows::fs::MetadataExt;
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) => Ok((meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0) != 0),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err),
+    }
+}
+
+fn remove_dir_tree_safe(expected_root: &Path, target: &Path) -> std::io::Result<()> {
+    target.strip_prefix(expected_root).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "{} escapes expected root {}",
+                target.display(),
+                expected_root.display()
+            ),
+        )
+    })?;
+    let handle = match open_cleanup_handle(target) {
+        Ok(handle) => handle,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err),
+    };
+    remove_opened_tree(handle, target, false)
 }
 
 /// Removes everything the product wrote outside the MSI's component tree: every profile's data, the
@@ -701,13 +880,13 @@ fn push_unique(dirs: &mut Vec<PathBuf>, path: PathBuf) {
 pub fn remove_product_data() -> Vec<String> {
     let profiles = user_profiles();
     let mut failures = Vec::new();
-    for dir in product_data_dirs(&profiles) {
+    for (expected_root, dir) in product_data_dirs(&profiles) {
         if !dir.exists() {
             continue;
         }
         let mut last_error = None;
         for attempt in 0..6 {
-            match std::fs::remove_dir_all(&dir) {
+            match remove_dir_tree_safe(&expected_root, &dir) {
                 Ok(()) => {
                     last_error = None;
                     break;
@@ -717,7 +896,11 @@ pub fn remove_product_data() -> Vec<String> {
                     break;
                 }
                 Err(err) => {
+                    let abort_retry = err.kind() == std::io::ErrorKind::InvalidInput;
                     last_error = Some(err.to_string());
+                    if abort_retry {
+                        break;
+                    }
                     std::thread::sleep(std::time::Duration::from_millis(200 * (attempt + 1)));
                 }
             }
@@ -992,6 +1175,28 @@ fn remove_service(name: &str) -> Result<(), String> {
         .args(["stop", name])
         .creation_flags(CREATE_NO_WINDOW)
         .output();
+    let mut stopped = false;
+    for _ in 0..20 {
+        let Ok(query) = Command::new(&sc)
+            .args(["query", name])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+        else {
+            break;
+        };
+        if query.status.code() == Some(1060) {
+            return Ok(());
+        }
+        let stdout = String::from_utf8_lossy(&query.stdout);
+        if stdout.contains("STOPPED") {
+            stopped = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    if !stopped {
+        return Err(format!("service {name} did not stop within 5 seconds"));
+    }
     let output = Command::new(&sc)
         .args(["delete", name])
         .creation_flags(CREATE_NO_WINDOW)
@@ -1061,10 +1266,10 @@ pub fn spawn_install_dir_cleanup(install_dir: &Path) -> Result<(), String> {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     const CLEANUP_SCRIPT: &str = "\
 $p = [int]$env:CAIRN_CLEANUP_PID; \
-if ($p -gt 0) { try { [System.Diagnostics.Process]::GetProcessById($p).WaitForExit() } catch {} }; \
+if ($p -gt 0) { try { $proc = [System.Diagnostics.Process]::GetProcessById($p); if ($proc.Path -ine $env:CAIRN_CLEANUP_EXE) { exit 1 }; if (-not $proc.WaitForExit(5000)) { exit 1 } } catch {} }; \
 $d = $env:CAIRN_CLEANUP_DIR; \
 $fs = $env:CAIRN_CLEANUP_FILES -split ';'; \
-for ($i = 0; $i -lt 5; $i++) { \
+for ($i = 0; $i -lt 20; $i++) { \
     $rem = $false; \
     foreach ($f in $fs) { \
         if ($f) { \
@@ -1076,7 +1281,7 @@ for ($i = 0; $i -lt 5; $i++) { \
         } \
     }; \
     if (-not $rem) { break }; \
-    Start-Sleep -Milliseconds 100 \
+    Start-Sleep -Milliseconds 250 \
 }; \
 if ([System.IO.Directory]::Exists($d)) { try { [System.IO.Directory]::Delete($d, $false) } catch {} }";
 
@@ -1097,6 +1302,10 @@ if ([System.IO.Directory]::Exists($d)) { try { [System.IO.Directory]::Delete($d,
         ])
         .env("CAIRN_CLEANUP_DIR", &install_dir)
         .env("CAIRN_CLEANUP_PID", std::process::id().to_string())
+        .env(
+            "CAIRN_CLEANUP_EXE",
+            std::env::current_exe().map_err(|error| error.to_string())?,
+        )
         .env("CAIRN_CLEANUP_FILES", PRODUCT_FILES.join(";"))
         .current_dir(std::env::temp_dir())
         .stdin(Stdio::null())
@@ -1156,13 +1365,20 @@ mod tests {
     #[test]
     fn every_profile_contributes_its_roaming_and_local_data_once() {
         let mut dirs = Vec::new();
-        push_user_data_dirs(&mut dirs, Path::new(r"C:\Users\Alice"));
-        push_user_data_dirs(&mut dirs, Path::new(r"C:\Users\Alice"));
+        let profile = Path::new(r"C:\Users\Alice");
+        push_user_data_dirs(&mut dirs, profile);
+        push_user_data_dirs(&mut dirs, profile);
         assert_eq!(
             dirs,
             [
-                PathBuf::from(r"C:\Users\Alice\AppData\Roaming\Cairn"),
-                PathBuf::from(r"C:\Users\Alice\AppData\Local\Cairn"),
+                (
+                    profile.to_path_buf(),
+                    PathBuf::from(r"C:\Users\Alice\AppData\Roaming\Cairn")
+                ),
+                (
+                    profile.to_path_buf(),
+                    PathBuf::from(r"C:\Users\Alice\AppData\Local\Cairn")
+                ),
             ]
         );
     }
@@ -1279,5 +1495,45 @@ mod tests {
             explorer.file_name(),
             Some(std::ffi::OsStr::new("explorer.exe"))
         );
+    }
+
+    #[test]
+    fn remove_dir_tree_safe_blocks_reparse_junction_and_removes_regular_subtrees() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root = temp.path().join("Profile");
+        let outside = temp.path().join("OutsideTarget");
+        let outside_sentinel = outside.join("keep.txt");
+        let data_dir = root.join("AppData").join("Local").join("Cairn");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(&outside_sentinel, b"do-not-delete").unwrap();
+        std::fs::create_dir_all(data_dir.parent().unwrap()).unwrap();
+
+        // A junction planted at `data_dir` itself must be refused and leave `outside` untouched.
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&data_dir)
+            .arg(&outside)
+            .status()
+            .expect("mklink /J");
+        assert!(status.success(), "mklink failed: {status}");
+        let err = super::remove_dir_tree_safe(&root, &data_dir).expect_err("junction refused");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(outside_sentinel.exists());
+        std::fs::remove_dir(&data_dir).unwrap();
+
+        // A nested child junction inside a regular `data_dir` is unlinked safely without wiping `outside`.
+        std::fs::create_dir_all(data_dir.join("sub")).unwrap();
+        std::fs::write(data_dir.join("sub").join("cache.idx"), b"abc").unwrap();
+        let nested_link = data_dir.join("child_link");
+        let nested_status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&nested_link)
+            .arg(&outside)
+            .status()
+            .expect("mklink nested");
+        assert!(nested_status.success(), "nested mklink failed");
+        super::remove_dir_tree_safe(&root, &data_dir).expect("regular data subtree removes safely");
+        assert!(!data_dir.exists());
+        assert!(outside_sentinel.exists());
     }
 }

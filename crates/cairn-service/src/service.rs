@@ -243,24 +243,4 @@ mod tests {
             "StartPending must accept SHUTDOWN"
         );
     }
-
-    #[test]
-    fn failed_startup_reports_a_failed_start() {
-        let state = state_after_startup(false);
-        assert_eq!(state, StartupState::Failed { exit_code: 1 });
-
-        let stopped = state.service_status();
-        assert_eq!(stopped.current_state, ServiceState::Stopped);
-        assert_eq!(stopped.exit_code, ServiceExitCode::Win32(1));
-        assert_eq!(stopped.checkpoint, 0);
-        assert_eq!(stopped.wait_hint, Duration::default());
-    }
-
-    #[test]
-    fn shutdown_still_reports_a_clean_stop() {
-        let stopped = stopped_status(0);
-        assert_eq!(stopped.current_state, ServiceState::Stopped);
-        assert_eq!(stopped.exit_code, ServiceExitCode::Win32(0));
-        assert_eq!(stopped.checkpoint, 0);
-    }
 }

@@ -300,22 +300,6 @@ impl SessionManager {
             .store(self.clock.now_nanos(), Ordering::Relaxed);
         page_session(session, offset, limit, sources)
     }
-
-    #[cfg(test)]
-    pub(crate) fn get_rows_multi_unchecked(
-        &self,
-        session_id: u64,
-        offset: usize,
-        limit: usize,
-        sources: &SourceTables<'_>,
-    ) -> Result<Vec<FileRowData>, RowsError> {
-        let lock = self.sessions.read().unwrap();
-        let session = lock.get(&session_id).ok_or(RowsError::UnknownSession)?;
-        session
-            .last_accessed_nanos
-            .store(self.clock.now_nanos(), Ordering::Relaxed);
-        page_session(session, offset, limit, sources)
-    }
 }
 
 const MAX_ROWS_PAGE: usize = 10_000;
@@ -479,6 +463,7 @@ mod tests {
 
     fn get_rows(
         sessions: &SessionManager,
+        owner: &QueryOwner,
         session_id: u64,
         offset: usize,
         limit: usize,
@@ -486,7 +471,8 @@ mod tests {
     ) -> Result<Vec<FileRowData>, RowsError> {
         let folders = HashMap::new();
         let props = PropertySideTables::disabled();
-        sessions.get_rows_multi_unchecked(
+        sessions.get_rows_multi(
+            owner,
             session_id,
             offset,
             limit,
@@ -580,14 +566,20 @@ mod tests {
         let sessions = SessionManager::default();
         let vol = three_file_volume();
         let (view, volumes) = all_files_view(vol, cairn_core::sort::SortColumn::Name, true, &[]);
-        let id = sessions.create_session(owner(7), MatchSet::AllFiles(view), &[], HashMap::new());
+        let client = owner(7);
+        let id = sessions.create_session(
+            client.clone(),
+            MatchSet::AllFiles(view),
+            &[],
+            HashMap::new(),
+        );
 
-        let first = get_rows(&sessions, id, 0, 2, &volumes).expect("first page");
+        let first = get_rows(&sessions, &client, id, 0, 2, &volumes).expect("first page");
         assert_eq!(first.len(), 2);
         assert_eq!(first[0].name, "a.txt");
         assert_eq!(first[1].name, "b.txt");
 
-        let second = get_rows(&sessions, id, 2, 2, &volumes).expect("second page");
+        let second = get_rows(&sessions, &client, id, 2, 2, &volumes).expect("second page");
         assert_eq!(second.len(), 1);
         assert_eq!(second[0].name, "c.txt");
     }
@@ -604,7 +596,13 @@ mod tests {
             true,
             &["$Recycle.Bin".to_string()],
         );
-        let id = sessions.create_session(owner(7), MatchSet::AllFiles(view), &[], HashMap::new());
+        let client = owner(7);
+        let id = sessions.create_session(
+            client.clone(),
+            MatchSet::AllFiles(view),
+            &[],
+            HashMap::new(),
+        );
 
         volumes
             .get_mut(&'C')
@@ -617,7 +615,7 @@ mod tests {
                 is_new_name: true,
             }]);
         assert!(
-            get_rows(&sessions, id, 0, 2, &volumes).is_ok(),
+            get_rows(&sessions, &client, id, 0, 2, &volumes).is_ok(),
             "an ordinary rename keeps the view"
         );
 
@@ -632,7 +630,7 @@ mod tests {
                 is_new_name: true,
             }]);
         assert_eq!(
-            get_rows(&sessions, id, 0, 2, &volumes),
+            get_rows(&sessions, &client, id, 0, 2, &volumes),
             Err(RowsError::Stale {
                 source_id: drive_c()
             })
@@ -644,8 +642,14 @@ mod tests {
         let sessions = SessionManager::default();
         let vol = three_file_volume();
         let (view, volumes) = all_files_view(vol, cairn_core::sort::SortColumn::Name, false, &[]);
-        let id = sessions.create_session(owner(7), MatchSet::AllFiles(view), &[], HashMap::new());
-        let page = get_rows(&sessions, id, 0, 2, &volumes).expect("first page");
+        let client = owner(7);
+        let id = sessions.create_session(
+            client.clone(),
+            MatchSet::AllFiles(view),
+            &[],
+            HashMap::new(),
+        );
+        let page = get_rows(&sessions, &client, id, 0, 2, &volumes).expect("first page");
         assert_eq!(page[0].name, "c.txt");
         assert_eq!(page[1].name, "b.txt");
     }
@@ -657,7 +661,13 @@ mod tests {
         let sessions = SessionManager::default();
         let vol = three_file_volume();
         let (view, volumes) = all_files_view(vol, cairn_core::sort::SortColumn::Name, true, &[]);
-        let id = sessions.create_session(owner(7), MatchSet::AllFiles(view), &[], HashMap::new());
+        let client = owner(7);
+        let id = sessions.create_session(
+            client.clone(),
+            MatchSet::AllFiles(view),
+            &[],
+            HashMap::new(),
+        );
 
         let mut volumes = volumes;
         volumes
@@ -665,7 +675,7 @@ mod tests {
             .expect("volume")
             .ensure_presorted_column(cairn_core::sort::SortColumn::Size);
         assert_eq!(
-            get_rows(&sessions, id, 0, 2, &volumes),
+            get_rows(&sessions, &client, id, 0, 2, &volumes),
             Err(RowsError::Stale {
                 source_id: drive_c()
             })
@@ -676,10 +686,11 @@ mod tests {
     fn unchanged_volumes_serve_pages() {
         let sessions = SessionManager::default();
         let vol = volume_with("notes.txt");
-        let session_id = create_items(&sessions, owner(7), vec![item(vol.generation())]);
+        let client = owner(7);
+        let session_id = create_items(&sessions, client.clone(), vec![item(vol.generation())]);
         let volumes = HashMap::from([('C', vol)]);
 
-        let rows = get_rows(&sessions, session_id, 0, 10, &volumes)
+        let rows = get_rows(&sessions, &client, session_id, 0, 10, &volumes)
             .expect("a valid session must page normally");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].name, "notes.txt");
@@ -689,12 +700,13 @@ mod tests {
     fn a_rebuilt_volume_refuses_stale_pages_instead_of_serving_other_rows() {
         let sessions = SessionManager::default();
         let vol = volume_with("notes.txt");
-        let session_id = create_items(&sessions, owner(7), vec![item(vol.generation())]);
+        let client = owner(7);
+        let session_id = create_items(&sessions, client.clone(), vec![item(vol.generation())]);
         let mut volumes = HashMap::from([('C', vol)]);
 
         // Replacing the table (rescan, reload, compaction) invalidates every cached record index.
         volumes.get_mut(&'C').unwrap().clear();
-        let error = get_rows(&sessions, session_id, 0, 10, &volumes)
+        let error = get_rows(&sessions, &client, session_id, 0, 10, &volumes)
             .expect_err("a stale page must not be served");
         assert_eq!(
             error,
@@ -709,10 +721,11 @@ mod tests {
         let sessions = SessionManager::new(1, DEFAULT_SESSION_TTL, SystemClock::new());
         let vol = volume_with("notes.txt");
         let volumes = HashMap::from([('C', vol)]);
-        let first = create_items(&sessions, owner(7), vec![item(0)]);
-        create_items(&sessions, owner(7), Vec::new());
+        let client = owner(7);
+        let first = create_items(&sessions, client.clone(), vec![item(0)]);
+        create_items(&sessions, client.clone(), Vec::new());
         assert_eq!(
-            get_rows(&sessions, first, 0, 10, &volumes),
+            get_rows(&sessions, &client, first, 0, 10, &volumes),
             Err(RowsError::UnknownSession)
         );
     }
@@ -754,21 +767,22 @@ mod tests {
         let generation = vol.generation();
         let volumes = HashMap::from([('C', vol)]);
 
-        let s1 = create_items(&sessions, owner(7), vec![item(generation)]);
+        let client = owner(7);
+        let s1 = create_items(&sessions, client.clone(), vec![item(generation)]);
         clock.advance(Duration::from_millis(20));
-        let s2 = create_items(&sessions, owner(7), vec![item(generation)]);
+        let s2 = create_items(&sessions, client.clone(), vec![item(generation)]);
 
         clock.advance(Duration::from_millis(20));
-        assert!(get_rows(&sessions, s1, 0, 10, &volumes).is_ok());
+        assert!(get_rows(&sessions, &client, s1, 0, 10, &volumes).is_ok());
 
-        let s3 = create_items(&sessions, owner(7), vec![item(generation)]);
+        let s3 = create_items(&sessions, client.clone(), vec![item(generation)]);
 
-        assert!(get_rows(&sessions, s1, 0, 10, &volumes).is_ok());
+        assert!(get_rows(&sessions, &client, s1, 0, 10, &volumes).is_ok());
         assert_eq!(
-            get_rows(&sessions, s2, 0, 10, &volumes),
+            get_rows(&sessions, &client, s2, 0, 10, &volumes),
             Err(RowsError::UnknownSession)
         );
-        assert!(get_rows(&sessions, s3, 0, 10, &volumes).is_ok());
+        assert!(get_rows(&sessions, &client, s3, 0, 10, &volumes).is_ok());
     }
 
     #[test]
@@ -785,19 +799,20 @@ mod tests {
         let generation = vol.generation();
         let volumes = HashMap::from([('C', vol)]);
 
-        let s1 = create_items(&sessions, owner(7), vec![item(generation)]);
+        let client = owner(7);
+        let s1 = create_items(&sessions, client.clone(), vec![item(generation)]);
         clock.advance(Duration::from_secs(299));
-        let _s2 = create_items(&sessions, owner(7), vec![item(generation)]);
+        let _s2 = create_items(&sessions, client.clone(), vec![item(generation)]);
         assert!(
-            get_rows(&sessions, s1, 0, 10, &volumes).is_ok(),
+            get_rows(&sessions, &client, s1, 0, 10, &volumes).is_ok(),
             "session accessed before TTL must stay live"
         );
 
         // Accessing s1 reset its idle timer; advance full 300s to cross expiry.
         clock.advance(Duration::from_secs(300));
-        let _s3 = create_items(&sessions, owner(7), vec![item(generation)]);
+        let _s3 = create_items(&sessions, client.clone(), vec![item(generation)]);
         assert_eq!(
-            get_rows(&sessions, s1, 0, 10, &volumes),
+            get_rows(&sessions, &client, s1, 0, 10, &volumes),
             Err(RowsError::UnknownSession)
         );
     }
@@ -816,27 +831,29 @@ mod tests {
         let generation = vol.generation();
         let volumes = std::sync::Arc::new(HashMap::from([('C', vol)]));
 
-        let s1 = create_items(&sessions, owner(7), vec![item(generation)]);
+        let client = owner(7);
+        let s1 = create_items(&sessions, client.clone(), vec![item(generation)]);
         clock.advance(Duration::from_secs(1));
-        let s2 = create_items(&sessions, owner(7), vec![item(generation)]);
+        let s2 = create_items(&sessions, client.clone(), vec![item(generation)]);
         clock.advance(Duration::from_secs(1));
 
         std::thread::scope(|scope| {
             for _ in 0..4 {
                 let s = sessions.clone();
                 let v = volumes.clone();
+                let c = client.clone();
                 scope.spawn(move || {
                     for _ in 0..25 {
-                        assert!(get_rows(&s, s1, 0, 10, &v).is_ok());
+                        assert!(get_rows(&s, &c, s1, 0, 10, &v).is_ok());
                     }
                 });
             }
         });
 
-        let _s3 = create_items(&sessions, owner(7), vec![item(generation)]);
-        assert!(get_rows(&sessions, s1, 0, 10, &volumes).is_ok());
+        let _s3 = create_items(&sessions, client.clone(), vec![item(generation)]);
+        assert!(get_rows(&sessions, &client, s1, 0, 10, &volumes).is_ok());
         assert_eq!(
-            get_rows(&sessions, s2, 0, 10, &volumes),
+            get_rows(&sessions, &client, s2, 0, 10, &volumes),
             Err(RowsError::UnknownSession)
         );
     }
@@ -922,17 +939,17 @@ mod tests {
 
         sessions.release_client(&mine);
         assert!(
-            get_rows(&sessions, my_session, 0, 10, &volumes).is_ok(),
+            get_rows(&sessions, &mine, my_session, 0, 10, &volumes).is_ok(),
             "a remaining connection keeps the session"
         );
 
         sessions.release_client(&mine);
         assert_eq!(
-            get_rows(&sessions, my_session, 0, 10, &volumes),
+            get_rows(&sessions, &mine, my_session, 0, 10, &volumes),
             Err(RowsError::UnknownSession)
         );
         assert!(
-            get_rows(&sessions, other_session, 0, 10, &volumes).is_ok(),
+            get_rows(&sessions, &other, other_session, 0, 10, &volumes).is_ok(),
             "another client's session is untouched"
         );
     }
@@ -990,8 +1007,9 @@ mod tests {
         );
 
         let sessions = SessionManager::default();
+        let client = owner(11);
         let session_id = sessions.create_session(
-            owner(11),
+            client.clone(),
             MatchSet::Items(vec![SearchResultItem {
                 source_id,
                 record_idx: idx,
@@ -1004,7 +1022,8 @@ mod tests {
         let volumes = HashMap::new();
         let mut folders = HashMap::from([(source_id, source)]);
         let rows = sessions
-            .get_rows_multi_unchecked(
+            .get_rows_multi(
+                &client,
                 session_id,
                 0,
                 10,
@@ -1023,7 +1042,8 @@ mod tests {
         // Rescanning advances folder generation -> stale error names the folder source id.
         folders.get_mut(&source_id).unwrap().rescan(&[]).unwrap();
         assert_eq!(
-            sessions.get_rows_multi_unchecked(
+            sessions.get_rows_multi(
+                &client,
                 session_id,
                 0,
                 10,
@@ -1140,8 +1160,9 @@ mod tests {
                     names
                 };
 
+                let client = owner(12);
                 let session_id = sessions.create_session(
-                    owner(12),
+                    client.clone(),
                     MatchSet::AllFiles(view),
                     &[],
                     HashMap::new(),
@@ -1171,7 +1192,7 @@ mod tests {
                 for &offset in &offsets {
                     for &limit in &limits {
                         let page = sessions
-                            .get_rows_multi_unchecked(session_id, offset, limit, &tables)
+                            .get_rows_multi(&client, session_id, offset, limit, &tables)
                             .expect("page should succeed");
                         let actual: Vec<&str> = page.iter().map(|row| row.name.as_str()).collect();
                         let expected: Vec<&str> = if offset >= total {
@@ -1201,8 +1222,13 @@ mod tests {
             let vol = populated_volume(120_000, 2_000, 0);
             let (view, volumes) =
                 all_files_view(vol, cairn_core::sort::SortColumn::Name, sort_asc, &rules);
-            let session_id =
-                sessions.create_session(owner(13), MatchSet::AllFiles(view), &[], HashMap::new());
+            let client = owner(13);
+            let session_id = sessions.create_session(
+                client.clone(),
+                MatchSet::AllFiles(view),
+                &[],
+                HashMap::new(),
+            );
             let tables = SourceTables {
                 volumes: &volumes,
                 folders: &folders,
@@ -1213,7 +1239,7 @@ mod tests {
             for step in 0..50usize {
                 let offset = 50_000 + step * 1_200;
                 let page = sessions
-                    .get_rows_multi_unchecked(session_id, offset, 200, &tables)
+                    .get_rows_multi(&client, session_id, offset, 200, &tables)
                     .expect("deep page");
                 assert_eq!(page.len(), 200);
             }

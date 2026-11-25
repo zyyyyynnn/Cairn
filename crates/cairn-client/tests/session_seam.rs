@@ -726,3 +726,161 @@ async fn oversized_frame_shrinks_read_buf_back_to_baseline_and_reuses_write_buf(
     drop(client);
     server_task.await.expect("server join");
 }
+
+#[tokio::test]
+async fn non_idempotent_control_mutation_does_not_retry_after_cached_connection_drop() {
+    let pipe = unique_pipe_name("no_retry_mut");
+    let s1 = ServerOptions::new()
+        .first_pipe_instance(true)
+        .create(&pipe)
+        .expect("first server");
+
+    let rescan_calls = Arc::new(AtomicUsize::new(0));
+    let rescan_srv = rescan_calls.clone();
+    let pipe_srv = pipe.clone();
+
+    let server_task = tokio::spawn(async move {
+        let mut s1 = s1;
+        s1.connect().await.expect("accept 1");
+        let mut s2 = ServerOptions::new()
+            .first_pipe_instance(false)
+            .create(&pipe_srv)
+            .expect("second server");
+
+        let mut buf = Vec::new();
+        while let Some(req) = read_one_request(&mut s1, &mut buf).await {
+            match req {
+                ClientRequest::Hello { .. } => {
+                    write_response(
+                        &mut s1,
+                        ResponsePayload::HelloAck {
+                            server_protocol_version: PROTOCOL_VERSION as u32,
+                            caller_is_admin: false,
+                        },
+                    )
+                    .await;
+                }
+                ClientRequest::GetStatus => {
+                    write_response(&mut s1, ResponsePayload::StatusAck).await;
+                }
+                ClientRequest::Rescan { .. } => {
+                    rescan_srv.fetch_add(1, Ordering::SeqCst);
+                    // Simulate connection loss after request was already received by server.
+                    break;
+                }
+                other => panic!("unexpected req on conn 1: {other:?}"),
+            }
+        }
+        drop(s1);
+
+        s2.connect().await.expect("accept 2");
+        buf.clear();
+        while let Some(req) = read_one_request(&mut s2, &mut buf).await {
+            let reply = match req {
+                ClientRequest::Hello { .. } => ResponsePayload::HelloAck {
+                    server_protocol_version: PROTOCOL_VERSION as u32,
+                    caller_is_admin: false,
+                },
+                ClientRequest::GetStatus => ResponsePayload::StatusAck,
+                other => panic!("unexpected req on conn 2 (must not retry rescan): {other:?}"),
+            };
+            write_response(&mut s2, reply).await;
+        }
+    });
+
+    let session = ServiceSession::for_pipe(pipe);
+    session
+        .get_status()
+        .await
+        .expect("prime cached control slot");
+    let err = session
+        .rescan(None)
+        .await
+        .expect_err("mutating call must surface disconnect without automatic retry");
+    assert!(matches!(err, ClientError::ConnectionClosed));
+
+    // Poisoned slot must have been evicted so a follow-up call connects cleanly.
+    session
+        .get_status()
+        .await
+        .expect("follow-up idempotent status must reconnect");
+    drop(session);
+    server_task.await.expect("server join");
+    assert_eq!(rescan_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn cancelling_an_in_flight_rpc_discards_the_partially_used_connection() {
+    let pipe = unique_pipe_name("cancel_rpc");
+    let first = ServerOptions::new()
+        .first_pipe_instance(true)
+        .create(&pipe)
+        .expect("first server");
+    let (request_tx, request_rx) = oneshot::channel();
+    let pipe_srv = pipe.clone();
+
+    let server_task = tokio::spawn(async move {
+        let mut first = first;
+        first.connect().await.expect("accept first");
+        let mut second = ServerOptions::new()
+            .first_pipe_instance(false)
+            .create(&pipe_srv)
+            .expect("second server");
+        let mut buf = Vec::new();
+        let mut status_calls = 0usize;
+        while let Some(req) = read_one_request(&mut first, &mut buf).await {
+            match req {
+                ClientRequest::Hello { .. } => {
+                    write_response(
+                        &mut first,
+                        ResponsePayload::HelloAck {
+                            server_protocol_version: PROTOCOL_VERSION as u32,
+                            caller_is_admin: false,
+                        },
+                    )
+                    .await;
+                }
+                ClientRequest::GetStatus if status_calls == 0 => {
+                    status_calls += 1;
+                    write_response(&mut first, ResponsePayload::StatusAck).await;
+                }
+                ClientRequest::GetStatus => {
+                    let _ = request_tx.send(());
+                    break;
+                }
+                other => panic!("unexpected request on first connection: {other:?}"),
+            }
+        }
+
+        second.connect().await.expect("accept replacement");
+        buf.clear();
+        while let Some(req) = read_one_request(&mut second, &mut buf).await {
+            let reply = match req {
+                ClientRequest::Hello { .. } => ResponsePayload::HelloAck {
+                    server_protocol_version: PROTOCOL_VERSION as u32,
+                    caller_is_admin: false,
+                },
+                ClientRequest::GetStatus => ResponsePayload::StatusAck,
+                other => panic!("unexpected request on replacement: {other:?}"),
+            };
+            write_response(&mut second, reply).await;
+        }
+    });
+
+    let session = ServiceSession::for_pipe(pipe).with_read_timeout(Duration::from_millis(100));
+    session.get_status().await.expect("prime control slot");
+    let pending = {
+        let session = session.clone();
+        tokio::spawn(async move { session.get_status().await })
+    };
+    request_rx.await.expect("server received cancelled request");
+    pending.abort();
+    let _ = pending.await;
+
+    session
+        .get_status()
+        .await
+        .expect("cancelled RPC must force a fresh connection");
+    drop(session);
+    server_task.await.expect("server join");
+}

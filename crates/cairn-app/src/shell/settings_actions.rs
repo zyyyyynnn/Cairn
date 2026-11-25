@@ -17,7 +17,7 @@ use crate::shell::commands::{
 use crate::shell::location::ActiveLocation;
 use crate::shell::settings::THEME_SYSTEM;
 use crate::shell::theme;
-use crate::table::model::{ColumnBoundary, ColumnWidths, SortColumn, TableColumn};
+use crate::table::columns::{ColumnBoundary, ColumnWidths, SortColumn, TableColumn};
 use gpui_kit::gpui::*;
 
 impl CairnApp {
@@ -35,15 +35,11 @@ impl CairnApp {
         self.toggle_sidebar(cx);
     }
 
-    #[cfg(not(test))]
     pub fn save_settings(&mut self) {
-        if let Err(e) = self.settings.save() {
+        if let Err(e) = self.runtime_ports.save_settings(&self.settings) {
             tracing::warn!("Failed to save settings: {}", e);
         }
     }
-
-    #[cfg(test)]
-    pub fn save_settings(&mut self) {}
 
     fn commit_sort_spec_change(&mut self, cx: &mut Context<'_, Self>) {
         self.settings.columns.sort_spec = self.results.table.sort_spec.to_clause();
@@ -385,7 +381,7 @@ mod tests {
                         assert!(this.settings.exclude_hidden);
                         assert!(this.settings.exclude_system);
 
-                        use crate::table::model::{OptionalColumn, TableColumn};
+                        use crate::table::columns::{OptionalColumn, TableColumn};
                         this.settings.columns = Default::default();
                         this.results.table.sort_spec = cairn_core::sort::SortSpec::default();
                         this.toggle_table_column(TableColumn::Name, cx);

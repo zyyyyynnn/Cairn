@@ -123,6 +123,7 @@ docs/              产品规格、工程架构与外部调研文档
 | [IPC 与安全](docs/engineering/ipc-security.md) | 协议帧限制、管道 ACL、调用方令牌鉴权与配置保护 |
 | [性能](docs/engineering/performance.md) | 性能目标、内存预算与查询延迟 |
 | [质量](docs/engineering/quality.md) | 测试分层与 CI 质量门禁 |
+| [测试与验证](docs/engineering/testing.md) | 分层测试规则、`#[ignore]` 台账与 CI 流水线 |
 | [打包与发布](docs/engineering/release.md) | GPUI Setup、WiX MSI、校验清单与发布门禁 |
 | [研究与竞品](docs/research/README.md) | 外部产品调研与证据索引 |
 | [贡献指南](CONTRIBUTING.md) | 开发环境、工程规范与 PR 流程 |

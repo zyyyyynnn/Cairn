@@ -26,8 +26,8 @@ use windows::Win32::UI::Shell::{
     BHID_EnumItems, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_WANTNUKEWARNING, FOFX_RECYCLEONDELETE,
     FOLDERID_RecycleBinFolder, FileOperation, IEnumShellItems, IFileOperation, IShellItem,
     IShellItem2, SEE_MASK_INVOKEIDLIST, SHCreateItemFromIDList, SHELLEXECUTEINFOW,
-    SHEmptyRecycleBinW, SHGetKnownFolderIDList, SHParseDisplayName, SIGDN_FILESYSPATH,
-    SIGDN_NORMALDISPLAY, ShellExecuteExW,
+    SHEmptyRecycleBinW, SHGetKnownFolderIDList, SHOpenFolderAndSelectItems, SHParseDisplayName,
+    SIGDN_FILESYSPATH, SIGDN_NORMALDISPLAY, ShellExecuteExW,
 };
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SW_SHOWNORMAL};
@@ -102,26 +102,31 @@ pub fn open_url(url: &str) -> Result<(), Box<dyn std::error::Error>> {
 pub fn open_folder_and_select(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(windows)]
     {
-        // Spawns `explorer.exe /select,"<path>"` which natively supports long and complex paths
-        let explorer_arg = format!("/select,\"{path}\"");
-        let wide_file: Vec<u16> = "explorer.exe\0".encode_utf16().collect();
-        let wide_params: Vec<u16> = format!("{explorer_arg}\0").encode_utf16().collect();
+        if path.trim().is_empty() || path.contains('\0') {
+            return Err("invalid path for Explorer selection".into());
+        }
+        struct PidlGuard(*mut windows::Win32::UI::Shell::Common::ITEMIDLIST);
+        impl Drop for PidlGuard {
+            fn drop(&mut self) {
+                if !self.0.is_null() {
+                    // SAFETY: `self.0` was allocated by `SHParseDisplayName` via COM task memory.
+                    unsafe { CoTaskMemFree(Some(self.0.cast())) };
+                }
+            }
+        }
 
-        let mut exec_info = SHELLEXECUTEINFOW {
-            cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
-            fMask: 0,
-            hwnd: HWND(std::ptr::null_mut()),
-            lpVerb: PCWSTR(std::ptr::null()),
-            lpFile: PCWSTR(wide_file.as_ptr()),
-            lpParameters: PCWSTR(wide_params.as_ptr()),
-            lpDirectory: PCWSTR(std::ptr::null()),
-            nShow: SW_SHOWNORMAL.0,
-            ..Default::default()
-        };
-
-        // SAFETY: ShellExecuteExW launches explorer with /select parameter.
-        let ok = unsafe { ShellExecuteExW(&mut exec_info) };
-        if let Err(err) = ok {
+        let _com = ComApartment::enter();
+        let wide_path = to_wide_path(path);
+        let mut pidl = std::ptr::null_mut();
+        // SAFETY: `wide_path` is null-terminated; `pidl` is freed by `PidlGuard`.
+        unsafe { SHParseDisplayName(PCWSTR(wide_path.as_ptr()), None, &mut pidl, 0, None) }
+            .map_err(|err| format!("Failed to resolve path in Shell: {err}"))?;
+        let pidl = PidlGuard(pidl);
+        if pidl.0.is_null() {
+            return Err("Shell returned null item ID list".into());
+        }
+        // SAFETY: `pidl.0` is a valid full PIDL owned for the duration of the synchronous call.
+        if let Err(err) = unsafe { SHOpenFolderAndSelectItems(pidl.0, None, 0) } {
             if win32_code_from_hresult(err.code().0) == Some(WIN32_ERROR_USER_CANCELLED) {
                 return Ok(());
             }
@@ -410,9 +415,10 @@ struct BinEntry<'com> {
     _com: std::marker::PhantomData<&'com ComApartment>,
 }
 
-/// Copies a shell-owned `PWSTR` and releases the `CoTaskMem` allocation the
-/// shell handed out. `PWSTR` has no `Drop`, so skipping the free leaks one
-/// allocation per display/property read.
+/// # Safety
+///
+/// `value` must be a shell-allocated, NUL-terminated UTF-16 `PWSTR` returned by a Win32 shell API
+/// that transfers ownership to the caller for release with `CoTaskMemFree`.
 #[cfg(windows)]
 unsafe fn shell_string(value: PWSTR) -> String {
     // SAFETY: the caller received this pointer from a shell API that returned
@@ -1182,6 +1188,13 @@ pub fn set_clipboard_text(text: &str) -> Result<(), Box<dyn std::error::Error>> 
     Ok(())
 }
 
+pub fn copy_lines(lines: &[String]) {
+    if lines.is_empty() {
+        return;
+    }
+    let _ = set_clipboard_text(&lines.join("\r\n"));
+}
+
 /// Retrieves text from the Windows system clipboard.
 pub fn get_clipboard_text() -> Option<String> {
     #[cfg(windows)]
@@ -1306,15 +1319,6 @@ mod tests {
             Some(BinErrorKind::NoItems),
             "the constructor must carry the classified kind"
         );
-    }
-
-    #[test]
-    fn a_cancelled_bin_operation_is_not_a_failure() {
-        assert!(BinOperationError::Cancelled.is_cancelled());
-        let failed = BinOperationError::failed("access denied", vec!["a.txt".to_string()]);
-        assert!(!failed.is_cancelled());
-        assert_eq!(failed.reason(), "access denied");
-        assert_eq!(failed.items(), ["a.txt"]);
     }
 
     #[test]

@@ -22,7 +22,7 @@ use crate::shell::commands::{
 use crate::shell::settings::{
     LANGUAGE_EN_US, LANGUAGE_SYSTEM, LANGUAGE_ZH_CN, THEME_DARK, THEME_LIGHT, THEME_SYSTEM,
 };
-use crate::table::model::{SortColumn, SortColumnLabel, TableColumn};
+use crate::table::columns::{SortColumn, SortColumnLabel, TableColumn};
 use gpui_kit::gpui::Action;
 
 /// One top-level menu in the title bar. One popup is open at a time, the way a desktop menu bar
@@ -505,22 +505,22 @@ pub static DEFAULT_GROUPS: &[MenuGroupSpec] = &[
                     ],
                     &[
                         GroupCommand::ToggleColumn(TableColumn::Optional(
-                            crate::table::model::OptionalColumn::DateCreated,
+                            crate::table::columns::OptionalColumn::DateCreated,
                         )),
                         GroupCommand::ToggleColumn(TableColumn::Optional(
-                            crate::table::model::OptionalColumn::Length,
+                            crate::table::columns::OptionalColumn::Length,
                         )),
                         GroupCommand::ToggleColumn(TableColumn::Optional(
-                            crate::table::model::OptionalColumn::Author,
+                            crate::table::columns::OptionalColumn::Author,
                         )),
                         GroupCommand::ToggleColumn(TableColumn::Optional(
-                            crate::table::model::OptionalColumn::Tags,
+                            crate::table::columns::OptionalColumn::Tags,
                         )),
                         GroupCommand::ToggleColumn(TableColumn::Optional(
-                            crate::table::model::OptionalColumn::Dimensions,
+                            crate::table::columns::OptionalColumn::Dimensions,
                         )),
                         GroupCommand::ToggleColumn(TableColumn::Optional(
-                            crate::table::model::OptionalColumn::Framerate,
+                            crate::table::columns::OptionalColumn::Framerate,
                         )),
                     ],
                 ],
@@ -639,7 +639,7 @@ pub fn all_commands() -> Vec<GroupCommand> {
 mod tests {
     use super::{GroupCommand, MenuGroup, ZoomPreset, all_commands, group_spec, menu_groups};
     use crate::shell::i18n::I18nManager;
-    use crate::table::model::SortColumn;
+    use crate::table::columns::SortColumn;
     use cairn_ui::theme::{MAX_ZOOM, MIN_ZOOM};
 
     #[test]
@@ -766,7 +766,7 @@ mod tests {
         );
         for non_radio in [
             GroupCommand::ReverseOrder,
-            GroupCommand::ToggleColumn(crate::table::model::TableColumn::Path),
+            GroupCommand::ToggleColumn(crate::table::columns::TableColumn::Path),
             GroupCommand::ToggleCase,
             GroupCommand::ToggleAutostart,
             GroupCommand::ToggleContentSearch,
@@ -874,7 +874,7 @@ mod tests {
 
     #[test]
     fn view_menu_offers_all_table_columns_with_name_locked() {
-        use crate::table::model::TableColumn;
+        use crate::table::columns::TableColumn;
 
         let view = group_spec(MenuGroup::View);
         let commands: Vec<GroupCommand> = view

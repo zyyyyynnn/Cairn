@@ -111,7 +111,7 @@
 - **Cairn 实现现状**：
   - 虚拟表格默认渲染名称、位置、大小、修改日期四列，并支持通过表头右键菜单与“查看 > 显示列”切换创建日期、时长、作者、标签、尺寸、帧速率等可选列；列宽比例与数值对齐符合规范。
   - 排序列与排序方向已接入 `%APPDATA%\Cairn\settings.toml` 读写；四列宽度可拖动表头分隔线调整，并在释放时回写同一配置、下次启动恢复。
-  - 文件名与路径命中区间切片高亮：`query_orchestration.rs` 切片、`rows.rs` 渲染。
+  - 文件名与路径命中区间切片高亮：`crates/cairn-app/src/search/query_orchestration.rs` 切片、`crates/cairn-app/src/table/rows.rs` 渲染。
   - 全灰阶界面规范（UI-09）下固定采用单色语义矢量图标，保证各扩展名类别完整覆盖并维持高密度滚动性能。
 
 ### 3.3 导航结构（Navigation Structure）

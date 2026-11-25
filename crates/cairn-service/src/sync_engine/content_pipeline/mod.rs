@@ -31,6 +31,8 @@ pub(in crate::sync_engine) struct ContentPipeline {
     status: RwLock<ContentIndexStatus>,
     cancel: Arc<AtomicBool>,
     shutdown: Arc<AtomicBool>,
+    cancel_lock: Mutex<()>,
+    inline_clear_lock: Mutex<()>,
     commands: Mutex<Option<std::sync::mpsc::Sender<ContentCommand>>>,
 }
 
@@ -57,6 +59,8 @@ impl ContentPipeline {
             status: RwLock::new(status),
             cancel: Arc::new(AtomicBool::new(false)),
             shutdown: Arc::new(AtomicBool::new(false)),
+            cancel_lock: Mutex::new(()),
+            inline_clear_lock: Mutex::new(()),
             commands: Mutex::new(None),
         }
     }
@@ -93,6 +97,7 @@ const CONTENT_BACKFILL_MARKER_TMP: &str = "backfill.complete.json.tmp";
 /// Commands handled by the single content thread. The thread owns the full-backfill state machine
 /// so the pipe server never blocks on a disk-sized job.
 pub enum ContentCommand {
+    EnsureStarted,
     Start,
     IndexChanges {
         tasks: Vec<ContentIndexTask>,

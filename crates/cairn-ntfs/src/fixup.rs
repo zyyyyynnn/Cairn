@@ -32,7 +32,7 @@ pub enum FixupError {
 ///
 /// Modifies `buf` in-place to restore original bytes before disk write.
 pub fn apply_fixup(buf: &mut [u8], sector_size: usize) -> Result<(), FixupError> {
-    if buf.len() < 48 {
+    if buf.len() < 48 || sector_size < 512 || !sector_size.is_power_of_two() {
         return Err(FixupError::BufferTooSmall(buf.len()));
     }
 
@@ -45,7 +45,24 @@ pub fn apply_fixup(buf: &mut [u8], sector_size: usize) -> Result<(), FixupError>
     let usa_offset = u16::from_le_bytes([buf[0x04], buf[0x05]]) as usize;
     let usa_count = u16::from_le_bytes([buf[0x06], buf[0x07]]) as usize;
 
-    if usa_offset + usa_count * 2 > buf.len() || usa_count < 1 {
+    let Some(usa_bytes) = usa_count.checked_mul(2) else {
+        return Err(FixupError::UsaOutOfBounds {
+            offset: usa_offset,
+            count: usa_count,
+        });
+    };
+    let Some(usa_end) = usa_offset.checked_add(usa_bytes) else {
+        return Err(FixupError::UsaOutOfBounds {
+            offset: usa_offset,
+            count: usa_count,
+        });
+    };
+    if usa_count < 2
+        || usa_end > buf.len()
+        || (usa_count - 1)
+            .checked_mul(sector_size)
+            .is_none_or(|covered| covered > buf.len())
+    {
         return Err(FixupError::UsaOutOfBounds {
             offset: usa_offset,
             count: usa_count,
@@ -57,10 +74,6 @@ pub fn apply_fixup(buf: &mut [u8], sector_size: usize) -> Result<(), FixupError>
 
     for i in 1..=num_sectors {
         let sector_end = i * sector_size;
-        if sector_end > buf.len() {
-            break;
-        }
-
         let fixup_pos = sector_end - 2;
         let actual_usn = u16::from_le_bytes([buf[fixup_pos], buf[fixup_pos + 1]]);
 
@@ -105,5 +118,28 @@ mod tests {
 
         assert_eq!(&record[510..512], &[0x11, 0x22]);
         assert_eq!(&record[1022..1024], &[0x33, 0x44]);
+    }
+
+    #[test]
+    fn apply_fixup_rejects_excessive_usa_count_and_undersized_sector() {
+        let mut record = vec![0u8; 1024];
+        record[0..4].copy_from_slice(b"FILE");
+        record[4..6].copy_from_slice(&48u16.to_le_bytes());
+        record[6..8].copy_from_slice(&4u16.to_le_bytes()); // covers 3 * 512 = 1536 > 1024
+        assert!(matches!(
+            apply_fixup(&mut record, 512),
+            Err(FixupError::UsaOutOfBounds { .. })
+        ));
+
+        record[6..8].copy_from_slice(&1u16.to_le_bytes()); // < 2 entries
+        assert!(matches!(
+            apply_fixup(&mut record, 512),
+            Err(FixupError::UsaOutOfBounds { .. })
+        ));
+
+        assert!(matches!(
+            apply_fixup(&mut record, 128),
+            Err(FixupError::BufferTooSmall(_))
+        ));
     }
 }

@@ -8,6 +8,10 @@
 #![windows_subsystem = "windows"]
 
 fn main() {
+    if let Err(error) = cairn_setup::enable_safe_dll_search() {
+        eprintln!("failed to restrict DLL search: {error}");
+        std::process::exit(1);
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|arg| is_quiet(arg)) {
         let restart_app = args.iter().any(|arg| is_restart_app(arg));

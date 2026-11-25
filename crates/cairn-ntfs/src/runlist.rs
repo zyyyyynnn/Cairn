@@ -12,6 +12,8 @@ pub enum RunlistError {
     UnexpectedEnd(usize),
     #[error("Invalid field size: len_bytes {len_bytes}, offset_bytes {offset_bytes}")]
     InvalidFieldSize { len_bytes: u8, offset_bytes: u8 },
+    #[error("Invalid cluster count or overflowing LCN offset in runlist")]
+    InvalidOffset,
 }
 
 /// A contiguous chunk of clusters on the physical volume.
@@ -26,7 +28,7 @@ pub struct DataRun {
 /// Parses an NTFS Data Runlist from raw attribute bytes.
 pub fn parse_runlist(bytes: &[u8], mut current_lcn: i64) -> Result<Vec<DataRun>, RunlistError> {
     let mut runs = Vec::new();
-    let mut cursor = 0;
+    let mut cursor = 0usize;
 
     while cursor < bytes.len() {
         let header = bytes[cursor];
@@ -46,7 +48,13 @@ pub fn parse_runlist(bytes: &[u8], mut current_lcn: i64) -> Result<Vec<DataRun>,
             });
         }
 
-        if cursor + len_bytes + offset_bytes > bytes.len() {
+        let Some(end) = cursor
+            .checked_add(len_bytes)
+            .and_then(|pos| pos.checked_add(offset_bytes))
+        else {
+            return Err(RunlistError::UnexpectedEnd(cursor));
+        };
+        if end > bytes.len() {
             return Err(RunlistError::UnexpectedEnd(cursor));
         }
 
@@ -54,6 +62,9 @@ pub fn parse_runlist(bytes: &[u8], mut current_lcn: i64) -> Result<Vec<DataRun>,
         let mut cluster_count = 0u64;
         for i in 0..len_bytes {
             cluster_count |= (bytes[cursor + i] as u64) << (i * 8);
+        }
+        if cluster_count == 0 {
+            return Err(RunlistError::InvalidOffset);
         }
         cursor += len_bytes;
 
@@ -65,14 +76,21 @@ pub fn parse_runlist(bytes: &[u8], mut current_lcn: i64) -> Result<Vec<DataRun>,
             for i in 0..offset_bytes {
                 delta |= (bytes[cursor + i] as i64) << (i * 8);
             }
-            // Sign extend if the most significant bit is set
-            let sign_bit = 1i64 << (offset_bytes * 8 - 1);
-            if (delta & sign_bit) != 0 {
-                delta |= !0i64 << (offset_bytes * 8);
+            let shift = offset_bytes * 8;
+            if shift < 64 {
+                let sign_bit = 1i64 << (shift - 1);
+                if (delta & sign_bit) != 0 {
+                    delta |= !0i64 << shift;
+                }
             }
             cursor += offset_bytes;
 
-            current_lcn += delta;
+            current_lcn = current_lcn
+                .checked_add(delta)
+                .ok_or(RunlistError::InvalidOffset)?;
+            if current_lcn < 0 {
+                return Err(RunlistError::InvalidOffset);
+            }
             Some(current_lcn)
         };
 
@@ -111,5 +129,23 @@ mod tests {
                 cluster_count: 8
             }
         );
+    }
+
+    #[test]
+    fn parse_runlist_rejects_zero_clusters_8byte_overflow_and_negative_lcn() {
+        // Zero cluster count
+        assert!(parse_runlist(&[0x11, 0x00, 0x04, 0x00], 0).is_err());
+        // 8-byte offset shift must not panic; negative LCN result must return Err
+        let neg_delta = [
+            0x81, 0x04, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00,
+        ];
+        assert!(parse_runlist(&neg_delta, 0).is_err());
+        // Signed overflow past i64::MAX
+        let pos_overflow = [
+            0x81, 0x02, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        assert!(parse_runlist(&pos_overflow, i64::MAX).is_err());
+        // Oversized field count (> 8)
+        assert!(parse_runlist(&[0x91, 0x01, 0x01], 0).is_err());
     }
 }

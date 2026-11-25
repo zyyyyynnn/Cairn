@@ -71,7 +71,7 @@ impl ServiceSession {
     }
 
     pub async fn get_status(&self) -> Result<Envelope<ResponsePayload>, ClientError> {
-        self.call_control(|client| Box::pin(client.get_status()))
+        self.call_control(true, |client| Box::pin(client.get_status()))
             .await
     }
 
@@ -86,7 +86,7 @@ impl ServiceSession {
     ) -> Result<Envelope<ResponsePayload>, ClientError> {
         let raw_query = raw_query.to_string();
         let sort_spec = sort_spec.clone();
-        self.call_primary(|client| {
+        self.call_primary(true, |client| {
             let raw_query = raw_query.clone();
             let sort_spec = sort_spec.clone();
             Box::pin(async move {
@@ -111,17 +111,19 @@ impl ServiceSession {
         offset: usize,
         limit: usize,
     ) -> Result<Envelope<ResponsePayload>, ClientError> {
-        self.call_primary(|client| Box::pin(client.get_rows(session_id, offset, limit)))
-            .await
+        self.call_primary(true, |client| {
+            Box::pin(client.get_rows(session_id, offset, limit))
+        })
+        .await
     }
 
     pub async fn get_content_index_status(&self) -> Result<Envelope<ResponsePayload>, ClientError> {
-        self.call_control(|client| Box::pin(client.get_content_index_status()))
+        self.call_control(true, |client| Box::pin(client.get_content_index_status()))
             .await
     }
 
     pub async fn clear_content_index(&self) -> Result<Envelope<ResponsePayload>, ClientError> {
-        self.call_control(|client| Box::pin(client.clear_content_index()))
+        self.call_control(false, |client| Box::pin(client.clear_content_index()))
             .await
     }
 
@@ -129,12 +131,12 @@ impl ServiceSession {
         &self,
         volume_id: Option<u16>,
     ) -> Result<Envelope<ResponsePayload>, ClientError> {
-        self.call_control(|client| Box::pin(client.rescan(volume_id)))
+        self.call_control(false, |client| Box::pin(client.rescan(volume_id)))
             .await
     }
 
     pub async fn get_sources(&self) -> Result<Envelope<ResponsePayload>, ClientError> {
-        self.call_control(|client| Box::pin(client.get_sources()))
+        self.call_control(true, |client| Box::pin(client.get_sources()))
             .await
     }
 
@@ -143,7 +145,7 @@ impl ServiceSession {
         path: &str,
     ) -> Result<Envelope<ResponsePayload>, ClientError> {
         let path = path.to_string();
-        self.call_control(|client| {
+        self.call_control(false, |client| {
             let path = path.clone();
             Box::pin(async move { client.add_folder_source(&path).await })
         })
@@ -155,7 +157,7 @@ impl ServiceSession {
         path: &str,
     ) -> Result<Envelope<ResponsePayload>, ClientError> {
         let path = path.to_string();
-        self.call_control(|client| {
+        self.call_control(false, |client| {
             let path = path.clone();
             Box::pin(async move { client.remove_folder_source(&path).await })
         })
@@ -166,14 +168,14 @@ impl ServiceSession {
         &self,
         source_id: SourceId,
     ) -> Result<Envelope<ResponsePayload>, ClientError> {
-        self.call_control(|client| Box::pin(client.rescan_source(source_id)))
+        self.call_control(false, |client| Box::pin(client.rescan_source(source_id)))
             .await
     }
 
     pub async fn get_property_index_status(
         &self,
     ) -> Result<Envelope<ResponsePayload>, ClientError> {
-        self.call_control(|client| Box::pin(client.get_property_index_status()))
+        self.call_control(true, |client| Box::pin(client.get_property_index_status()))
             .await
     }
 
@@ -181,8 +183,10 @@ impl ServiceSession {
         &self,
         enabled: bool,
     ) -> Result<Envelope<ResponsePayload>, ClientError> {
-        self.call_control(|client| Box::pin(client.set_property_index_enabled(enabled)))
-            .await
+        self.call_control(false, |client| {
+            Box::pin(client.set_property_index_enabled(enabled))
+        })
+        .await
     }
 
     pub async fn get_index_journal(
@@ -190,25 +194,29 @@ impl ServiceSession {
         after_seq: u64,
         limit: usize,
     ) -> Result<Envelope<ResponsePayload>, ClientError> {
-        self.call_control(|client| Box::pin(client.get_index_journal(after_seq, limit)))
-            .await
+        self.call_control(true, |client| {
+            Box::pin(client.get_index_journal(after_seq, limit))
+        })
+        .await
     }
 
     pub async fn set_index_journal_enabled(
         &self,
         enabled: bool,
     ) -> Result<Envelope<ResponsePayload>, ClientError> {
-        self.call_control(|client| Box::pin(client.set_index_journal_enabled(enabled)))
-            .await
+        self.call_control(false, |client| {
+            Box::pin(client.set_index_journal_enabled(enabled))
+        })
+        .await
     }
 
     pub async fn get_config(&self) -> Result<Envelope<ResponsePayload>, ClientError> {
-        self.call_control(|client| Box::pin(client.get_config()))
+        self.call_control(true, |client| Box::pin(client.get_config()))
             .await
     }
 
     pub async fn reload_service_config(&self) -> Result<(bool, String), ClientError> {
-        self.call_control(|client| Box::pin(client.reload_service_config()))
+        self.call_control(false, |client| Box::pin(client.reload_service_config()))
             .await
     }
 
@@ -217,7 +225,7 @@ impl ServiceSession {
         config_toml: &str,
     ) -> Result<(bool, String), ClientError> {
         let config_toml = config_toml.to_string();
-        self.call_control(|client| {
+        self.call_control(false, |client| {
             let config_toml = config_toml.clone();
             Box::pin(async move { client.submit_service_config(&config_toml).await })
         })
@@ -226,13 +234,13 @@ impl ServiceSession {
 
     /// Sends query cancellation on a connection independent of the primary slot.
     pub async fn cancel(&self, query_id: u64) -> Result<Envelope<ResponsePayload>, ClientError> {
-        self.call_slot(&self.inner.cancel, |client| {
+        self.call_slot(&self.inner.cancel, true, |client| {
             Box::pin(client.cancel(query_id))
         })
         .await
     }
 
-    async fn call_primary<T, F>(&self, op: F) -> Result<T, ClientError>
+    async fn call_primary<T, F>(&self, idempotent: bool, op: F) -> Result<T, ClientError>
     where
         F: for<'a> FnMut(
             &'a mut CairnClient,
@@ -240,10 +248,10 @@ impl ServiceSession {
             Box<dyn Future<Output = Result<T, ClientError>> + Send + 'a>,
         >,
     {
-        self.call_slot(&self.inner.primary, op).await
+        self.call_slot(&self.inner.primary, idempotent, op).await
     }
 
-    async fn call_control<T, F>(&self, op: F) -> Result<T, ClientError>
+    async fn call_control<T, F>(&self, idempotent: bool, op: F) -> Result<T, ClientError>
     where
         F: for<'a> FnMut(
             &'a mut CairnClient,
@@ -251,12 +259,13 @@ impl ServiceSession {
             Box<dyn Future<Output = Result<T, ClientError>> + Send + 'a>,
         >,
     {
-        self.call_slot(&self.inner.control, op).await
+        self.call_slot(&self.inner.control, idempotent, op).await
     }
 
     async fn call_slot<T, F>(
         &self,
         slot: &Mutex<Option<CairnClient>>,
+        idempotent: bool,
         mut op: F,
     ) -> Result<T, ClientError>
     where
@@ -267,26 +276,28 @@ impl ServiceSession {
         >,
     {
         let mut guard = slot.lock().await;
-        let mut used_cached = guard.is_some();
 
         loop {
-            if guard.is_none() {
-                let mut client = CairnClient::connect_to(&self.inner.pipe_name).await?;
-                client.set_read_timeout(self.inner.read_timeout);
-                *guard = Some(client);
-                used_cached = false;
-            }
-            let client = guard.as_mut().expect("client just connected");
-            match op(client).await {
-                Ok(value) => return Ok(value),
+            let (mut client, used_cached) = match guard.take() {
+                Some(client) => (client, true),
+                None => {
+                    let mut client = CairnClient::connect_to(&self.inner.pipe_name).await?;
+                    client.set_read_timeout(self.inner.read_timeout);
+                    (client, false)
+                }
+            };
+            match op(&mut client).await {
+                Ok(value) => {
+                    *guard = Some(client);
+                    return Ok(value);
+                }
                 Err(err) => {
-                    let can_retry = used_cached && should_retry_cached(&err);
-                    if is_connection_poisoned(&err) {
-                        *guard = None;
-                    }
+                    let can_retry = idempotent && used_cached && should_retry_cached(&err);
                     if can_retry {
-                        used_cached = false;
                         continue;
+                    }
+                    if !is_connection_poisoned(&err) {
+                        *guard = Some(client);
                     }
                     return Err(err);
                 }
