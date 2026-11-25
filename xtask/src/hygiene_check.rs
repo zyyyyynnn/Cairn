@@ -11,6 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const TESTING_DOC: &str = "docs/engineering/testing.md";
+const CI_WORKFLOW_DOC: &str = ".github/workflows/ci.yml";
 const IGNORED_SECTION_HEADER: &str = "## 被忽略的测试";
 
 const FORBID_UNSAFE_ENTRYPOINTS: &[&str] = &[
@@ -553,8 +554,76 @@ fn check_sources(
             "{TESTING_DOC}: stale ignored-test entry `{crate_name}` `{fn_name}` (no matching #[ignore] test found)"
         ));
     }
+    check_ci_ignored_test_filters(workspace, &actual, violations)?;
 
     Ok(actual.len())
+}
+
+fn check_ci_ignored_test_filters(
+    workspace: &Path,
+    actual: &BTreeSet<(String, String)>,
+    violations: &mut Vec<String>,
+) -> Result<(), String> {
+    let ci_path = workspace.join(CI_WORKFLOW_DOC);
+    if !ci_path.is_file() {
+        return Ok(());
+    }
+    let ci_text =
+        fs::read_to_string(&ci_path).map_err(|err| format!("{}: {err}", ci_path.display()))?;
+    let valid_filters: BTreeSet<&str> = actual
+        .iter()
+        .map(|(_, name)| runtime_test_name(name))
+        .collect();
+    for (line_no, filter) in extract_ci_ignored_test_filters(&ci_text) {
+        if !valid_filters.contains(filter.as_str()) {
+            violations.push(format!(
+                "{CI_WORKFLOW_DOC}:{line_no}: stale CI ignored-test filter `{filter}` (no matching #[ignore] test found)"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn runtime_test_name(qualified: &str) -> &str {
+    if let Some(rest) = qualified.strip_prefix("tests::")
+        && let Some((_, inner)) = rest.split_once("::")
+    {
+        return inner;
+    }
+    qualified
+}
+
+fn extract_ci_ignored_test_filters(ci_yml: &str) -> Vec<(usize, String)> {
+    let mut filters = Vec::new();
+    for (line_idx, raw) in ci_yml.lines().enumerate() {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if trimmed.contains("Invoke-IgnoredTest")
+            && let Some((_, after_flag)) = trimmed.split_once("-Filter")
+        {
+            if let Some(tok) = after_flag.split_whitespace().next() {
+                let filter = tok.trim_matches(['\'', '"']);
+                if !filter.is_empty() && !filter.contains('$') {
+                    filters.push((line_idx + 1, filter.to_string()));
+                }
+            }
+            continue;
+        }
+        if trimmed.contains("--ignored") && trimmed.contains("--exact") {
+            let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+            for i in 1..tokens.len() {
+                if tokens[i].trim_matches(['\'', '"', ',']) == "--ignored" {
+                    let filter = tokens[i - 1].trim_matches(['\'', '"', ',', ';', '(', ')']);
+                    if !filter.is_empty() && !filter.starts_with('-') && !filter.contains('$') {
+                        filters.push((line_idx + 1, filter.to_string()));
+                    }
+                }
+            }
+        }
+    }
+    filters
 }
 
 fn has_ignore_reason(attr_line: &str) -> bool {
@@ -1707,5 +1776,53 @@ mod tests {
         .expect("dup testing doc");
         let err = check_hygiene(distinct.path()).expect_err("duplicate doc row must fail");
         assert!(err.contains("duplicate ignored-test entry"), "{err}");
+    }
+
+    #[test]
+    fn ci_workflow_ignored_test_filters_must_match_actual_tests() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        seed_valid_workspace(temp.path());
+        fs::create_dir_all(temp.path().join("crates/demo/src/sub")).expect("sub dir");
+        fs::create_dir_all(temp.path().join("crates/demo/tests")).expect("tests dir");
+        fs::create_dir_all(temp.path().join(".github/workflows")).expect("workflows dir");
+
+        fs::write(
+            temp.path().join("crates/demo/src/lib.rs"),
+            "#[cfg(test)]\nmod sub;\n",
+        )
+        .expect("demo lib");
+        fs::write(
+            temp.path().join("crates/demo/src/sub/mod.rs"),
+            "#[test]\n#[ignore = \"requires hardware\"]\nfn hardware_round_trip() {}\n",
+        )
+        .expect("sub mod");
+        fs::write(
+            temp.path().join("crates/demo/tests/seam.rs"),
+            "#[test]\n#[ignore = \"requires seam\"]\nfn seam_round_trip() {}\n",
+        )
+        .expect("seam test");
+        fs::write(
+            temp.path().join("docs/engineering/testing.md"),
+            "# Testing\n\n## 被忽略的测试\n\n| 测试 | 忽略理由 | 运行方式与前条件 |\n| --- | --- | --- |\n| `demo` `sub::hardware_round_trip` | Hardware | Local |\n| `demo` `tests::seam::seam_round_trip` | Seam | Local |\n",
+        )
+        .expect("testing doc");
+
+        let valid_ci = "\
+function Invoke-IgnoredTest {
+  $testArgs = @($Filter, '--ignored', '--nocapture', '--exact')
+}
+Invoke-IgnoredTest -Exe $demoLib -Filter 'sub::hardware_round_trip'
+Invoke-IgnoredTest -Exe $seamBin -Filter 'seam_round_trip'
+$output = & package-test.exe sub::hardware_round_trip --ignored --nocapture --exact 2>&1
+";
+        fs::write(temp.path().join(".github/workflows/ci.yml"), valid_ci).expect("valid ci");
+        check_hygiene(temp.path()).expect("matching CI ignored-test filters pass");
+
+        let stale_ci =
+            valid_ci.replace("'sub::hardware_round_trip'", "'stale::hardware_round_trip'");
+        fs::write(temp.path().join(".github/workflows/ci.yml"), stale_ci).expect("stale ci");
+        let err = check_hygiene(temp.path()).expect_err("stale CI filter must fail");
+        assert!(err.contains("stale CI ignored-test filter"), "{err}");
+        assert!(err.contains("stale::hardware_round_trip"), "{err}");
     }
 }
