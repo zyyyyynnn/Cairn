@@ -1257,6 +1257,64 @@ fn same_file(first: &std::path::Path, second: &std::path::Path) -> bool {
     }
 }
 
+/// Replaces `dst` with `src`, retrying briefly on transient Windows rename contention.
+pub(crate) fn atomic_replace_file(
+    src: &std::path::Path,
+    dst: &std::path::Path,
+) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::Win32::Storage::FileSystem::{
+            MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+        };
+
+        const MAX_REPLACE_ATTEMPTS: usize = 20;
+
+        let wide_src: Vec<u16> = src.as_os_str().encode_wide().chain(Some(0)).collect();
+        let wide_dst: Vec<u16> = dst.as_os_str().encode_wide().chain(Some(0)).collect();
+
+        for attempt in 0..MAX_REPLACE_ATTEMPTS {
+            // SAFETY: both paths are NUL-terminated UTF-16 strings kept alive for the synchronous call.
+            let res = unsafe {
+                MoveFileExW(
+                    PCWSTR(wide_src.as_ptr()),
+                    PCWSTR(wide_dst.as_ptr()),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+                )
+            };
+            match res {
+                Ok(()) => return Ok(()),
+                Err(err) => {
+                    let last = std::io::Error::last_os_error();
+                    let os_err = if last.raw_os_error().is_some_and(|code| code != 0) {
+                        last
+                    } else {
+                        std::io::Error::other(err.to_string())
+                    };
+                    let transient = matches!(os_err.raw_os_error(), Some(5 | 32))
+                        && !std::fs::symlink_metadata(dst).is_ok_and(|meta| meta.is_dir());
+                    if transient && attempt + 1 < MAX_REPLACE_ATTEMPTS {
+                        if attempt < 4 {
+                            std::thread::yield_now();
+                        } else {
+                            let delay_ms = (((attempt - 3) as u64) * 5).min(50);
+                            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                        }
+                        continue;
+                    }
+                    return Err(os_err);
+                }
+            }
+        }
+        unreachable!("loop returns on final attempt")
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::rename(src, dst)
+    }
+}
+
 /// Builds a shell item through the display-name parser and its PIDL, the form
 /// that handles long and CJK paths; destination parsing stays independent of
 /// the recycle-bin namespace item.

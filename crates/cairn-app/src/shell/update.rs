@@ -317,37 +317,11 @@ async fn download_and_verify(release: &ReleaseInfo) -> Result<(PathBuf, String),
         let _ = std::fs::remove_file(&temp_path);
         return Err(err);
     }
-    if atomic_replace_update(&temp_path, &setup_path).is_err() {
+    if crate::shell::os::atomic_replace_file(&temp_path, &setup_path).is_err() {
         let _ = std::fs::remove_file(&temp_path);
         return Err(UpdateError::Download);
     }
     Ok((setup_path, expected))
-}
-
-#[cfg(windows)]
-fn atomic_replace_update(src: &Path, dst: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows::Win32::Storage::FileSystem::{
-        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
-    };
-    use windows::core::PCWSTR;
-
-    let src_w: Vec<u16> = src.as_os_str().encode_wide().chain(Some(0)).collect();
-    let dst_w: Vec<u16> = dst.as_os_str().encode_wide().chain(Some(0)).collect();
-    // SAFETY: both paths are NUL-terminated UTF-16 strings kept alive for the synchronous Win32 call.
-    unsafe {
-        MoveFileExW(
-            PCWSTR(src_w.as_ptr()),
-            PCWSTR(dst_w.as_ptr()),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    }
-    .map_err(|err| std::io::Error::from_raw_os_error(err.code().0))
-}
-
-#[cfg(not(windows))]
-fn atomic_replace_update(src: &Path, dst: &Path) -> std::io::Result<()> {
-    std::fs::rename(src, dst)
 }
 
 fn normalize_version(tag: &str) -> String {

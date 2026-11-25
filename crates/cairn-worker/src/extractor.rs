@@ -413,6 +413,18 @@ mod tests {
                 .expect_err("reparse ancestor junction must be rejected");
             assert_eq!(dir_err.kind(), std::io::ErrorKind::InvalidInput);
         }
+
+        let long_dir = dir.path().join("LongWorkerSubdirectoryName");
+        std::fs::create_dir(&long_dir).unwrap();
+        let long_file = long_dir.join("LongDocumentName.txt");
+        std::fs::write(&long_file, "short-ok").unwrap();
+        let short_dir = crate::short_path_for_test(&long_dir);
+        let short_with_dot = short_dir.join(".").join("LongDocumentName.txt");
+        let mut short_file = open_no_follow(&short_with_dot)
+            .expect("8.3 short path and dot segment should resolve to expected long path");
+        let mut short_text = String::new();
+        short_file.read_to_string(&mut short_text).unwrap();
+        assert_eq!(short_text, "short-ok");
     }
 
     #[cfg(windows)]

@@ -359,39 +359,13 @@ impl AppSettings {
             }
         };
 
-        if let Err(err) = atomic_replace_settings(&temp_path, path) {
+        if let Err(err) = crate::shell::os::atomic_replace_file(&temp_path, path) {
             let _ = fs::remove_file(&temp_path);
             return Err(err);
         }
 
         Ok(())
     }
-}
-
-#[cfg(windows)]
-fn atomic_replace_settings(src: &Path, dst: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows::Win32::Storage::FileSystem::{
-        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
-    };
-    use windows::core::PCWSTR;
-
-    let src_w: Vec<u16> = src.as_os_str().encode_wide().chain(Some(0)).collect();
-    let dst_w: Vec<u16> = dst.as_os_str().encode_wide().chain(Some(0)).collect();
-    // SAFETY: both paths are NUL-terminated UTF-16 strings kept alive for the synchronous Win32 call.
-    unsafe {
-        MoveFileExW(
-            PCWSTR(src_w.as_ptr()),
-            PCWSTR(dst_w.as_ptr()),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    }
-    .map_err(|err| std::io::Error::from_raw_os_error(err.code().0))
-}
-
-#[cfg(not(windows))]
-fn atomic_replace_settings(src: &Path, dst: &Path) -> std::io::Result<()> {
-    fs::rename(src, dst)
 }
 
 #[cfg(test)]

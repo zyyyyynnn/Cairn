@@ -36,8 +36,8 @@ use windows::Win32::Storage::FileSystem::{
     FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileAttributeTagInfo,
     FileDispositionInfo, FileDispositionInfoEx, GETFINALPATHNAMEBYHANDLE_FLAGS,
     GetFileInformationByHandle, GetFileInformationByHandleEx, GetFinalPathNameByHandleW,
-    OPEN_EXISTING, READ_CONTROL, SYNCHRONIZE, SetFileInformationByHandle, VOLUME_NAME_DOS,
-    WRITE_DAC, WRITE_OWNER,
+    GetFullPathNameW, GetLongPathNameW, OPEN_EXISTING, READ_CONTROL, SYNCHRONIZE,
+    SetFileInformationByHandle, VOLUME_NAME_DOS, WRITE_DAC, WRITE_OWNER,
 };
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
@@ -500,6 +500,41 @@ fn normalized_cleanup_path(path: &Path) -> String {
         .to_lowercase()
 }
 
+/// Resolves `.`/`..` and expands Windows 8.3 short names without following reparse points.
+fn expand_expected_cleanup_path(path: &Path) -> std::io::Result<String> {
+    let raw_wide = wide(path.as_os_str());
+    let mut full_buf = vec![0u16; 32_768];
+    let full_len = loop {
+        // SAFETY: `raw_wide` is NUL-terminated and `full_buf` is writable for its full length.
+        let len = unsafe { GetFullPathNameW(PCWSTR(raw_wide.as_ptr()), Some(&mut full_buf), None) };
+        if len == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if (len as usize) < full_buf.len() {
+            break len as usize;
+        }
+        full_buf.resize(len as usize + 1, 0);
+    };
+    full_buf[full_len] = 0;
+
+    let mut long_buf = vec![0u16; full_len.max(32_768) + 1];
+    let long_len = loop {
+        // SAFETY: `full_buf` is NUL-terminated at `full_len` and `long_buf` is writable.
+        let len = unsafe { GetLongPathNameW(PCWSTR(full_buf.as_ptr()), Some(&mut long_buf)) };
+        if len == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if (len as usize) < long_buf.len() {
+            break len as usize;
+        }
+        long_buf.resize(len as usize + 1, 0);
+    };
+
+    Ok(normalized_cleanup_path(Path::new(
+        &String::from_utf16_lossy(&long_buf[..long_len]),
+    )))
+}
+
 fn verify_cleanup_handle(handle: HANDLE, expected: &Path) -> std::io::Result<u32> {
     let attributes = staging_attributes(handle)?;
     let mut buf = vec![0u16; 32_768];
@@ -522,7 +557,7 @@ fn verify_cleanup_handle(handle: HANDLE, expected: &Path) -> std::io::Result<u32
         }
         buf.resize(len as usize + 1, 0);
     };
-    if actual != normalized_cleanup_path(expected) {
+    if actual != expand_expected_cleanup_path(expected)? {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!(
@@ -1535,5 +1570,52 @@ mod tests {
         super::remove_dir_tree_safe(&root, &data_dir).expect("regular data subtree removes safely");
         assert!(!data_dir.exists());
         assert!(outside_sentinel.exists());
+    }
+
+    #[test]
+    fn remove_dir_tree_safe_accepts_short_paths_and_still_blocks_junctions() {
+        use windows::Win32::Storage::FileSystem::GetShortPathNameW;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root = temp.path().join("LongRunnerProfileDirectory");
+        let target = root.join("AppData").join("Local").join("CairnLongFolder");
+        std::fs::create_dir_all(target.join("nested")).unwrap();
+        std::fs::write(target.join("nested").join("data.bin"), b"ok").unwrap();
+
+        let wide_root = super::wide(root.as_os_str());
+        let mut short_buf = vec![0u16; 32_768];
+        // SAFETY: `wide_root` is NUL-terminated and `short_buf` is writable.
+        let short_len = unsafe {
+            GetShortPathNameW(
+                windows::core::PCWSTR(wide_root.as_ptr()),
+                Some(&mut short_buf),
+            )
+        };
+        assert!(short_len > 0, "GetShortPathNameW failed");
+        let short_root = PathBuf::from(String::from_utf16_lossy(&short_buf[..short_len as usize]));
+        let short_target = short_root
+            .join("AppData")
+            .join("Local")
+            .join(".")
+            .join("CairnLongFolder");
+
+        super::remove_dir_tree_safe(&short_root, &short_target)
+            .expect("8.3 short path should expand to the same long directory");
+        assert!(!target.exists());
+
+        let outside = temp.path().join("OutsideTarget");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&target)
+            .arg(&outside)
+            .status()
+            .expect("mklink /J");
+        assert!(status.success(), "mklink failed: {status}");
+        let err = super::remove_dir_tree_safe(&short_root, &short_target)
+            .expect_err("junction via short path must still be refused");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        std::fs::remove_dir(&target).unwrap();
     }
 }
