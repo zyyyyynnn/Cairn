@@ -274,7 +274,7 @@
 
 | 编号 | 优先级 | 需求描述 | 交付产物与验证标准 |
 |:---|:---|:---|:---|
-| **REL-01** | P1 | 基于 GPUI Setup + WiX MSI 的单文件安装包（`CairnSetup.exe`）：前置界面负责许可、路径与进度，MSI 负责系统服务（`CairnService`）注册、SYSTEM/Administrators 权限、快捷方式与安装/卸载事务；Setup 内嵌 MSI 并输出 `cairn.wxs` 源 | 产出 `CairnSetup.exe`、`cairn.msi`、WiX 模板与 SHA256 校验清单，严禁输出无系统服务权限的便携版 ZIP |
+| **REL-01** | P1 | 基于 GPUI Setup + WiX MSI 的单文件安装包（`CairnSetup.exe`）：前置界面负责安装路径与进度，MSI 负责系统服务（`CairnService`）注册、SYSTEM/Administrators 权限、快捷方式与安装/卸载事务；Setup 内嵌 MSI 并输出 `cairn.wxs` 源 | 产出 `CairnSetup.exe`、`cairn.msi`、WiX 模板与 SHA256 校验清单，严禁输出无系统服务权限的便携版 ZIP |
 | **REL-02** | P1 | 官方发布产物均经过 Authenticode 代码签名（或本地测试证书签名） | 签名证书链合规有效 |
 | **REL-04** | P1 | 构建流水线自动产出全部发布产物的 `SHA256SUMS.txt` 校验和文件，并通过 `xtask bench-query --check` 执行性能回归门禁 | 校验和精确匹配，合成查询延迟与内存门禁不回退 |
 

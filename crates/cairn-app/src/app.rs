@@ -321,6 +321,26 @@ impl QueryDomain {
     }
 }
 
+/// Prevents tooltips from painting over an open context menu.
+#[derive(Default)]
+pub(crate) struct TooltipSuppression {
+    suppressed: bool,
+}
+
+impl TooltipSuppression {
+    pub fn is_suppressed(&self) -> bool {
+        self.suppressed
+    }
+
+    pub fn suppress(&mut self) {
+        self.suppressed = true;
+    }
+
+    pub fn restore(&mut self) -> bool {
+        std::mem::replace(&mut self.suppressed, false)
+    }
+}
+
 /// The result table: focus, scroll owners, viewport state and lane geometry.
 pub struct ResultsDomain {
     /// Focus region of the result table, and the only region that answers Left, Right, Home and End.
@@ -341,6 +361,8 @@ pub struct ResultsDomain {
     pub(crate) column_drag: Option<ColumnDrag>,
     /// Active content-snippet preview popover state, when open on a row.
     pub(crate) snippet_preview: Option<crate::table::snippets::SnippetPreviewState>,
+    /// Whether this window has published its first query result or rejection.
+    pub(crate) has_presented_results: bool,
 }
 
 /// The indexer this window talks to, and everything it reports back.
@@ -398,19 +420,73 @@ pub(crate) struct RenameEditor {
     pub _subscription: Subscription,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TableRevealPhase {
+    Initial,
+    Waiting,
+    Revealing,
+    Settled,
+}
+
 pub struct TableRevealState {
-    pub generation: u64,
-    pub fade_epoch: u64,
-    pub pending: bool,
+    phase: TableRevealPhase,
+    epoch: u64,
 }
 
 impl TableRevealState {
     pub fn new() -> Self {
         Self {
-            generation: 0,
-            fade_epoch: 0,
-            pending: true,
+            phase: TableRevealPhase::Initial,
+            epoch: 0,
         }
+    }
+
+    pub(crate) fn begin_session(&mut self) {
+        self.phase = TableRevealPhase::Waiting;
+    }
+
+    pub(crate) fn start_reveal(&mut self, reduce_motion: bool) -> Option<u64> {
+        if self.phase != TableRevealPhase::Waiting {
+            return None;
+        }
+        self.epoch = self.epoch.wrapping_add(1);
+        if reduce_motion {
+            self.phase = TableRevealPhase::Settled;
+            None
+        } else {
+            self.phase = TableRevealPhase::Revealing;
+            Some(self.epoch)
+        }
+    }
+
+    pub(crate) fn finish_reveal(&mut self, epoch: u64) -> bool {
+        if self.phase == TableRevealPhase::Revealing && self.epoch == epoch {
+            self.phase = TableRevealPhase::Settled;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn is_initial(&self) -> bool {
+        self.phase == TableRevealPhase::Initial
+    }
+
+    pub(crate) fn is_waiting(&self) -> bool {
+        self.phase == TableRevealPhase::Waiting
+    }
+
+    pub(crate) fn is_revealing(&self) -> bool {
+        self.phase == TableRevealPhase::Revealing
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_settled(&self) -> bool {
+        self.phase == TableRevealPhase::Settled
+    }
+
+    pub(crate) fn epoch(&self) -> u64 {
+        self.epoch
     }
 }
 
@@ -429,6 +505,7 @@ pub struct CairnApp {
     /// settings dialog opens. `theme = system` resolves through this value.
     pub system_dark: bool,
     pub(crate) open_group_menu: Option<OpenGroupMenu>,
+    pub(crate) result_menu_dismiss: Option<Subscription>,
     /// Window-level focus-lost subscriptions, held so they stay registered for
     /// the lifetime of the view. Never read: dropping this field would cancel
     /// the focus restoration above.
@@ -436,6 +513,7 @@ pub struct CairnApp {
     /// Records whether the keyboard drives focus, including the Tab the focus walk consumes.
     pub _keyboard_modality: Subscription,
     pub sidebar_collapsed: bool,
+    pub(crate) sidebar_focus: FocusHandle,
     pub nav_history: NavHistory,
     pub sidebar_scroll: ScrollHandle,
     /// The in-place rename editor for the single selected result row.
@@ -449,9 +527,10 @@ pub struct CairnApp {
     pub(crate) recycle_bin: crate::shell::recycle_bin::RecycleBinView,
     /// True while a delete-to-bin task is running outside the bin.
     pub(crate) delete_in_flight: bool,
-    /// The app-owned transient status surface. One at a time; errors persist.
-    pub toast: Option<crate::shell::toast::ToastState>,
-    pub(crate) toast_serial: u64,
+    /// The app-owned transient status surface and its explicit lifecycle.
+    pub(crate) toast: crate::shell::toast::ToastState,
+    pub(crate) tooltip_suppression: TooltipSuppression,
+    pub(crate) next_toast_id: u64,
     pub table_reveal: TableRevealState,
     /// In-app update lifecycle rendered on the Help menu's update row.
     pub(crate) update_state: crate::shell::update::UpdateState,
@@ -503,6 +582,7 @@ impl CairnApp {
         };
 
         let search_focus = cx.focus_handle().tab_stop(true);
+        let sidebar_focus = cx.focus_handle();
         let root_focus = cx.focus_handle();
         // A tab stop in its own right: the table owns a keyboard path that nothing else answers, so
         // Tab has to be able to reach it (Design Guides Accessibility checklist: "every action is
@@ -583,6 +663,7 @@ impl CairnApp {
                 column_widths,
                 column_drag: None,
                 snippet_preview: None,
+                has_presented_results: false,
             },
             service: ServiceDomain {
                 connection: ServiceConnection::initial(),
@@ -605,9 +686,11 @@ impl CairnApp {
             settings,
             system_dark,
             open_group_menu: None,
+            result_menu_dismiss: None,
             _focus_lost: vec![focus_lost],
             _keyboard_modality: keyboard_modality,
             sidebar_collapsed: false,
+            sidebar_focus,
             nav_history: NavHistory::new(NavState {
                 text: String::new(),
                 filter: FilterCategory::All,
@@ -624,8 +707,9 @@ impl CairnApp {
             _hotkey: hotkey,
             recycle_bin: crate::shell::recycle_bin::RecycleBinView::closed(),
             delete_in_flight: false,
-            toast: None,
-            toast_serial: 0,
+            toast: crate::shell::toast::ToastState::Hidden,
+            tooltip_suppression: TooltipSuppression::default(),
+            next_toast_id: 0,
             table_reveal: TableRevealState::new(),
             update_state: crate::shell::update::UpdateState::Idle,
             window_resize: Default::default(),
@@ -675,7 +759,7 @@ impl CairnApp {
     /// Opens a fresh table session. Every entry point that replaces the result set starts
     /// one, so the entrance waits for real content instead of firing over an empty frame.
     pub(crate) fn begin_table_session(&mut self) {
-        self.table_reveal.pending = true;
+        self.table_reveal.begin_session();
     }
 
     /// Replaces the visible result set as a new location. The old rows leave at
@@ -695,17 +779,17 @@ impl CairnApp {
 
     /// Starts the results panel's entrance and closes the pending session.
     pub(crate) fn bump_table_reveal(&mut self, cx: &mut Context<'_, Self>) {
-        self.table_reveal.generation = self.table_reveal.generation.wrapping_add(1);
-        self.table_reveal.pending = false;
-        self.table_reveal.fade_epoch = self.table_reveal.generation;
-        let fade_epoch = self.table_reveal.fade_epoch;
+        let reduce_motion = cx.reduce_motion();
+        let Some(epoch) = self.table_reveal.start_reveal(reduce_motion) else {
+            cx.notify();
+            return;
+        };
         cx.spawn(async move |this, cx| {
             cx.background_executor()
-                .timer(crate::shell::motion::MASK_DISSOLVE_CLEANUP)
+                .timer(crate::motion::MASK_DISSOLVE_CLEANUP)
                 .await;
             let _ = this.update(cx, |this, cx| {
-                if this.table_reveal.fade_epoch == fade_epoch {
-                    this.table_reveal.fade_epoch = 0;
+                if this.table_reveal.finish_reveal(epoch) {
                     cx.notify();
                 }
             });
@@ -716,7 +800,7 @@ impl CairnApp {
     /// Starts the table entrance once a panel session actually has rows, so the
     /// fade begins with content rather than while the query is still in flight.
     pub(crate) fn note_table_content(&mut self, cx: &mut Context<'_, Self>) {
-        if self.table_reveal.pending && self.results.table.total_rows() > 0 {
+        if self.table_reveal.is_waiting() && self.results.table.total_rows() > 0 {
             self.bump_table_reveal(cx);
         }
     }
@@ -724,7 +808,7 @@ impl CairnApp {
     /// Starts the same entrance for a new session whose answer is empty; the
     /// state band is content too, not a reason to leave the old frame static.
     pub(crate) fn note_table_empty(&mut self, cx: &mut Context<'_, Self>) {
-        if self.table_reveal.pending {
+        if self.table_reveal.is_waiting() {
             self.bump_table_reveal(cx);
         }
     }
@@ -732,7 +816,7 @@ impl CairnApp {
     pub fn set_initial_query(&mut self, text: &str, cx: &mut Context<'_, Self>) {
         self.query.search_input.text = text.to_string();
         self.query.search_input.selection = text.len()..text.len();
-        self.request_result_set(crate::search::ResultSetChange::Replace, cx);
+        self.request_result_set(crate::search::ResultSetChange::Probe, cx);
     }
 
     /// The font the painted query text used. Before the first paint there is no capture, so the
@@ -937,7 +1021,7 @@ pub(crate) use tests::test_row;
 
 #[cfg(test)]
 mod tests {
-    use super::{CairnApp, join_row_path};
+    use super::{CairnApp, TableRevealState, join_row_path};
     use crate::search::ResultSetChange;
     use cairn_protocol::message::{FileRowData, SourceId};
     use cairn_protocol::status::{
@@ -966,6 +1050,7 @@ mod tests {
     ) {
         gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
             gpui_kit::init(cx);
+            cx.set_reduce_motion(false);
             let _ = gpui_kit::open_window(
                 gpui_kit::gpui::WindowOptions {
                     show: false,
@@ -1085,12 +1170,12 @@ mod tests {
 
         with_app(|this, cx| {
             this.results.table.set_rows(vec![test_row("old.txt")], 1);
-            this.table_reveal.pending = false;
-            let generation = this.table_reveal.generation;
+            assert!(this.table_reveal.is_initial());
+            let epoch = this.table_reveal.epoch();
 
             this.set_filter(FilterCategory::Document, cx);
             assert!(
-                this.table_reveal.pending,
+                this.table_reveal.is_waiting(),
                 "a new location opens a table session"
             );
             assert_eq!(
@@ -1099,44 +1184,48 @@ mod tests {
                 "the previous location's rows leave at once"
             );
             assert_eq!(
-                this.table_reveal.generation, generation,
+                this.table_reveal.epoch(),
+                epoch,
                 "no fade runs before the new content exists"
             );
 
             this.results.table.set_rows(vec![test_row("new.docx")], 1);
             this.note_table_content(cx);
-            assert_eq!(
-                this.table_reveal.fade_epoch,
-                generation + 1,
-                "the new page fades in"
+            assert!(this.table_reveal.is_revealing());
+            assert_ne!(
+                this.table_reveal.epoch(),
+                epoch,
+                "the new page receives a fresh fade epoch"
             );
         });
     }
 
-    /// The status-bar refresh of a settled index is a replacement: the rows leave
-    /// at once and the refreshed page fades in.
     #[test]
     fn a_table_refresh_replaces_the_result_set_at_once() {
         with_app(|this, cx| {
             this.results.table.set_rows(vec![test_row("old.txt")], 1);
-            this.table_reveal.pending = false;
-            let generation = this.table_reveal.generation;
+            assert!(this.table_reveal.is_initial());
+            let epoch = this.table_reveal.epoch();
 
             this.refresh_current_view(cx);
-            assert!(this.table_reveal.pending, "refresh opens a table session");
+            assert!(
+                this.table_reveal.is_waiting(),
+                "refresh opens a table session"
+            );
             assert_eq!(
                 this.results.table.total_rows(),
                 0,
                 "the stale rows leave before the new page exists"
             );
-            assert_eq!(this.table_reveal.generation, generation);
+            assert_eq!(this.table_reveal.epoch(), epoch);
 
             this.results.table.set_rows(vec![test_row("old.txt")], 1);
             this.note_table_content(cx);
-            assert_eq!(
-                this.table_reveal.fade_epoch,
-                generation + 1,
-                "the refreshed page fades in"
+            assert!(this.table_reveal.is_revealing());
+            assert_ne!(
+                this.table_reveal.epoch(),
+                epoch,
+                "the refreshed page receives a fresh fade epoch"
             );
         });
     }
@@ -1146,39 +1235,55 @@ mod tests {
     fn a_sort_keeps_the_rows_without_a_table_entrance() {
         with_app(|this, cx| {
             this.results.table.set_rows(vec![test_row("old.txt")], 1);
-            this.table_reveal.pending = false;
-            let epoch = this.table_reveal.fade_epoch;
+            this.table_reveal.begin_session();
+            let epoch = this.table_reveal.start_reveal(false).unwrap();
+            assert!(this.table_reveal.finish_reveal(epoch));
+            assert!(this.table_reveal.is_settled());
 
             this.request_result_set(ResultSetChange::InPlace, cx);
-            assert!(!this.table_reveal.pending, "sorting opens no session");
+            assert!(!this.table_reveal.is_waiting(), "sorting opens no session");
             assert_eq!(this.results.table.total_rows(), 1, "the rows stay");
-            assert_eq!(this.table_reveal.fade_epoch, epoch, "nothing fades");
+            assert!(this.table_reveal.is_settled(), "nothing fades");
         });
     }
 
-    /// A probe is a refresh, not a place change: rows stay, no entrance runs;
-    /// an empty table still gets the first-content entrance.
+    /// A background refresh keeps the current result set and never reveals it.
     #[test]
-    fn a_probe_refreshes_silently_once_rows_exist() {
+    fn a_background_refresh_keeps_rows_without_a_table_entrance() {
         with_app(|this, cx| {
             this.results.table.set_rows(vec![test_row("a.txt")], 1);
-            this.table_reveal.pending = false;
-            let epoch = this.table_reveal.fade_epoch;
+            this.request_result_set(ResultSetChange::Background, cx);
+            assert_eq!(this.results.table.total_rows(), 1, "the rows stay");
+            assert!(!this.table_reveal.is_waiting());
+            this.note_table_content(cx);
+            assert!(this.table_reveal.is_initial(), "nothing fades");
+        });
+    }
+
+    /// A probe is a refresh, not a place change: rows stay and no entrance runs,
+    /// including while the table is empty.
+    #[test]
+    fn a_probe_refreshes_silently_with_or_without_rows() {
+        with_app(|this, cx| {
+            this.results.table.set_rows(vec![test_row("a.txt")], 1);
+            assert!(this.table_reveal.is_initial());
 
             this.request_result_set(ResultSetChange::Probe, cx);
             assert!(
-                !this.table_reveal.pending,
+                !this.table_reveal.is_waiting(),
                 "a probe over rows opens no session"
             );
             assert_eq!(this.results.table.total_rows(), 1, "the rows stay");
-            assert_eq!(this.table_reveal.fade_epoch, epoch, "nothing fades");
+            assert!(this.table_reveal.is_initial(), "nothing fades");
 
             this.results.table.set_rows(Vec::new(), 0);
             this.request_result_set(ResultSetChange::Probe, cx);
             assert!(
-                this.table_reveal.pending,
-                "an empty table gets the replacement entrance"
+                !this.table_reveal.is_waiting(),
+                "an empty-table probe also opens no session"
             );
+            this.note_table_empty(cx);
+            assert!(this.table_reveal.is_initial(), "nothing fades");
         });
     }
 
@@ -1202,7 +1307,7 @@ mod tests {
 
         with_app(|this, cx| {
             this.results.table.set_rows(vec![test_row("old.txt")], 1);
-            this.table_reveal.pending = false;
+            assert!(this.table_reveal.is_initial());
             catching_up(this);
 
             this.request_result_set(ResultSetChange::Refresh, cx);
@@ -1212,7 +1317,7 @@ mod tests {
                 "a refresh keeps rows that already describe this place"
             );
             assert!(
-                !this.table_reveal.pending,
+                !this.table_reveal.is_waiting(),
                 "the poll answers the refresh without an entrance"
             );
 
@@ -1230,7 +1335,7 @@ mod tests {
                 "another place's rows never wait for the index"
             );
             assert!(
-                this.table_reveal.pending,
+                this.table_reveal.is_waiting(),
                 "the place change owes its own first page"
             );
         });
@@ -1285,36 +1390,81 @@ mod tests {
             );
             assert!(!this.query.is_searching(), "the stale request is stopped");
             assert!(
-                this.table_reveal.pending,
+                this.table_reveal.is_waiting(),
                 "the replacement waits for its own first page"
             );
         });
     }
 
     #[test]
-    fn table_reveal_fade_epoch_advances_and_cleans_up() {
-        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
-            gpui_kit::init(cx);
-            let _ = gpui_kit::open_window(
-                gpui_kit::gpui::WindowOptions {
-                    show: false,
-                    focus: false,
-                    ..gpui_kit::gpui::WindowOptions::default()
+    fn first_startup_content_starts_a_reveal() {
+        with_app(|this, cx| {
+            this.apply_query_payload(
+                true,
+                cairn_protocol::message::ResponsePayload::QueryResult {
+                    query_id: 1,
+                    session_id: 1,
+                    total_matches: 1,
+                    total_bytes: 1,
+                    first_page: vec![test_row("report.txt")],
+                    applied_sort: Default::default(),
+                    degraded: None,
                 },
                 cx,
-                |window, cx| {
-                    let app = cx.new(|cx| CairnApp::new(window, cx));
-                    app.update(cx, |this, cx| {
-                        assert_eq!(this.table_reveal.fade_epoch, 0);
-                        this.table_reveal.pending = true;
-                        this.bump_table_reveal(cx);
-                        assert_eq!(this.table_reveal.fade_epoch, 1);
-                        assert!(!this.table_reveal.pending);
-                    });
-                    cx.quit();
-                    app
-                },
             );
+            assert!(this.table_reveal.is_revealing());
+        });
+    }
+
+    #[test]
+    fn repeated_content_notifications_do_not_restart_the_same_reveal() {
+        with_app(|this, cx| {
+            this.begin_table_session();
+            this.results.table.set_rows(vec![test_row("report.txt")], 1);
+            this.note_table_content(cx);
+            assert!(this.table_reveal.is_revealing());
+            let epoch = this.table_reveal.epoch();
+
+            this.note_table_content(cx);
+            this.note_table_empty(cx);
+            assert_eq!(this.table_reveal.epoch(), epoch);
+        });
+    }
+
+    #[test]
+    fn a_new_table_session_invalidates_the_previous_reveal_epoch() {
+        let mut reveal = TableRevealState::new();
+        reveal.begin_session();
+        let first = reveal.start_reveal(false).expect("first session reveals");
+        assert!(reveal.is_revealing());
+
+        reveal.begin_session();
+        assert!(reveal.is_waiting());
+        assert!(!reveal.finish_reveal(first));
+
+        let second = reveal.start_reveal(false).expect("second session reveals");
+        assert_ne!(second, first);
+        assert!(!reveal.finish_reveal(first));
+        assert!(reveal.is_revealing());
+        assert!(reveal.finish_reveal(second));
+        assert!(reveal.is_settled());
+    }
+
+    #[test]
+    fn reduced_motion_table_reveal_settles_without_an_animation_epoch() {
+        let mut reveal = TableRevealState::new();
+        reveal.begin_session();
+        assert_eq!(reveal.start_reveal(true), None);
+        assert!(reveal.is_settled());
+    }
+
+    #[test]
+    fn reduced_motion_bump_leaves_no_pending_table_reveal() {
+        with_app(|this, cx| {
+            cx.set_reduce_motion(true);
+            this.begin_table_session();
+            this.bump_table_reveal(cx);
+            assert!(this.table_reveal.is_settled());
         });
     }
 

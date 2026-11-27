@@ -7,6 +7,7 @@
 #![windows_subsystem = "windows"]
 
 mod app;
+mod motion;
 mod search;
 mod service;
 mod shell;

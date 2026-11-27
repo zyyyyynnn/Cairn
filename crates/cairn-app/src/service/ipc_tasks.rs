@@ -1171,7 +1171,12 @@ impl CairnApp {
                 self.query.source_scope = None;
             }
             if !self.location_profile().is_local_listing {
-                self.request_result_set(ResultSetChange::Replace, cx);
+                let change = if !self.results.has_presented_results {
+                    crate::search::ResultSetChange::Probe
+                } else {
+                    crate::search::ResultSetChange::Replace
+                };
+                self.request_result_set(change, cx);
             }
         }
         self.start_source_status_follow_up(cx);

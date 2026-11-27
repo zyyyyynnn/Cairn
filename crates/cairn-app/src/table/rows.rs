@@ -118,6 +118,18 @@ fn cell_text_color(tokens: &ShellTokens, is_selected: bool) -> gpui::Hsla {
     }
 }
 
+fn tooltip_when<E, F>(element: E, visible: bool, build_tooltip: F) -> E
+where
+    E: StatefulInteractiveElement,
+    F: Fn(&mut Window, &mut App) -> AnyView + 'static,
+{
+    if visible {
+        element.tooltip(build_tooltip)
+    } else {
+        element
+    }
+}
+
 impl CairnApp {
     pub(super) fn render_result_row(
         &self,
@@ -193,6 +205,7 @@ impl CairnApp {
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                        this.restore_result_tooltips(cx);
                         if this
                             .rename
                             .draft
@@ -218,7 +231,6 @@ impl CairnApp {
                     MouseButton::Right,
                     cx.listener(move |this, _: &MouseDownEvent, _, cx| {
                         this.focus_row_for_context(ix, cx);
-                        cx.notify();
                     }),
                 );
         }
@@ -274,7 +286,11 @@ impl CairnApp {
             .gap(rems(layout::INNER_SPACING));
         let cell = if band.interactive && !renaming {
             let tooltip = SharedString::from(row.name.as_str());
-            cell.tooltip(crate::shell::tooltip::text(tooltip))
+            tooltip_when(
+                cell,
+                !self.tooltip_suppression.is_suppressed(),
+                cairn_ui::tooltip::text(tooltip),
+            )
         } else {
             cell
         };
@@ -320,7 +336,11 @@ impl CairnApp {
             .id(("result-path", ctx.ix))
             .when(ctx.band.interactive, |this| {
                 let tooltip = SharedString::from(ctx.row.path.as_str());
-                this.tooltip(crate::shell::tooltip::text(tooltip))
+                tooltip_when(
+                    this,
+                    !self.tooltip_suppression.is_suppressed(),
+                    cairn_ui::tooltip::text(tooltip),
+                )
             })
             .lane_grow(self.results.column_widths.path)
             .min_w(rems(layout::PATH_MIN_COLUMN))

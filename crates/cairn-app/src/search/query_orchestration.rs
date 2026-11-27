@@ -27,9 +27,8 @@ pub(crate) enum ResultSetChange {
     /// A sort or search-flag change. Rows stay visible, the new order starts
     /// at the top, and nothing fades.
     InPlace,
-    /// A connection probe of the current location. The owner decides from the
-    /// table state: an empty table gets the replacement entrance, a table with
-    /// rows refreshes silently.
+    /// A connection probe of the current location. Rows and scroll stay, and
+    /// nothing fades.
     Probe,
 }
 
@@ -390,15 +389,8 @@ impl CairnApp {
     ) {
         // An explicit result-set request leaves the row the rename editor was opened on.
         self.discard_rename(cx);
-        // A probe is about the connection, not the place: only an empty table
-        // needs an entrance, every table with rows refreshes silently.
-        let change = match change {
-            ResultSetChange::Probe if self.results.table.total_rows() == 0 => {
-                ResultSetChange::Replace
-            }
-            ResultSetChange::Probe => ResultSetChange::Background,
-            other => other,
-        };
+        // A probe is about the connection, not the place: it refreshes silently
+        // whether or not the table already has rows.
         // The recycle bin owns its rows; an index request must neither clear
         // them nor take the index-loading shortcut.
         let local_surface = self.location_profile().is_local_listing;
@@ -670,7 +662,11 @@ impl CairnApp {
                 self.query.degraded = degraded;
                 self.results.snippet_preview = None;
                 self.query.active_session_id = Some(session_id);
+                self.results.has_presented_results = true;
                 self.results.table.sort_spec = applied_sort;
+                if reset_scroll && self.table_reveal.is_initial() {
+                    self.begin_table_session();
+                }
                 if reset_scroll {
                     self.results.rows_scroll.set_offset(Point::default());
                     self.results.table.scroll_top = 0.0;
@@ -706,6 +702,10 @@ impl CairnApp {
                 self.query.degraded = None;
                 self.results.snippet_preview = None;
                 if self.query.rejection.is_some() {
+                    self.results.has_presented_results = true;
+                    if reset_scroll && self.table_reveal.is_initial() {
+                        self.begin_table_session();
+                    }
                     self.results.table.set_rows(Vec::new(), 0);
                     self.query.active_session_id = None;
                     self.service.status.clear_objects_count();

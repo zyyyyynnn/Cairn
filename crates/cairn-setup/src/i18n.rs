@@ -52,7 +52,6 @@ mod tests {
         for lang in ["zh-CN", "en-US"] {
             let i18n = I18n::new(lang);
             for key in [
-                "license_title",
                 "location_title",
                 "action_install",
                 "uninstall_title",
@@ -78,6 +77,37 @@ mod tests {
         let version = zh.format("maintenance_installed", &[("version", "0.1.0")]);
         assert!(version.contains("0.1.0"));
         assert!(!version.contains("$version"));
+
+        for (lang, label) in [("en-US", "View log"), ("zh-CN", "查看日志")] {
+            let text = I18n::new(lang).format(
+                "error_msi_unknown",
+                &[("has_log", "true"), ("logAction", label)],
+            );
+            assert!(
+                text.contains(label),
+                "{lang} is missing the inline log action"
+            );
+            assert!(!text.contains("$logAction"), "{lang} leaks the placeholder");
+
+            let marked = I18n::new(lang).format(
+                "error_msi_unknown",
+                &[("has_log", "true"), ("logAction", "\u{E000}")],
+            );
+            assert!(marked.contains('\u{E000}'), "{lang} lost the inline slot");
+
+            let plain = I18n::new(lang).format(
+                "error_msi_unknown",
+                &[("has_log", "false"), ("logAction", "\u{E000}")],
+            );
+            assert!(
+                !plain.contains('\u{E000}'),
+                "{lang} exposed an unused log slot"
+            );
+            assert!(
+                !plain.contains(label),
+                "{lang} exposed a log action without a log"
+            );
+        }
     }
 
     /// The failure page names what happened and points at the log. The installer's raw code is
@@ -86,7 +116,14 @@ mod tests {
     fn a_failure_page_never_shows_the_raw_installer_code() {
         for lang in ["zh-CN", "en-US"] {
             let i18n = I18n::new(lang);
-            let text = i18n.format("error_msi_unknown", &[("code", "1603")]);
+            let text = i18n.format(
+                "error_msi_unknown",
+                &[
+                    ("code", "1603"),
+                    ("has_log", "true"),
+                    ("logAction", "View log"),
+                ],
+            );
             assert!(!text.contains("1603"), "{lang} leaks the installer code");
             assert!(!text.contains("$code"), "{lang} leaks a raw placeholder");
         }

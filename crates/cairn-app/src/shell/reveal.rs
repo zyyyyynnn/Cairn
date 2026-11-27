@@ -34,6 +34,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn reveal_limit_counts_unique_parent_folders() {
+        let paths = (0..=MAX_REVEAL_TARGETS)
+            .map(|index| format!(r"C:\folder-{index}\file.txt"))
+            .collect::<Vec<_>>();
+        assert_eq!(reveal_targets(&paths).len(), MAX_REVEAL_TARGETS + 1);
+    }
+
+    #[test]
     fn reveal_opens_each_selected_directory_once() {
         let paths = vec![
             r"C:\Alpha\one.txt".to_string(),

@@ -1,18 +1,16 @@
+use crate::motion::{RESIZE_MAX_WAIT, RESIZE_POLL, RESIZE_QUIET};
 use std::time::{Duration, Instant};
 
-/// How long the window size must stop changing before the drag counts as settled.
-const QUIET: Duration = Duration::from_millis(150);
-
 /// Poll interval for the settle watcher.
-pub(crate) const SETTLE_POLL: Duration = QUIET;
+pub(crate) const SETTLE_POLL: Duration = RESIZE_POLL;
 
 /// A settle watcher that never sees quiet input gives up after this many polls.
-const MAX_POLLS: usize = 400;
+const MAX_POLLS: usize = (RESIZE_MAX_WAIT.as_millis() / RESIZE_POLL.as_millis()) as usize;
 
 /// A live window resize and the cover it owns.
 ///
 /// The drag is judged by this window's own geometry: a size that stops changing
-/// for [`QUIET`] has settled. Global pointer state cannot answer that — a left
+/// for [`RESIZE_QUIET`] has settled. Global pointer state cannot answer that — a left
 /// button held in another program would keep this window's cover up while the
 /// window itself sits still.
 ///
@@ -20,14 +18,18 @@ const MAX_POLLS: usize = 400;
 /// exercised without waiting on a timer.
 #[derive(Debug)]
 pub(crate) struct WindowResizeTracker {
-    /// The size the last frame reported. `(0, 0)` until the first frame adopts one.
-    observed: (f32, f32),
-    /// `Some` while the cover is up: the resize this tracker is waiting on.
-    active: Option<Active>,
+    /// The size the last frame reported, or `None` before the first frame.
+    observed: Option<(f32, f32)>,
+    phase: WindowResizePhase,
     /// Generation of the most recent resize, whether or not it is still active.
     epoch: u64,
-    /// Generation whose dissolve is on screen; `0` means no dissolve.
-    fading: u64,
+}
+
+#[derive(Debug)]
+enum WindowResizePhase {
+    Uncovered,
+    Covered(Active),
+    Dissolving(u64),
 }
 
 #[derive(Debug)]
@@ -50,10 +52,9 @@ pub(crate) enum Observed {
 impl Default for WindowResizeTracker {
     fn default() -> Self {
         Self {
-            observed: (0.0, 0.0),
-            active: None,
+            observed: None,
+            phase: WindowResizePhase::Uncovered,
             epoch: 0,
-            fading: 0,
         }
     }
 }
@@ -63,25 +64,26 @@ impl WindowResizeTracker {
     /// same size: the layout is expressed in logical pixels and rounding noise
     /// must not read as a drag that never stops.
     pub(crate) fn observe(&mut self, size: (f32, f32), now: Instant) -> Observed {
-        let changed =
-            (self.observed.0 - size.0).abs() > 0.5 || (self.observed.1 - size.1).abs() > 0.5;
-        self.observed = size;
-        if !changed {
-            return Observed::Unchanged;
-        }
+        let changed = self.observed.is_some_and(|previous| {
+            (previous.0 - size.0).abs() > 0.5 || (previous.1 - size.1).abs() > 0.5
+        });
+        self.observed = Some(size);
         // The first size the window reports is its starting geometry, not a drag.
-        if self.epoch == 0 && self.active.is_none() {
+        if self.epoch == 0 {
             self.epoch = 1;
             return Observed::Unchanged;
         }
-        match &mut self.active {
-            Some(active) => {
+        if !changed {
+            return Observed::Unchanged;
+        }
+        match &mut self.phase {
+            WindowResizePhase::Covered(active) => {
                 active.last_change = now;
                 Observed::Continued
             }
-            None => {
+            WindowResizePhase::Uncovered | WindowResizePhase::Dissolving(_) => {
                 self.epoch += 1;
-                self.active = Some(Active {
+                self.phase = WindowResizePhase::Covered(Active {
                     epoch: self.epoch,
                     last_change: now,
                 });
@@ -90,43 +92,56 @@ impl WindowResizeTracker {
         }
     }
 
-    /// Whether the content is under the cover right now.
+    /// Whether the content is under the solid cover right now.
     pub(crate) fn is_covered(&self) -> bool {
-        self.active.is_some()
+        matches!(self.phase, WindowResizePhase::Covered(_))
     }
 
     /// Whether the running resize has stopped moving.
     pub(crate) fn is_quiet(&self, now: Instant) -> bool {
-        self.active
-            .as_ref()
-            .is_some_and(|active| now.saturating_duration_since(active.last_change) >= QUIET)
+        match &self.phase {
+            WindowResizePhase::Covered(active) => {
+                now.saturating_duration_since(active.last_change) >= RESIZE_QUIET
+            }
+            WindowResizePhase::Uncovered | WindowResizePhase::Dissolving(_) => false,
+        }
     }
 
     /// The running resize's generation, which its watcher compares against so a
     /// superseded resize cannot settle the one now in progress.
     pub(crate) fn active_epoch(&self) -> Option<u64> {
-        self.active.as_ref().map(|active| active.epoch)
+        match &self.phase {
+            WindowResizePhase::Covered(active) => Some(active.epoch),
+            WindowResizePhase::Uncovered | WindowResizePhase::Dissolving(_) => None,
+        }
     }
 
-    /// Drops the cover for a settled resize and hands its generation to the dissolve.
-    pub(crate) fn settle(&mut self, epoch: u64) -> bool {
+    /// Drops the solid cover for a settled resize and hands its generation to
+    /// the dissolve. Reduced motion removes the cover immediately.
+    pub(crate) fn settle(&mut self, epoch: u64, reduce_motion: bool) -> bool {
         if self.active_epoch() != Some(epoch) {
             return false;
         }
-        self.active = None;
-        self.fading = epoch;
+        self.phase = if reduce_motion {
+            WindowResizePhase::Uncovered
+        } else {
+            WindowResizePhase::Dissolving(epoch)
+        };
         true
     }
 
-    /// The dissolve on screen, or `0` when there is none.
-    pub(crate) fn fading_epoch(&self) -> u64 {
-        self.fading
+    /// The dissolve on screen, or `None` when there is none.
+    pub(crate) fn fading_epoch(&self) -> Option<u64> {
+        match &self.phase {
+            WindowResizePhase::Dissolving(epoch) => Some(*epoch),
+            WindowResizePhase::Uncovered | WindowResizePhase::Covered(_) => None,
+        }
     }
 
     /// Ends a dissolve once its animation has run out. A newer resize keeps its own.
     pub(crate) fn clear_fade(&mut self, epoch: u64) -> bool {
-        if self.fading == epoch && epoch != 0 {
-            self.fading = 0;
+        if self.fading_epoch() == Some(epoch) {
+            self.phase = WindowResizePhase::Uncovered;
             true
         } else {
             false
@@ -170,16 +185,16 @@ mod tests {
         assert!(!tracker.is_quiet(start + Duration::from_millis(200)));
 
         let epoch = tracker.active_epoch().expect("resize still running");
-        assert!(!tracker.settle(epoch + 1));
+        assert!(!tracker.settle(epoch + 1, false));
         assert!(
             tracker.is_covered(),
             "a stale settle must not drop the cover"
         );
-        assert!(tracker.settle(epoch));
+        assert!(tracker.settle(epoch, false));
         assert!(!tracker.is_covered());
-        assert_eq!(tracker.fading_epoch(), epoch);
+        assert_eq!(tracker.fading_epoch(), Some(epoch));
         assert!(tracker.clear_fade(epoch));
-        assert_eq!(tracker.fading_epoch(), 0);
+        assert_eq!(tracker.fading_epoch(), None);
     }
 
     #[test]
@@ -190,7 +205,7 @@ mod tests {
         tracker.observe((1200.0, 800.0), start);
         assert!(tracker.is_covered());
         assert!(!tracker.is_quiet(start + Duration::from_millis(140)));
-        assert!(tracker.is_quiet(start + QUIET));
+        assert!(tracker.is_quiet(start + RESIZE_QUIET));
     }
 
     #[test]
@@ -211,14 +226,52 @@ mod tests {
         let mut tracker = WindowResizeTracker::default();
         tracker.observe((1280.0, 800.0), start);
         let first = tracker.observe((1200.0, 800.0), start);
-        tracker.settle(match first {
+        let first_epoch = match first {
             Observed::Started(epoch) => epoch,
             other => panic!("expected a started resize, got {other:?}"),
-        });
+        };
+        assert!(tracker.settle(first_epoch, false));
         assert_eq!(
             tracker.observe((1100.0, 800.0), start + Duration::from_millis(400)),
             Observed::Started(3)
         );
         assert!(tracker.is_covered());
+    }
+
+    #[test]
+    fn an_old_dissolve_cannot_clear_a_new_cover() {
+        let start = Instant::now();
+        let mut tracker = WindowResizeTracker::default();
+        tracker.observe((1280.0, 800.0), start);
+        let first = tracker.observe((1200.0, 800.0), start);
+        let first_epoch = match first {
+            Observed::Started(epoch) => epoch,
+            other => panic!("expected a started resize, got {other:?}"),
+        };
+        assert!(tracker.settle(first_epoch, false));
+        assert_eq!(tracker.fading_epoch(), Some(first_epoch));
+
+        assert_eq!(
+            tracker.observe((1100.0, 800.0), start + Duration::from_millis(200)),
+            Observed::Started(3)
+        );
+        assert!(!tracker.clear_fade(first_epoch));
+        assert!(tracker.is_covered());
+        assert_eq!(tracker.active_epoch(), Some(3));
+    }
+
+    #[test]
+    fn reduced_motion_removes_a_settled_cover_without_a_dissolve() {
+        let start = Instant::now();
+        let mut tracker = WindowResizeTracker::default();
+        tracker.observe((1280.0, 800.0), start);
+        let epoch = match tracker.observe((1200.0, 800.0), start) {
+            Observed::Started(epoch) => epoch,
+            other => panic!("expected a started resize, got {other:?}"),
+        };
+
+        assert!(tracker.settle(epoch, true));
+        assert!(!tracker.is_covered());
+        assert_eq!(tracker.fading_epoch(), None);
     }
 }

@@ -227,7 +227,7 @@ impl CairnApp {
             cx.notify();
             return;
         }
-        if self.toast.is_some() {
+        if !self.toast.is_hidden() {
             self.dismiss_toast(cx);
             return;
         }
@@ -442,6 +442,12 @@ impl CairnApp {
         cx: &mut Context<'_, Self>,
     ) {
         self.show_selected_properties(cx);
+    }
+
+    pub(crate) fn restore_result_tooltips(&mut self, cx: &mut Context<'_, Self>) {
+        if self.tooltip_suppression.restore() {
+            cx.notify();
+        }
     }
 
     pub fn focus_row_for_context(&mut self, ix: usize, cx: &mut Context<'_, Self>) {

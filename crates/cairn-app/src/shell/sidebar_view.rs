@@ -335,6 +335,7 @@ impl CairnApp {
         if sidebar_width <= 0.5 {
             return div()
                 .id("cairn-sidebar-collapsed")
+                .track_focus(&self.sidebar_focus)
                 .w_0()
                 .overflow_hidden()
                 .into_any_element();
@@ -606,6 +607,7 @@ impl CairnApp {
 
         div()
             .id("cairn-sidebar-surface")
+            .track_focus(&self.sidebar_focus)
             .w(px(sidebar_width))
             .h_full()
             .flex_shrink_0()

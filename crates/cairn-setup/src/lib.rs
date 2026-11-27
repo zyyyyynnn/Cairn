@@ -20,6 +20,8 @@ pub(crate) mod installed;
 #[cfg(feature = "gui")]
 pub(crate) mod model;
 #[cfg(feature = "gui")]
+pub(crate) mod motion;
+#[cfg(feature = "gui")]
 pub(crate) mod msi;
 /// Loads Win32 setup binaries with DLL search restricted to System32.
 #[cfg(all(windows, feature = "gui"))]
@@ -71,7 +73,3 @@ pub const PRODUCT_FILES: [&str; 6] = [
 /// The product version this setup binary installs.
 #[cfg(feature = "gui")]
 pub(crate) const PRODUCT_VERSION: &str = env!("CARGO_PKG_VERSION");
-
-/// The license text shown from the consent page and shipped in the repository root.
-#[cfg(feature = "gui")]
-pub(crate) const LICENSE_TEXT: &str = include_str!("../../../LICENSE");
