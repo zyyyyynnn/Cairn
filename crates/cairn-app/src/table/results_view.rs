@@ -12,7 +12,6 @@ use crate::shell::theme::{ShellTokens, overlay_scrollbar};
 use crate::table::rows::{RowBand, rows_to_paint};
 use crate::table::surface::{ResultSurface, ResultSurfaceInputs, result_surface};
 use crate::view::announce_shortcut;
-use gpui_kit::base::motion::{Presence, Transition};
 use gpui_kit::component::menu::ContextMenuExt;
 use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::{InteractiveElementExt as _, h_flex, v_flex};
@@ -20,7 +19,6 @@ use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::*;
 use std::ops::Range;
 use std::rc::Rc;
-use std::time::Duration;
 
 const CONTEXT_MENU_MIN_WIDTH: f32 = 12.0;
 
@@ -60,16 +58,7 @@ impl CairnApp {
         let state = state.map(gpui_kit::IntoElement::into_any_element);
         let overflows_sideways = self.results.table_scroll.max_offset().x > px(0.0);
         let revealing = self.table_reveal.is_revealing();
-        let reveal_sample = Presence::new(
-            ElementId::NamedInteger("table-reveal-presence".into(), self.table_reveal.epoch()),
-            !revealing,
-        )
-        .transition(if revealing {
-            crate::motion::mask_dissolve()
-        } else {
-            Transition::new(Duration::ZERO)
-        })
-        .sample(window, cx);
+        let reveal_epoch = self.table_reveal.epoch();
 
         let viewport = div()
             .id("result-table-viewport")
@@ -174,7 +163,11 @@ impl CairnApp {
                         .inset_0()
                         .when(overflows_sideways, |this| this.bottom(Scrollbar::width()))
                         .bg(tokens.muted)
-                        .opacity(reveal_sample.progress),
+                        .with_animation(
+                            format!("table-reveal-{reveal_epoch}"),
+                            crate::motion::mask_dissolve_animation(),
+                            |element, delta| element.opacity(1.0 - delta),
+                        ),
                 )
             })
             .when(results_hold_focus, |this| {

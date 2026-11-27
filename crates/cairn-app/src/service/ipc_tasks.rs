@@ -1171,7 +1171,7 @@ impl CairnApp {
                 self.query.source_scope = None;
             }
             if !self.location_profile().is_local_listing {
-                let change = if self.table_reveal.is_initial() {
+                let change = if !self.results.has_presented_results {
                     crate::search::ResultSetChange::Probe
                 } else {
                     crate::search::ResultSetChange::Replace

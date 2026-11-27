@@ -448,8 +448,14 @@ impl SetupApp {
         cx.notify();
         if let Some(pending) = self.completion {
             match pending.phase {
-                CompletionPhase::Ready => self.request_screen(pending.next, cx),
-                CompletionPhase::WaitingForScreen => self.start_completion_fade(pending.token, cx),
+                CompletionPhase::Ready => {
+                    self.request_screen(pending.next, cx);
+                    return;
+                }
+                CompletionPhase::WaitingForScreen => {
+                    self.start_completion_fade(pending.token, cx);
+                    return;
+                }
                 CompletionPhase::Fading | CompletionPhase::Holding => {}
             }
         }
@@ -1698,6 +1704,26 @@ mod tests {
                             this.screen_transition.expect("result transition").target,
                             Screen::Finished
                         );
+
+                        this.screen_transition = None;
+                        this.motion.settle();
+                        this.set_screen_now(Screen::Location);
+                        this.completion = None;
+                        this.installing.set(false);
+                        this.begin_progress_screen(Screen::Installing, Stage::Preparing, cx);
+                        let transition = this.screen_transition.expect("progress exit").token;
+                        this.handle_msi_event(
+                            MsiEvent::Done(Ok(MsiSuccess {
+                                restart_required: false,
+                            })),
+                            cx,
+                        );
+                        let completion = this.completion.expect("completion pending").token;
+                        this.finish_completion(completion, cx);
+                        cx.set_reduce_motion(true);
+                        this.finish_screen_transition(transition, cx);
+                        assert_eq!(this.screen, Screen::Finished);
+                        assert!(this.motion.is_settled());
                     });
                     window.draw(cx).clear(cx);
                 })

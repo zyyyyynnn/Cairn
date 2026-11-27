@@ -11,9 +11,9 @@ targets = ["x86_64-pc-windows-msvc"]
 ignore = [
     { id = "RUSTSEC-2024-0384", reason = "instant is pulled by gpui-kit/gpui-base; no safe upgrade, no direct use" },
     { id = "RUSTSEC-2024-0436", reason = "paste is pulled by gpui-component/gpui-pre; no safe upgrade, no direct use" },
-    { id = "RUSTSEC-2026-0192", reason = "ttf-parser is pulled by the locked gpui/usvg stack; no safe upstream upgrade, no direct use" },
-    { id = "RUSTSEC-2026-0206", reason = "rustybuzz is pulled by the locked gpui/usvg stack; no safe upstream upgrade, no direct use" },
-    { id = "RUSTSEC-2026-0543", reason = "chrono is pulled by the locked gpui stack; no safe upstream upgrade, no direct use" },
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser is pulled by the locked gpui/usvg stack; no safe upstream upgrade, no direct use (https://rustsec.org/advisories/RUSTSEC-2026-0192)" },
+    { id = "RUSTSEC-2026-0206", reason = "rustybuzz is pulled by the locked gpui/usvg stack; no safe upstream upgrade, no direct use (https://rustsec.org/advisories/RUSTSEC-2026-0206)" },
+    { id = "RUSTSEC-2026-0543", reason = "chrono is pulled by the locked gpui stack; no safe upstream upgrade, no direct use (https://rustsec.org/advisories/RUSTSEC-2026-0543)" },
 ]
 
 [licenses]

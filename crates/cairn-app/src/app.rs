@@ -361,6 +361,8 @@ pub struct ResultsDomain {
     pub(crate) column_drag: Option<ColumnDrag>,
     /// Active content-snippet preview popover state, when open on a row.
     pub(crate) snippet_preview: Option<crate::table::snippets::SnippetPreviewState>,
+    /// Whether this window has published its first query result or rejection.
+    pub(crate) has_presented_results: bool,
 }
 
 /// The indexer this window talks to, and everything it reports back.
@@ -661,6 +663,7 @@ impl CairnApp {
                 column_widths,
                 column_drag: None,
                 snippet_preview: None,
+                has_presented_results: false,
             },
             service: ServiceDomain {
                 connection: ServiceConnection::initial(),

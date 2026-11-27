@@ -662,6 +662,7 @@ impl CairnApp {
                 self.query.degraded = degraded;
                 self.results.snippet_preview = None;
                 self.query.active_session_id = Some(session_id);
+                self.results.has_presented_results = true;
                 self.results.table.sort_spec = applied_sort;
                 if reset_scroll && self.table_reveal.is_initial() {
                     self.begin_table_session();
@@ -701,6 +702,7 @@ impl CairnApp {
                 self.query.degraded = None;
                 self.results.snippet_preview = None;
                 if self.query.rejection.is_some() {
+                    self.results.has_presented_results = true;
                     if reset_scroll && self.table_reveal.is_initial() {
                         self.begin_table_session();
                     }

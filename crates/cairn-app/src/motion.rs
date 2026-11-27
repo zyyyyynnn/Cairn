@@ -8,7 +8,8 @@ use std::time::Duration;
 
 pub use cairn_ui::motion::{MASK_DISSOLVE, MASK_DISSOLVE_CLEANUP, SIDEBAR, TOAST};
 use cairn_ui::motion::{flow_enter, flow_exit};
-use gpui_kit::base::motion::Transition;
+use gpui_kit::base::motion::{Easing, Transition};
+use gpui_kit::gpui::Animation;
 
 pub const TOAST_INFO_TIMEOUT: Duration = Duration::from_secs(4);
 pub const TOAST_ERROR_TIMEOUT: Duration = Duration::from_secs(4);
@@ -29,6 +30,8 @@ pub fn toast_exit() -> Transition {
     flow_exit(TOAST)
 }
 
-pub fn mask_dissolve() -> Transition {
-    flow_exit(MASK_DISSOLVE)
+pub fn mask_dissolve_animation() -> Animation {
+    let easing =
+        Easing::cubic_bezier(0.4, 0.0, 1.0, 1.0).expect("static mask-dissolve curve is valid");
+    Animation::new(MASK_DISSOLVE).with_easing(move |progress| easing.sample(progress))
 }

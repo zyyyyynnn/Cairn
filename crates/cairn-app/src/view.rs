@@ -26,7 +26,7 @@ use crate::shell::theme::{self, ShellTokens};
 use crate::shell::window_resize::{SETTLE_POLL, WindowResizeTracker};
 use gpui_kit::assets::IconName as AssetIconName;
 use gpui_kit::base::Disableable;
-use gpui_kit::base::motion::{Presence, Transition, transition_with_status};
+use gpui_kit::base::motion::transition_with_status;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::spinner::Spinner;
@@ -38,7 +38,7 @@ use gpui_kit::gpui::*;
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// The fixed identity of one caption button. The action stays a separate argument so each call
 /// site keeps its own closure.
@@ -1057,23 +1057,8 @@ impl CairnApp {
     /// The plate a live resize puts over the content panel, so the reflowing table
     /// stays one stable surface while the window is being dragged. It dissolves
     /// over [`crate::motion::MASK_DISSOLVE`] once the geometry has settled and the layout reflowed.
-    fn render_window_resize_cover(
-        &self,
-        tokens: &ShellTokens,
-        window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) -> Option<AnyElement> {
+    fn render_window_resize_cover(&self, tokens: &ShellTokens) -> Option<AnyElement> {
         let epoch = self.window_resize.fading_epoch();
-        let sample = Presence::new(
-            ElementId::NamedInteger("panel-resize-presence".into(), epoch.unwrap_or(0)),
-            epoch.is_none(),
-        )
-        .transition(if epoch.is_some() {
-            crate::motion::mask_dissolve()
-        } else {
-            Transition::new(Duration::ZERO)
-        })
-        .sample(window, cx);
         if self.window_resize.is_covered() {
             return Some(
                 div()
@@ -1084,14 +1069,18 @@ impl CairnApp {
                     .into_any_element(),
             );
         }
-        epoch?;
+        let epoch = epoch?;
         Some(
             div()
                 .id("panel-resize-overlay")
                 .absolute()
                 .inset_0()
                 .bg(tokens.muted)
-                .opacity(sample.progress)
+                .with_animation(
+                    format!("panel-resize-{epoch}"),
+                    crate::motion::mask_dissolve_animation(),
+                    |element, delta| element.opacity(1.0 - delta),
+                )
                 .into_any_element(),
         )
     }
@@ -1104,7 +1093,7 @@ impl CairnApp {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
-        let resize_cover = self.render_window_resize_cover(tokens, window, cx);
+        let resize_cover = self.render_window_resize_cover(tokens);
         let QueryBand {
             is_query_focused,
             search_focus,

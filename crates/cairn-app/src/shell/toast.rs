@@ -368,6 +368,7 @@ mod tests {
     use super::{ToastContent, ToastId, ToastKind, ToastState};
     use crate::app::CairnApp;
     use gpui_kit::AppContext as _;
+    use std::time::Duration;
 
     fn content(id: ToastId, title: &str) -> ToastContent {
         ToastContent::new(id, ToastKind::Info, title.to_string(), String::new())
@@ -465,8 +466,7 @@ mod tests {
 
     #[test]
     fn toast_timeouts_share_the_same_transient_retention() {
-        let timeout = ToastKind::Info.timeout();
-        assert_eq!(ToastKind::Error.timeout(), timeout);
-        assert!(!timeout.is_zero());
+        assert_eq!(ToastKind::Info.timeout(), Duration::from_secs(4));
+        assert_eq!(ToastKind::Error.timeout(), Duration::from_secs(4));
     }
 }

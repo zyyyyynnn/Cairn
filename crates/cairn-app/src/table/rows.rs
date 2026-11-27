@@ -231,8 +231,6 @@ impl CairnApp {
                     MouseButton::Right,
                     cx.listener(move |this, _: &MouseDownEvent, _, cx| {
                         this.focus_row_for_context(ix, cx);
-                        this.tooltip_suppression.suppress();
-                        cx.notify();
                     }),
                 );
         }

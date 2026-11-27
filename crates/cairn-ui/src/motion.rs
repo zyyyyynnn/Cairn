@@ -34,11 +34,6 @@ pub fn enter(duration: Duration, cx: &App) -> Transition {
     Transition::new(duration).easing(cx.theme().motion.easing_enter.clone())
 }
 
-/// Builds an exit transition using the active theme's exit curve.
-pub fn exit(duration: Duration, cx: &App) -> Transition {
-    Transition::new(duration).easing(cx.theme().motion.easing_exit.clone())
-}
-
 /// Directional curve for content leaving a flow.
 pub fn flow_exit(duration: Duration) -> Transition {
     Transition::new(duration)
