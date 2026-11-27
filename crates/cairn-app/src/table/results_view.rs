@@ -53,7 +53,6 @@ impl CairnApp {
         };
 
         let has_content = rows.is_some();
-        let has_state = state.is_some();
         let rows = rows.map(gpui_kit::IntoElement::into_any_element);
         let state = state.map(gpui_kit::IntoElement::into_any_element);
         let overflows_sideways = self.results.table_scroll.max_offset().x > px(0.0);
@@ -155,7 +154,7 @@ impl CairnApp {
                         .bg(tokens.muted),
                 )
             })
-            .when(revealing && (has_content || has_state), |this| {
+            .when(revealing && has_content, |this| {
                 this.child(
                     div()
                         .id("table-reveal-fade-overlay")
