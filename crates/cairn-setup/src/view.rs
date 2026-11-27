@@ -248,7 +248,7 @@ fn progress_element(
     completion: Option<f32>,
 ) -> AnyElement {
     let tokens = *tokens;
-    if completion.is_some() {
+    if completion.is_some() || progress.is_some() || reduce_motion {
         return div()
             .w_full()
             .child(progress_bar(
@@ -1198,7 +1198,6 @@ impl SetupApp {
             .text_color(tokens.danger_label)
             .text_sm()
             .font_weight(FontWeight::MEDIUM)
-            .cursor_pointer()
             .hover(|style| style.bg(tokens.danger_hover))
             .active(|style| style.bg(tokens.danger_active))
             .on_click(cx.listener(move |this, _, _, cx| on_activate(this, cx)))
