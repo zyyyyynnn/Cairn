@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-/// One bulk reveal opens at most this many tabs in a single Explorer window. A larger spread
+/// One bulk reveal opens at most this many Explorer windows. A larger spread
 /// is refused with a recovery message instead of launching an unbounded batch.
 pub(crate) const MAX_REVEAL_TARGETS: usize = 8;
 

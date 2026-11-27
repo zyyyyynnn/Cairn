@@ -1048,6 +1048,7 @@ mod tests {
     ) {
         gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
             gpui_kit::init(cx);
+            cx.set_reduce_motion(false);
             let _ = gpui_kit::open_window(
                 gpui_kit::gpui::WindowOptions {
                     show: false,

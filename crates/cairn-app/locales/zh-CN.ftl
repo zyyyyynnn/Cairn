@@ -90,8 +90,6 @@ selection_limit_title = 已达到选择上限
 selection_limit_message = 已选择前 { $count_text } 项。请缩小查询范围后再试。
 reveal_limit_title = 未打开全部文件夹
 reveal_limit_message = 选中项分布在 { $count } 个文件夹，超过一次最多打开 { $limit } 个文件夹的限制。请缩小选择范围后重试。
-reveal_failed_title = 无法打开文件夹
-reveal_failed_message = Windows 文件资源管理器未能完成打开操作，请重试。
 status_objects_summary = { $count_text } 个项目 { $size }
 
 # 搜索框占位符
