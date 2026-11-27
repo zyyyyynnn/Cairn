@@ -8,7 +8,7 @@ use crate::app::{CairnApp, layout};
 use crate::shell::dialogs;
 use crate::shell::i18n::I18nManager;
 use crate::shell::status_bar::format_count;
-use crate::shell::theme::{HAIRLINE, ShellTokens, tabular_figures};
+use crate::shell::theme::{HAIRLINE, ShellTokens, overlay_scrollbar, tabular_figures};
 use crate::table::model::format_timestamp;
 use cairn_core::format_size_bytes;
 use cairn_protocol::status::{IndexJournalEntry, IndexJournalStatus, JournalChangeKind};
@@ -17,7 +17,7 @@ use gpui_kit::assets::IconName as AssetIconName;
 use gpui_kit::base::Disableable;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::DialogEntrance;
-use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
+use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, WindowExt as _, h_flex, v_flex};
@@ -377,7 +377,7 @@ fn render_journal_row(
                 .truncate()
                 .text_sm()
                 .text_color(tokens.foreground)
-                .tooltip(crate::shell::tooltip::text(tooltip))
+                .tooltip(cairn_ui::tooltip::text(tooltip))
                 .child(entry.path.clone()),
         )
         .into_any_element()
@@ -457,14 +457,11 @@ fn render_journal_rows(
                 .flex_shrink_0()
                 .w(Scrollbar::width())
                 .h(list_height)
-                .border_l(HAIRLINE)
-                .border_color(tokens.border)
-                .child(
+                .child(overlay_scrollbar(
                     Scrollbar::vertical(scroll_handle)
                         .id("index-journal-scrollbar")
-                        .mode(ScrollbarMode::Always)
                         .viewport_from_layout(),
-                ),
+                )),
         );
 
     v_flex().w_full().child(header).child(scroller)

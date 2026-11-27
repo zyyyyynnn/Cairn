@@ -5,7 +5,7 @@
 | 产物 | 说明 |
 | --- | --- |
 | `cairn.msi` | WiX v5 构建的 MSI（源码使用 WiX v4 schema） |
-| `CairnSetup.exe` | GPUI 安装程序，内嵌 MSI 载荷；负责许可、路径、进度与提权启动 |
+| `CairnSetup.exe` | GPUI 安装程序，内嵌 MSI 载荷；负责安装路径、进度与提权启动 |
 | `Cairn.exe` | GPUI 桌面端 |
 | `CairnService.exe` | Windows 后台索引服务（LocalSystem） |
 | `CairnCli.exe` | 命令行检索工具 |

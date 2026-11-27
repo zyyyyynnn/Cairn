@@ -11,6 +11,7 @@
 //! danger button takes the component's red ramp with the palette's solid label; the chromatic state
 //! roles keep the component palette.
 
+use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode, ScrollbarStyles};
 use gpui_kit::component::{
     Colorize as _, Theme, ThemeMode, red_300, red_400, red_500, red_600, red_700, red_800,
 };
@@ -266,7 +267,7 @@ mod gray {
 pub struct ModePalette {
     /// The page: result body, table head, and light dialogs and toasts.
     pub content: Hsla,
-    /// Sunken surfaces: cards, the unfocused search box, loading/resize covers, and scrollbar tracks.
+    /// Sunken surfaces: cards, the unfocused search box, and loading/resize covers.
     pub inset: Hsla,
     /// Window chrome: title bar, sidebar, status bar, and dark dialogs and toasts.
     pub frame: Hsla,
@@ -414,11 +415,26 @@ fn bind_component_neutrals(theme: &mut Theme, palette: &ModePalette) {
     theme.progress_bar = palette.accent;
     theme.tokens.progress_bar = palette.accent.into();
 
-    // The scroll track and thumb: the thumb is a non-text control, so it takes the ring step,
-    // and its hover state takes the step that moves further from the page in both modes.
-    theme.scrollbar = palette.inset;
+    // The track stays transparent so the thumb reads as part of the content surface. The thumb is
+    // a non-text control, so it takes the ring step, and hover moves to the secondary ink.
+    theme.scrollbar = hsla(0.0, 0.0, 0.0, 0.0);
     theme.scrollbar_thumb = palette.ring;
     theme.scrollbar_thumb_hover = palette.muted_foreground;
+}
+
+/// Keeps an explicit scrollbar track transparent in every interaction state.
+fn overlay_scrollbar_styles(styles: ScrollbarStyles) -> ScrollbarStyles {
+    let transparent = hsla(0.0, 0.0, 0.0, 0.0);
+    styles
+        .track(|track| track.bg(transparent))
+        .track_hover(|track| track.bg(transparent))
+        .track_active(|track| track.bg(transparent).border_color(transparent))
+}
+
+pub fn overlay_scrollbar(scrollbar: Scrollbar) -> Scrollbar {
+    scrollbar
+        .styles(overlay_scrollbar_styles)
+        .mode(ScrollbarMode::Always)
 }
 
 /// Applies the mode palette and raises the ink roles that render below [`INK_CONTRAST_FLOOR`] on
@@ -689,7 +705,8 @@ mod tests {
         NEUTRAL_RAMP, RING_CONTRAST_FLOOR, SURFACE_CONTRAST_FLOOR, apply_danger_button_palette,
         apply_unified_interaction_fill, clamp_zoom, contrast_ratio, dialog_surface,
         enforce_contrast_floor, gray, is_neutral_ramp_step, lightness_step, mode_palette, oklch,
-        overlay_color, perceptual_distance, relative_luminance, repair_ink_contrast,
+        overlay_color, overlay_scrollbar, perceptual_distance, relative_luminance,
+        repair_ink_contrast,
     };
     use gpui_kit::component::{Theme, ThemeMode};
     use gpui_kit::gpui::Hsla;
@@ -1303,6 +1320,10 @@ mod tests {
         let ramp = gray::ALL;
         for dark in [false, true] {
             let theme = product_theme(dark);
+            assert_eq!(
+                theme.scrollbar.a, 0.0,
+                "scrollbar track must stay transparent"
+            );
             let roles = [
                 ("foreground", theme.foreground),
                 ("muted_foreground", theme.muted_foreground),
@@ -1319,7 +1340,6 @@ mod tests {
                 ("popover", theme.popover),
                 ("popover_foreground", theme.popover_foreground),
                 ("progress_bar", theme.progress_bar),
-                ("scrollbar", theme.scrollbar),
                 ("scrollbar_thumb", theme.scrollbar_thumb),
                 ("scrollbar_thumb_hover", theme.scrollbar_thumb_hover),
                 ("selection", theme.selection),
@@ -1367,5 +1387,14 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn overlay_scrollbar_builds_both_axes() {
+        let handle = gpui_kit::gpui::ScrollHandle::new();
+        let vertical = gpui_kit::component::scroll::Scrollbar::vertical(&handle);
+        let horizontal = gpui_kit::component::scroll::Scrollbar::horizontal(&handle);
+        let _ = overlay_scrollbar(vertical).viewport_from_layout();
+        let _ = overlay_scrollbar(horizontal).viewport_from_layout();
     }
 }

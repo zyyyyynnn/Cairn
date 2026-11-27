@@ -9,7 +9,9 @@ use crate::search::ResultSetChange;
 use crate::search::filters::FilterCategory;
 use crate::shell::commands::*;
 use crate::shell::location::ActiveLocation;
-use crate::shell::os::{copy_lines, open_file, open_folder_and_select, show_properties_dialog};
+use crate::shell::os::{
+    copy_lines, open_file, open_folder_and_select, open_folders_in_tabs, show_properties_dialog,
+};
 use crate::shell::reveal::{MAX_REVEAL_TARGETS, reveal_targets};
 use crate::shell::status_bar::format_count;
 use crate::table::model::SELECT_ALL_LIMIT;
@@ -227,7 +229,7 @@ impl CairnApp {
             cx.notify();
             return;
         }
-        if self.toast.is_some() {
+        if !self.toast.is_hidden() {
             self.dismiss_toast(cx);
             return;
         }
@@ -352,9 +354,22 @@ impl CairnApp {
                 let _ = open_folder_and_select(&path);
             }
         } else {
-            for path in targets {
-                let _ = open_folder_and_select(&path);
-            }
+            let targets = targets.clone();
+            cx.spawn(async move |this, cx| {
+                let result = cx
+                    .background_executor()
+                    .spawn(async move { open_folders_in_tabs(&targets) })
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    if let Err(error) = result {
+                        tracing::warn!("Explorer tab reveal failed: {error}");
+                        let title = this.i18n.get_text("reveal_failed_title");
+                        let message = this.i18n.get_text("reveal_failed_message");
+                        this.show_error_toast(title, message, cx);
+                    }
+                });
+            })
+            .detach();
         }
         cx.notify();
     }
@@ -442,6 +457,12 @@ impl CairnApp {
         cx: &mut Context<'_, Self>,
     ) {
         self.show_selected_properties(cx);
+    }
+
+    pub(crate) fn restore_result_tooltips(&mut self, cx: &mut Context<'_, Self>) {
+        if self.tooltip_suppression.restore() {
+            cx.notify();
+        }
     }
 
     pub fn focus_row_for_context(&mut self, ix: usize, cx: &mut Context<'_, Self>) {

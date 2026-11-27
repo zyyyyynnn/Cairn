@@ -8,17 +8,19 @@ use crate::app::{CairnApp, layout};
 use crate::shell::accessibility::{self, ControlElement};
 use crate::shell::command_groups::GroupCommand;
 use crate::shell::commands::RESULTS_CONTEXT;
-use crate::shell::theme::ShellTokens;
+use crate::shell::theme::{ShellTokens, overlay_scrollbar};
 use crate::table::rows::{RowBand, rows_to_paint};
 use crate::table::surface::{ResultSurface, ResultSurfaceInputs, result_surface};
 use crate::view::announce_shortcut;
+use gpui_kit::base::motion::{Presence, Transition};
 use gpui_kit::component::menu::ContextMenuExt;
-use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
+use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::{InteractiveElementExt as _, h_flex, v_flex};
 use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::*;
 use std::ops::Range;
 use std::rc::Rc;
+use std::time::Duration;
 
 const CONTEXT_MENU_MIN_WIDTH: f32 = 12.0;
 
@@ -57,6 +59,14 @@ impl CairnApp {
         let rows = rows.map(gpui_kit::IntoElement::into_any_element);
         let state = state.map(gpui_kit::IntoElement::into_any_element);
         let overflows_sideways = self.results.table_scroll.max_offset().x > px(0.0);
+        let revealing = self.table_reveal.is_revealing();
+        let reveal_sample = Presence::new("table-reveal-presence", !revealing)
+            .transition(if revealing {
+                crate::motion::mask_dissolve()
+            } else {
+                Transition::new(Duration::ZERO)
+            })
+            .sample(window, cx);
 
         let viewport = div()
             .id("result-table-viewport")
@@ -120,24 +130,26 @@ impl CairnApp {
                             .child(div().flex_1().min_h_0().when(
                                 has_content && self.results.table.total_rows() > 0,
                                 |this| {
-                                    this.child(
+                                    this.child(overlay_scrollbar(
                                         Scrollbar::vertical(&self.results.rows_scroll)
                                             .id("result-table-vscroll")
-                                            .mode(ScrollbarMode::Always)
                                             .viewport_from_layout(),
-                                    )
+                                    ))
                                 },
                             )),
                     ),
             )
             .when(overflows_sideways, |this| {
                 this.child(
-                    div().flex_shrink_0().w_full().h(Scrollbar::width()).child(
-                        Scrollbar::horizontal(&self.results.table_scroll)
-                            .id("result-table-hscroll")
-                            .mode(ScrollbarMode::Always)
-                            .viewport_from_layout(),
-                    ),
+                    div()
+                        .flex_shrink_0()
+                        .w_full()
+                        .h(Scrollbar::width())
+                        .child(overlay_scrollbar(
+                            Scrollbar::horizontal(&self.results.table_scroll)
+                                .id("result-table-hscroll")
+                                .viewport_from_layout(),
+                        )),
                 )
             })
             .when_some(state, gpui_kit::ParentElement::child)
@@ -151,33 +163,17 @@ impl CairnApp {
                         .bg(tokens.muted),
                 )
             })
-            .when(
-                self.table_reveal.fade_epoch > 0 && (has_content || has_state),
-                |this| {
-                    let fade_key = format!("table-reveal-fade-{}", self.table_reveal.fade_epoch);
-                    let reduce_motion = cx.reduce_motion();
-                    this.child(
-                        div()
-                            .id("table-reveal-fade-overlay")
-                            .absolute()
-                            .inset_0()
-                            .when(overflows_sideways, |this| this.bottom(Scrollbar::width()))
-                            .bg(tokens.muted)
-                            .with_animation(
-                                fade_key,
-                                Animation::new(crate::shell::motion::MASK_DISSOLVE)
-                                    .with_easing(ease_out_quint()),
-                                move |el, delta| {
-                                    if reduce_motion {
-                                        el.opacity(0.0)
-                                    } else {
-                                        el.opacity(1.0 - delta)
-                                    }
-                                },
-                            ),
-                    )
-                },
-            )
+            .when(revealing && (has_content || has_state), |this| {
+                this.child(
+                    div()
+                        .id("table-reveal-fade-overlay")
+                        .absolute()
+                        .inset_0()
+                        .when(overflows_sideways, |this| this.bottom(Scrollbar::width()))
+                        .bg(tokens.muted)
+                        .opacity(reveal_sample.progress),
+                )
+            })
             .when(results_hold_focus, |this| {
                 this.child(
                     div()
@@ -300,6 +296,21 @@ impl CairnApp {
         let app = cx.entity();
         stack
             .context_menu(move |menu, window, cx| {
+                let menu_entity = cx.entity();
+                app.update(cx, |this, cx| {
+                    this.tooltip_suppression.suppress();
+                    let subscription = cx.subscribe_in(
+                        &menu_entity,
+                        window,
+                        move |this, _menu, _: &DismissEvent, _window, cx| {
+                            if this.tooltip_suppression.restore() {
+                                cx.notify();
+                            }
+                        },
+                    );
+                    this.result_menu_dismiss = Some(subscription);
+                    cx.notify();
+                });
                 let mut menu = menu.min_w(window.rem_size() * CONTEXT_MENU_MIN_WIDTH);
                 let rename_available = app.read(cx).rename_target_ix().is_some();
                 for (ix, command) in commands.iter().enumerate() {

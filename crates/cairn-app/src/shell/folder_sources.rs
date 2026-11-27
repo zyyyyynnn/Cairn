@@ -15,7 +15,7 @@ use gpui_kit::base::Disableable;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::DialogEntrance;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
+use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::gpui::*;
 use std::cell::Cell;
@@ -182,7 +182,7 @@ impl FolderSourcesDialogView {
                     .truncate()
                     .text_sm()
                     .text_color(tokens.foreground)
-                    .tooltip(crate::shell::tooltip::text(source.root_path.clone()))
+                    .tooltip(cairn_ui::tooltip::text(source.root_path.clone()))
                     .child(source.root_path.clone()),
             )
             .child(
@@ -313,14 +313,11 @@ impl Render for FolderSourcesDialogView {
                 .flex_shrink_0()
                 .w(Scrollbar::width())
                 .h(list_height)
-                .border_l(HAIRLINE)
-                .border_color(tokens.border)
-                .child(
+                .child(theme::overlay_scrollbar(
                     Scrollbar::vertical(&scroll_handle)
                         .id("folder-source-scrollbar")
-                        .mode(ScrollbarMode::Always)
                         .viewport_from_layout(),
-                );
+                ));
             h_flex()
                 .w_full()
                 .items_stretch()

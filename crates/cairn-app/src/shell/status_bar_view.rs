@@ -17,6 +17,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::status_bar::StatusBar;
 use gpui_kit::component::{Icon, Sizable as _, h_flex};
 use gpui_kit::gpui::*;
+use gpui_kit::prelude::FluentBuilder as _;
 
 /// The band marks a loading state only while the current view has nothing to show.
 ///
@@ -156,7 +157,9 @@ impl CairnApp {
             .icon(IconName::RefreshCw)
             .loading_icon(IconName::LoaderCircle)
             .loading(icon_loading)
-            .tooltip(refresh_label.clone())
+            .when(!self.tooltip_suppression.is_suppressed(), |button| {
+                button.tooltip(refresh_label.clone())
+            })
             .accessibility_label(refresh_label)
             .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
                 this.refresh_current_view(cx);

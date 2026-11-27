@@ -26,6 +26,9 @@ pub const BRAND_TITLE_SIZE: f32 = 16.0 / BASE_FONT_PX;
 /// headings share the same heading line box.
 pub const SERIF_LINE_HEIGHT: f32 = 1.25;
 
+/// The unitless line box for UI body copy, hints, errors and log text.
+pub const BODY_LINE_HEIGHT: f32 = 1.5;
+
 /// The small UI text step: 0.875 rem, 12.25 px at 100%. Status-bar text, hints, section
 /// labels, state copy, control labels and the installer descriptor use it in place of the
 /// framework's 10.5 px `text_xs`.

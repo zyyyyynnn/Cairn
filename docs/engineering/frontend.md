@@ -8,7 +8,7 @@
 1. **BorderBox**：taffy 默认按 border-box 计算；固定高度已经包含边框，不要再次把 1px 细线加进总高度。
 2. **rem 单一来源**：`rems()` 依赖 `window.rem_size()`；壳层按 `BASE_FONT_PX = 14px` 和 `zoom` 计算，不要引入 16px rem 基准。所有虚拟化高度和布局常量应走同一换算。
 3. **窗口最小尺寸只在创建时读取**：`window_min_size` 没有运行时 setter；需要动态限制时在应用层主动 resize，或按启动时的最坏情况预算。
-4. **滚动条不是自动的**：只设置 `.overflow_x_scroll()` 不会画出滚动条；taffy 的 `scrollbar_width` 默认为 0，需要 `ScrollbarMode::Always` 并挂载 `Scrollbar`。
+4. **滚动条不是自动的**：只设置 `.overflow_x_scroll()` 不会画出滚动条；taffy 的 `scrollbar_width` 默认为 0，需要 `ScrollbarMode::Always` 并挂载 `Scrollbar`。所有显式滚动条统一通过 `overlay_scrollbar` 构造，轨道透明且不额外绘制灰底或分隔线。
 5. **GPUI 没有内置键盘滚动**：应用层监听按键，调用 `ScrollHandle::set_offset`，用 `max_offset()` 限制边界。
 6. **列宽共享模型**：表头与数据行必须读取同一套 flex 比例；否则拖拽列宽后表头与单元格会错位。
 7. **CJK 排版**：GPUI 没有避头尾和 CJK 分词；不可换行的文本必须显式分配宽度预算，不能假设会自动处理标点。
@@ -73,7 +73,7 @@
 | 按词删除 | `Ctrl+Backspace` / `Ctrl+Delete` |
 | 按词移动光标 | `Ctrl+Left` / `Ctrl+Right` |
 
-“编辑”菜单同步暴露撤销、重做、剪切、复制、粘贴、全选与清空，中英文文案保持一致。结果区全选只覆盖已加载行，上限 1,000 项；一次“打开所在文件夹”最多打开 8 个目录，超出时拒绝并提示缩小选择范围。
+“编辑”菜单同步暴露撤销、重做、剪切、复制、粘贴、全选与清空，中英文文案保持一致。结果区全选只覆盖已加载行，上限 1,000 项；一次“打开所在文件夹”在 Windows 11 的同一个资源管理器窗口中以标签页打开最多 8 个目录，Windows 10 回退为多个窗口；超出时拒绝并提示缩小选择范围。
 
 ### 2. Undo/Redo 语义
 

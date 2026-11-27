@@ -19,7 +19,6 @@ pub struct Preview {
     pub language: Option<String>,
     pub dark: Option<bool>,
     pub installed: bool,
-    pub accepted: bool,
     pub progress: Option<f32>,
     pub stage: Stage,
     pub log: Option<PathBuf>,
@@ -103,7 +102,6 @@ impl Preview {
             language: non_empty(language),
             dark: theme.map(|theme| theme.eq_ignore_ascii_case("dark")),
             installed,
-            accepted: screen != Screen::License,
             progress: if indeterminate {
                 None
             } else {
@@ -151,7 +149,6 @@ fn non_empty(value: Option<String>) -> Option<String> {
 #[cfg(debug_assertions)]
 fn screen_from_key(key: &str) -> Option<Screen> {
     match key {
-        "license" => Some(Screen::License),
         "location" => Some(Screen::Location),
         "installing" | "installing-indeterminate" => Some(Screen::Installing),
         "finished" => Some(Screen::Finished),

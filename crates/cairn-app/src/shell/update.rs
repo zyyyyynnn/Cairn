@@ -848,7 +848,7 @@ mod tests {
                         this.start_update_check(window, cx);
                         assert!(this.update_state.is_checking());
                         assert!(
-                            this.toast.is_none(),
+                            this.toast.is_hidden(),
                             "the checking phase belongs to the Help menu row"
                         );
                         assert!(

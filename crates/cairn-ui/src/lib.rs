@@ -12,4 +12,6 @@ pub mod brand;
 pub mod focus;
 pub mod i18n;
 pub mod locale;
+pub mod motion;
 pub mod theme;
+pub mod tooltip;

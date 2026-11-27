@@ -19,7 +19,6 @@ pub enum Launch {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screen {
-    License,
     Location,
     Installing,
     Finished,
@@ -130,10 +129,10 @@ pub fn initial_screen(
     }
 
     match installed {
-        None => Screen::License,
+        None => Screen::Location,
         // The 0.1.x Burn package predates this installer and must be removed before the new MSI
         // can own the machine. Its version is allowed to look newer than this work line.
-        Some(_) if legacy_burn => Screen::License,
+        Some(_) if legacy_burn => Screen::Location,
         Some(product)
             if product
                 .product_code
@@ -143,7 +142,7 @@ pub fn initial_screen(
         {
             Screen::Maintenance
         }
-        Some(_) => Screen::License,
+        Some(_) => Screen::Location,
     }
 }
 
@@ -276,12 +275,12 @@ mod tests {
         let uninstall_target = product("0.1.0");
 
         let cases = [
-            (Launch::Setup, None, false, Screen::License),
-            (Launch::Setup, Some(&no_code), false, Screen::License),
+            (Launch::Setup, None, false, Screen::Location),
+            (Launch::Setup, Some(&no_code), false, Screen::Location),
             (Launch::Setup, Some(&newer), false, Screen::Maintenance),
             (Launch::Setup, Some(&current), false, Screen::Maintenance),
-            (Launch::Setup, Some(&older), false, Screen::License),
-            (Launch::Setup, Some(&burn), true, Screen::License),
+            (Launch::Setup, Some(&older), false, Screen::Location),
+            (Launch::Setup, Some(&burn), true, Screen::Location),
             (Launch::Uninstall, None, false, Screen::Failed),
             (
                 Launch::Uninstall,

@@ -10,33 +10,126 @@
 //! single-line truncated description with a full-text tooltip.
 
 use crate::app::{CairnApp, layout};
+use crate::motion::{TOAST, TOAST_ERROR_TIMEOUT, TOAST_INFO_TIMEOUT, toast_enter, toast_exit};
 use crate::shell::accessibility;
 use crate::shell::theme::{self, ShellTokens};
 use fluent_bundle::FluentArgs;
 use gpui_kit::assets::IconName as AssetIconName;
+use gpui_kit::base::motion::Presence;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::gpui::*;
-use gpui_kit::gpui::{Animation, AnimationExt, ease_out_quint};
-use std::time::Duration;
+use gpui_kit::prelude::FluentBuilder as _;
+use std::time::{Duration, Instant};
 
-const TOAST_INFO_DURATION: Duration = Duration::from_secs(6);
-const TOAST_ERROR_DURATION: Duration = Duration::from_secs(8);
 /// The toast is a reading surface, not a panel: one short measure, independent
 /// of the result columns underneath it.
 const TOAST_WIDTH_REM: f32 = 24.0;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ToastKind {
     Error,
     Info,
 }
 
+impl ToastKind {
+    fn timeout(self) -> Duration {
+        match self {
+            Self::Error => TOAST_ERROR_TIMEOUT,
+            Self::Info => TOAST_INFO_TIMEOUT,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ToastId {
+    Update,
+    Message(u64),
+}
+
+impl ToastId {
+    fn key(self) -> u64 {
+        match self {
+            Self::Update => 0,
+            Self::Message(id) => id,
+        }
+    }
+}
+
 #[derive(Clone)]
-pub(crate) struct ToastState {
+pub(crate) struct ToastContent {
+    id: ToastId,
     kind: ToastKind,
     title: String,
     message: String,
-    closing: bool,
+    shown_at: Instant,
+}
+
+impl ToastContent {
+    fn new(id: ToastId, kind: ToastKind, title: String, message: String) -> Self {
+        Self {
+            id,
+            kind,
+            title,
+            message,
+            shown_at: Instant::now(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) enum ToastState {
+    Hidden,
+    Visible(ToastContent),
+    Exiting(ToastId, ToastContent),
+}
+
+impl ToastState {
+    pub(crate) fn content(&self) -> Option<&ToastContent> {
+        match self {
+            Self::Hidden => None,
+            Self::Visible(content) | Self::Exiting(_, content) => Some(content),
+        }
+    }
+
+    pub(crate) fn is_hidden(&self) -> bool {
+        matches!(self, Self::Hidden)
+    }
+
+    fn is_current(&self, id: ToastId, shown_at: Instant) -> bool {
+        self.content()
+            .is_some_and(|content| content.id == id && content.shown_at == shown_at)
+    }
+
+    fn replace(&mut self, content: ToastContent) -> bool {
+        let same_id = self
+            .content()
+            .is_some_and(|current| current.id == content.id);
+        *self = Self::Visible(content);
+        same_id
+    }
+
+    fn begin_exit(&mut self, id: ToastId, shown_at: Instant) -> bool {
+        let Self::Visible(content) = self else {
+            return false;
+        };
+        if content.id != id || content.shown_at != shown_at {
+            return false;
+        }
+        *self = Self::Exiting(id, content.clone());
+        true
+    }
+
+    fn finish_exit(&mut self, id: ToastId, shown_at: Instant) -> bool {
+        let Self::Exiting(exiting_id, content) = self else {
+            return false;
+        };
+        if *exiting_id != id || content.shown_at != shown_at {
+            return false;
+        }
+        *self = Self::Hidden;
+        true
+    }
 }
 
 impl CairnApp {
@@ -64,7 +157,14 @@ impl CairnApp {
         message: impl Into<String>,
         cx: &mut Context<'_, Self>,
     ) {
-        self.show_toast(ToastKind::Info, title.into(), message.into(), false, cx);
+        self.upsert_toast(
+            ToastId::Update,
+            ToastKind::Info,
+            title.into(),
+            message.into(),
+            false,
+            cx,
+        );
     }
 
     fn show_toast(
@@ -75,30 +175,30 @@ impl CairnApp {
         auto_dismiss: bool,
         cx: &mut Context<'_, Self>,
     ) {
-        self.toast_serial = self.toast_serial.wrapping_add(1);
-        let serial = self.toast_serial;
-        self.toast = Some(ToastState {
-            kind,
-            title,
-            message,
-            closing: false,
-        });
+        self.next_toast_id = self.next_toast_id.wrapping_add(1);
+        let id = ToastId::Message(self.next_toast_id);
+        self.upsert_toast(id, kind, title, message, auto_dismiss, cx);
+    }
 
-        // A newer toast replaces this one before its timer fires; the serial
-        // makes the stale timer a no-op instead of clearing the newer state.
+    fn upsert_toast(
+        &mut self,
+        id: ToastId,
+        kind: ToastKind,
+        title: String,
+        message: String,
+        auto_dismiss: bool,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let content = ToastContent::new(id, kind, title, message);
+        let shown_at = content.shown_at;
+        self.toast.replace(content);
+
         if auto_dismiss {
-            let duration = if kind == ToastKind::Error {
-                TOAST_ERROR_DURATION
-            } else {
-                TOAST_INFO_DURATION
-            };
             cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(duration).await;
+                cx.background_executor().timer(kind.timeout()).await;
                 let _ = this.update(cx, |this, cx| {
-                    let still_current = this.toast_serial == serial
-                        && this.toast.as_ref().is_some_and(|toast| !toast.closing);
-                    if still_current {
-                        this.begin_toast_exit(serial, cx);
+                    if this.toast.is_current(id, shown_at) {
+                        this.begin_toast_exit(id, shown_at, cx);
                     }
                 });
             })
@@ -108,8 +208,14 @@ impl CairnApp {
     }
 
     pub(crate) fn dismiss_toast(&mut self, cx: &mut Context<'_, Self>) {
-        let serial = self.toast_serial;
-        self.begin_toast_exit(serial, cx);
+        let Some((id, shown_at)) = self
+            .toast
+            .content()
+            .map(|content| (content.id, content.shown_at))
+        else {
+            return;
+        };
+        self.begin_toast_exit(id, shown_at, cx);
     }
 
     /// Removes the current toast only when it is the one `title` names. A
@@ -118,38 +224,29 @@ impl CairnApp {
     pub(crate) fn dismiss_toast_titled(&mut self, title: &str, cx: &mut Context<'_, Self>) {
         let matches = self
             .toast
-            .as_ref()
+            .content()
             .is_some_and(|toast| toast.title == title);
         if matches {
             self.dismiss_toast(cx);
         }
     }
 
-    /// Keeps the card mounted for one short fade-out, then drops it. A newer toast bumps the
-    /// serial, so a stale exit timer can never remove the replacement.
-    fn begin_toast_exit(&mut self, serial: u64, cx: &mut Context<'_, Self>) {
-        let Some(toast) = self.toast.as_mut() else {
-            return;
-        };
-        if self.toast_serial != serial || toast.closing {
+    /// Keeps the card mounted for one short fade-out, then drops it. The id and
+    /// content instance make every superseded timer a no-op.
+    fn begin_toast_exit(&mut self, id: ToastId, shown_at: Instant, cx: &mut Context<'_, Self>) {
+        if !self.toast.begin_exit(id, shown_at) {
             return;
         }
-        toast.closing = true;
         if cx.reduce_motion() {
-            self.toast = None;
+            self.toast.finish_exit(id, shown_at);
             cx.notify();
             return;
         }
         cx.notify();
         cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(crate::shell::motion::TOAST)
-                .await;
+            cx.background_executor().timer(TOAST).await;
             let _ = this.update(cx, |this, cx| {
-                let still_closing = this.toast_serial == serial
-                    && this.toast.as_ref().is_some_and(|toast| toast.closing);
-                if still_closing {
-                    this.toast = None;
+                if this.toast.finish_exit(id, shown_at) {
                     cx.notify();
                 }
             });
@@ -159,11 +256,15 @@ impl CairnApp {
 
     pub(crate) fn render_toast(
         &self,
-        toast: ToastState,
+        toast: ToastContent,
         tokens: &ShellTokens,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
+        let present = matches!(self.toast, ToastState::Visible(_));
+        let sample = Presence::new("cairn-toast-presence", present)
+            .transition(if present { toast_enter() } else { toast_exit() })
+            .sample(window, cx);
         let is_error = toast.kind == ToastKind::Error;
         let control = if is_error {
             accessibility::control("toast")
@@ -172,8 +273,7 @@ impl CairnApp {
         };
         let dismiss = accessibility::control("toast-dismiss");
         let dismiss_label = accessibility::name(dismiss, &self.i18n);
-        let serial = self.toast_serial;
-        let closing = toast.closing;
+        let toast_key = toast.id.key();
         let surface = cairn_ui::theme::dialog_surface(cx.theme());
         let close = Button::new(dismiss.element)
             .ghost()
@@ -185,7 +285,6 @@ impl CairnApp {
             .on_click(cx.listener(|this, _, _, cx| this.dismiss_toast(cx)));
 
         let bottom = rems(layout::STATUS_HEIGHT + layout::SPACE_8);
-        let reduce_motion = cx.reduce_motion();
         let accessible_name = if toast.message.is_empty() {
             toast.title.clone()
         } else {
@@ -213,6 +312,7 @@ impl CairnApp {
             .border_1()
             .border_color(tokens.border)
             .shadow_md()
+            .opacity(sample.progress)
             .child(
                 v_flex()
                     .w_full()
@@ -243,35 +343,127 @@ impl CairnApp {
                     )
                     .child(
                         div()
-                            .id(("toast-message", serial))
+                            .id(("toast-message", toast_key))
                             .w_full()
                             .min_w_0()
                             .truncate()
                             .text_size(rems(theme::SMALL_TEXT_SIZE))
                             .line_height(relative(1.5))
                             .text_color(tokens.muted_foreground)
-                            .tooltip(crate::shell::tooltip::text(toast.message.clone()))
+                            .when(!self.tooltip_suppression.is_suppressed(), |this| {
+                                this.tooltip(cairn_ui::tooltip::text(toast.message.clone()))
+                            })
                             .child(toast.message),
                     ),
             )
-            .with_animation(
-                if closing {
-                    format!("toast-out-{serial}")
-                } else {
-                    format!("toast-in-{serial}")
-                },
-                Animation::new(crate::shell::motion::TOAST).with_easing(ease_out_quint()),
-                move |card, delta| {
-                    let progress = if reduce_motion {
-                        1.0
-                    } else if closing {
-                        1.0 - delta
-                    } else {
-                        delta
-                    };
-                    card.opacity(progress)
-                },
-            )
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ToastContent, ToastId, ToastKind, ToastState};
+    use crate::app::CairnApp;
+    use gpui_kit::AppContext as _;
+
+    fn content(id: ToastId, title: &str) -> ToastContent {
+        ToastContent::new(id, ToastKind::Info, title.to_string(), String::new())
+    }
+
+    #[test]
+    fn replacing_a_visible_toast_with_the_same_id_keeps_its_identity() {
+        let id = ToastId::Update;
+        let mut state = ToastState::Hidden;
+        state.replace(content(id, "Installing"));
+        assert!(state.replace(content(id, "Installing 50%")));
+
+        let current = state.content().expect("updated toast stays visible");
+        assert_eq!(current.id, id);
+        assert_eq!(current.title, "Installing 50%");
+        assert!(matches!(state, ToastState::Visible(_)));
+    }
+
+    #[test]
+    fn a_new_id_replaces_the_old_card_without_an_exiting_state() {
+        let mut state = ToastState::Hidden;
+        state.replace(content(ToastId::Message(1), "Old"));
+        assert!(!state.replace(content(ToastId::Message(2), "New")));
+
+        let current = state.content().expect("replacement is visible");
+        assert_eq!(current.id, ToastId::Message(2));
+        assert_eq!(current.title, "New");
+        assert!(matches!(state, ToastState::Visible(_)));
+    }
+
+    #[test]
+    fn exit_and_cleanup_reject_stale_timers() {
+        let id = ToastId::Message(1);
+        let first = content(id, "First");
+        let first_shown_at = first.shown_at;
+        let mut state = ToastState::Hidden;
+        state.replace(first);
+        assert!(state.begin_exit(id, first_shown_at));
+        assert!(matches!(state, ToastState::Exiting(_, _)));
+
+        assert!(!state.finish_exit(ToastId::Message(2), first_shown_at));
+        let second = content(ToastId::Message(2), "Second");
+        let second_shown_at = second.shown_at;
+        state.replace(second);
+        assert!(!state.finish_exit(id, first_shown_at));
+        assert!(state.is_current(ToastId::Message(2), second_shown_at));
+
+        assert!(state.begin_exit(ToastId::Message(2), second_shown_at));
+        assert!(state.finish_exit(ToastId::Message(2), second_shown_at));
+        assert!(state.is_hidden());
+    }
+
+    #[test]
+    fn updating_the_same_id_invalidates_its_previous_auto_dismiss_timer() {
+        let id = ToastId::Update;
+        let first = content(id, "First");
+        let first_shown_at = first.shown_at;
+        let mut state = ToastState::Hidden;
+        state.replace(first);
+        state.begin_exit(id, first_shown_at);
+
+        let second = content(id, "Second");
+        let second_shown_at = second.shown_at;
+        state.replace(second);
+        assert!(!state.finish_exit(id, first_shown_at));
+        assert!(state.is_current(id, second_shown_at));
+    }
+
+    #[test]
+    fn reduced_motion_dismisses_a_toast_without_an_exit_timer() {
+        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
+            gpui_kit::init(cx);
+            let _ = gpui_kit::open_window(
+                gpui_kit::gpui::WindowOptions {
+                    show: false,
+                    focus: false,
+                    ..gpui_kit::gpui::WindowOptions::default()
+                },
+                cx,
+                |window, cx| {
+                    let app = cx.new(|cx| CairnApp::new(window, cx));
+                    app.update(cx, |this, cx| {
+                        cx.set_reduce_motion(true);
+                        this.show_info_toast("Title", "Message", cx);
+                        assert!(!this.toast.is_hidden());
+                        this.dismiss_toast(cx);
+                        assert!(this.toast.is_hidden());
+                    });
+                    cx.quit();
+                    app
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn toast_timeouts_share_the_same_transient_retention() {
+        let timeout = ToastKind::Info.timeout();
+        assert_eq!(ToastKind::Error.timeout(), timeout);
+        assert!(!timeout.is_zero());
     }
 }

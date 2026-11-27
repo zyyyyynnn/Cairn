@@ -23,7 +23,6 @@ pub(crate) mod location;
 pub(crate) mod menu_actions;
 pub(crate) mod menu_popup;
 pub(crate) mod menu_rules;
-pub(crate) mod motion;
 pub(crate) mod nav_history;
 pub(crate) mod os;
 pub(crate) mod perf;
@@ -41,7 +40,6 @@ pub(crate) mod status_bar;
 pub(crate) mod status_bar_view;
 pub(crate) mod theme;
 pub(crate) mod toast;
-pub(crate) mod tooltip;
 #[cfg(windows)]
 pub(crate) mod tray;
 pub(crate) mod update;

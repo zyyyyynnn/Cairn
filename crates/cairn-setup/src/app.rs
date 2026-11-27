@@ -9,14 +9,21 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::mpsc::Receiver;
 
-use cairn_ui::brand::heading_text;
-use cairn_ui::theme::dialog_surface;
+use cairn_ui::brand::{BODY_LINE_HEIGHT, RADIUS, heading_text};
+use cairn_ui::theme::{dialog_surface, overlay_scrollbar};
+use cairn_ui::tooltip;
 use gpui_kit::Focusable;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::dialog::DialogEntrance;
 use gpui_kit::component::input::{InputEvent, InputState};
-use gpui_kit::component::{ActiveTheme as _, WindowExt as _, v_flex};
+use gpui_kit::component::scroll::Scrollbar;
+use gpui_kit::component::{
+    ActiveTheme as _, IconName, Sizable as _, WindowExt as _, h_flex, v_flex,
+};
 use gpui_kit::gpui::{
-    AppContext as _, Context, Entity, FocusHandle, FontWeight, KeyBinding, ParentElement as _,
-    Styled as _, Subscription, WeakEntity, Window, div, relative,
+    AppContext as _, Context, Entity, FocusHandle, FontWeight, InteractiveElement as _, KeyBinding,
+    MouseButton, ParentElement as _, Pixels, Point, ScrollHandle, StatefulInteractiveElement as _,
+    Styled as _, Subscription, WeakEntity, Window, div, px, relative,
 };
 
 use crate::i18n::I18n;
@@ -25,6 +32,7 @@ use crate::model::{
     InstalledProduct, Launch, PathProblem, Screen, Stage, default_install_dir, initial_screen,
     validate_install_path,
 };
+use crate::motion::{COMPLETION_FADE, COMPLETION_HOLD, PAGE_ENTER, PAGE_EXIT, SetupMotion};
 use crate::msi::{self, MsiEvent};
 use crate::payload::PayloadError;
 use crate::platform;
@@ -95,17 +103,41 @@ fn force_cleanup_allowed(screen: Screen) -> bool {
     matches!(screen, Screen::Uninstalling | Screen::Failed)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PendingCompletion {
+    token: u64,
+    next: Screen,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ScreenTransition {
+    token: u64,
+    target: Screen,
+}
+
+fn progress_caption_for(i18n: &I18n, screen: Screen, stage: Stage) -> String {
+    if screen == Screen::Uninstalling {
+        i18n.get("uninstall_progress_working")
+    } else {
+        i18n.get(stage.message_key())
+    }
+}
+
 pub struct SetupApp {
     pub(crate) i18n: I18n,
     pub(crate) launch: Launch,
     pub(crate) screen: Screen,
+    pub(crate) motion: SetupMotion,
     pub(crate) dark: bool,
-    pub(crate) accepted: bool,
     pub(crate) path_input: Option<Entity<InputState>>,
     pub(crate) path_error: Option<PathProblem>,
     pub(crate) installing: Rc<Cell<bool>>,
     pub(crate) progress: Option<f32>,
     pub(crate) stage: Stage,
+    completion: Option<PendingCompletion>,
+    completion_counter: u64,
+    screen_transition: Option<ScreenTransition>,
+    transition_counter: u64,
     pub(crate) log: Option<PathBuf>,
     pub(crate) error: Option<&'static str>,
     pub(crate) notice: Option<&'static str>,
@@ -131,9 +163,6 @@ pub struct SetupApp {
     /// The page heading receives focus when the screen changes, so a keyboard or screen-reader
     /// user lands on the new task instead of the disappearing control that opened it.
     pub(crate) screen_focus: FocusHandle,
-    /// The license agreement is the field that a missing acceptance refers to, so an error can
-    /// return the person to it instead of leaving focus on the Continue button.
-    pub(crate) license_focus: FocusHandle,
     /// The destructive uninstall action owns its focus ring because the framework's filled-button
     /// focus line is drawn at reduced opacity inside the danger fill.
     pub(crate) uninstall_focus: FocusHandle,
@@ -191,7 +220,7 @@ impl SetupApp {
                         && let Some(input) = &this.path_input
                     {
                         let raw = input.read(cx).value().to_string();
-                        this.path_error = validate_install_path(&raw).err();
+                        this.set_path_error(validate_install_path(&raw).err());
                         cx.notify();
                     }
                 },
@@ -219,7 +248,6 @@ impl SetupApp {
         // holds focus.
         let root_focus = cx.focus_handle();
         let screen_focus = cx.focus_handle();
-        let license_focus = cx.focus_handle().tab_stop(true);
         let uninstall_focus = cx.focus_handle().tab_stop(true);
         let force_cleanup_focus = cx.focus_handle().tab_stop(true);
 
@@ -256,20 +284,30 @@ impl SetupApp {
         let install_dir = installed
             .as_ref()
             .map(|product| product.install_dir.clone());
-
+        let progress = preview.as_ref().and_then(|preview| preview.progress);
+        let stage = preview
+            .as_ref()
+            .map_or(Stage::Preparing, |preview| preview.stage);
+        let initial_caption = progress_caption_for(&i18n, screen, stage);
+        let motion = SetupMotion::new(
+            initial_caption,
+            progress.map(|value| visible_progress(Some(value))),
+        );
         Self {
             i18n,
             launch,
             screen,
+            motion,
             dark,
-            accepted: preview.as_ref().is_some_and(|preview| preview.accepted),
             path_input,
             path_error: None,
             installing,
-            progress: preview.as_ref().and_then(|preview| preview.progress),
-            stage: preview
-                .as_ref()
-                .map_or(Stage::Preparing, |preview| preview.stage),
+            progress,
+            stage,
+            completion: None,
+            completion_counter: 0,
+            screen_transition: None,
+            transition_counter: 0,
             log: preview.as_ref().and_then(|preview| preview.log.clone()),
             error,
             notice: None,
@@ -287,7 +325,6 @@ impl SetupApp {
             forced_cleanup: false,
             root_focus,
             screen_focus,
-            license_focus,
             uninstall_focus,
             force_cleanup_focus,
             focused_screen: None,
@@ -300,7 +337,18 @@ impl SetupApp {
     }
 
     pub(crate) fn is_busy(&self) -> bool {
-        matches!(self.screen, Screen::Installing | Screen::Uninstalling)
+        self.installing.get()
+            || self.completion.is_some()
+            || self.screen_transition.is_some()
+            || matches!(self.screen, Screen::Installing | Screen::Uninstalling)
+    }
+
+    pub(crate) fn is_transitioning(&self) -> bool {
+        self.motion.is_transitioning()
+    }
+
+    pub(crate) fn is_completing(&self) -> bool {
+        self.completion.is_some()
     }
 
     pub(crate) fn is_uninstall(&self) -> bool {
@@ -326,40 +374,142 @@ impl SetupApp {
         }
     }
 
-    pub(crate) fn continue_from_license(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        if !self.accepted {
-            self.notice = Some("error_license_required");
-            self.license_focus.focus(window, cx);
+    fn set_screen_now(&mut self, next: Screen) {
+        self.screen = next;
+        if !matches!(next, Screen::Installing | Screen::Uninstalling) {
+            self.completion = None;
+        }
+    }
+
+    fn request_screen(&mut self, next: Screen, cx: &mut Context<'_, Self>) {
+        if next == self.screen && self.screen_transition.is_none() {
+            return;
+        }
+        if cx.reduce_motion() {
+            self.screen_transition = None;
+            self.set_screen_now(next);
+            self.installing
+                .set(matches!(next, Screen::Installing | Screen::Uninstalling));
             cx.notify();
             return;
         }
-        self.screen = Screen::Location;
-        self.focused_screen = Some(Screen::Location);
-        self.notice = None;
-        if let Some(input) = &self.path_input {
-            input.read(cx).focus_handle(cx).focus(window, cx);
+        if let Some(mut transition) = self.screen_transition {
+            if transition.target != next {
+                transition.target = next;
+                self.screen_transition = Some(transition);
+            }
+            return;
         }
+
+        self.transition_counter += 1;
+        let token = self.transition_counter;
+        self.installing.set(true);
+        self.screen_transition = Some(ScreenTransition {
+            token,
+            target: next,
+        });
+        self.motion.begin_exit();
+        cx.notify();
+        let weak = cx.entity().downgrade();
+        cx.spawn(async move |_, cx| {
+            cx.background_executor().timer(PAGE_EXIT).await;
+            let _ = weak.update(cx, |this, cx| this.enter_screen_transition(token, cx));
+            cx.background_executor().timer(PAGE_ENTER).await;
+            let _ = weak.update(cx, |this, cx| this.finish_screen_transition(token, cx));
+        })
+        .detach();
+    }
+
+    fn enter_screen_transition(&mut self, token: u64, cx: &mut Context<'_, Self>) {
+        let Some(transition) = self.screen_transition else {
+            return;
+        };
+        if transition.token != token {
+            return;
+        }
+        self.set_screen_now(transition.target);
+        self.motion.begin_enter();
         cx.notify();
     }
 
-    pub(crate) fn back(&mut self, cx: &mut Context<'_, Self>) {
-        if self.screen == Screen::Location {
-            self.screen = Screen::License;
-            self.path_error = None;
-            cx.notify();
+    fn finish_screen_transition(&mut self, token: u64, cx: &mut Context<'_, Self>) {
+        let Some(transition) = self.screen_transition else {
+            return;
+        };
+        if transition.token != token {
+            return;
+        }
+        let target = transition.target;
+        self.screen_transition = None;
+        self.motion.settle();
+        if !matches!(self.screen, Screen::Installing | Screen::Uninstalling) {
+            self.installing.set(false);
+        }
+        cx.notify();
+        if target != self.screen {
+            self.request_screen(target, cx);
         }
     }
 
-    pub(crate) fn set_accepted(&mut self, accepted: bool, cx: &mut Context<'_, Self>) {
-        self.accepted = accepted;
-        if accepted {
-            self.notice = None;
+    fn set_path_error(&mut self, next: Option<PathProblem>) {
+        self.path_error = next;
+        self.motion.set_path_error(next);
+    }
+
+    fn begin_progress_screen(&mut self, screen: Screen, stage: Stage, cx: &mut Context<'_, Self>) {
+        self.completion = None;
+        self.progress = None;
+        self.stage = stage;
+        self.motion
+            .reset_progress(progress_caption_for(&self.i18n, screen, stage));
+        self.request_screen(screen, cx);
+    }
+
+    fn begin_completion(&mut self, next: Screen, cx: &mut Context<'_, Self>) {
+        self.stage = Stage::Finishing;
+        self.motion.set_caption(if self.is_uninstall() {
+            self.i18n.get("uninstall_progress_working")
+        } else {
+            self.i18n.get(Stage::Finishing.message_key())
+        });
+        self.motion.set_progress(100.0);
+        self.motion.begin_completion();
+        self.completion_counter += 1;
+        let token = self.completion_counter;
+        self.completion = Some(PendingCompletion { token, next });
+        if cx.reduce_motion() {
+            self.finish_completion(token, cx);
+            return;
         }
+        let weak = cx.entity().downgrade();
+        cx.spawn(async move |_, cx| {
+            cx.background_executor().timer(COMPLETION_FADE).await;
+            let _ = weak.update(cx, |this, cx| this.hold_completion(token, cx));
+        })
+        .detach();
         cx.notify();
+    }
+
+    fn hold_completion(&mut self, token: u64, cx: &mut Context<'_, Self>) {
+        if self.completion.is_none_or(|pending| pending.token != token) {
+            return;
+        }
+        let weak = cx.entity().downgrade();
+        cx.spawn(async move |_, cx| {
+            cx.background_executor().timer(COMPLETION_HOLD).await;
+            let _ = weak.update(cx, |this, cx| this.finish_completion(token, cx));
+        })
+        .detach();
+    }
+
+    fn finish_completion(&mut self, token: u64, cx: &mut Context<'_, Self>) {
+        let Some(pending) = self.completion else {
+            return;
+        };
+        if pending.token != token {
+            return;
+        }
+        self.request_screen(pending.next, cx);
     }
 
     pub(crate) fn browse(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
@@ -373,7 +523,7 @@ impl SetupApp {
         let Some(path) = platform::browse_for_folder(&title) else {
             return;
         };
-        self.path_error = None;
+        self.set_path_error(None);
         input.update(cx, |state, cx| {
             state.set_value(path.to_string_lossy().to_string(), window, cx);
         });
@@ -384,8 +534,7 @@ impl SetupApp {
         tracing::warn!("installer staging root is unavailable: {error}");
         self.log = None;
         self.error = Some("error_staging");
-        self.screen = Screen::Failed;
-        self.installing.set(false);
+        self.request_screen(Screen::Failed, cx);
         cx.notify();
     }
 
@@ -400,20 +549,19 @@ impl SetupApp {
         let install_dir = match validate_install_path(&raw) {
             Ok(path) => path,
             Err(problem) => {
-                self.path_error = Some(problem);
-                self.screen = Screen::Location;
+                self.set_path_error(Some(problem));
+                self.request_screen(Screen::Location, cx);
                 self.focused_screen = Some(Screen::Location);
                 input.read(cx).focus_handle(cx).focus(window, cx);
                 cx.notify();
                 return;
             }
         };
-
         let (msi, payload_dir) = match quiet::msi_for_this_build(None) {
             Ok(value) => value,
             Err(error) => {
                 self.error = Some(error_key_from_payload(&error));
-                self.screen = Screen::Failed;
+                self.request_screen(Screen::Failed, cx);
                 cx.notify();
                 return;
             }
@@ -443,17 +591,15 @@ impl SetupApp {
         self.log = Some(log);
         self.error = None;
         self.notice = None;
-        self.path_error = None;
-        self.progress = None;
-        self.stage = Stage::Preparing;
+        self.set_path_error(None);
         self.restart_required = false;
         self.cleanup_incomplete = false;
         self.record_remaining = false;
         self.active_product_codes.clear();
         self.forced_cleanup = false;
         self.uninstall_attempted = false;
-        self.screen = Screen::Installing;
         self.installing.set(true);
+        self.begin_progress_screen(Screen::Installing, Stage::Preparing, cx);
         self.pump(session.events, cx);
         cx.notify();
     }
@@ -470,7 +616,7 @@ impl SetupApp {
         let product = installed::installed_product();
         let Some(product) = product else {
             self.error = Some("error_not_installed");
-            self.screen = Screen::Failed;
+            self.request_screen(Screen::Failed, cx);
             cx.notify();
             return;
         };
@@ -498,7 +644,7 @@ impl SetupApp {
                     }
                 }
                 self.error = Some("error_msi_unknown");
-                self.screen = Screen::Failed;
+                self.request_screen(Screen::Failed, cx);
                 cx.notify();
                 return;
             }
@@ -534,11 +680,9 @@ impl SetupApp {
         self.error = None;
         self.notice = None;
         self.cleanup_incomplete = false;
-        self.progress = None;
-        self.stage = Stage::Preparing;
         self.uninstall_attempted = true;
-        self.screen = Screen::Uninstalling;
         self.installing.set(true);
+        self.begin_progress_screen(Screen::Uninstalling, Stage::Preparing, cx);
         self.pump(session.events, cx);
         cx.notify();
     }
@@ -577,11 +721,9 @@ impl SetupApp {
         self.error = None;
         self.notice = None;
         self.cleanup_incomplete = false;
-        self.progress = None;
-        self.stage = Stage::Finishing;
         self.uninstall_attempted = true;
-        self.screen = Screen::Uninstalling;
         self.installing.set(true);
+        self.begin_progress_screen(Screen::Uninstalling, Stage::Finishing, cx);
         self.pump(session.events, cx);
         cx.notify();
     }
@@ -594,7 +736,7 @@ impl SetupApp {
     /// It must not reject a busy screen: the automatic fallback runs from the Done event while the
     /// progress page still owns the busy state, and refusing there would strand the window.
     pub(crate) fn start_force_cleanup(&mut self, cx: &mut Context<'_, Self>) {
-        if !force_cleanup_allowed(self.screen) {
+        if !force_cleanup_allowed(self.screen) || self.is_transitioning() {
             return;
         }
         // The automatic fallback arrives with the previous session finished; a duplicate call
@@ -605,7 +747,7 @@ impl SetupApp {
         self.record_remaining = false;
         let Some(install_dir) = self.install_dir.clone() else {
             self.error = Some("error_msi_unknown");
-            self.screen = Screen::Failed;
+            self.request_screen(Screen::Failed, cx);
             cx.notify();
             return;
         };
@@ -642,12 +784,10 @@ impl SetupApp {
         self.error = None;
         self.notice = None;
         self.cleanup_incomplete = false;
-        self.progress = None;
-        self.stage = Stage::Finishing;
         self.uninstall_attempted = true;
         self.forced_cleanup = true;
-        self.screen = Screen::Uninstalling;
         self.installing.set(true);
+        self.begin_progress_screen(Screen::Uninstalling, Stage::Finishing, cx);
         self.pump(session.events, cx);
         cx.notify();
     }
@@ -692,12 +832,11 @@ impl SetupApp {
         if !self.is_busy() {
             return;
         }
-        self.installing.set(false);
         if let Some(dir) = self.payload_dir.take() {
             let _ = std::fs::remove_dir_all(dir);
         }
         self.error = Some("error_msi_unknown");
-        self.screen = Screen::Failed;
+        self.request_screen(Screen::Failed, cx);
         cx.notify();
     }
 
@@ -708,12 +847,16 @@ impl SetupApp {
                     && stage != self.stage
                 {
                     self.stage = stage;
+                    if !self.is_uninstall() {
+                        self.motion.set_caption(self.i18n.get(stage.message_key()));
+                    }
                     cx.notify();
                 }
             }
             MsiEvent::Progress { current, total } => {
                 if let Some(next) = progress_percent(self.progress, current, total) {
                     self.progress = Some(next);
+                    self.motion.set_progress(visible_progress(Some(next)));
                     cx.notify();
                 }
             }
@@ -722,27 +865,25 @@ impl SetupApp {
                 cx.notify();
             }
             MsiEvent::Done(result) => {
-                let was_uninstalling = self.screen == Screen::Uninstalling;
-                self.installing.set(false);
+                let was_uninstalling = self.is_uninstall();
                 if let Some(dir) = self.payload_dir.take() {
                     let _ = std::fs::remove_dir_all(dir);
                 }
                 match result {
                     Ok(success) => {
-                        self.progress = Some(100.0);
-                        self.stage = Stage::Finishing;
                         self.restart_required = success.restart_required;
-                        if was_uninstalling {
+                        let next = if was_uninstalling {
                             self.record_remaining = record_remaining_after_cleanup(
                                 self.forced_cleanup,
                                 installed::find_product_codes_checked(),
                             );
-                            self.screen = Screen::Uninstalled;
+                            Screen::Uninstalled
                         } else {
-                            self.screen = Screen::Finished;
-                        }
+                            Screen::Finished
+                        };
                         self.forced_cleanup = false;
                         self.notice = None;
+                        self.begin_completion(next, cx);
                     }
                     Err(failure) => {
                         self.log = Some(failure.log.clone());
@@ -757,7 +898,7 @@ impl SetupApp {
                         } else {
                             failure.kind.message_key()
                         });
-                        self.screen = Screen::Failed;
+                        self.request_screen(Screen::Failed, cx);
                     }
                 }
                 cx.notify();
@@ -801,18 +942,8 @@ impl SetupApp {
             }
         };
         let title = self.i18n.get("log_viewer_title");
-        show_text_dialog(window, cx, title, text, TextDialogKind::Log);
-    }
-
-    pub(crate) fn view_license(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        let title = self.i18n.get("license_title");
-        show_text_dialog(
-            window,
-            cx,
-            title,
-            crate::LICENSE_TEXT.to_string(),
-            TextDialogKind::License,
-        );
+        let close_label = self.i18n.get("window_close");
+        let _ = show_log_dialog(window, cx, title, text, close_label);
     }
 
     pub(crate) fn retry(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
@@ -824,120 +955,188 @@ impl SetupApp {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct LicenseLine {
-    text: String,
-    centered: bool,
+fn log_scroll_offset(
+    offset: Point<Pixels>,
+    max_offset: Point<Pixels>,
+    key: &str,
+    line_step: Pixels,
+    page_step: Pixels,
+) -> Point<Pixels> {
+    // GPUI scroll offsets run from 0 at the top down to -max_offset.y at the bottom.
+    let min_y = -max_offset.y.max(px(0.0));
+    let y = match key {
+        "up" => (offset.y + line_step).clamp(min_y, px(0.0)),
+        "down" => (offset.y - line_step).clamp(min_y, px(0.0)),
+        "pageup" => (offset.y + page_step).clamp(min_y, px(0.0)),
+        "pagedown" => (offset.y - page_step).clamp(min_y, px(0.0)),
+        "home" => px(0.0),
+        "end" => min_y,
+        _ => offset.y,
+    };
+    Point::new(offset.x, y)
 }
 
-fn license_lines(text: &str) -> Vec<LicenseLine> {
-    let raw: Vec<&str> = text.lines().collect();
-    let headers: Vec<usize> = raw
-        .iter()
-        .enumerate()
-        .filter(|(_, line)| !line.trim().is_empty())
-        .map(|(index, _)| index)
-        .take(3)
-        .collect();
-    let page_margin = raw
-        .iter()
-        .enumerate()
-        .filter(|(index, line)| !headers.contains(index) && !line.trim().is_empty())
-        .map(|(_, line)| line.chars().take_while(|ch| *ch == ' ').count())
-        .min()
-        .unwrap_or(0);
-    raw.into_iter()
-        .enumerate()
-        .map(|(index, line)| {
-            if headers.contains(&index) {
-                LicenseLine {
-                    text: line.trim().to_string(),
-                    centered: true,
-                }
-            } else {
-                let leading = line.chars().take_while(|ch| *ch == ' ').count();
-                LicenseLine {
-                    text: line[leading.min(page_margin)..].to_string(),
-                    centered: false,
-                }
-            }
-        })
-        .collect()
-}
-
-#[derive(Clone, Copy)]
-enum TextDialogKind {
-    License,
-    Log,
-}
-
-/// One scrollable read-only surface for the embedded license and the installer log. The text is
-/// already in memory, so opening it never touches a user-readable file or the shell's viewer.
-fn show_text_dialog(
+/// One scrollable read-only surface for the installer log. The text is already in memory, so
+/// opening it never touches a user-readable file or the shell's viewer.
+fn show_log_dialog(
     window: &mut Window,
     cx: &mut Context<'_, SetupApp>,
     title: String,
     text: String,
-    kind: TextDialogKind,
-) {
+    close_label: String,
+) -> ScrollHandle {
     let surface = dialog_surface(cx.theme());
-    window.open_dialog(cx, move |dialog, window, _| {
-        let body = match kind {
-            TextDialogKind::License => license_lines(&text).into_iter().fold(
-                v_flex().w_full().text_sm().line_height(relative(1.5)),
-                |body, line| {
-                    let LicenseLine { text, centered } = line;
-                    let content = if text.is_empty() {
-                        " ".to_string()
-                    } else {
-                        text
-                    };
-                    let line = if centered {
-                        div().w_full().text_center()
-                    } else {
-                        div().w_full()
-                    };
-                    body.child(line.child(content))
-                },
-            ),
-            TextDialogKind::Log => {
-                let body = v_flex()
-                    .w_full()
-                    .text_sm()
-                    .line_height(relative(1.5))
-                    .font_family("Consolas");
-                text.lines().fold(body, |body, line| {
-                    body.child(div().w_full().child(if line.is_empty() {
-                        " ".to_string()
-                    } else {
-                        line.to_string()
-                    }))
-                })
+    let scroll_handle = ScrollHandle::new();
+    let returned_scroll = scroll_handle.clone();
+    let focus_handle = cx.focus_handle().tab_stop(true);
+    let focus_body = Rc::new(Cell::new(true));
+    window.open_dialog(cx, move |dialog, window, cx| {
+        if focus_body.replace(false) {
+            focus_handle.focus(window, cx);
+        }
+        let rem = window.rem_size();
+        let body_height = (window.viewport_size().height * 0.55).clamp(rem * 8.0, rem * 18.0);
+        let body = v_flex()
+            .w_full()
+            .text_sm()
+            .line_height(relative(BODY_LINE_HEIGHT))
+            .font_family("Consolas");
+        let body = text.lines().enumerate().fold(body, |body, (index, line)| {
+            let display = if line.is_empty() {
+                " ".to_string()
+            } else {
+                line.to_string()
+            };
+            let row = div()
+                .id(("setup-log-line", index))
+                .w_full()
+                .min_w_0()
+                .truncate();
+            if line.is_empty() {
+                return body.child(row.child(display));
             }
-        };
+            let full_text = line.to_string();
+            body.child(
+                row.aria_label(full_text.clone())
+                    .tooltip(tooltip::element(move |window, _| {
+                        div()
+                            .id("setup-log-tooltip-content")
+                            .max_w(window.rem_size() * 28.0)
+                            .whitespace_normal()
+                            .line_height(relative(BODY_LINE_HEIGHT))
+                            .child(full_text.clone())
+                    }))
+                    .child(display),
+            )
+        });
+        let keyboard_scroll = scroll_handle.clone();
+        let click_focus = focus_handle.clone();
+        let scroll_body = div()
+            .id("setup-log-body")
+            .w_full()
+            .h(body_height)
+            .overflow_y_scroll()
+            .track_scroll(&scroll_handle)
+            .track_focus(&focus_handle)
+            .aria_label(title.clone())
+            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                cairn_ui::focus::set_keyboard_navigation(false, cx);
+                click_focus.focus(window, cx);
+            })
+            .on_key_down(move |event, _, cx| {
+                let key = event.keystroke.key.as_str();
+                if !matches!(key, "up" | "down" | "pageup" | "pagedown" | "home" | "end") {
+                    return;
+                }
+                let offset = keyboard_scroll.offset();
+                let next = log_scroll_offset(
+                    offset,
+                    keyboard_scroll.max_offset(),
+                    key,
+                    rem * BODY_LINE_HEIGHT,
+                    (body_height - rem).max(rem),
+                );
+                if next != offset {
+                    keyboard_scroll.set_offset(next);
+                    cx.refresh_windows();
+                }
+                cx.stop_propagation();
+            })
+            .child(body);
+        let focus_edge = cairn_ui::focus::edge(
+            &focus_handle,
+            cx.theme().ring,
+            RADIUS,
+            cairn_ui::focus::keyboard_navigation(cx),
+            window,
+            cx,
+        );
+        let scroller = h_flex()
+            .w_full()
+            .items_stretch()
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_w_0()
+                    .child(scroll_body)
+                    .children(focus_edge),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .w(Scrollbar::width())
+                    .h(body_height)
+                    .child(overlay_scrollbar(
+                        Scrollbar::vertical(&scroll_handle)
+                            .id("setup-log-scrollbar")
+                            .viewport_from_layout(),
+                    )),
+            );
+        let title_row = h_flex()
+            .w_full()
+            .items_center()
+            .justify_between()
+            .child(heading_text(title.clone(), FontWeight::SEMIBOLD))
+            .child(
+                div().w(Scrollbar::width()).flex_shrink_0().child(
+                    Button::new("setup-log-close")
+                        .small()
+                        .ghost()
+                        .icon(IconName::Close)
+                        .accessibility_label(close_label.clone())
+                        .w_full()
+                        .on_click(|_, window, cx| window.close_dialog(cx)),
+                ),
+            );
         dialog
             .width(window.rem_size() * 36.0)
             .bg(surface)
-            .title(heading_text(title.clone(), FontWeight::SEMIBOLD))
-            .child(body)
+            .entrance(DialogEntrance::FadeSlide)
+            .close_button(false)
+            .title(title_row)
+            .child(scroller)
     });
+    returned_scroll
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        force_cleanup_allowed, license_lines, progress_percent, record_remaining_after_cleanup,
-        uninstall_can_fall_back_to_cleanup, visible_progress,
+        SetupApp, force_cleanup_allowed, log_scroll_offset, progress_percent,
+        record_remaining_after_cleanup, show_log_dialog, uninstall_can_fall_back_to_cleanup,
+        visible_progress,
     };
-    use crate::model::Screen;
+    use crate::i18n::I18n;
+    use crate::model::{Launch, Screen, Stage};
     use crate::msi::FailureKind;
+    use crate::preview::Preview;
 
     #[test]
     fn a_forced_cleanup_can_start_from_the_progress_or_failure_page() {
         assert!(force_cleanup_allowed(Screen::Uninstalling));
         assert!(force_cleanup_allowed(Screen::Failed));
         for screen in [
-            Screen::License,
             Screen::Location,
             Screen::Installing,
             Screen::Finished,
@@ -978,35 +1177,217 @@ mod tests {
         );
     }
     #[test]
-    fn the_license_header_is_centered_and_the_page_margin_is_removed() {
-        let lines = license_lines(crate::LICENSE_TEXT);
-        assert!(lines[0].centered && lines[1].centered && lines[2].centered);
-        assert_eq!(lines[0].text, "Apache License");
-        assert_eq!(lines[1].text, "Version 2.0, January 2004");
-        assert_eq!(lines[2].text, "http://www.apache.org/licenses/");
-
-        let terms = lines
-            .iter()
-            .find(|line| {
-                line.text == "TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION"
-            })
-            .expect("the license body");
-        assert!(!terms.centered);
-        let definitions = lines
-            .iter()
-            .find(|line| line.text == "1. Definitions.")
-            .expect("the first numbered section");
-        assert!(!definitions.centered);
-
-        let definition = lines
-            .iter()
-            .find(|line| line.text.trim_start().starts_with("\"License\" shall mean"))
-            .expect("an indented definition");
-        assert!(
-            definition.text.starts_with("   \"License\""),
-            "the relative list indent must remain: {:?}",
-            definition.text
+    fn log_scroll_keys_move_by_line_or_page_and_clamp_to_bounds() {
+        let offset = gpui_kit::gpui::point(gpui_kit::gpui::px(0.0), gpui_kit::gpui::px(-40.0));
+        let max = gpui_kit::gpui::point(gpui_kit::gpui::px(0.0), gpui_kit::gpui::px(100.0));
+        let line = gpui_kit::gpui::px(20.0);
+        let page = gpui_kit::gpui::px(30.0);
+        assert_eq!(
+            log_scroll_offset(offset, max, "up", line, page).y,
+            gpui_kit::gpui::px(-20.0)
         );
+        assert_eq!(
+            log_scroll_offset(offset, max, "down", line, page).y,
+            gpui_kit::gpui::px(-60.0)
+        );
+        assert_eq!(
+            log_scroll_offset(offset, max, "pageup", line, page).y,
+            gpui_kit::gpui::px(-10.0)
+        );
+        assert_eq!(
+            log_scroll_offset(offset, max, "pagedown", line, page).y,
+            gpui_kit::gpui::px(-70.0)
+        );
+        assert_eq!(
+            log_scroll_offset(offset, max, "home", line, page).y,
+            gpui_kit::gpui::px(0.0)
+        );
+        assert_eq!(
+            log_scroll_offset(offset, max, "end", line, page).y,
+            gpui_kit::gpui::px(-100.0)
+        );
+        assert_eq!(
+            log_scroll_offset(
+                gpui_kit::gpui::point(gpui_kit::gpui::px(0.0), gpui_kit::gpui::px(-10.0)),
+                max,
+                "up",
+                line,
+                page
+            )
+            .y,
+            gpui_kit::gpui::px(0.0)
+        );
+        assert_eq!(
+            log_scroll_offset(
+                gpui_kit::gpui::point(gpui_kit::gpui::px(0.0), gpui_kit::gpui::px(-90.0)),
+                max,
+                "down",
+                line,
+                page
+            )
+            .y,
+            gpui_kit::gpui::px(-100.0)
+        );
+        assert_eq!(
+            log_scroll_offset(
+                gpui_kit::gpui::point(gpui_kit::gpui::px(0.0), gpui_kit::gpui::px(0.0)),
+                gpui_kit::gpui::point(gpui_kit::gpui::px(0.0), gpui_kit::gpui::px(0.0)),
+                "down",
+                line,
+                page
+            )
+            .y,
+            gpui_kit::gpui::px(0.0)
+        );
+        assert_eq!(log_scroll_offset(offset, max, "other", line, page), offset);
+    }
+
+    #[test]
+    fn log_dialog_scrolls_by_keyboard_and_closes_on_escape() {
+        use gpui_kit::component::WindowExt as _;
+        use gpui_kit::gpui::{
+            AppContext as _, Bounds, Keystroke, Size, WindowBounds, WindowOptions, px,
+        };
+        use std::io::Write as _;
+
+        let mut file = tempfile::NamedTempFile::new().expect("temp log file");
+        let lines: Vec<String> = (0..40)
+            .map(|i| {
+                if i % 2 == 0 {
+                    format!("LINE_{i:02} MSI: Product Cairn step {i}")
+                } else {
+                    format!(
+                        "LINE_{i:02} MSI: Executing CairnInstallGuard on C:\\Program Files\\Cairn\\CairnService.exe with verified staging DACL and rollback"
+                    )
+                }
+            })
+            .collect();
+        let log_text = lines.join("\n");
+        file.write_all(log_text.as_bytes()).expect("write temp log");
+        let log_path = file.path().to_path_buf();
+
+        gpui_kit::application().run(move |cx| {
+            gpui_kit::init(cx);
+            cairn_ui::locale::init_layout_direction(cx);
+            cairn_ui::theme::apply_appearance(false, 1.0, cx);
+
+            let (handle, app) = gpui_kit::open_window(
+                WindowOptions {
+                    show: false,
+                    focus: false,
+                    window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+                        None,
+                        Size {
+                            width: px(520.0),
+                            height: px(240.0),
+                        },
+                        cx,
+                    ))),
+                    ..WindowOptions::default()
+                },
+                cx,
+                |window, cx| {
+                    let preview = Preview {
+                        screen: Screen::Failed,
+                        launch: Launch::Setup,
+                        language: Some("zh-CN".to_string()),
+                        dark: Some(false),
+                        installed: false,
+                        progress: None,
+                        stage: Stage::Preparing,
+                        log: Some(log_path.clone()),
+                        error: Some("error_msi_unknown"),
+                        uninstall_attempted: false,
+                        record_remaining: false,
+                    };
+                    cx.new(|cx| {
+                        SetupApp::new(
+                            window,
+                            cx,
+                            Launch::Setup,
+                            I18n::new("zh-CN"),
+                            Some(preview),
+                            false,
+                        )
+                    })
+                },
+            )
+            .expect("setup test window opens");
+
+            handle
+                .update(cx, |_, window, cx| {
+                    // Opening through the public SetupApp entry point reads the log and mounts a dialog.
+                    app.update(cx, |this, cx| this.open_log(window, cx));
+                    window.draw(cx).clear(cx);
+                    assert!(
+                        window.has_active_dialog(cx),
+                        "open_log must open the log viewer dialog"
+                    );
+                    assert!(
+                        window.dispatch_keystroke(Keystroke::parse("escape").expect("escape"), cx),
+                        "Escape must be handled by the open dialog"
+                    );
+                    window.draw(cx).clear(cx);
+                    assert!(
+                        !window.has_active_dialog(cx),
+                        "Escape must close the log dialog even while the log body holds focus"
+                    );
+
+                    // Mount directly to observe the real GPUI ScrollHandle through keyboard scroll events.
+                    let scroll = app.update(cx, |_, cx| {
+                        show_log_dialog(
+                            window,
+                            cx,
+                            "Install log".to_string(),
+                            log_text.clone(),
+                            "Close".to_string(),
+                        )
+                    });
+                    window.draw(cx).clear(cx);
+                    window.draw(cx).clear(cx);
+
+                    let max_y = scroll.max_offset().y;
+                    assert!(
+                        max_y > px(0.0),
+                        "40-line log must overflow the dialog viewport, got max_y={max_y:?}"
+                    );
+                    assert_eq!(scroll.offset().y, px(0.0), "log starts at top");
+
+                    window.dispatch_keystroke(Keystroke::parse("down").expect("down"), cx);
+                    window.draw(cx).clear(cx);
+                    let after_down = scroll.offset().y;
+                    assert!(
+                        after_down < px(0.0),
+                        "Down key must move GPUI scroll offset negative, got {after_down:?}"
+                    );
+
+                    window.dispatch_keystroke(Keystroke::parse("pagedown").expect("pagedown"), cx);
+                    window.draw(cx).clear(cx);
+                    let after_pagedown = scroll.offset().y;
+                    assert!(
+                        after_pagedown < after_down,
+                        "PageDown must scroll further down: {after_pagedown:?} vs {after_down:?}"
+                    );
+
+                    window.dispatch_keystroke(Keystroke::parse("end").expect("end"), cx);
+                    window.draw(cx).clear(cx);
+                    assert_eq!(
+                        scroll.offset().y,
+                        -max_y,
+                        "End key must scroll to -max_offset.y"
+                    );
+
+                    window.dispatch_keystroke(Keystroke::parse("home").expect("home"), cx);
+                    window.draw(cx).clear(cx);
+                    assert_eq!(
+                        scroll.offset().y,
+                        px(0.0),
+                        "Home key must return scroll offset to top"
+                    );
+                })
+                .expect("window update succeeds");
+            cx.quit();
+        });
     }
 
     #[test]
@@ -1024,5 +1405,173 @@ mod tests {
         assert_eq!(visible_progress(None), 0.0);
         assert_eq!(visible_progress(Some(42.0)), 42.0);
         assert_eq!(visible_progress(Some(100.0)), 99.0);
+    }
+
+    #[test]
+    fn motion_tracks_screen_stage_and_percent_transitions_and_honors_reduce_motion() {
+        use crate::msi::{MsiEvent, MsiSuccess};
+        use gpui_kit::gpui::{AppContext as _, Bounds, Size, WindowBounds, WindowOptions, px};
+
+        gpui_kit::application().run(move |cx| {
+            gpui_kit::init(cx);
+            cairn_ui::locale::init_layout_direction(cx);
+            cairn_ui::theme::apply_appearance(false, 1.0, cx);
+
+            let (handle, app) = gpui_kit::open_window(
+                WindowOptions {
+                    show: false,
+                    focus: false,
+                    window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+                        None,
+                        Size {
+                            width: px(520.0),
+                            height: px(240.0),
+                        },
+                        cx,
+                    ))),
+                    ..WindowOptions::default()
+                },
+                cx,
+                |window, cx| {
+                    let preview = Preview {
+                        screen: Screen::Location,
+                        launch: Launch::Setup,
+                        language: Some("en-US".to_string()),
+                        dark: Some(false),
+                        installed: false,
+                        progress: None,
+                        stage: Stage::Preparing,
+                        log: None,
+                        error: None,
+                        uninstall_attempted: false,
+                        record_remaining: false,
+                    };
+                    cx.new(|cx| {
+                        SetupApp::new(
+                            window,
+                            cx,
+                            Launch::Setup,
+                            I18n::new("en-US"),
+                            Some(preview),
+                            false,
+                        )
+                    })
+                },
+            )
+            .expect("setup motion test window opens");
+
+            handle
+                .update(cx, |_, window, cx| {
+                    window.draw(cx).clear(cx);
+                    app.update(cx, |this, cx| {
+                        assert_eq!(this.motion.transition_epoch(), 0);
+                        assert_eq!(this.motion.percent().value(), None);
+                        this.begin_progress_screen(Screen::Installing, Stage::Preparing, cx);
+                        assert_eq!(this.screen, Screen::Location);
+                        let token = this.screen_transition.expect("exit pending").token;
+                        this.enter_screen_transition(token, cx);
+                        assert_eq!(this.screen, Screen::Installing);
+                        this.finish_screen_transition(token, cx);
+                    });
+                    window.draw(cx).clear(cx);
+
+                    app.update(cx, |this, cx| {
+                        assert_eq!(this.motion.transition_epoch(), 1);
+                        this.handle_msi_event(MsiEvent::Action(String::from("InstallFiles")), cx);
+                        assert_eq!(this.motion.caption().current().as_ref(), "Copying files");
+
+                        for current in [8, 9, 10, 14, 24] {
+                            this.handle_msi_event(
+                                MsiEvent::Progress {
+                                    current,
+                                    total: 100,
+                                },
+                                cx,
+                            );
+                        }
+                        let (_, tens, ones) =
+                            this.motion.percent().slots().expect("percent visible");
+                        assert_eq!(tens.expect("tens slot").current, 2);
+                        assert_eq!(ones.current, 4);
+                        assert_eq!(ones.previous, Some(0));
+                    });
+                    window.draw(cx).clear(cx);
+
+                    app.update(cx, |this, cx| {
+                        this.installing.set(true);
+                        this.handle_msi_event(MsiEvent::Action(String::from("StartServices")), cx);
+                        this.handle_msi_event(
+                            MsiEvent::Done(Ok(MsiSuccess {
+                                restart_required: false,
+                            })),
+                            cx,
+                        );
+                        assert_eq!(this.screen, Screen::Installing);
+                        assert_eq!(this.motion.percent().value(), Some(100));
+                        assert_eq!(
+                            this.motion.caption().current().as_ref(),
+                            "Finishing the installation"
+                        );
+                        assert!(this.installing.get());
+                        assert_eq!(this.motion.transition_epoch(), 1);
+                        let stale_token = this.completion.expect("completion pending").token;
+                        this.begin_progress_screen(Screen::Installing, Stage::Preparing, cx);
+                        this.finish_completion(stale_token, cx);
+                        assert_eq!(this.screen, Screen::Installing);
+                        assert_eq!(this.progress, None);
+                        assert!(this.completion.is_none());
+                        assert!(this.installing.get());
+
+                        this.begin_completion(Screen::Finished, cx);
+                        let token = this.completion.expect("new completion pending").token;
+                        this.finish_completion(token, cx);
+                        assert_eq!(this.screen, Screen::Installing);
+                        assert!(this.completion.is_some(), "100% stays stable through exit");
+                        let transition_token = this.screen_transition.expect("result exit").token;
+                        this.enter_screen_transition(transition_token, cx);
+                        assert_eq!(this.screen, Screen::Finished);
+                        assert!(this.completion.is_none());
+                        this.finish_screen_transition(transition_token, cx);
+                        assert_eq!(this.motion.transition_epoch(), 2);
+                        assert!(!this.installing.get());
+
+                        cx.set_reduce_motion(true);
+                        this.request_screen(Screen::Maintenance, cx);
+                        assert_eq!(this.screen, Screen::Maintenance);
+                        assert!(this.motion.is_settled());
+
+                        cx.set_reduce_motion(false);
+                        this.request_screen(Screen::Uninstalled, cx);
+                        this.request_screen(Screen::Finished, cx);
+                        let token = this.screen_transition.expect("latest target pending").token;
+                        assert_eq!(
+                            this.screen_transition.expect("pending").target,
+                            Screen::Finished
+                        );
+                        this.finish_screen_transition(token + 1, cx);
+                        assert_eq!(this.screen, Screen::Maintenance);
+                        this.enter_screen_transition(token, cx);
+                        assert_eq!(this.screen, Screen::Finished);
+                        this.finish_screen_transition(token, cx);
+                        assert!(this.motion.is_settled());
+
+                        this.launch = Launch::Uninstall;
+                        this.begin_progress_screen(Screen::Uninstalling, Stage::Preparing, cx);
+                        this.handle_msi_event(
+                            MsiEvent::Done(Ok(MsiSuccess {
+                                restart_required: false,
+                            })),
+                            cx,
+                        );
+                        assert_eq!(
+                            this.completion.expect("uninstall completion").next,
+                            Screen::Uninstalled
+                        );
+                    });
+                    window.draw(cx).clear(cx);
+                })
+                .expect("window update succeeds");
+            cx.quit();
+        });
     }
 }

@@ -5,30 +5,29 @@
 //! The installer window. One column, one decision per page, a fixed footer, and the same chrome
 //! and grayscale palette as the product it installs.
 
-use gpui_kit::base::Progress as BaseProgress;
+use cairn_ui::brand::{
+    BODY_LINE_HEIGHT, BRAND_TITLE_SIZE, RADIUS, SERIF_LINE_HEIGHT, SMALL_TEXT_SIZE, UI_ICON_SIZE,
+    app_icon, cjk_heading_font, has_cjk, heading_text, serif_font,
+};
+use gpui_kit::base::{Disableable as _, Progress as BaseProgress};
+use gpui_kit::component::animation::cubic_bezier;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Input;
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::*;
-use gpui_kit::gpui::{Animation, AnimationExt, ease_in_out};
-use std::f32::consts::TAU;
-use std::time::Duration;
-
-use cairn_ui::brand::{
-    BRAND_TITLE_SIZE, RADIUS, SERIF_LINE_HEIGHT, SMALL_TEXT_SIZE, UI_ICON_SIZE, app_icon,
-    cjk_heading_font, has_cjk, heading_text, serif_font, tabular_figures,
-};
+use gpui_kit::gpui::{Animation, AnimationExt};
 
 use crate::app::{SetupApp, visible_progress};
 use crate::model::{InstalledProduct, Screen};
+use crate::motion::PagePhase;
 
 /// One physical platform surface: the caption row is 34 px at every zoom, like the product shell.
 const TITLE_BAR_HEIGHT: Pixels = px(34.0);
 /// Chrome horizontal inset (12 px), matching the product shell's title bar and footer margins.
 const PAGE_INSET: Pixels = px(12.0);
 /// Single vertical spacing token (16 px) for the main body area between title, description,
-/// inputs, cards, and checkboxes.
+/// and inputs.
 const MAIN_GAP: Pixels = px(16.0);
 /// Inline tight group spacing (8 px) for related controls on the same row.
 const GROUP_GAP: Pixels = px(8.0);
@@ -38,16 +37,14 @@ const PROGRESS_TRACK_RADIUS: Pixels = px(2.0);
 const PROGRESS_TRACK_BORDER: Pixels = px(0.5);
 /// A soft highlight travels across the completed portion. It is deliberately calm: motion
 /// explains that work is still running, without becoming a second loading indicator.
-const PROGRESS_SWEEP: Duration = Duration::from_millis(1800);
 const PROGRESS_INDETERMINATE_WIDTH: f32 = 0.28;
-const CARD_PAD: Pixels = px(12.0);
 /// Action bar height: 40 px, leaving 6 px around the 28 px medium buttons.
 const FOOTER_HEIGHT: Pixels = px(40.0);
 /// The title-bar app mark token, separate from the 16 px wordmark.
 const TITLE_BAR_ICON: Pixels = cairn_ui::brand::APP_ICON_SIZE;
 
 const PAGE_ICON: Pixels = px(18.0);
-const CHECK_SVG: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 7.5 6 10l4.5-5.5"/></svg>"#;
+const LOG_ACTION_MARKER: &str = "\u{E000}";
 
 /// The path field's accessible name carries its current validation message because the input
 /// component exposes no description attribute. The visible Alert and the focus returned to the
@@ -146,10 +143,6 @@ impl Tokens {
     }
 }
 
-fn progress_fraction(progress: f32) -> f32 {
-    (progress / 100.0).clamp(0.0, 1.0)
-}
-
 /// Returns the normalized leading offset of the indeterminate progress segment.
 /// Under reduced motion (`phase = 0.0`), the segment stays centred in the track rather than
 /// starting clipped outside the leading edge at `-PROGRESS_INDETERMINATE_WIDTH`.
@@ -161,28 +154,44 @@ fn indeterminate_left(phase: f32, reduce_motion: bool) -> f32 {
     }
 }
 
-/// A slow brightness breath, not a travelling band: the fill stays solid and the progress
-/// surface never reads as a scanning line.
-fn progress_pulse(phase: f32) -> f32 {
-    0.82 + 0.18 * (0.5 - 0.5 * (phase * TAU).cos())
+fn progress_fraction(progress: f32) -> f32 {
+    (progress / 100.0).clamp(0.0, 1.0)
 }
 
-fn effective_progress_pulse(phase: f32, reduce_motion: bool) -> f32 {
-    if reduce_motion {
-        1.0
-    } else {
-        progress_pulse(phase)
-    }
+fn progress_segment(tokens: &Tokens, phase: f32, reduce_motion: bool) -> AnyElement {
+    let left = indeterminate_left(phase, reduce_motion);
+    div()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .left(relative(left))
+        .w(relative(PROGRESS_INDETERMINATE_WIDTH))
+        .rounded(PROGRESS_TRACK_RADIUS)
+        .bg(tokens.foreground)
+        .into_any_element()
 }
 
-/// The track carries the value; the scan line or travelling segment carries the running-work
-/// motion. Neither changes layout. [`BaseProgress`] carries the role, label and numeric value for
-/// assistive technology.
+fn progress_fill(tokens: &Tokens, progress: f32) -> AnyElement {
+    div()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .left_0()
+        .w(relative(progress_fraction(progress)))
+        .rounded(PROGRESS_TRACK_RADIUS)
+        .bg(tokens.foreground)
+        .into_any_element()
+}
+
+/// The track carries determinate progress when MSI provides it and a travelling segment while
+/// the total is unknown. Completion crossfades either state into a solid full track.
+/// [`BaseProgress`] carries the role, label and numeric value for assistive technology.
 fn progress_bar(
     tokens: &Tokens,
     progress: Option<f32>,
     phase: f32,
     reduce_motion: bool,
+    completion: Option<f32>,
 ) -> AnyElement {
     let track = div()
         .relative()
@@ -193,35 +202,41 @@ fn progress_bar(
         .border_color(tokens.border)
         .bg(tokens.muted)
         .overflow_hidden();
-    let opacity = effective_progress_pulse(phase, reduce_motion);
-    match progress {
-        Some(value) => {
-            let fill = div()
-                .absolute()
-                .top_0()
-                .bottom_0()
-                .left_0()
-                .w(relative(progress_fraction(value)))
-                .overflow_hidden()
-                .rounded(PROGRESS_TRACK_RADIUS)
-                .bg(tokens.foreground.opacity(opacity));
-            track.child(fill).into_any_element()
-        }
-        None => {
-            let left = indeterminate_left(phase, reduce_motion);
-            track
-                .child(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .bottom_0()
-                        .left(relative(left))
-                        .w(relative(PROGRESS_INDETERMINATE_WIDTH))
-                        .rounded(PROGRESS_TRACK_RADIUS)
-                        .bg(tokens.foreground.opacity(opacity)),
-                )
-                .into_any_element()
-        }
+    let running = match progress {
+        Some(value) => progress_fill(tokens, value),
+        None => progress_segment(tokens, phase, reduce_motion),
+    };
+    if let Some(opacity) = completion {
+        track
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left_0()
+                    .right_0()
+                    .opacity(1.0 - opacity)
+                    .child(running),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left_0()
+                    .right_0()
+                    .opacity(opacity)
+                    .child(
+                        div()
+                            .w_full()
+                            .h_full()
+                            .rounded(PROGRESS_TRACK_RADIUS)
+                            .bg(tokens.foreground),
+                    ),
+            )
+            .into_any_element()
+    } else {
+        track.child(running).into_any_element()
     }
 }
 
@@ -230,16 +245,31 @@ fn progress_element(
     id: &'static str,
     progress: Option<f32>,
     reduce_motion: bool,
+    completion: Option<f32>,
 ) -> AnyElement {
     let tokens = *tokens;
+    if completion.is_some() {
+        return div()
+            .w_full()
+            .child(progress_bar(
+                &tokens,
+                progress,
+                0.0,
+                reduce_motion,
+                completion,
+            ))
+            .into_any_element();
+    }
     div()
         .w_full()
         .with_animation(
             id,
-            Animation::new(PROGRESS_SWEEP)
-                .with_easing(ease_in_out)
+            Animation::new(crate::motion::PROGRESS_SWEEP)
+                .with_easing(cubic_bezier(0.4, 0.0, 0.6, 1.0))
                 .repeat(),
-            move |track, phase| track.child(progress_bar(&tokens, progress, phase, reduce_motion)),
+            move |track, phase| {
+                track.child(progress_bar(&tokens, progress, phase, reduce_motion, None))
+            },
         )
         .into_any_element()
 }
@@ -338,7 +368,11 @@ impl Render for SetupApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let tokens = Tokens::new(cx);
         let reduce_motion = cx.reduce_motion();
-        if self.focused_screen != Some(self.screen) {
+        if self.motion.is_transitioning() {
+            if self.focused_screen.take().is_some() {
+                window.focus(&self.root_focus, cx);
+            }
+        } else if self.focused_screen != Some(self.screen) {
             self.focused_screen = Some(self.screen);
             window.focus(&self.screen_focus, cx);
         }
@@ -494,90 +528,54 @@ impl SetupApp {
         cx: &mut Context<'_, Self>,
     ) -> impl IntoElement {
         let page = match self.screen {
-            Screen::License => self.render_license(tokens, window, cx),
             Screen::Location => self.render_location(tokens, window, cx),
-            Screen::Installing => self.render_installing(tokens, reduce_motion),
+            Screen::Installing => self.render_installing(tokens, reduce_motion, window, cx),
             Screen::Finished => self.render_finished(tokens),
-            Screen::Failed => self.render_failed(tokens),
+            Screen::Failed => self.render_failed(tokens, cx),
             Screen::Maintenance => self.render_maintenance(tokens),
             Screen::Uninstall => self.render_uninstall_confirm(tokens, cx),
-            Screen::Uninstalling => self.render_uninstalling(tokens, reduce_motion),
-            Screen::Uninstalled => self.render_uninstalled(tokens),
+            Screen::Uninstalling => self.render_uninstalling(tokens, reduce_motion, window, cx),
+            Screen::Uninstalled => self.render_uninstalled(tokens, cx),
+        };
+        let page_opacity = match self.motion.page_phase() {
+            PagePhase::Settled => 1.0,
+            PagePhase::Exiting => {
+                1.0 - crate::motion::sample_progress(
+                    "setup-page-exit",
+                    self.motion.transition_epoch(),
+                    crate::motion::fade_exit(crate::motion::PAGE_EXIT),
+                    window,
+                    cx,
+                )
+            }
+            PagePhase::Entering => crate::motion::sample_progress(
+                "setup-page-enter",
+                self.motion.transition_epoch(),
+                crate::motion::fade_enter(crate::motion::PAGE_ENTER),
+                window,
+                cx,
+            ),
         };
         div()
             .id("setup-body")
-            .role(Role::Main)
+            .when(self.motion.is_settled(), |this| this.role(Role::Main))
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
-            .child(v_flex().w_full().px(PAGE_INSET).py(MAIN_GAP).child(page))
-    }
-
-    fn render_license(
-        &self,
-        tokens: &Tokens,
-        window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) -> AnyElement {
-        let license_card = h_flex()
-            .w_full()
-            .items_center()
-            .justify_between()
-            .gap(GROUP_GAP)
-            .px(CARD_PAD)
-            .py(GROUP_GAP)
-            .border_1()
-            .border_color(tokens.border)
-            .rounded(RADIUS)
-            .bg(tokens.muted)
-            .child(
-                div()
-                    .text_sm()
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(self.i18n.get("license_name")),
-            )
-            .child(
-                Button::new("setup-view-license")
-                    .ghost()
-                    .font_weight(FontWeight::MEDIUM)
-                    .small()
-                    .label(self.i18n.get("action_view_license"))
-                    .on_click(cx.listener(|this, _, window, cx| this.view_license(window, cx))),
-            );
-
-        v_flex()
-            .gap(MAIN_GAP)
-            .child(self.heading("license_title"))
-            .child(license_card)
-            // The agreement and the sentence that explains it belong together: the error hangs
-            // under the row it belongs to instead of taking a block of its own, so the page keeps
-            // inside the window's body without scrolling.
             .child(
                 v_flex()
-                    .child(
-                        self.license_checkbox(tokens, window, cx, |this, checked, _, cx| {
-                            this.set_accepted(checked, cx);
-                        }),
-                    )
-                    .when_some(self.notice, |this, key| {
-                        this.child(
-                            div()
-                                .id("setup-license-notice")
-                                .role(Role::Alert)
-                                .text_sm()
-                                .line_height(relative(1.5))
-                                .text_color(tokens.danger)
-                                .child(self.i18n.get(key)),
-                        )
-                    }),
+                    .w_full()
+                    .px(PAGE_INSET)
+                    .py(MAIN_GAP)
+                    .opacity(page_opacity)
+                    .child(page),
             )
-            .into_any_element()
     }
 
     fn render_location(
         &self,
         tokens: &Tokens,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let Some(path_input) = &self.path_input else {
@@ -592,14 +590,20 @@ impl SetupApp {
             path_accessible_label(&self.i18n.get("location_title"), path_error.as_deref());
         let path_focus = path_input.read(cx).focus_handle(cx);
         let path_focused = path_focus.is_focused(window);
+        let notice_opacity = crate::motion::sample_fade(
+            "setup-path-notice",
+            self.motion.path_notice_epoch(),
+            crate::motion::NOTICE_ENTER,
+            window,
+            cx,
+        );
         v_flex()
             .gap(MAIN_GAP)
             .child(self.heading("location_title"))
-            // The path field and the sentence that explains it belong together: the error hangs
-            // under the field it belongs to instead of taking a block of its own, so a message
-            // that wraps to a second line still keeps the page inside the window's body.
+            // The field and its message use the same compact gap as the progress label and bar.
             .child(
                 v_flex()
+                    .gap(GROUP_GAP)
                     .child(
                         h_flex()
                             .gap(GROUP_GAP)
@@ -607,6 +611,7 @@ impl SetupApp {
                             .child(
                                 div().flex_1().min_w_0().child(
                                     Input::new(path_input)
+                                        .disabled(!self.motion.is_settled())
                                         .aria_label(accessible_label)
                                         // The field carries its own resting, focused and error
                                         // strokes, so the component's focus border would paint a
@@ -624,7 +629,9 @@ impl SetupApp {
                             )
                             .child(
                                 Button::new("setup-browse")
+                                    .disabled(!self.motion.is_settled())
                                     .font_weight(FontWeight::MEDIUM)
+                                    .line_height(relative(BODY_LINE_HEIGHT))
                                     .label(self.i18n.get("action_browse"))
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.browse(window, cx);
@@ -637,39 +644,56 @@ impl SetupApp {
                                 .id("setup-path-error")
                                 .role(Role::Alert)
                                 .text_sm()
-                                .line_height(relative(1.5))
+                                .line_height(relative(BODY_LINE_HEIGHT))
                                 .text_color(tokens.danger)
+                                .opacity(notice_opacity)
                                 .child(message),
+                        )
+                    })
+                    .when(self.path_error.is_none(), |this| {
+                        this.child(
+                            div()
+                                .text_sm()
+                                .line_height(relative(BODY_LINE_HEIGHT))
+                                .text_color(tokens.muted_foreground)
+                                .opacity(notice_opacity)
+                                .child(self.i18n.get("install_summary")),
                         )
                     }),
             )
-            .when(self.path_error.is_none(), |this| {
-                this.child(
-                    div()
-                        .text_sm()
-                        .text_color(tokens.muted_foreground)
-                        .child(self.i18n.get("install_summary")),
-                )
-            })
             .into_any_element()
     }
 
-    /// The progress page's shared body: current stage, percentage, and the dot matrix.
+    /// The progress page's shared body: current stage, percentage, and the progress track.
     /// Setup and uninstall use the same block so their two long-running pages cannot drift.
     fn progress_block(
         &self,
         tokens: &Tokens,
         id: &'static str,
-        stage_label: String,
         reduce_motion: bool,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
     ) -> AnyElement {
-        let progress = visible_progress(self.progress);
-        let percent = self.progress.map(|_| {
-            self.i18n.format(
-                "progress_percent",
-                &[("percent", &format!("{progress:.0}"))],
+        let completing = self.is_completing();
+        let progress = if completing {
+            100.0
+        } else {
+            visible_progress(self.progress)
+        };
+        let completion = completing.then(|| {
+            crate::motion::sample_fade(
+                "setup-progress-complete",
+                self.motion.completion_epoch(),
+                crate::motion::COMPLETION_FADE,
+                window,
+                cx,
             )
         });
+        let line_height = (window.rem_size() * SMALL_TEXT_SIZE * BODY_LINE_HEIGHT).ceil();
+        let percent_pattern = self.i18n.format(
+            "progress_percent",
+            &[("percent", crate::motion::PERCENT_DIGITS_MARKER)],
+        );
         v_flex()
             .gap(GROUP_GAP)
             .child(
@@ -677,44 +701,51 @@ impl SetupApp {
                     .w_full()
                     .items_center()
                     .justify_between()
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(tokens.muted_foreground)
-                            .child(stage_label.clone()),
-                    )
-                    .when_some(percent, |this, percent| {
-                        this.child(
-                            div()
-                                .text_sm()
-                                .line_height(relative(1.5))
-                                .text_color(tokens.muted_foreground)
-                                .font_features(tabular_figures())
-                                .child(percent),
-                        )
-                    }),
+                    .gap(GROUP_GAP)
+                    .child(crate::motion::render_stage_caption(
+                        self.motion.caption(),
+                        tokens.muted_foreground,
+                        line_height,
+                        window,
+                        cx,
+                    ))
+                    .children(crate::motion::render_percent_reel(
+                        self.motion.percent(),
+                        &percent_pattern,
+                        tokens.muted_foreground,
+                        line_height,
+                        window,
+                        cx,
+                    )),
             )
             .child(
                 BaseProgress::new(id)
                     .value(progress)
-                    .indeterminate(self.progress.is_none())
-                    .accessibility_label(stage_label)
+                    .indeterminate(self.progress.is_none() && !completing)
+                    .accessibility_label(self.motion.caption().current().to_string())
                     .w_full()
-                    .child(progress_element(tokens, id, self.progress, reduce_motion)),
+                    .child(progress_element(
+                        tokens,
+                        id,
+                        self.progress,
+                        reduce_motion,
+                        completion,
+                    )),
             )
             .into_any_element()
     }
 
-    fn render_installing(&self, tokens: &Tokens, reduce_motion: bool) -> AnyElement {
+    fn render_installing(
+        &self,
+        tokens: &Tokens,
+        reduce_motion: bool,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
         v_flex()
             .gap(MAIN_GAP)
             .child(self.heading("progress_title"))
-            .child(self.progress_block(
-                tokens,
-                "setup-progress",
-                self.i18n.get(self.stage.message_key()),
-                reduce_motion,
-            ))
+            .child(self.progress_block(tokens, "setup-progress", reduce_motion, window, cx))
             .into_any_element()
     }
 
@@ -751,7 +782,7 @@ impl SetupApp {
         };
         let detail = div()
             .text_sm()
-            .text_color(tokens.foreground)
+            .text_color(tokens.muted_foreground)
             .child(version_line)
             .into_any_element();
         self.render_installed_page(tokens, vec![detail])
@@ -779,7 +810,7 @@ impl SetupApp {
         page.into_any_element()
     }
 
-    fn render_failed(&self, tokens: &Tokens) -> AnyElement {
+    fn render_failed(&self, tokens: &Tokens, cx: &mut Context<'_, Self>) -> AnyElement {
         let uninstall = self.is_uninstall() || self.uninstall_attempted;
         let missing_install = uninstall && self.error == Some("error_not_installed");
         let title = if missing_install {
@@ -789,16 +820,15 @@ impl SetupApp {
         } else {
             "error_title"
         };
-        let detail = if missing_install {
-            Some(self.i18n.get("uninstall_missing_body"))
+        let detail_key = if missing_install {
+            Some("uninstall_missing_body")
         } else {
             self.error.map(|key| {
-                let key = if uninstall {
+                if uninstall {
                     crate::model::uninstall_error_key(key)
                 } else {
                     key
-                };
-                self.i18n.get(key)
+                }
             })
         };
 
@@ -808,14 +838,12 @@ impl SetupApp {
             .into_any_element();
         let mut page = v_flex().gap(MAIN_GAP).child(self.title_row(icon, title));
 
-        if let Some(detail) = detail {
+        if let Some(key) = detail_key {
+            let detail = self.inline_log_detail(key, tokens.muted_foreground, cx);
             page = page.child(
                 div()
                     .id("setup-failed-detail")
                     .role(Role::Alert)
-                    .text_sm()
-                    .line_height(relative(1.5))
-                    .text_color(tokens.foreground)
                     .child(detail),
             );
         }
@@ -850,20 +878,27 @@ impl SetupApp {
             .into_any_element()
     }
 
-    fn render_uninstalling(&self, tokens: &Tokens, reduce_motion: bool) -> AnyElement {
+    fn render_uninstalling(
+        &self,
+        tokens: &Tokens,
+        reduce_motion: bool,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
         v_flex()
             .gap(MAIN_GAP)
             .child(self.heading("uninstall_progress_title"))
             .child(self.progress_block(
                 tokens,
                 "setup-uninstall-progress",
-                self.i18n.get("uninstall_progress_working"),
                 reduce_motion,
+                window,
+                cx,
             ))
             .into_any_element()
     }
 
-    fn render_uninstalled(&self, tokens: &Tokens) -> AnyElement {
+    fn render_uninstalled(&self, tokens: &Tokens, cx: &mut Context<'_, Self>) -> AnyElement {
         let icon = Icon::new(IconName::CircleCheck)
             .size(PAGE_ICON)
             .text_color(tokens.foreground)
@@ -903,14 +938,13 @@ impl SetupApp {
                 )
             })
             .when(self.cleanup_incomplete, |this| {
+                let detail =
+                    self.inline_log_detail("uninstall_cleanup_incomplete", tokens.danger, cx);
                 this.child(
                     div()
                         .id("setup-cleanup-notice")
                         .role(Role::Alert)
-                        .text_sm()
-                        .line_height(relative(1.5))
-                        .text_color(tokens.danger)
-                        .child(self.i18n.get("uninstall_cleanup_incomplete")),
+                        .child(detail),
                 )
             })
             .into_any_element()
@@ -929,29 +963,10 @@ impl SetupApp {
         let mut actions: Vec<AnyElement> = Vec::new();
 
         match self.screen {
-            Screen::License => {
-                actions.push(
-                    Button::new("setup-continue")
-                        .font_weight(FontWeight::MEDIUM)
-                        .primary()
-                        .label(self.i18n.get("action_continue"))
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.continue_from_license(window, cx);
-                        }))
-                        .into_any_element(),
-                );
-            }
             Screen::Location => {
                 actions.push(
-                    Button::new("setup-back")
-                        .font_weight(FontWeight::MEDIUM)
-                        .ghost()
-                        .label(self.i18n.get("action_back"))
-                        .on_click(cx.listener(|this, _, _, cx| this.back(cx)))
-                        .into_any_element(),
-                );
-                actions.push(
                     Button::new("setup-install")
+                        .disabled(!self.motion.is_settled())
                         .font_weight(FontWeight::MEDIUM)
                         .primary()
                         .label(self.i18n.get("action_install"))
@@ -979,6 +994,7 @@ impl SetupApp {
                 }
                 actions.push(
                     Button::new("setup-done")
+                        .disabled(!self.motion.is_settled())
                         .font_weight(FontWeight::MEDIUM)
                         .ghost()
                         .label(self.i18n.get("action_close"))
@@ -988,6 +1004,7 @@ impl SetupApp {
                 if !self.restart_required {
                     actions.push(
                         Button::new("setup-launch-app")
+                            .disabled(!self.motion.is_settled())
                             .font_weight(FontWeight::MEDIUM)
                             .primary()
                             .label(self.i18n.get("action_open_app"))
@@ -999,15 +1016,11 @@ impl SetupApp {
                 }
             }
             Screen::Failed => {
-                if self.log.is_some() {
-                    actions.push(self.log_button(cx));
-                }
                 let uninstall = self.is_uninstall() || self.uninstall_attempted;
                 let uninstall_invalid = uninstall && self.error == Some("error_msi_invalid");
                 if uninstall_invalid {
                     // A damaged saved package cannot be retried into working, so the page's one
-                    // recovery is the file cleanup. It keeps the log beside it and leaves the way
-                    // out to the title bar and Escape.
+                    // recovery is the file cleanup. Closing stays in the title bar and Escape.
                     actions.push(self.danger_action(
                         DangerAction {
                             id: "setup-force-cleanup",
@@ -1022,6 +1035,7 @@ impl SetupApp {
                 } else {
                     actions.push(
                         Button::new("setup-failed-close")
+                            .disabled(!self.motion.is_settled())
                             .font_weight(FontWeight::MEDIUM)
                             .ghost()
                             .label(self.i18n.get("action_close"))
@@ -1038,6 +1052,7 @@ impl SetupApp {
                     {
                         actions.push(
                             Button::new("setup-retry")
+                                .disabled(!self.motion.is_settled())
                                 .font_weight(FontWeight::MEDIUM)
                                 .primary()
                                 .label(self.i18n.get("action_retry"))
@@ -1052,11 +1067,9 @@ impl SetupApp {
                 actions.push(self.uninstall_button(tokens, window, cx));
             }
             Screen::Uninstalled => {
-                if self.log.is_some() {
-                    actions.push(self.log_button(cx));
-                }
                 actions.push(
                     Button::new("setup-uninstalled-done")
+                        .disabled(!self.motion.is_settled())
                         .font_weight(FontWeight::MEDIUM)
                         .primary()
                         .label(self.i18n.get("action_finish"))
@@ -1066,6 +1079,26 @@ impl SetupApp {
             }
         }
 
+        let footer_opacity = match self.motion.page_phase() {
+            PagePhase::Settled => 1.0,
+            PagePhase::Exiting => {
+                1.0 - crate::motion::sample_progress(
+                    "setup-footer-exit",
+                    self.motion.transition_epoch(),
+                    crate::motion::fade_exit(crate::motion::FOOTER_EXIT),
+                    window,
+                    cx,
+                )
+            }
+            PagePhase::Entering => crate::motion::sample_progress(
+                "setup-footer-enter",
+                self.motion.transition_epoch(),
+                crate::motion::fade_enter(crate::motion::FOOTER_ENTER)
+                    .delay(crate::motion::FOOTER_ENTER_DELAY),
+                window,
+                cx,
+            ),
+        };
         h_flex()
             .id("setup-footer")
             .h(FOOTER_HEIGHT)
@@ -1077,25 +1110,29 @@ impl SetupApp {
             .bg(tokens.chrome)
             .px(PAGE_INSET)
             .gap(GROUP_GAP)
-            .child(h_flex().gap(GROUP_GAP).items_center().children(leading))
-            .child(h_flex().gap(GROUP_GAP).items_center().children(actions))
+            .child(
+                h_flex()
+                    .gap(GROUP_GAP)
+                    .items_center()
+                    .opacity(footer_opacity)
+                    .children(leading),
+            )
+            .child(
+                h_flex()
+                    .gap(GROUP_GAP)
+                    .items_center()
+                    .opacity(footer_opacity)
+                    .children(actions),
+            )
     }
 
     fn cancel_button(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         Button::new("setup-cancel")
+            .disabled(!self.motion.is_settled())
             .font_weight(FontWeight::MEDIUM)
             .ghost()
             .label(self.i18n.get("action_cancel"))
             .on_click(cx.listener(|this, _, window, cx| this.close_window(window, cx)))
-            .into_any_element()
-    }
-
-    fn log_button(&self, cx: &mut Context<'_, Self>) -> AnyElement {
-        Button::new("setup-log")
-            .font_weight(FontWeight::MEDIUM)
-            .ghost()
-            .label(self.i18n.get("action_view_log"))
-            .on_click(cx.listener(|this, _, window, cx| this.open_log(window, cx)))
             .into_any_element()
     }
 
@@ -1117,6 +1154,25 @@ impl SetupApp {
             on_activate,
         } = action;
         let label = self.i18n.get(label_key);
+        if !self.motion.is_settled() {
+            return h_flex()
+                .id(id)
+                .h(px(28.0))
+                .px(rems(0.625))
+                .flex()
+                .flex_shrink_0()
+                .items_center()
+                .justify_center()
+                .whitespace_nowrap()
+                .rounded(RADIUS)
+                .bg(tokens.danger_fill)
+                .text_color(tokens.danger_label)
+                .text_sm()
+                .font_weight(FontWeight::MEDIUM)
+                .opacity(0.55)
+                .child(label)
+                .into_any_element();
+        }
         h_flex()
             .id(id)
             .role(Role::Button)
@@ -1182,109 +1238,6 @@ impl SetupApp {
             .child(self.heading(key))
     }
 
-    fn license_checkbox(
-        &self,
-        tokens: &Tokens,
-        window: &mut Window,
-        cx: &mut Context<'_, SetupApp>,
-        on_click: impl Fn(&mut SetupApp, bool, &mut Window, &mut Context<'_, SetupApp>) + 'static,
-    ) -> AnyElement {
-        let checked = self.accepted;
-        let label = self.i18n.get("license_accept");
-        let description = (self.notice == Some("error_license_required"))
-            .then(|| self.i18n.get("error_license_required"));
-        let focus = &self.license_focus;
-        let is_focused = cairn_ui::focus::keyboard_navigation(cx) && focus.is_focused(window);
-
-        let on_click = std::rc::Rc::new(on_click);
-        let on_click_mouse = on_click.clone();
-        let on_click_key = on_click.clone();
-
-        let indicator_size = px(14.0);
-        // The frame sits on the indicator edge with no gap. A checked box is filled with the
-        // foreground ink, so its frame uses the ring ink instead and stays visible against both the
-        // fill and the page.
-        let focus_frame = if checked {
-            tokens.ring
-        } else {
-            tokens.foreground
-        };
-
-        h_flex()
-            .id("setup-accept")
-            .role(Role::CheckBox)
-            .aria_label(label.clone())
-            .when_some(
-                description,
-                gpui_kit::StatefulInteractiveElement::aria_description,
-            )
-            .aria_toggled(if checked {
-                gpui_kit::gpui::accesskit::Toggled::True
-            } else {
-                gpui_kit::gpui::accesskit::Toggled::False
-            })
-            .track_focus(focus)
-            .min_h(px(24.0))
-            .py(px(4.0))
-            .items_center()
-            .gap(GROUP_GAP)
-            .group("checkbox")
-            .on_click(cx.listener(move |this, _, window, cx| {
-                on_click_mouse(this, !checked, window, cx);
-            }))
-            // The agreement flips on the key release, not on the key press. A held key sends one
-            // press and one release, so the box cannot flip again and again while the key is
-            // down, and the mark appears exactly once per press.
-            .on_key_up(cx.listener(move |this, event: &KeyUpEvent, window, cx| {
-                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                    on_click_key(this, !checked, window, cx);
-                }
-            }))
-            .child(
-                div()
-                    .rounded(RADIUS)
-                    .border_1()
-                    // A reserved 1px frame sits on the indicator edge, not around a padded gap.
-                    .border_color(focus_frame.opacity(if is_focused { 1.0 } else { 0.0 }))
-                    .child(
-                        div()
-                            .size(indicator_size)
-                            .flex_shrink_0()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(RADIUS)
-                            .border_1()
-                            .when(!checked, |this| {
-                                this.border_color(tokens.control_stroke)
-                                    .bg(tokens.background)
-                                    .group_hover("checkbox", |style| {
-                                        style.border_color(tokens.foreground)
-                                    })
-                            })
-                            .when(checked, |this| {
-                                this.border_color(tokens.foreground)
-                                    .bg(tokens.foreground)
-                                    .group_hover("checkbox", |style| style.opacity(0.85))
-                                    .child(
-                                        Icon::default()
-                                            .data(CHECK_SVG)
-                                            .size(indicator_size)
-                                            .text_color(tokens.background),
-                                    )
-                            }),
-                    ),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .line_height(relative(1.0))
-                    .text_color(tokens.foreground)
-                    .child(label),
-            )
-            .into_any_element()
-    }
-
     /// The page title. It carries the heading role so a screen reader can name the page it is
     /// on, and its own id so the role reaches the accessibility tree.
     fn heading(&self, key: &'static str) -> Stateful<Div> {
@@ -1300,10 +1253,83 @@ impl SetupApp {
             .child(heading_text(self.i18n.get(key), FontWeight::SEMIBOLD))
     }
 
+    fn log_button(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+        Button::new("setup-log")
+            .disabled(!self.motion.is_settled())
+            .font_weight(FontWeight::MEDIUM)
+            .ghost()
+            .label(self.i18n.get("action_view_log"))
+            .on_click(cx.listener(|this, _, window, cx| this.open_log(window, cx)))
+            .into_any_element()
+    }
+
+    fn inline_log_detail(
+        &self,
+        key: &'static str,
+        color: Hsla,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
+        let label = self.i18n.get("action_view_log");
+        let has_log = self.log.is_some();
+        let text = self.i18n.format(
+            key,
+            &[
+                ("has_log", if has_log { "true" } else { "false" }),
+                ("logAction", LOG_ACTION_MARKER),
+            ],
+        );
+        let plain = |text: String| {
+            div()
+                .text_sm()
+                .line_height(relative(BODY_LINE_HEIGHT))
+                .text_color(color)
+                .child(text)
+                .into_any_element()
+        };
+        if !has_log {
+            return plain(text);
+        }
+        let Some((before, after)) = text.split_once(LOG_ACTION_MARKER) else {
+            return plain(text);
+        };
+        let before = before.to_string();
+        let after = after.to_string();
+        h_flex()
+            .w_full()
+            .flex_wrap()
+            .items_center()
+            .child(
+                div()
+                    .min_w_0()
+                    .text_sm()
+                    .line_height(relative(BODY_LINE_HEIGHT))
+                    .text_color(color)
+                    .child(before),
+            )
+            .child(
+                Button::new("setup-log-inline")
+                    .disabled(!self.motion.is_settled())
+                    .small()
+                    .link()
+                    .line_height(relative(BODY_LINE_HEIGHT))
+                    .label(label)
+                    .on_click(cx.listener(|this, _, window, cx| this.open_log(window, cx))),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .text_sm()
+                    .line_height(relative(BODY_LINE_HEIGHT))
+                    .text_color(color)
+                    .child(after),
+            )
+            .into_any_element()
+    }
+
     fn paragraph(&self, key: &str, tokens: &Tokens) -> Div {
         div()
             .text_sm()
-            .line_height(relative(1.5))
+            .line_height(relative(BODY_LINE_HEIGHT))
             .text_color(tokens.muted_foreground)
             .child(self.i18n.get(key))
     }
@@ -1312,12 +1338,12 @@ impl SetupApp {
 #[cfg(test)]
 mod tests {
     use super::{
-        PROGRESS_INDETERMINATE_WIDTH, effective_progress_pulse, failure_offers_retry,
-        indeterminate_left, path_accessible_label, progress_fraction,
+        PROGRESS_INDETERMINATE_WIDTH, failure_offers_retry, indeterminate_left,
+        path_accessible_label, progress_fraction,
     };
 
     #[test]
-    fn progress_fraction_clamps_to_the_track() {
+    fn determinate_progress_clamps_to_the_track() {
         assert_eq!(progress_fraction(0.0), 0.0);
         assert!((progress_fraction(42.0) - 0.42).abs() < f32::EPSILON);
         assert_eq!(progress_fraction(100.0), 1.0);
@@ -1332,7 +1358,6 @@ mod tests {
             left + PROGRESS_INDETERMINATE_WIDTH <= 1.0,
             "segment must stay inside trailing edge: {left}"
         );
-        assert_eq!(effective_progress_pulse(0.0, true), 1.0);
         assert!(indeterminate_left(0.0, false) < 0.0);
     }
 

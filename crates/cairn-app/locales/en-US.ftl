@@ -92,6 +92,8 @@ selection_limit_title = Selection limit reached
 selection_limit_message = The first { $count_text } items are selected. Narrow the results and try again.
 reveal_limit_title = Folders not opened
 reveal_limit_message = The selection spans { $count } folders; at most { $limit } can be opened at once. Narrow the selection and try again.
+reveal_failed_title = Could not open folders
+reveal_failed_message = Windows File Explorer could not complete the request. Try again.
 status_objects_count = { $count ->
     [one] { $count_text } item
    *[other] { $count_text } items

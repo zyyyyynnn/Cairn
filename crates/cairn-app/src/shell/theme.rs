@@ -15,7 +15,7 @@ pub use cairn_ui::brand::{
     UI_ICON_SIZE, serif_font, tabular_figures,
 };
 pub use cairn_ui::locale::system_prefers_dark;
-pub use cairn_ui::theme::{clamp_zoom, control_stroke, warning_ink};
+pub use cairn_ui::theme::{clamp_zoom, control_stroke, overlay_scrollbar, warning_ink};
 
 /// Installs the resolved appearance before the window opens. Call once during bootstrap and update
 /// via [`set_dark_mode`] or [`set_zoom`] when preferences change.

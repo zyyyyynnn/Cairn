@@ -10,14 +10,23 @@
 //! this executable and waits for its exit code.
 
 #[cfg(windows)]
-use windows::Win32::Foundation::{FILETIME, HWND, PROPERTYKEY};
+use windows::Win32::Foundation::{FILETIME, HWND, PROPERTYKEY, VARIANT_BOOL};
 #[cfg(windows)]
 use windows::Win32::System::Com::{
     CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
     CoUninitialize,
 };
 #[cfg(windows)]
+use windows::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW};
+#[cfg(windows)]
 use windows::Win32::System::SystemServices::{SFGAO_FLAGS, SFGAO_FOLDER};
+#[cfg(windows)]
+use windows::Win32::System::Variant::{VARIANT, VT_I4, VariantClear};
+#[cfg(windows)]
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP,
+    KEYEVENTF_UNICODE, SendInput, VIRTUAL_KEY,
+};
 #[cfg(windows)]
 #[cfg(windows)]
 use windows::Win32::UI::Shell::PropertiesSystem::PSGetPropertyKeyFromName;
@@ -25,16 +34,18 @@ use windows::Win32::UI::Shell::PropertiesSystem::PSGetPropertyKeyFromName;
 use windows::Win32::UI::Shell::{
     BHID_EnumItems, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_WANTNUKEWARNING, FOFX_RECYCLEONDELETE,
     FOLDERID_RecycleBinFolder, FileOperation, IEnumShellItems, IFileOperation, IShellItem,
-    IShellItem2, SEE_MASK_INVOKEIDLIST, SHCreateItemFromIDList, SHELLEXECUTEINFOW,
-    SHEmptyRecycleBinW, SHGetKnownFolderIDList, SHOpenFolderAndSelectItems, SHParseDisplayName,
-    SIGDN_FILESYSPATH, SIGDN_NORMALDISPLAY, ShellExecuteExW,
+    IShellItem2, IShellWindows, IWebBrowser2, SEE_MASK_INVOKEIDLIST, SHCreateItemFromIDList,
+    SHELLEXECUTEINFOW, SHEmptyRecycleBinW, SHGetKnownFolderIDList, SHOpenFolderAndSelectItems,
+    SHParseDisplayName, SIGDN_FILESYSPATH, SIGDN_NORMALDISPLAY, ShellExecuteExW, ShellWindows,
 };
 #[cfg(windows)]
-use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SW_SHOWNORMAL};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetForegroundWindow, SW_SHOWNORMAL, SetForegroundWindow,
+};
 #[cfg(windows)]
 use windows::core::PCWSTR;
 #[cfg(windows)]
-use windows::core::{Interface as _, PWSTR};
+use windows::core::{Interface as _, PWSTR, w};
 
 use crate::shell::rename::RenameError;
 #[cfg(windows)]
@@ -134,6 +145,303 @@ pub fn open_folder_and_select(path: &str) -> Result<(), Box<dyn std::error::Erro
         }
     }
     Ok(())
+}
+
+/// Explorer tabs are available starting with Windows 11.
+#[cfg(windows)]
+fn explorer_tabs_supported() -> bool {
+    let mut buffer = [0u16; 32];
+    let mut size = (buffer.len() * std::mem::size_of::<u16>()) as u32;
+    // SAFETY: the registry path and value name are static, and `buffer`/`size` describe a valid
+    // UTF-16 output buffer for the synchronous call.
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            w!(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion"),
+            w!("CurrentBuildNumber"),
+            RRF_RT_REG_SZ,
+            None,
+            Some(buffer.as_mut_ptr().cast()),
+            Some(&mut size),
+        )
+    };
+    status.is_ok() && windows_build_supports_explorer_tabs(parse_windows_build(&buffer))
+}
+
+#[cfg(not(windows))]
+pub fn explorer_tabs_supported() -> bool {
+    false
+}
+
+#[cfg(windows)]
+fn parse_windows_build(buffer: &[u16]) -> u32 {
+    String::from_utf16_lossy(buffer)
+        .trim_matches('\0')
+        .parse()
+        .unwrap_or(0)
+}
+
+#[cfg(windows)]
+fn windows_build_supports_explorer_tabs(build: u32) -> bool {
+    build >= 22000
+}
+
+/// Opens one Explorer window and adds each remaining parent directory as a tab.
+pub fn open_folders_in_tabs(
+    paths: &[String],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    if paths.len() == 1 {
+        return open_folder_and_select(&paths[0]).map_err(
+            |error| -> Box<dyn std::error::Error + Send + Sync> { format!("{error}").into() },
+        );
+    }
+    if paths
+        .iter()
+        .any(|path| path.trim().is_empty() || path.contains('\0'))
+    {
+        return Err("invalid path for Explorer tabs".into());
+    }
+    if !explorer_tabs_supported() {
+        for path in paths {
+            open_folder_and_select(path).map_err(
+                |error| -> Box<dyn std::error::Error + Send + Sync> { format!("{error}").into() },
+            )?;
+        }
+        return Ok(());
+    }
+
+    #[cfg(windows)]
+    {
+        let _com = ComApartment::enter();
+        // SAFETY: `ShellWindows` is a registered COM class and the output is a live interface.
+        let shell_windows: IShellWindows = unsafe {
+            CoCreateInstance(&ShellWindows, None, CLSCTX_ALL)
+                .map_err(|error| format!("Failed to access Explorer windows: {error}"))?
+        };
+        let before = explorer_browsers(&shell_windows)?
+            .into_iter()
+            .filter_map(|browser| browser_handle(&browser).ok())
+            .collect::<std::collections::HashSet<_>>();
+
+        open_folder_and_select(&paths[0]).map_err(
+            |error| -> Box<dyn std::error::Error + Send + Sync> { format!("{error}").into() },
+        )?;
+        let first_parent = std::path::Path::new(&paths[0])
+            .parent()
+            .ok_or("selected path has no parent folder")?;
+        let mut browser = None;
+        for _ in 0..100 {
+            // SAFETY: `GetForegroundWindow` only reads the current foreground HWND.
+            let foreground = unsafe { GetForegroundWindow() }.0 as isize;
+            for candidate in explorer_browsers(&shell_windows)? {
+                let handle = browser_handle(&candidate).ok();
+                let location = browser_location(&candidate);
+                if handle == Some(foreground)
+                    || handle.is_some_and(|handle| !before.contains(&handle))
+                    || location
+                        .as_deref()
+                        .is_some_and(|location| shell_location_matches(location, first_parent))
+                {
+                    browser = Some(candidate);
+                    break;
+                }
+            }
+            if browser.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let browser = browser.ok_or("Explorer did not expose the opened folder window")?;
+        for _ in 0..100 {
+            // SAFETY: `browser` is a live Explorer automation interface.
+            if !unsafe { browser.Busy() }
+                .map(windows::Win32::Foundation::VARIANT_BOOL::as_bool)
+                .unwrap_or(false)
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        // SAFETY: `browser` is a live Explorer automation interface.
+        unsafe { browser.SetVisible(VARIANT_BOOL(1)) }
+            .map_err(|error| format!("Failed to show Explorer: {error}"))?;
+
+        let handle = browser_handle(&browser)?;
+        // SAFETY: `handle` came from the live Explorer window returned by ShellWindows.
+        if !unsafe { SetForegroundWindow(HWND(handle as *mut std::ffi::c_void)) }.as_bool() {
+            return Err("Failed to focus Explorer for tab navigation".into());
+        }
+        for _ in 0..50 {
+            // SAFETY: `GetForegroundWindow` only reads the current foreground HWND.
+            if unsafe { GetForegroundWindow() }.0 as isize == handle {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        for path in &paths[1..] {
+            // SAFETY: `GetForegroundWindow` only reads the current foreground HWND.
+            if unsafe { GetForegroundWindow() }.0 as isize != handle {
+                return Err("Explorer lost focus before all tabs were opened".into());
+            }
+            let parent = std::path::Path::new(path)
+                .parent()
+                .ok_or("selected path has no parent folder")?;
+            let folder = parent.to_string_lossy();
+            send_shortcut(VIRTUAL_KEY(0x54))?;
+            std::thread::sleep(std::time::Duration::from_millis(900));
+            send_shortcut(VIRTUAL_KEY(0x4c))?;
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            send_unicode_text(&folder)?;
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            send_key(VIRTUAL_KEY(0x0d), KEYBD_EVENT_FLAGS(0))?;
+            send_key(VIRTUAL_KEY(0x0d), KEYEVENTF_KEYUP)?;
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let file_name = std::path::Path::new(path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or("selected path has no file name")?;
+            send_unicode_text(file_name)?;
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn explorer_browsers(
+    shell_windows: &IShellWindows,
+) -> Result<Vec<IWebBrowser2>, Box<dyn std::error::Error + Send + Sync>> {
+    // SAFETY: `shell_windows` is a live COM interface for the duration of the enumeration.
+    let count = unsafe { shell_windows.Count() }
+        .map_err(|error| format!("Failed to count Explorer windows: {error}"))?;
+    let mut browsers = Vec::new();
+    for index in 0..count {
+        let mut item = i4_variant(index);
+        // SAFETY: `item` is a valid integer VARIANT for the synchronous Item call.
+        let dispatch = unsafe { shell_windows.Item(&item) };
+        // SAFETY: `item` is cleared exactly once after the call.
+        unsafe { VariantClear(&mut item).ok() };
+        let Ok(dispatch) = dispatch else {
+            continue;
+        };
+        let Ok(browser) = dispatch.cast::<IWebBrowser2>() else {
+            continue;
+        };
+        // SAFETY: `browser` is a live shell automation interface.
+        let is_explorer = unsafe { browser.FullName() }
+            .map(|name| {
+                name.to_string()
+                    .to_ascii_lowercase()
+                    .ends_with("explorer.exe")
+            })
+            .unwrap_or(false);
+        if is_explorer {
+            browsers.push(browser);
+        }
+    }
+    Ok(browsers)
+}
+
+#[cfg(windows)]
+fn browser_handle(browser: &IWebBrowser2) -> windows::core::Result<isize> {
+    // SAFETY: `browser` is a live shell automation interface.
+    unsafe { browser.HWND() }.map(|handle| handle.0)
+}
+
+#[cfg(windows)]
+fn browser_location(browser: &IWebBrowser2) -> Option<String> {
+    // SAFETY: `browser` is a live shell automation interface.
+    unsafe { browser.LocationURL() }
+        .ok()
+        .map(|location| location.to_string())
+}
+
+#[cfg(windows)]
+fn shell_location_matches(location: &str, path: &std::path::Path) -> bool {
+    let location = location.trim_start_matches("file://").replace('/', "\\");
+    let location = location.to_ascii_lowercase();
+    let path = path.to_string_lossy().to_ascii_lowercase();
+    location == path
+}
+
+#[cfg(windows)]
+fn i4_variant(value: i32) -> VARIANT {
+    let mut variant = VARIANT::default();
+    // SAFETY: the VARIANT is zero-initialized and the union field matches its VT_I4 tag.
+    unsafe {
+        let tagged = &mut *variant.Anonymous.Anonymous;
+        std::ptr::write(&mut tagged.vt, VT_I4);
+        let data = &mut tagged.Anonymous;
+        std::ptr::write(&mut data.lVal, value);
+    }
+    variant
+}
+
+#[cfg(windows)]
+fn keyboard_input(key: VIRTUAL_KEY, scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: key,
+                wScan: scan,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }
+}
+
+#[cfg(windows)]
+fn send_keyboard_inputs(inputs: &[INPUT]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // SAFETY: `inputs` is a valid slice of keyboard INPUT records for the synchronous call.
+    let delivered = unsafe { SendInput(inputs, std::mem::size_of::<INPUT>() as i32) };
+    if delivered as usize != inputs.len() {
+        return Err(format!(
+            "Explorer keyboard input delivered {delivered} of {} events",
+            inputs.len()
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn send_key(
+    key: VIRTUAL_KEY,
+    flags: KEYBD_EVENT_FLAGS,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    send_keyboard_inputs(&[keyboard_input(key, 0, flags)])
+}
+
+#[cfg(windows)]
+fn send_shortcut(key: VIRTUAL_KEY) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    send_key(VIRTUAL_KEY(0x11), KEYBD_EVENT_FLAGS(0))?;
+    send_key(key, KEYBD_EVENT_FLAGS(0))?;
+    send_key(key, KEYEVENTF_KEYUP)?;
+    send_key(VIRTUAL_KEY(0x11), KEYEVENTF_KEYUP)?;
+    std::thread::sleep(std::time::Duration::from_millis(60));
+    Ok(())
+}
+
+#[cfg(windows)]
+fn send_unicode_text(value: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut inputs = Vec::with_capacity(value.encode_utf16().count() * 2);
+    for unit in value.encode_utf16() {
+        inputs.push(keyboard_input(VIRTUAL_KEY(0), unit, KEYEVENTF_UNICODE));
+        inputs.push(keyboard_input(
+            VIRTUAL_KEY(0),
+            unit,
+            KEYEVENTF_UNICODE | KEYEVENTF_KEYUP,
+        ));
+    }
+    send_keyboard_inputs(&inputs)
 }
 
 /// Displays the native Windows properties dialog for the specified file (`SEE_MASK_INVOKEIDLIST`).
@@ -1346,6 +1654,25 @@ fn shell_item_from_path(path: &str) -> Result<IShellItem, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn explorer_tabs_require_windows_11_or_newer() {
+        assert_eq!(
+            parse_windows_build(&[0x0032, 0x0036, 0x0031, 0x0030, 0x0030, 0x0000]),
+            26100
+        );
+        assert_eq!(
+            parse_windows_build(&[
+                0x0067, 0x0061, 0x0072, 0x0062, 0x0061, 0x0067, 0x0065, 0x0000
+            ]),
+            0
+        );
+        assert!(!windows_build_supports_explorer_tabs(19045));
+        assert!(!windows_build_supports_explorer_tabs(21999));
+        assert!(windows_build_supports_explorer_tabs(22000));
+        assert!(windows_build_supports_explorer_tabs(26100));
+    }
 
     #[test]
     fn every_failure_classifier_keeps_its_remedy() {

@@ -21,18 +21,22 @@ use crate::table::columns::{ColumnBoundary, ColumnWidths, SortColumn, TableColum
 use gpui_kit::gpui::*;
 
 impl CairnApp {
-    pub fn toggle_sidebar(&mut self, cx: &mut Context<'_, Self>) {
-        self.sidebar_collapsed = !self.sidebar_collapsed;
+    pub fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let collapsing = !self.sidebar_collapsed;
+        if collapsing && self.sidebar_focus.contains_focused(window, cx) {
+            self.query.search_focus.focus(window, cx);
+        }
+        self.sidebar_collapsed = collapsing;
         cx.notify();
     }
 
     pub(crate) fn toggle_sidebar_action(
         &mut self,
         _: &ToggleSidebar,
-        _w: &mut Window,
+        window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        self.toggle_sidebar(cx);
+        self.toggle_sidebar(window, cx);
     }
 
     pub fn save_settings(&mut self) {
@@ -410,6 +414,59 @@ mod tests {
                     app
                 },
             );
+        });
+    }
+
+    #[test]
+    fn collapsing_the_sidebar_moves_only_internal_focus_and_expanding_keeps_focus() {
+        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
+            gpui_kit::init(cx);
+            let (handle, app) = gpui_kit::open_window(
+                gpui_kit::gpui::WindowOptions {
+                    show: false,
+                    focus: false,
+                    ..gpui_kit::gpui::WindowOptions::default()
+                },
+                cx,
+                |window, cx| cx.new(|cx| CairnApp::new(window, cx)),
+            )
+            .expect("test window opens");
+
+            handle
+                .update(cx, |_, window, cx| {
+                    window.draw(cx).clear(cx);
+                    app.update(cx, |this, cx| {
+                        this.sidebar_focus.focus(window, cx);
+                        assert!(this.sidebar_focus.contains_focused(window, cx));
+
+                        this.toggle_sidebar_action(
+                            &crate::shell::commands::ToggleSidebar,
+                            window,
+                            cx,
+                        );
+                        assert!(this.sidebar_collapsed);
+                        assert!(this.query.search_focus.is_focused(window));
+
+                        this.toggle_sidebar_action(
+                            &crate::shell::commands::ToggleSidebar,
+                            window,
+                            cx,
+                        );
+                        assert!(!this.sidebar_collapsed);
+                        assert!(this.query.search_focus.is_focused(window));
+
+                        this.results.results_focus.focus(window, cx);
+                        this.toggle_sidebar_action(
+                            &crate::shell::commands::ToggleSidebar,
+                            window,
+                            cx,
+                        );
+                        assert!(this.sidebar_collapsed);
+                        assert!(this.results.results_focus.is_focused(window));
+                    });
+                })
+                .expect("sidebar focus transitions succeed");
+            cx.quit();
         });
     }
 

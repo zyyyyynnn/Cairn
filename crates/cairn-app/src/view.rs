@@ -26,7 +26,7 @@ use crate::shell::theme::{self, ShellTokens};
 use crate::shell::window_resize::{SETTLE_POLL, WindowResizeTracker};
 use gpui_kit::assets::IconName as AssetIconName;
 use gpui_kit::base::Disableable;
-use gpui_kit::base::motion::{Transition, transition_with_status};
+use gpui_kit::base::motion::{Presence, Transition, transition_with_status};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::spinner::Spinner;
@@ -38,7 +38,7 @@ use gpui_kit::gpui::*;
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// The fixed identity of one caption button. The action stays a separate argument so each call
 /// site keeps its own closure.
@@ -387,7 +387,8 @@ impl Render for CairnApp {
         let row_height = layout::row_height(window);
         let toast = self
             .toast
-            .clone()
+            .content()
+            .cloned()
             .map(|toast| self.render_toast(toast, &tokens, window, cx));
         let root_focus = self.root_focus.clone();
         let search_focus = self.query.search_focus.clone();
@@ -462,7 +463,7 @@ impl Render for CairnApp {
         let sidebar_motion = transition_with_status(
             "cairn-sidebar-width",
             target_sidebar_width,
-            Transition::new(crate::shell::motion::SIDEBAR).ease(ease_out_quint()),
+            crate::motion::sidebar(),
             window,
             cx,
         );
@@ -534,7 +535,8 @@ impl Render for CairnApp {
             .on_action(cx.listener(Self::reset_zoom))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|_, _: &MouseDownEvent, _, cx| {
+                cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                    this.restore_result_tooltips(cx);
                     // A press on the window's chrome returns the input modality to
                     // the pointer.
                     if cairn_ui::focus::keyboard_navigation(cx) {
@@ -929,8 +931,9 @@ impl CairnApp {
                                         &ToggleSidebar,
                                         Some(WINDOW_CONTEXT),
                                     )
-                                    .on_click(move |_, _window, cx| {
-                                        toggle_view.update(cx, Self::toggle_sidebar);
+                                    .on_click(move |_, window, cx| {
+                                        toggle_view
+                                            .update(cx, |this, cx| this.toggle_sidebar(window, cx));
                                     }),
                             ),
                     ),
@@ -1030,18 +1033,17 @@ impl CairnApp {
                 }
             }
             let settled = this.update(cx, |this, cx| {
-                if this.window_resize.settle(epoch) {
-                    cx.notify();
-                    true
-                } else {
-                    false
+                if !this.window_resize.settle(epoch, cx.reduce_motion()) {
+                    return false;
                 }
+                cx.notify();
+                this.window_resize.fading_epoch().is_some()
             });
             if !matches!(settled, Ok(true)) {
                 return;
             }
             cx.background_executor()
-                .timer(crate::shell::motion::MASK_DISSOLVE_CLEANUP)
+                .timer(crate::motion::MASK_DISSOLVE_CLEANUP)
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if this.window_resize.clear_fade(epoch) {
@@ -1054,12 +1056,21 @@ impl CairnApp {
 
     /// The plate a live resize puts over the content panel, so the reflowing table
     /// stays one stable surface while the window is being dragged. It dissolves
-    /// over `motion::MASK_DISSOLVE` once the geometry has settled and the layout reflowed.
+    /// over [`crate::motion::MASK_DISSOLVE`] once the geometry has settled and the layout reflowed.
     fn render_window_resize_cover(
         &self,
         tokens: &ShellTokens,
+        window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> Option<AnyElement> {
+        let epoch = self.window_resize.fading_epoch();
+        let sample = Presence::new("panel-resize-presence", epoch.is_none())
+            .transition(if epoch.is_some() {
+                crate::motion::mask_dissolve()
+            } else {
+                Transition::new(Duration::ZERO)
+            })
+            .sample(window, cx);
         if self.window_resize.is_covered() {
             return Some(
                 div()
@@ -1070,29 +1081,14 @@ impl CairnApp {
                     .into_any_element(),
             );
         }
-        let epoch = self.window_resize.fading_epoch();
-        if epoch == 0 {
-            return None;
-        }
-        let reduce_motion = cx.reduce_motion();
+        epoch?;
         Some(
             div()
-                .id("panel-resize-fade-overlay")
+                .id("panel-resize-overlay")
                 .absolute()
                 .inset_0()
                 .bg(tokens.muted)
-                .with_animation(
-                    format!("window-resize-fade-{epoch}"),
-                    Animation::new(crate::shell::motion::MASK_DISSOLVE)
-                        .with_easing(ease_out_quint()),
-                    move |element, delta| {
-                        if reduce_motion {
-                            element.opacity(0.0)
-                        } else {
-                            element.opacity(1.0 - delta)
-                        }
-                    },
-                )
+                .opacity(sample.progress)
                 .into_any_element(),
         )
     }
@@ -1105,7 +1101,7 @@ impl CairnApp {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
-        let resize_cover = self.render_window_resize_cover(tokens, cx);
+        let resize_cover = self.render_window_resize_cover(tokens, window, cx);
         let QueryBand {
             is_query_focused,
             search_focus,
