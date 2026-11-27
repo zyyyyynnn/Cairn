@@ -1414,6 +1414,7 @@ mod tests {
 
         gpui_kit::application().run(move |cx| {
             gpui_kit::init(cx);
+            cx.set_reduce_motion(false);
             cairn_ui::locale::init_layout_direction(cx);
             cairn_ui::theme::apply_appearance(false, 1.0, cx);
 
