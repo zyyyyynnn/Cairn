@@ -262,9 +262,13 @@ impl CairnApp {
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let present = matches!(self.toast, ToastState::Visible(_));
-        let sample = Presence::new("cairn-toast-presence", present)
-            .transition(if present { toast_enter() } else { toast_exit() })
-            .sample(window, cx);
+        let toast_key = toast.id.key();
+        let sample = Presence::new(
+            ElementId::NamedInteger("cairn-toast-presence".into(), toast_key),
+            present,
+        )
+        .transition(if present { toast_enter() } else { toast_exit() })
+        .sample(window, cx);
         let is_error = toast.kind == ToastKind::Error;
         let control = if is_error {
             accessibility::control("toast")
@@ -273,7 +277,6 @@ impl CairnApp {
         };
         let dismiss = accessibility::control("toast-dismiss");
         let dismiss_label = accessibility::name(dismiss, &self.i18n);
-        let toast_key = toast.id.key();
         let surface = cairn_ui::theme::dialog_surface(cx.theme());
         let close = Button::new(dismiss.element)
             .ghost()

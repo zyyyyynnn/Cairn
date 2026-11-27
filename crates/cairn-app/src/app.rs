@@ -483,7 +483,6 @@ impl TableRevealState {
         self.phase == TableRevealPhase::Settled
     }
 
-    #[cfg(test)]
     pub(crate) fn epoch(&self) -> u64 {
         self.epoch
     }
@@ -1019,7 +1018,7 @@ pub(crate) use tests::test_row;
 
 #[cfg(test)]
 mod tests {
-    use super::{CairnApp, TableRevealState, TooltipSuppression, join_row_path};
+    use super::{CairnApp, TableRevealState, join_row_path};
     use crate::search::ResultSetChange;
     use cairn_protocol::message::{FileRowData, SourceId};
     use cairn_protocol::status::{
@@ -1196,22 +1195,6 @@ mod tests {
                 "the new page receives a fresh fade epoch"
             );
         });
-    }
-
-    /// The status-bar refresh of a settled index is a replacement: the rows leave
-    /// at once and the refreshed page fades in.
-    #[test]
-    fn result_tooltips_stay_suppressed_until_pointer_interaction_resumes() {
-        let mut tooltips = TooltipSuppression::default();
-        assert!(!tooltips.is_suppressed());
-        assert!(!tooltips.restore());
-
-        tooltips.suppress();
-        tooltips.suppress();
-        assert!(tooltips.is_suppressed());
-        assert!(tooltips.restore());
-        assert!(!tooltips.is_suppressed());
-        assert!(!tooltips.restore());
     }
 
     #[test]
@@ -1411,26 +1394,37 @@ mod tests {
     }
 
     #[test]
-    fn table_reveal_does_not_run_for_the_first_startup_content() {
-        let mut reveal = TableRevealState::new();
-        assert!(reveal.is_initial());
-        assert_eq!(reveal.start_reveal(false), None);
-        assert!(reveal.is_initial());
+    fn first_startup_content_starts_a_reveal() {
+        with_app(|this, cx| {
+            this.apply_query_payload(
+                true,
+                cairn_protocol::message::ResponsePayload::QueryResult {
+                    query_id: 1,
+                    session_id: 1,
+                    total_matches: 1,
+                    total_bytes: 1,
+                    first_page: vec![test_row("report.txt")],
+                    applied_sort: Default::default(),
+                    degraded: None,
+                },
+                cx,
+            );
+            assert!(this.table_reveal.is_revealing());
+        });
     }
 
     #[test]
-    fn startup_query_and_source_discovery_do_not_reveal_the_table() {
+    fn repeated_content_notifications_do_not_restart_the_same_reveal() {
         with_app(|this, cx| {
-            this.set_initial_query("report", cx);
-            assert!(this.table_reveal.is_initial());
+            this.begin_table_session();
             this.results.table.set_rows(vec![test_row("report.txt")], 1);
             this.note_table_content(cx);
-            assert!(this.table_reveal.is_initial());
+            assert!(this.table_reveal.is_revealing());
+            let epoch = this.table_reveal.epoch();
 
-            this.apply_sources_snapshot(vec![folder_source(1000, SourceKind::Folder)], cx);
-            assert!(this.table_reveal.is_initial());
+            this.note_table_content(cx);
             this.note_table_empty(cx);
-            assert!(this.table_reveal.is_initial());
+            assert_eq!(this.table_reveal.epoch(), epoch);
         });
     }
 

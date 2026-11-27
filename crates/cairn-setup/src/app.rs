@@ -97,16 +97,19 @@ fn record_remaining_after_cleanup(forced: bool, codes: Result<Vec<String>, u32>)
     forced && codes.map_or(true, |codes| !codes.is_empty())
 }
 
-/// A forced cleanup starts from the progress page when Windows Installer reports the record gone,
-/// or from the failure page when the person chooses it. Any other page has no cleanup to start.
-fn force_cleanup_allowed(screen: Screen) -> bool {
-    matches!(screen, Screen::Uninstalling | Screen::Failed)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CompletionPhase {
+    WaitingForScreen,
+    Fading,
+    Holding,
+    Ready,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PendingCompletion {
     token: u64,
     next: Screen,
+    phase: CompletionPhase,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -343,10 +346,6 @@ impl SetupApp {
             || matches!(self.screen, Screen::Installing | Screen::Uninstalling)
     }
 
-    pub(crate) fn is_transitioning(&self) -> bool {
-        self.motion.is_transitioning()
-    }
-
     pub(crate) fn is_completing(&self) -> bool {
         self.completion.is_some()
     }
@@ -387,6 +386,7 @@ impl SetupApp {
         }
         if cx.reduce_motion() {
             self.screen_transition = None;
+            self.motion.settle();
             self.set_screen_now(next);
             self.installing
                 .set(matches!(next, Screen::Installing | Screen::Uninstalling));
@@ -446,6 +446,13 @@ impl SetupApp {
             self.installing.set(false);
         }
         cx.notify();
+        if let Some(pending) = self.completion {
+            match pending.phase {
+                CompletionPhase::Ready => self.request_screen(pending.next, cx),
+                CompletionPhase::WaitingForScreen => self.start_completion_fade(pending.token, cx),
+                CompletionPhase::Fading | CompletionPhase::Holding => {}
+            }
+        }
         if target != self.screen {
             self.request_screen(target, cx);
         }
@@ -476,24 +483,57 @@ impl SetupApp {
         self.motion.begin_completion();
         self.completion_counter += 1;
         let token = self.completion_counter;
-        self.completion = Some(PendingCompletion { token, next });
+        self.completion = Some(PendingCompletion {
+            token,
+            next,
+            phase: CompletionPhase::WaitingForScreen,
+        });
         if cx.reduce_motion() {
             self.finish_completion(token, cx);
             return;
         }
+        if self.screen_transition.is_some() {
+            cx.notify();
+            return;
+        }
+        self.start_completion_fade(token, cx);
+        cx.notify();
+    }
+
+    fn start_completion_fade(&mut self, token: u64, cx: &mut Context<'_, Self>) {
+        let Some(pending) = self.completion else {
+            return;
+        };
+        if pending.token != token || pending.phase != CompletionPhase::WaitingForScreen {
+            return;
+        }
+        if cx.reduce_motion() {
+            self.finish_completion(token, cx);
+            return;
+        }
+        self.completion = Some(PendingCompletion {
+            phase: CompletionPhase::Fading,
+            ..pending
+        });
         let weak = cx.entity().downgrade();
         cx.spawn(async move |_, cx| {
             cx.background_executor().timer(COMPLETION_FADE).await;
             let _ = weak.update(cx, |this, cx| this.hold_completion(token, cx));
         })
         .detach();
-        cx.notify();
     }
 
     fn hold_completion(&mut self, token: u64, cx: &mut Context<'_, Self>) {
-        if self.completion.is_none_or(|pending| pending.token != token) {
+        let Some(pending) = self.completion else {
+            return;
+        };
+        if pending.token != token || pending.phase != CompletionPhase::Fading {
             return;
         }
+        self.completion = Some(PendingCompletion {
+            phase: CompletionPhase::Holding,
+            ..pending
+        });
         let weak = cx.entity().downgrade();
         cx.spawn(async move |_, cx| {
             cx.background_executor().timer(COMPLETION_HOLD).await;
@@ -506,7 +546,19 @@ impl SetupApp {
         let Some(pending) = self.completion else {
             return;
         };
-        if pending.token != token {
+        if pending.token != token
+            || !matches!(
+                pending.phase,
+                CompletionPhase::Holding | CompletionPhase::WaitingForScreen
+            )
+        {
+            return;
+        }
+        if self.screen_transition.is_some() && self.screen != pending.next {
+            self.completion = Some(PendingCompletion {
+                phase: CompletionPhase::Ready,
+                ..pending
+            });
             return;
         }
         self.request_screen(pending.next, cx);
@@ -736,9 +788,6 @@ impl SetupApp {
     /// It must not reject a busy screen: the automatic fallback runs from the Done event while the
     /// progress page still owns the busy state, and refusing there would strand the window.
     pub(crate) fn start_force_cleanup(&mut self, cx: &mut Context<'_, Self>) {
-        if !force_cleanup_allowed(self.screen) || self.is_transitioning() {
-            return;
-        }
         // The automatic fallback arrives with the previous session finished; a duplicate call
         // while this cleanup is already running must not start a second one.
         if self.forced_cleanup && self.is_busy() {
@@ -1123,30 +1172,13 @@ fn show_log_dialog(
 #[cfg(test)]
 mod tests {
     use super::{
-        SetupApp, force_cleanup_allowed, log_scroll_offset, progress_percent,
-        record_remaining_after_cleanup, show_log_dialog, uninstall_can_fall_back_to_cleanup,
-        visible_progress,
+        SetupApp, log_scroll_offset, progress_percent, record_remaining_after_cleanup,
+        show_log_dialog, uninstall_can_fall_back_to_cleanup, visible_progress,
     };
     use crate::i18n::I18n;
     use crate::model::{Launch, Screen, Stage};
     use crate::msi::FailureKind;
     use crate::preview::Preview;
-
-    #[test]
-    fn a_forced_cleanup_can_start_from_the_progress_or_failure_page() {
-        assert!(force_cleanup_allowed(Screen::Uninstalling));
-        assert!(force_cleanup_allowed(Screen::Failed));
-        for screen in [
-            Screen::Location,
-            Screen::Installing,
-            Screen::Finished,
-            Screen::Maintenance,
-            Screen::Uninstall,
-            Screen::Uninstalled,
-        ] {
-            assert!(!force_cleanup_allowed(screen), "{screen:?}");
-        }
-    }
 
     #[test]
     fn only_a_missing_msi_record_falls_back_to_cleanup_without_asking() {
@@ -1525,6 +1557,7 @@ mod tests {
 
                         this.begin_completion(Screen::Finished, cx);
                         let token = this.completion.expect("new completion pending").token;
+                        this.hold_completion(token, cx);
                         this.finish_completion(token, cx);
                         assert_eq!(this.screen, Screen::Installing);
                         assert!(this.completion.is_some(), "100% stays stable through exit");
@@ -1541,6 +1574,16 @@ mod tests {
                         assert_eq!(this.screen, Screen::Maintenance);
                         assert!(this.motion.is_settled());
 
+                        cx.set_reduce_motion(false);
+                        this.request_screen(Screen::Uninstalled, cx);
+                        assert!(this.motion.is_transitioning());
+                        cx.set_reduce_motion(true);
+                        this.request_screen(Screen::Finished, cx);
+                        assert_eq!(this.screen, Screen::Finished);
+                        assert!(this.motion.is_settled());
+
+                        cx.set_reduce_motion(true);
+                        this.request_screen(Screen::Maintenance, cx);
                         cx.set_reduce_motion(false);
                         this.request_screen(Screen::Uninstalled, cx);
                         this.request_screen(Screen::Finished, cx);
@@ -1567,6 +1610,93 @@ mod tests {
                         assert_eq!(
                             this.completion.expect("uninstall completion").next,
                             Screen::Uninstalled
+                        );
+                    });
+                    window.draw(cx).clear(cx);
+                })
+                .expect("window update succeeds");
+            cx.quit();
+        });
+    }
+
+    #[test]
+    fn completion_waits_for_the_progress_page_transition() {
+        use crate::msi::{MsiEvent, MsiSuccess};
+        use gpui_kit::gpui::{AppContext as _, Bounds, Size, WindowBounds, WindowOptions, px};
+
+        gpui_kit::application().run(move |cx| {
+            gpui_kit::init(cx);
+            cx.set_reduce_motion(false);
+            cairn_ui::locale::init_layout_direction(cx);
+            cairn_ui::theme::apply_appearance(false, 1.0, cx);
+
+            let (handle, app) = gpui_kit::open_window(
+                WindowOptions {
+                    show: false,
+                    focus: false,
+                    window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+                        None,
+                        Size {
+                            width: px(520.0),
+                            height: px(240.0),
+                        },
+                        cx,
+                    ))),
+                    ..WindowOptions::default()
+                },
+                cx,
+                |window, cx| {
+                    let preview = Preview {
+                        screen: Screen::Location,
+                        launch: Launch::Setup,
+                        language: Some("en-US".to_string()),
+                        dark: Some(false),
+                        installed: false,
+                        progress: None,
+                        stage: Stage::Preparing,
+                        log: None,
+                        error: None,
+                        uninstall_attempted: false,
+                        record_remaining: false,
+                    };
+                    cx.new(|cx| {
+                        SetupApp::new(
+                            window,
+                            cx,
+                            Launch::Setup,
+                            I18n::new("en-US"),
+                            Some(preview),
+                            false,
+                        )
+                    })
+                },
+            )
+            .expect("setup completion test window opens");
+
+            handle
+                .update(cx, |_, window, cx| {
+                    window.draw(cx).clear(cx);
+                    app.update(cx, |this, cx| {
+                        this.begin_progress_screen(Screen::Installing, Stage::Preparing, cx);
+                        let transition = this.screen_transition.expect("progress exit").token;
+                        this.handle_msi_event(
+                            MsiEvent::Done(Ok(MsiSuccess {
+                                restart_required: false,
+                            })),
+                            cx,
+                        );
+                        let completion = this.completion.expect("completion pending").token;
+                        this.finish_completion(completion, cx);
+                        assert_eq!(
+                            this.screen_transition.expect("progress transition").target,
+                            Screen::Installing
+                        );
+                        this.enter_screen_transition(transition, cx);
+                        assert_eq!(this.screen, Screen::Installing);
+                        this.finish_screen_transition(transition, cx);
+                        assert_eq!(
+                            this.screen_transition.expect("result transition").target,
+                            Screen::Finished
                         );
                     });
                     window.draw(cx).clear(cx);

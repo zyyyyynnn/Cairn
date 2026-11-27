@@ -663,6 +663,9 @@ impl CairnApp {
                 self.results.snippet_preview = None;
                 self.query.active_session_id = Some(session_id);
                 self.results.table.sort_spec = applied_sort;
+                if reset_scroll && self.table_reveal.is_initial() {
+                    self.begin_table_session();
+                }
                 if reset_scroll {
                     self.results.rows_scroll.set_offset(Point::default());
                     self.results.table.scroll_top = 0.0;
@@ -698,6 +701,9 @@ impl CairnApp {
                 self.query.degraded = None;
                 self.results.snippet_preview = None;
                 if self.query.rejection.is_some() {
+                    if reset_scroll && self.table_reveal.is_initial() {
+                        self.begin_table_session();
+                    }
                     self.results.table.set_rows(Vec::new(), 0);
                     self.query.active_session_id = None;
                     self.service.status.clear_objects_count();

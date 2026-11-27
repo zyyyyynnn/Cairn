@@ -1064,13 +1064,16 @@ impl CairnApp {
         cx: &mut Context<'_, Self>,
     ) -> Option<AnyElement> {
         let epoch = self.window_resize.fading_epoch();
-        let sample = Presence::new("panel-resize-presence", epoch.is_none())
-            .transition(if epoch.is_some() {
-                crate::motion::mask_dissolve()
-            } else {
-                Transition::new(Duration::ZERO)
-            })
-            .sample(window, cx);
+        let sample = Presence::new(
+            ElementId::NamedInteger("panel-resize-presence".into(), epoch.unwrap_or(0)),
+            epoch.is_none(),
+        )
+        .transition(if epoch.is_some() {
+            crate::motion::mask_dissolve()
+        } else {
+            Transition::new(Duration::ZERO)
+        })
+        .sample(window, cx);
         if self.window_resize.is_covered() {
             return Some(
                 div()

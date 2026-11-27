@@ -60,13 +60,16 @@ impl CairnApp {
         let state = state.map(gpui_kit::IntoElement::into_any_element);
         let overflows_sideways = self.results.table_scroll.max_offset().x > px(0.0);
         let revealing = self.table_reveal.is_revealing();
-        let reveal_sample = Presence::new("table-reveal-presence", !revealing)
-            .transition(if revealing {
-                crate::motion::mask_dissolve()
-            } else {
-                Transition::new(Duration::ZERO)
-            })
-            .sample(window, cx);
+        let reveal_sample = Presence::new(
+            ElementId::NamedInteger("table-reveal-presence".into(), self.table_reveal.epoch()),
+            !revealing,
+        )
+        .transition(if revealing {
+            crate::motion::mask_dissolve()
+        } else {
+            Transition::new(Duration::ZERO)
+        })
+        .sample(window, cx);
 
         let viewport = div()
             .id("result-table-viewport")

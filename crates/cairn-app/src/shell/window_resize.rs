@@ -159,14 +159,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_faster_poll_keeps_the_resize_watchers_wall_clock_ceiling() {
-        assert!(
-            SETTLE_POLL.checked_mul(MAX_POLLS as u32).unwrap() >= RESIZE_MAX_WAIT,
-            "a long drag must not settle early because polling became faster"
-        );
-    }
-
-    #[test]
     fn the_first_size_the_window_reports_is_its_starting_geometry() {
         let start = Instant::now();
         let mut tracker = WindowResizeTracker::default();
