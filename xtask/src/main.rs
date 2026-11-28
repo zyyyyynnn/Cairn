@@ -70,6 +70,9 @@ enum Commands {
         /// Rewrite the baseline after removing comments; never use it to admit new ones.
         #[arg(long, default_value_t = false)]
         update: bool,
+        /// Admit reviewed increases or edits while rewriting the baseline.
+        #[arg(long, default_value_t = false)]
+        allow_increase: bool,
     },
     /// Package the GPUI setup (CairnSetup.exe), WiX MSI, and SHA256 checksums
     #[cfg(feature = "package")]
@@ -124,9 +127,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::CheckHygiene { workspace } => {
             hygiene_check::check_hygiene(&workspace)?;
         }
-        Commands::CheckComments { workspace, update } => {
+        Commands::CheckComments {
+            workspace,
+            update,
+            allow_increase,
+        } => {
             let files = hygiene_check::collect_rust_files(&workspace)?;
-            comment_check::check_comments(&workspace, &files, update)?;
+            comment_check::check_comments(&workspace, &files, update, allow_increase)?;
         }
         #[cfg(feature = "package")]
         Commands::Package { out_dir } => {

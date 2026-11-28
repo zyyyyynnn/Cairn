@@ -17,6 +17,8 @@ package = ["dep:cairn-protocol", "dep:cairn-setup", "dep:sha2"]
 
 [dependencies]
 clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 toml.workspace = true
 cairn-core = { workspace = true, optional = true }
 cairn-ntfs = { workspace = true, optional = true }

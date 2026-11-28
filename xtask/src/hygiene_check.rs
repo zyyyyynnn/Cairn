@@ -45,7 +45,7 @@ pub fn check_hygiene(workspace: &Path) -> Result<(), String> {
     let member_count = check_workspace_lints(workspace, &mut violations)?;
     let ignored_count = check_sources(workspace, &rust_files, &mut violations)?;
     let copy_count = check_copy_symbols(workspace, &mut violations)?;
-    let comment_count = crate::comment_check::check_comments(workspace, &rust_files, false)?;
+    let comment_count = crate::comment_check::check_comments(workspace, &rust_files, false, false)?;
 
     if !violations.is_empty() {
         return Err(format!(

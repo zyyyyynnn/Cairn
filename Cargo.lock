@@ -9574,6 +9574,8 @@ dependencies = [
  "cairn-service",
  "cairn-setup",
  "clap",
+ "serde",
+ "serde_json",
  "sha2 0.11.1",
  "tempfile",
  "toml 1.2.1+spec-1.1.0",
