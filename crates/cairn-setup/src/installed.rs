@@ -137,7 +137,7 @@ pub fn find_product_codes_checked() -> Result<Vec<String>, u32> {
 
 /// The old Burn bundles registered their own Apps & features entries and launched `CairnSetup.exe`.
 /// Those entries cannot be upgraded by the new MSI, so setup removes every one before installing.
-/// More than one can exist after a failed migration or a side-by-side 0.1.x install.
+/// More than one can exist after a failed migration or a side-by-side legacy Burn install.
 pub fn legacy_burn_uninstallers() -> Vec<LegacyUninstall> {
     let mut found = Vec::new();
     for (base, view) in UNINSTALL_KEYS

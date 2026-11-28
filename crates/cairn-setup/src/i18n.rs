@@ -74,9 +74,10 @@ mod tests {
         assert_eq!(text, "42%");
 
         let zh = I18n::new("zh-CN");
-        let version = zh.format("maintenance_installed", &[("version", "0.1.0")]);
-        assert!(version.contains("0.1.0"));
-        assert!(!version.contains("$version"));
+        let version = env!("CARGO_PKG_VERSION");
+        let text = zh.format("maintenance_installed", &[("version", version)]);
+        assert!(text.contains(version));
+        assert!(!text.contains("$version"));
 
         for (lang, label) in [("en-US", "View log"), ("zh-CN", "查看日志")] {
             let text = I18n::new(lang).format(

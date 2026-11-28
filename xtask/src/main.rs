@@ -14,6 +14,7 @@ mod docs_check;
 mod hygiene_check;
 mod i18n_check;
 mod size_check;
+mod version_check;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -114,6 +115,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             docs_check::check_docs(&workspace)?;
             hygiene_check::check_hygiene(&workspace)?;
+            version_check::check_versions(&workspace)?;
         }
         Commands::CheckI18n { workspace } => {
             i18n_check::check_i18n(&workspace)?;
@@ -126,6 +128,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::CheckHygiene { workspace } => {
             hygiene_check::check_hygiene(&workspace)?;
+            version_check::check_versions(&workspace)?;
         }
         Commands::CheckComments {
             workspace,

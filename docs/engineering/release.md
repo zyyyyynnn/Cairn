@@ -63,6 +63,23 @@ cargo run -p xtask -- package
 
 - MSI `ProductVersion` 只接受数字三段式；升级码固定、产品码每构建生成。预发布标签不得直接进入 MSI。
 
+### 6.1 版本登记
+
+本表只登记标识符、单一来源与递增规则，不复制数值；数值只在对应常量或 manifest 中维护。
+
+| 标识 | 单一来源 | 递增规则与消费方 |
+| --- | --- | --- |
+| 产品版本 | 根 `Cargo.toml` 的 `[workspace.package].version`；成员仅 `version.workspace = true` | 发布准备/发布提交提升；tag `vMAJOR.MINOR.PATCH` 必须一致；MSI 只接受数字三段式；应用、更新器、安装器通过 `CARGO_PKG_VERSION` 读取 |
+| `PROTOCOL_VERSION` | `crates/cairn-protocol/src/message.rs` | wire 布局或消息语义变化时递增；帧头与 `Hello` 握手校验 |
+| `INDEX_MAGIC` / `INDEX_VERSION` | `crates/cairn-core/src/index_file.rs` | 索引快照格式变化时递增；旧快照按不兼容处理 |
+| `CONTENT_BACKFILL_SCHEMA` | `crates/cairn-service/src/sync_engine/content_pipeline/mod.rs` | 内容回填标记结构变化时递增；旧标记丢弃并重建 |
+| comment manifest `schema_version` | `xtask/src/comment_check.rs` 的 `COMMENT_SCHEMA_VERSION` | 注释 baseline/debt JSON 结构变化时递增；`xtask check` 读取 |
+| installer payload | `crates/cairn-setup/src/payload.rs` 的 `CAIRNMSI` | 无版本；xtask 与 setup 同一构建产物 |
+| `skills-lock.json` `version` | 外部技能锁工具生成 | 外部工具 schema，不参与运行时版本 |
+| Common Controls assembly version | `crates/cairn-setup-bin/installer.manifest` | Windows 平台程序集版本，不参与项目版本 |
+
+外部依赖、`Cargo.lock`、系统工具与技能包的版本不属于项目版本，不在本表控制范围。
+
 ## 代码位置
 
 - `xtask/src/package.rs`：WiX MSI、GPUI Setup 封装与 checksum 生成。

@@ -15,6 +15,22 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const CAIRN_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+fn numeric_product_version(version: &str) -> Result<&str, Box<dyn Error>> {
+    let parts: Vec<&str> = version.split('.').collect();
+    if parts.len() == 3
+        && parts
+            .iter()
+            .all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()))
+    {
+        Ok(version)
+    } else {
+        Err(format!(
+            "workspace version `{version}` must be MAJOR.MINOR.PATCH numeric for MSI ProductVersion"
+        )
+        .into())
+    }
+}
 pub const SETUP_EXE_NAME: &str = "CairnSetup.exe";
 pub const UNINSTALLER_NAME: &str = "CairnUninstall.exe";
 pub const MSI_NAME: &str = "cairn.msi";
@@ -447,6 +463,7 @@ fn run_command(command: &mut Command, what: &str) -> Result<(), Box<dyn Error>> 
 }
 
 fn generate_wix_template(wxs_path: &Path) -> Result<(), Box<dyn Error>> {
+    let product_version = numeric_product_version(CAIRN_VERSION)?;
     let wxs_content = format!(
         r#"<?xml version="1.0" encoding="utf-8"?>
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
@@ -644,7 +661,7 @@ fn generate_wix_template(wxs_path: &Path) -> Result<(), Box<dyn Error>> {
   </Package>
 </Wix>
 "#,
-        version = CAIRN_VERSION,
+        version = product_version,
         upgrade_code = cairn_setup::MSI_UPGRADE_CODE,
         service_name = cairn_protocol::message::SERVICE_NAME,
         icon = ICON_NAME,
@@ -692,6 +709,17 @@ pub fn sha256_digest(data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn msi_version_requires_three_numeric_parts() {
+        assert_eq!(numeric_product_version("1.2.3").expect("valid"), "1.2.3");
+        for bad in ["1.2", "1.2.3-beta", "1.2.3+build", "1.2.x"] {
+            assert!(
+                numeric_product_version(bad).is_err(),
+                "`{bad}` must be rejected for MSI"
+            );
+        }
+    }
 
     #[test]
     fn the_install_guard_command_keeps_quoted_paths_parseable() {

@@ -209,10 +209,10 @@ mod tests {
         );
 
         let mut newer_version = header.encode();
-        newer_version[8..12].copy_from_slice(&9u32.to_le_bytes());
+        newer_version[8..12].copy_from_slice(&(INDEX_VERSION + 1).to_le_bytes());
         assert_eq!(
             IndexHeader::decode(&newer_version),
-            Err(IndexFileError::UnsupportedVersion(9))
+            Err(IndexFileError::UnsupportedVersion(INDEX_VERSION + 1))
         );
     }
 }

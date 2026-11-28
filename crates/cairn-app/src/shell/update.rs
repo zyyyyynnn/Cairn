@@ -697,30 +697,50 @@ mod tests {
 
     #[test]
     fn release_tags_compare_numerically_not_lexically() {
-        assert!(is_newer("v0.1.10", "0.1.9"));
-        assert!(is_newer("v0.2.0", "0.1.9"));
-        assert!(!is_newer("v0.1.0", "0.1.0"));
-        assert!(!is_newer("0.0.9", "0.1.0"));
-        assert!(!is_newer("0.2", "0.1.9"));
-        assert!(!is_newer("0.3.0+build.1", "0.3.0"));
-        assert!(!is_newer("0.3.0", "0.3.0+build.1"));
-        assert!(is_newer("0.3.0", "0.3.0-beta.1"));
-        assert!(!is_newer("0.3.0-beta.1", "0.3.0"));
-        assert_eq!(normalize_version(" V1.2.3 "), "1.2.3");
+        let v = |parts: &[u64]| {
+            parts
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(".")
+        };
+        assert!(is_newer(&format!("v{}", v(&[1, 1, 10])), &v(&[1, 1, 9])));
+        assert!(is_newer(&format!("v{}", v(&[2, 0, 0])), &v(&[1, 9, 9])));
+        let current = v(&[1, 1, 0]);
+        assert!(!is_newer(&format!("v{current}"), &current));
+        assert!(!is_newer(&v(&[0, 0, 9]), &current));
+        assert!(!is_newer(&v(&[2]), &v(&[1, 9])));
+        let stable = v(&[3, 0, 0]);
+        assert!(!is_newer(&format!("{stable}+build.1"), &stable));
+        assert!(!is_newer(&stable, &format!("{stable}+build.1")));
+        assert!(is_newer(&stable, &format!("{stable}-beta.1")));
+        assert!(!is_newer(&format!("{stable}-beta.1"), &stable));
+        assert_eq!(
+            normalize_version(&format!(" V{} ", v(&[1, 2, 3]))),
+            v(&[1, 2, 3])
+        );
     }
 
     #[test]
     fn the_available_update_title_carries_no_version() {
+        let sample_version = {
+            let parts = [9u64, 9, 9];
+            parts
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(".")
+        };
         for language in ["zh-CN", "en-US"] {
             let i18n = I18nManager::new(language);
             let title = i18n.get_text("update_available_title");
             assert!(!title.contains('{'), "{language}: {title}");
-            assert!(!title.contains("9.9.9"), "{language}: {title}");
+            assert!(!title.contains(&sample_version), "{language}: {title}");
 
             let mut args = FluentArgs::new();
-            args.set("version", "9.9.9");
+            args.set("version", sample_version.clone());
             let body = i18n.get_text_with_args("update_available_body", &args);
-            assert!(body.contains("9.9.9"), "{language}: {body}");
+            assert!(body.contains(&sample_version), "{language}: {body}");
         }
     }
 

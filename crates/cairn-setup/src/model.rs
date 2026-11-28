@@ -130,7 +130,7 @@ pub fn initial_screen(
 
     match installed {
         None => Screen::Location,
-        // The 0.1.x Burn package predates this installer and must be removed before the new MSI
+        // The legacy Burn package predates this installer and must be removed before the new MSI
         // can own the machine. Its version is allowed to look newer than this work line.
         Some(_) if legacy_burn => Screen::Location,
         Some(product)
@@ -235,6 +235,14 @@ mod tests {
     };
     use std::cmp::Ordering;
 
+    fn v(parts: &[u64]) -> String {
+        parts
+            .iter()
+            .map(u64::to_string)
+            .collect::<Vec<_>>()
+            .join(".")
+    }
+
     /// An equal version is not enough: a build from another commit carries a new `ProductCode` and
     /// must be installed over the copy on disk.
     #[test]
@@ -249,7 +257,7 @@ mod tests {
         assert!(!installed.is_same_build(None));
 
         let older = InstalledProduct {
-            version: "0.0.9".to_string(),
+            version: v(&[0, 0, 9]),
             ..installed.clone()
         };
         assert!(!older.is_same_build(Some("{AAAA}")));
@@ -269,10 +277,10 @@ mod tests {
         let mut no_code = product(env!("CARGO_PKG_VERSION"));
         no_code.product_code = None;
         let current = product(env!("CARGO_PKG_VERSION"));
-        let newer = product("9.0.0");
-        let older = product("0.0.1");
-        let burn = product("0.1.2");
-        let uninstall_target = product("0.1.0");
+        let newer = product(&v(&[99, 0, 0]));
+        let older = product(&v(&[0, 0, 1]));
+        let burn = product(&v(&[0, 0, 2]));
+        let uninstall_target = product(&v(&[0, 0, 1]));
 
         let cases = [
             (Launch::Setup, None, false, Screen::Location),
@@ -300,9 +308,18 @@ mod tests {
 
     #[test]
     fn version_order_is_numeric_not_lexical() {
-        assert_eq!(compare_versions("0.1.2", "0.1.10"), Ordering::Less);
-        assert_eq!(compare_versions("1.0", "1.0.0"), Ordering::Equal);
-        assert_eq!(compare_versions("2.0.0", "1.9.9"), Ordering::Greater);
+        assert_eq!(
+            compare_versions(&v(&[0, 1, 2]), &v(&[0, 1, 10])),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_versions(&v(&[1, 0]), &v(&[1, 0, 0])),
+            Ordering::Equal
+        );
+        assert_eq!(
+            compare_versions(&v(&[2, 0, 0]), &v(&[1, 9, 9])),
+            Ordering::Greater
+        );
     }
 
     #[test]

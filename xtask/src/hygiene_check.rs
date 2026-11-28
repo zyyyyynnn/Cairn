@@ -1695,7 +1695,7 @@ mod tests {
         seed_valid_workspace(lock.path());
         fs::write(
             lock.path().join("Cargo.lock"),
-            "version = 4\n\n[[package]]\nname = \"cairn-content\"\nversion = \"0.1.0\"\ndependencies = [\"helper\"]\n\n[[package]]\nname = \"helper\"\nversion = \"0.1.0\"\ndependencies = [\"quick_xml 0.42.0\"]\n\n[[package]]\nname = \"quick_xml\"\nversion = \"0.42.0\"\n",
+            "version = 4\n\n[[package]]\nname = \"cairn-content\"\nversion = \"0.0.0\"\ndependencies = [\"helper\"]\n\n[[package]]\nname = \"helper\"\nversion = \"0.0.0\"\ndependencies = [\"quick_xml 9.9.9\"]\n\n[[package]]\nname = \"quick_xml\"\nversion = \"9.9.9\"\n",
         )
         .expect("write lockfile");
         let err = check_hygiene(lock.path()).expect_err("transitive lockfile dep must fail");

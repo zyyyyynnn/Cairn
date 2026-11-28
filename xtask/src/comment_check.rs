@@ -16,7 +16,7 @@ use crate::hygiene_check::scan_rust_source;
 
 pub(crate) const BASELINE_FILE: &str = ".comment-baseline";
 pub(crate) const DEBT_FILE: &str = ".comment-debt";
-const BASELINE_VERSION: u32 = 2;
+const COMMENT_SCHEMA_VERSION: u32 = 1;
 const BASELINE_UNIT: &str = "comment-block";
 const GENERATED_BY: &str = "xtask/comment_check";
 const DEBT_OWNER: &str = "@zyyyyynnn";
@@ -24,7 +24,7 @@ const DEBT_TRACKING: &str = "docs/engineering/quality.md#12-静态检查与回�
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Baseline {
-    version: u32,
+    schema_version: u32,
     unit: String,
     generated_by: String,
     files: BTreeMap<String, usize>,
@@ -448,9 +448,9 @@ fn read_baseline(workspace: &Path) -> Result<Option<Baseline>, String> {
     }
     let baseline: Baseline = serde_json::from_str(&text)
         .map_err(|err| format!("{}: invalid baseline JSON: {err}", path.display()))?;
-    if baseline.version != BASELINE_VERSION || baseline.unit != BASELINE_UNIT {
+    if baseline.schema_version != COMMENT_SCHEMA_VERSION || baseline.unit != BASELINE_UNIT {
         return Err(format!(
-            "{}: expected version {BASELINE_VERSION} unit `{BASELINE_UNIT}`",
+            "{}: expected schema_version {COMMENT_SCHEMA_VERSION} unit `{BASELINE_UNIT}`",
             path.display()
         ));
     }
@@ -471,7 +471,7 @@ fn write_baseline(
         .map_err(|err| format!("cannot serialize baseline items: {err}"))?
         .join(",\n    ");
     let text = format!(
-        "{{\n  \"version\": {BASELINE_VERSION},\n  \"unit\": \"{BASELINE_UNIT}\",\n  \"generated_by\": \"{GENERATED_BY}\",\n  \"files\": {files},\n  \"items\": [\n    {items}\n  ]\n}}\n"
+        "{{\n  \"schema_version\": {COMMENT_SCHEMA_VERSION},\n  \"unit\": \"{BASELINE_UNIT}\",\n  \"generated_by\": \"{GENERATED_BY}\",\n  \"files\": {files},\n  \"items\": [\n    {items}\n  ]\n}}\n"
     );
     let path = workspace.join(BASELINE_FILE);
     fs::write(&path, text).map_err(|err| format!("{}: {err}", path.display()))
@@ -497,7 +497,7 @@ fn write_debt(workspace: &Path, items: &[Item]) -> Result<(), String> {
         .map_err(|err| format!("cannot serialize debt items: {err}"))?
         .join(",\n    ");
     let text = format!(
-        "{{\n  \"version\": 1,\n  \"unit\": \"{BASELINE_UNIT}\",\n  \"count\": {count},\n  \"owner\": \"{DEBT_OWNER}\",\n  \"tracking\": \"{DEBT_TRACKING}\",\n  \"items\": [\n    {items}\n  ]\n}}\n"
+        "{{\n  \"schema_version\": {COMMENT_SCHEMA_VERSION},\n  \"unit\": \"{BASELINE_UNIT}\",\n  \"count\": {count},\n  \"owner\": \"{DEBT_OWNER}\",\n  \"tracking\": \"{DEBT_TRACKING}\",\n  \"items\": [\n    {items}\n  ]\n}}\n"
     );
     let path = workspace.join(DEBT_FILE);
     fs::write(&path, text).map_err(|err| format!("{}: {err}", path.display()))
