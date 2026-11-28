@@ -53,7 +53,6 @@ const EXTERNAL_CONTEXT: &[&str] = &[
     "gpui",
     "tantivy",
     "wix",
-    "windows",
     "rustsec",
     "quick-xml",
     "quick_xml",
@@ -266,7 +265,7 @@ fn has_product_version(text: &str, version: &str, file_name: &str) -> bool {
         let context = product_context(line);
         let version_line = version_key(line);
         let hit = contains_version_literal(line, version)
-            && !external_context(line)
+            && !external_context(line, version)
             && (context
                 || (recent[0] || recent[1]) && version_line
                 || line.trim_start().starts_with('#')
@@ -299,9 +298,43 @@ fn version_key(line: &str) -> bool {
     lower.contains("version") || line.contains("版本") || lower.contains("tag")
 }
 
-fn external_context(line: &str) -> bool {
+fn external_context(line: &str, version: &str) -> bool {
     let lower = line.to_ascii_lowercase();
-    EXTERNAL_CONTEXT.iter().any(|term| lower.contains(term))
+    let mut start = 0;
+    while let Some(offset) = lower[start..].find(version) {
+        let begin = start + offset;
+        let prefix = &lower[..begin];
+        let external = EXTERNAL_CONTEXT.iter().any(|term| {
+            prefix.rfind(term).is_some_and(|position| {
+                prefix[position + term.len()..].chars().all(|ch| {
+                    ch.is_ascii_alphanumeric()
+                        || matches!(
+                            ch,
+                            '-' | '_'
+                                | '@'
+                                | '/'
+                                | '.'
+                                | ':'
+                                | '='
+                                | '('
+                                | ')'
+                                | '['
+                                | ']'
+                                | '`'
+                                | '\''
+                                | '"'
+                                | ','
+                        )
+                        || ch.is_whitespace()
+                })
+            })
+        });
+        if external {
+            return true;
+        }
+        start = begin + version.len();
+    }
+    false
 }
 
 fn contains_version_literal(text: &str, version: &str) -> bool {
@@ -523,6 +556,19 @@ mod tests {
         )
         .expect("readme");
         check_versions(temp.path()).expect("external dependency");
+    }
+
+    #[test]
+    fn external_term_after_the_product_version_does_not_exempt_it() {
+        let version = v();
+        let temp = workspace(&version);
+        fs::write(
+            temp.path().join("README.md"),
+            format!("Cairn {version} uses gpui-kit\n"),
+        )
+        .expect("readme");
+        let err = check_versions(temp.path()).expect_err("product copy still fails");
+        assert!(err.contains("README.md"), "{err}");
     }
 
     #[test]
