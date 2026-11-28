@@ -209,7 +209,8 @@ pub fn msi_version(version: &str) -> Result<&str, String> {
 }
 
 /// Returns the GitHub tag name when the build runs for a tag ref.
-pub fn release_tag_from_env() -> Result<Option<String>, String> {
+#[cfg(feature = "package")]
+pub(crate) fn release_tag_from_env() -> Result<Option<String>, String> {
     if std::env::var("GITHUB_REF_TYPE").ok().as_deref() != Some("tag") {
         return Ok(None);
     }

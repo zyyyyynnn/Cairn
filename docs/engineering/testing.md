@@ -14,7 +14,7 @@
 
 一个行为只在一层测一次，放在最接近用户的那一层；下层不重复上层已经断言过的结果。
 
-查询语法的差分测试以原始查询字符串为输入的朴素参考实现对照生产 `parse_query -> execute_query`，参考实现不共享生产 lexer/AST；随机查询同时断言命中与非命中，避免两侧共享同一缺陷时结果相互抵消。差分测试只建模 QRY-02 的文本文法（AND / OR / 否定 / 分组 / 引号），函数、修饰符、通配符与正则的值语义由精确命中用例覆盖。端到端查询回归断言精确命中集合，防止查询静默退化为全库。
+查询语法的差分测试以原始查询字符串为输入的朴素参考实现对照生产 `parse_query -> execute_query`，参考实现不共享生产 lexer/AST；随机查询同时断言命中与非命中，避免两侧共享同一缺陷时结果相互抵消。差分测试只建模 QRY-02 的文本文法（AND / OR / 否定 / 分组 / 引号），QRY-03 的函数、修饰符、通配符与正则值语义由精确命中用例覆盖。端到端查询回归断言精确命中集合，防止查询静默退化为全库。
 
 `cairn-app` 的公开入口在 `src` 内以 `CairnApp` 上下文覆盖：启动通过 `StartupCoordinator` 与 `TestBootstrapPorts` / `AppRuntimePorts` 注入免副作用端口；就地重命名的打开、替换与取消（`rename_selected` / `cancel_rename`），查询历史后退（`go_back`），停止查询后的状态与 id（`cancel_in_flight_query`），以及取消后的状态刷新不发起查询（`refresh_results`）；启动去重、搜索防抖取消与每帧渲染缓存通过对应 Seam（`StartupCoordinator`、`SearchCoordinator`、`RowPresentationCache`）以无 OS 真弹窗方式验证；列表几何测试通过 `#[cfg(test)]` 渲染夹具（`SourceRowsHarness`、`JournalHeaderHarness`、`JournalRowsHarness`）在无生产后门的情况下测量真实排布边界。
 

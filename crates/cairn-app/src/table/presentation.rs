@@ -111,8 +111,8 @@ fn civil_from_days(days_since_1970: i64) -> (i64, u32, u32) {
     (if month <= 2 { year + 1 } else { year }, month, day)
 }
 
-/// Bounded timestamp cache keyed by UTC minute for per-frame row rendering. Conversion uses the
-/// current system time zone and DST bias, so a time-zone change during a run leaves already-cached
+/// Bounded timestamp cache keyed by UTC minute for per-frame row rendering. Conversion applies the
+/// system time zone rules for each timestamp, so a time-zone change during a run leaves already-cached
 /// minutes at their earlier rendering; a restart re-reads the zone.
 pub(crate) struct RowPresentationCache<P: LocalTimePort> {
     port: P,

@@ -59,6 +59,22 @@ const EXTERNAL_CONTEXT: &[&str] = &[
     "lopdf",
     "serde",
     "tokio",
+    "reqwest",
+    "clap",
+    "postcard",
+    "zip",
+    "semver",
+    "rayon",
+    "regex",
+    "sha2",
+    "memchr",
+    "tracing",
+    "thiserror",
+    "crc32fast",
+    "windows-service",
+    "winresource",
+    "chardetng",
+    "encoding_rs",
     "actions/",
     "tool install",
     "cargo-deny",
@@ -229,7 +245,7 @@ fn check_registry(workspace: &Path, violations: &mut Vec<String>) -> Result<(), 
         }
         for token in line.split('`').skip(1).step_by(2) {
             let token = token.trim();
-            if !token.contains('/')
+            if !is_registry_path(token)
                 || token.contains(char::is_whitespace)
                 || token.starts_with("//")
             {
@@ -258,6 +274,22 @@ fn check_registry(workspace: &Path, violations: &mut Vec<String>) -> Result<(), 
     Ok(())
 }
 
+fn is_registry_path(token: &str) -> bool {
+    token.contains('/')
+        || [
+            ".toml",
+            ".lock",
+            ".md",
+            ".json",
+            ".rs",
+            ".manifest",
+            ".wxs",
+            ".wxi",
+        ]
+        .iter()
+        .any(|extension| token.ends_with(extension))
+}
+
 fn has_product_version(text: &str, version: &str) -> bool {
     text.lines()
         .any(|line| contains_version_literal(line, version) && !external_context(line, version))
@@ -266,40 +298,41 @@ fn has_product_version(text: &str, version: &str) -> bool {
 fn external_context(line: &str, version: &str) -> bool {
     let lower = line.to_ascii_lowercase();
     let mut start = 0;
+    let mut found = false;
     while let Some(offset) = lower[start..].find(version) {
+        found = true;
         let begin = start + offset;
         let prefix = &lower[..begin];
         let external = EXTERNAL_CONTEXT.iter().any(|term| {
             prefix.rfind(term).is_some_and(|position| {
-                prefix[position + term.len()..].chars().all(|ch| {
-                    ch.is_ascii_alphanumeric()
-                        || matches!(
-                            ch,
-                            '-' | '_'
-                                | '@'
-                                | '/'
-                                | '.'
-                                | ':'
-                                | '='
-                                | '('
-                                | ')'
-                                | '['
-                                | ']'
-                                | '`'
-                                | '\''
-                                | '"'
-                                | ','
-                        )
-                        || ch.is_whitespace()
-                })
+                let between = &prefix[position + term.len()..];
+                if term.ends_with('/') {
+                    return true;
+                }
+                between.split_whitespace().all(dependency_suffix)
             })
         });
-        if external {
-            return true;
+        if !external {
+            return false;
         }
         start = begin + version.len();
     }
-    false
+    found
+}
+
+fn dependency_suffix(word: &str) -> bool {
+    let trimmed = word.trim_matches(|ch: char| {
+        matches!(
+            ch,
+            '(' | ')' | '[' | ']' | ',' | ';' | ':' | '"' | '\'' | '`' | '=' | '.' | '/' | '\\'
+        )
+    });
+    trimmed.is_empty()
+        || trimmed.starts_with('-')
+        || trimmed.starts_with('_')
+        || trimmed.starts_with('@')
+        || trimmed == "version"
+        || trimmed == "v"
 }
 
 fn contains_version_literal(text: &str, version: &str) -> bool {
@@ -535,6 +568,26 @@ mod tests {
         .expect("readme");
         let err = check_versions(temp.path()).expect_err("product copy still fails");
         assert!(err.contains("README.md"), "{err}");
+    }
+
+    #[test]
+    fn only_an_adjacent_external_dependency_exempts_a_version() {
+        let version = v();
+        let temp = workspace(&version);
+        fs::write(
+            temp.path().join("README.md"),
+            format!("gpui is the UI framework used by Cairn {version}\n"),
+        )
+        .expect("readme");
+        let err = check_versions(temp.path()).expect_err("distant external term does not exempt");
+        assert!(err.contains("README.md"), "{err}");
+
+        fs::write(
+            temp.path().join("README.md"),
+            format!("Cairn uses gpui-kit version {version}\n"),
+        )
+        .expect("readme");
+        check_versions(temp.path()).expect("adjacent external dependency");
     }
 
     #[test]
