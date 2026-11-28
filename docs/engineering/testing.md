@@ -70,7 +70,7 @@
 
 `.github/workflows/ci.yml` 按正交依赖拆分为 Ubuntu 静态门禁与 Engine / Desktop 双路 Windows 作业，不重复编译无关依赖：
 
-- `Repository Gates`（`ubuntu-latest`）：执行 `cargo run -p xtask --no-default-features -- check`（纯文档变更传入 `--docs-only` 只跑 `check-docs` 与 `check-hygiene`）。
+- `Repository Gates`（`ubuntu-latest`）：执行 `cargo run -p xtask --no-default-features -- check`（纯文档变更传入 `--docs-only` 只跑 `check-docs`、`check-hygiene` 与版本治理）。
 - `Lint & Rustdoc`（`windows-latest`，纯文档变更跳过）：执行 `cargo clippy --workspace --all-targets -- -D warnings` 与 `cargo doc --workspace --no-deps`。
 - `Code Quality & Static Analysis`（`ubuntu-latest`）：汇总 `Repository Gates` 与 `Lint & Rustdoc` 的结果，作为必需状态检查。
 - `Dependency Policy`（`ubuntu-latest`，纯文档变更跳过）：执行 `cargo fmt --all --check` 与预编译 `cargo deny check`。

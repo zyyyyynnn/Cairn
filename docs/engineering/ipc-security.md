@@ -50,7 +50,7 @@
 
 ## 4. 权限使用
 
-- `SeRestorePrivilege`：服务数据目录 owner 修复所必需；只有该特权允许把任意有效 SID 设为 owner。`SeTakeOwnershipPrivilege` 单独只能把 owner 设为自己可合法声明的 SID，只有它时 elevated `--console` 会以 `ERROR_INVALID_OWNER` 失败。`SeRestorePrivilege` 在使用后按原状态释放，长期索引进程不保留该权限。
+- `SeRestorePrivilege`：服务数据目录 owner 修复所必需；只有该特权允许把任意有效 SID 设为 owner。`SeTakeOwnershipPrivilege` 单独只能把 owner 设为自己可合法声明的 SID，只有它时 elevated `--console` 会以 `ERROR_INVALID_OWNER` 失败。仅本次启用的场景在修复完成后恢复到原状态；账户（`LocalSystem`）原本持有的启用状态不被改变，长期索引进程也不会新增保留该权限。
 - 服务数据目录的 ACL 只允许 SYSTEM 与内置 Administrators；桌面客户端不写入服务数据目录。
 - 服务数据根整体受保护，配置与日志随根目录覆盖，不逐个子目录枚举；启动时未被认证的 `service.toml` 不会因后续 reload 重新读取而变为可信。
 - `Path::exists()` 不能用于创建决策：它把“不存在”和“存在但无权查询”都报为 `false`。存在性按 I/O 错误类型区分，只有 `NotFound` 才是缺失；`PermissionDenied` 表示目录存在但不可列出，应直接进入 ACL 检查而不是 `create_dir_all`。

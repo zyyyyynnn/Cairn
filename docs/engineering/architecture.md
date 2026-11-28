@@ -36,7 +36,7 @@ graph TD
 
 - **解析依赖与工作区边界**：`cairn-service` 与 `cairn-content` 对 `cairn-worker` 及第三方格式解析库（`lopdf`、`zip`、`quick-xml`、`chardetng`、`encoding_rs`）保持零直接与零传递依赖（由 `xtask check-hygiene` 核验 manifest 与 `Cargo.lock`）。
 - **只读查询视图与双子管线**：`cairn-core::query::SourceView` 与 `EvalContext` 以借用视图隔离底层源存储与查询求值；`crates/cairn-service/src/sync_engine/worker_runner.rs` 以 `BELOW_NORMAL_PRIORITY_CLASS`、Job Object（`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`）、超时与 64 KiB 管道输出截断调度 `CairnWorker.exe`（经 `WorkerBinaryLocator` 定位，生产使用 `AdjacentWorkerBinaryLocator`），供 `content_pipeline` 与 `property_pipeline` 隔离运行，且 `cairn-worker` 在读文件前校验祖先与末段重解析点并限制 MP4 容器嵌套深度与原子计数；`MultiVolumeEngine` 按 `persist_lock -> config_apply_lock -> volumes -> folder_sources -> folder_watchers -> property_pipeline.(tables -> refresh -> status) -> index_journal` 锁序协作。
-- **模块化源码组织**：`pipe_server/`（`mod.rs`、`tests.rs`）与 `volume_index/`（`mod.rs`、`presort.rs`、`refresh.rs`）等模块按职责拆分，`xtask check-size` 强制所有 `.rs` 文件低于 2,000 行。
+- **模块化源码组织**：`pipe_server/`（`mod.rs`、`tests.rs`）与 `volume_index/`（`mod.rs`、`presort.rs`、`refresh.rs`）等模块按职责拆分，`xtask check-size` 强制所有 `.rs` 文件不超过 2,000 行。
 
 ### 1.2 多进程协同与权限隔离模型
 

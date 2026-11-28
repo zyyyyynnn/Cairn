@@ -35,7 +35,7 @@ enum Commands {
         /// The workspace root to check.
         #[arg(default_value = ".")]
         workspace: PathBuf,
-        /// Only run documentation links and repository hygiene gates (for docs-only changes).
+        /// Only run documentation links, repository hygiene, and version gates (for docs-only changes).
         #[arg(long, default_value_t = false)]
         docs_only: bool,
     },
@@ -136,7 +136,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             allow_increase,
         } => {
             let files = hygiene_check::collect_rust_files(&workspace)?;
-            comment_check::check_comments(&workspace, &files, update, allow_increase)?;
+            if files.is_empty() {
+                return Err("no Rust source files found for the comment gate".into());
+            }
+            let count = comment_check::check_comments(&workspace, &files, update, allow_increase)?;
+            if !update {
+                println!("comment check passed: {count} non-exempt comment block(s)");
+            }
         }
         #[cfg(feature = "package")]
         Commands::Package { out_dir } => {

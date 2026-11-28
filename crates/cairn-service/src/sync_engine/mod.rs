@@ -94,7 +94,7 @@ impl WorkerBinaryLocator for FixedWorkerBinaryLocator {
 }
 
 pub struct MultiVolumeEngine {
-    // See docs/engineering/indexing.md#3-并发内存与流式查询 for the lock order.
+    // See docs/engineering/indexing.md#3-并发内存与流式查询.
     persist_lock: Mutex<()>,
     volumes: RwLock<HashMap<char, VolumeIndex>>,
     folder_sources: Arc<RwLock<HashMap<SourceId, folder_source::FolderSource>>>,

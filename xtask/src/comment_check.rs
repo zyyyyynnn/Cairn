@@ -137,20 +137,31 @@ pub(crate) fn check_comments(
         return Ok(total);
     }
 
-    let Some(old) = read_baseline(workspace)? else {
-        if workspace.join(".git").exists() {
-            return Err(format!(
-                "{BASELINE_FILE} is missing; run `check-comments --update` only after the comments were cleaned"
-            ));
+    let old = match read_baseline(workspace) {
+        Ok(Some(old)) => old,
+        Ok(None) => {
+            if workspace.join(".git").exists() {
+                violations.push(format!(
+                    "{BASELINE_FILE} is missing; run `check-comments --update` only after the comments were cleaned"
+                ));
+            }
+            if !violations.is_empty() {
+                return Err(format!(
+                    "{} comment violation(s):\n  {}",
+                    violations.len(),
+                    violations.join("\n  ")
+                ));
+            }
+            return Ok(counts.values().sum());
         }
-        if !violations.is_empty() {
+        Err(err) => {
+            violations.push(err);
             return Err(format!(
                 "{} comment violation(s):\n  {}",
                 violations.len(),
                 violations.join("\n  ")
             ));
         }
-        return Ok(counts.values().sum());
     };
 
     let keys: BTreeSet<&String> = counts.keys().chain(old.files.keys()).collect();
@@ -178,17 +189,20 @@ pub(crate) fn check_comments(
         }
     }
 
-    let Some(debt) = read_debt(workspace)? else {
-        return Err(format!(
+    match read_debt(workspace) {
+        Ok(Some(debt)) => {
+            let old_items: BTreeSet<&Item> = old.items.iter().collect();
+            let debt_items: BTreeSet<&Item> = debt.items.iter().collect();
+            if debt_items != old_items {
+                violations.push(format!(
+                    "{DEBT_FILE}: open debt items do not match {BASELINE_FILE}"
+                ));
+            }
+        }
+        Ok(None) => violations.push(format!(
             "{DEBT_FILE} is missing; run `check-comments --update` after the comments were cleaned"
-        ));
-    };
-    let old_items: BTreeSet<&Item> = old.items.iter().collect();
-    let debt_items: BTreeSet<&Item> = debt.items.iter().collect();
-    if debt_items != old_items {
-        violations.push(format!(
-            "{DEBT_FILE}: open debt items do not match {BASELINE_FILE}"
-        ));
+        )),
+        Err(err) => violations.push(err),
     }
 
     if !violations.is_empty() {
@@ -226,13 +240,17 @@ fn safety_violations(
     code_lines: &[(usize, String)],
 ) -> Vec<(usize, String)> {
     let mut violations = Vec::new();
-    for group in comment_groups(comments) {
+    let start_index = spdx_header_len(comments);
+    for group in comment_groups(&comments[start_index..]) {
         if group.kind == 0
-            && comments[group.start].1.trim_start().starts_with("SAFETY:")
-            && !is_live_safety(code_lines, comments[group.end].0)
+            && comments[start_index + group.start]
+                .1
+                .trim_start()
+                .starts_with("SAFETY:")
+            && !is_live_safety(code_lines, comments[start_index + group.end].0)
         {
             violations.push((
-                comments[group.start].0,
+                comments[start_index + group.start].0,
                 "orphan SAFETY directive on safe code".to_string(),
             ));
         }
@@ -259,9 +277,7 @@ fn comment_blocks(
         let exempt = match kind {
             0 => {
                 (body.trim_start().starts_with("SAFETY:") && is_live_safety(code_lines, last_line))
-                    || (end == start
-                        && link_token(body)
-                            .is_some_and(|link| validate_link(workspace, link).is_ok()))
+                    || (end == start && link_only(workspace, body))
             }
             _ => true,
         };
@@ -361,6 +377,16 @@ fn link_token(body: &str) -> Option<&str> {
     let rest = body.strip_prefix("See docs/engineering/")?;
     let token = rest.split_whitespace().next()?;
     Some(token.trim_end_matches(['.', ',', ';', ':', '。', '，', '；', '：', '、', ')', '）']))
+}
+
+fn link_only(workspace: &Path, body: &str) -> bool {
+    let Some(token) = link_token(body) else {
+        return false;
+    };
+    let expected = format!("See docs/engineering/{token}");
+    let trimmed =
+        body.trim_end_matches(['.', ',', ';', ':', '。', '，', '；', '：', '、', ')', '）']);
+    trimmed == expected && validate_link(workspace, token).is_ok()
 }
 
 fn validate_link(workspace: &Path, link: &str) -> Result<(), String> {
@@ -488,35 +514,43 @@ fn contains_word(haystack: &str, needle: &str) -> bool {
 }
 
 fn lint_suppressions(code_lines: &[(usize, String)]) -> Vec<usize> {
-    let mut found = Vec::new();
-    let mut in_attribute = false;
-    let mut depth = 0usize;
-    let mut buffer = String::new();
+    let mut chars = Vec::new();
+    let mut lines = Vec::new();
     for (line, code) in code_lines {
-        let chars: Vec<char> = code.chars().filter(|ch| !ch.is_whitespace()).collect();
-        let mut index = 0;
-        while index < chars.len() {
-            if !in_attribute {
-                if chars[index] == '#' && index + 1 < chars.len() && chars[index + 1] == '[' {
-                    in_attribute = true;
-                    depth = 1;
-                    buffer.clear();
-                    index += 2;
-                } else if chars[index] == '#'
-                    && index + 2 < chars.len()
-                    && chars[index + 1] == '!'
-                    && chars[index + 2] == '['
-                {
-                    in_attribute = true;
-                    depth = 1;
-                    buffer.clear();
-                    index += 3;
-                } else {
-                    index += 1;
-                }
-                continue;
+        for ch in code.chars() {
+            chars.push(ch);
+            lines.push(*line);
+        }
+        chars.push('\n');
+        lines.push(*line);
+    }
+    let mut found = Vec::new();
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] != '#' {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        let mut look = index + 1;
+        while look < chars.len() && chars[look].is_whitespace() {
+            look += 1;
+        }
+        if look < chars.len() && chars[look] == '!' {
+            look += 1;
+            while look < chars.len() && chars[look].is_whitespace() {
+                look += 1;
             }
-            match chars[index] {
+        }
+        if look >= chars.len() || chars[look] != '[' {
+            index += 1;
+            continue;
+        }
+        let mut depth = 1usize;
+        let mut cursor = look + 1;
+        let mut buffer = String::new();
+        while cursor < chars.len() {
+            match chars[cursor] {
                 '[' => {
                     depth += 1;
                     buffer.push('[');
@@ -525,21 +559,18 @@ fn lint_suppressions(code_lines: &[(usize, String)]) -> Vec<usize> {
                     depth -= 1;
                     if depth == 0 {
                         if buffer.contains("allow(") || buffer.contains("expect(") {
-                            found.push(*line);
+                            found.push(lines[start]);
                         }
-                        in_attribute = false;
-                        buffer.clear();
-                    } else {
-                        buffer.push(']');
+                        break;
                     }
+                    buffer.push(']');
                 }
-                ch => buffer.push(ch),
+                ch if !ch.is_whitespace() => buffer.push(ch),
+                _ => {}
             }
-            index += 1;
+            cursor += 1;
         }
-        if in_attribute {
-            buffer.push('\n');
-        }
+        index = cursor.saturating_add(1).max(index + 1);
     }
     found
 }
@@ -799,14 +830,30 @@ mod tests {
         check_comments(temp.path(), std::slice::from_ref(&path), true, false)
             .expect("update baseline");
         let mut text = source();
-        text.push_str("\n// See docs/engineering/../Cargo.toml#x.\n");
+        text.push_str("\n// See docs/engineering/../quality.md#12-静态检查与回归门禁.\n");
+        write_source(&temp, &text);
+        let err = check_comments(temp.path(), std::slice::from_ref(&path), false, false)
+            .expect_err("traversal fails");
+        assert!(err.contains("below docs/engineering"), "{err}");
+
+        let mut text = source();
         text.push_str("\n// See docs/engineering/quality.md#12-静态检查与回归门禁.\n// narration after a link\n");
         write_source(&temp, &text);
-        let err = check_comments(temp.path(), &[path], false, false).expect_err("link paths fail");
-        assert!(
-            err.contains("below docs/engineering") || err.contains("new or changed"),
-            "{err}"
-        );
+        let err = check_comments(temp.path(), &[path], false, false).expect_err("narration fails");
+        assert!(err.contains("new or changed"), "{err}");
+    }
+
+    #[test]
+    fn link_with_trailing_prose_is_not_exempt() {
+        let temp = workspace();
+        let path = write_source(&temp, &source());
+        check_comments(temp.path(), std::slice::from_ref(&path), true, false)
+            .expect("update baseline");
+        let mut text = source();
+        text.push_str("\n// See docs/engineering/quality.md#12-静态检查与回归门禁 plus prose.\n");
+        write_source(&temp, &text);
+        let err = check_comments(temp.path(), &[path], false, false).expect_err("prose fails");
+        assert!(err.contains("new or changed"), "{err}");
     }
 
     #[test]
@@ -842,6 +889,15 @@ mod tests {
     }
 
     #[test]
+    fn split_attribute_suppression_fails() {
+        let temp = workspace();
+        let text = format!("{}\n#[allow\n(dead_code)]\nfn helper() {{}}\n", source());
+        let path = write_source(&temp, &text);
+        let err = check_comments(temp.path(), &[path], false, false).expect_err("split fails");
+        assert!(err.contains("lint suppression"), "{err}");
+    }
+
+    #[test]
     fn baseline_recreation_requires_allow_increase() {
         let temp = workspace();
         fs::create_dir_all(temp.path().join(".git")).expect("git dir");
@@ -864,7 +920,20 @@ mod tests {
             .expect_err("missing debt fails");
         assert!(err.contains(DEBT_FILE), "{err}");
         assert_eq!(baseline(&temp).files.len(), 1);
-        check_comments(temp.path(), &[path], true, false).expect("restore debt");
+
+        check_comments(temp.path(), std::slice::from_ref(&path), true, false)
+            .expect("restore debt");
+        let mut debt = read_debt(temp.path()).expect("read debt").expect("debt");
+        debt.items.pop();
+        debt.count = debt.items.len();
+        fs::write(
+            temp.path().join(DEBT_FILE),
+            serde_json::to_string(&debt).expect("serialize debt"),
+        )
+        .expect("write debt");
+        let err =
+            check_comments(temp.path(), &[path], false, false).expect_err("mismatched debt fails");
+        assert!(err.contains("do not match"), "{err}");
     }
 
     #[test]
@@ -879,6 +948,19 @@ mod tests {
         check_comments(temp.path(), std::slice::from_ref(&path), true, false)
             .expect("update baseline");
         assert_eq!(baseline(&temp).files.values().sum::<usize>(), 1);
+    }
+
+    #[test]
+    fn orphan_safety_next_to_the_spdx_header_fails() {
+        let temp = workspace();
+        let text = "// Cairn - High-performance Windows file search engine\n\
+             // Copyright (c) 2026 Cairn Contributors\n\
+             // SPDX-License-Identifier: Apache-2.0\n\
+             // SAFETY: not attached to unsafe code\n\
+             const A: u8 = 1;\n";
+        let path = write_source(&temp, text);
+        let err = check_comments(temp.path(), &[path], true, true).expect_err("orphan fails");
+        assert!(err.contains("orphan SAFETY"), "{err}");
     }
 
     #[test]

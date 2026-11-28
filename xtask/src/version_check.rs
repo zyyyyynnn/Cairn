@@ -7,13 +7,13 @@
 //! changelog, validates MSI numeric fields, and checks the release tag when one is present.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use toml::{Table, Value};
 
-use xtask::versioning::{msi_version, release_tag_from_env, validate_release_tag};
+use xtask::versioning::msi_version;
 
-const PRODUCT_VERSION_ALLOWED_FILES: &[&str] = &["Cargo.toml", "Cargo.lock", "CHANGELOG.md"];
+const PRODUCT_VERSION_ALLOWED_PATHS: &[&str] = &["Cargo.toml", "Cargo.lock", "CHANGELOG.md"];
 const SKIPPED_DIRS: &[&str] = &[
     ".git",
     "target",
@@ -35,8 +35,34 @@ const TEXT_EXTENSIONS: &[&str] = &[
     "txt",
     "manifest",
     "svg",
-    "gitignore",
-    "gitattributes",
+    "ps1",
+    "psm1",
+    "sh",
+    "bat",
+    "cmd",
+    "xml",
+    "wxs",
+    "wxi",
+    "props",
+    "targets",
+    "nuspec",
+    "vsixmanifest",
+];
+const EXTERNAL_CONTEXT: &[&str] = &[
+    "gpui",
+    "tantivy",
+    "wix",
+    "windows",
+    "rustsec",
+    "quick-xml",
+    "quick_xml",
+    "lopdf",
+    "serde",
+    "tokio",
+    "actions/",
+    "tool install",
+    "cargo-deny",
+    "dependabot",
 ];
 
 pub(crate) fn check_versions(workspace: &Path) -> Result<usize, String> {
@@ -44,11 +70,9 @@ pub(crate) fn check_versions(workspace: &Path) -> Result<usize, String> {
     let version = workspace_version(&root)?;
     msi_version(&version)?;
     let mut violations = Vec::new();
-    let members = check_member_manifests(workspace, &root, &mut violations)?;
+    let members = check_member_manifests(workspace, &mut violations)?;
     let scanned = scan_version_literals(workspace, &version, &mut violations)?;
-    if let Some(tag) = release_tag_from_env()? {
-        validate_release_tag(Some(&tag), &version)?;
-    }
+    check_registry(workspace, &mut violations)?;
 
     if !violations.is_empty() {
         return Err(format!(
@@ -73,12 +97,8 @@ fn workspace_version(root: &Table) -> Result<String, String> {
         .ok_or_else(|| "Cargo.toml: missing `[workspace.package].version`".to_string())
 }
 
-fn check_member_manifests(
-    workspace: &Path,
-    root: &Table,
-    violations: &mut Vec<String>,
-) -> Result<usize, String> {
-    let manifests = workspace_members(workspace, root)?;
+fn check_member_manifests(workspace: &Path, violations: &mut Vec<String>) -> Result<usize, String> {
+    let manifests = xtask::versioning::workspace_members(workspace)?;
     for manifest in &manifests {
         let rel = relative(workspace, manifest);
         if !manifest.is_file() {
@@ -100,37 +120,6 @@ fn check_member_manifests(
         }
     }
     Ok(manifests.len())
-}
-
-fn workspace_members(workspace: &Path, root: &Table) -> Result<Vec<PathBuf>, String> {
-    if let Some(members) = root
-        .get("workspace")
-        .and_then(|workspace| workspace.get("members"))
-        .and_then(Value::as_array)
-    {
-        return Ok(members
-            .iter()
-            .filter_map(Value::as_str)
-            .map(|member| workspace.join(member).join("Cargo.toml"))
-            .collect());
-    }
-    let mut manifests = Vec::new();
-    let crates = workspace.join("crates");
-    if crates.is_dir() {
-        for entry in fs::read_dir(&crates).map_err(|err| format!("{}: {err}", crates.display()))? {
-            let entry = entry.map_err(|err| format!("{}: {err}", crates.display()))?;
-            let manifest = entry.path().join("Cargo.toml");
-            if manifest.is_file() {
-                manifests.push(manifest);
-            }
-        }
-    }
-    let xtask = workspace.join("xtask/Cargo.toml");
-    if xtask.is_file() {
-        manifests.push(xtask);
-    }
-    manifests.sort();
-    Ok(manifests)
 }
 
 fn scan_version_literals(
@@ -175,23 +164,30 @@ fn scan_path(
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or_default();
-    if PRODUCT_VERSION_ALLOWED_FILES.contains(&name) {
+    if PRODUCT_VERSION_ALLOWED_PATHS.contains(&rel.as_str()) {
         return Ok(0);
     }
     let extension = path
         .extension()
         .and_then(|extension| extension.to_str())
         .map(str::to_ascii_lowercase);
-    if !extension.is_some_and(|extension| TEXT_EXTENSIONS.contains(&extension.as_str())) {
+    let text_extension = extension
+        .as_deref()
+        .is_some_and(|extension| TEXT_EXTENSIONS.contains(&extension));
+    let version_file = matches!(name, "VERSION" | "version");
+    if !text_extension && !version_file {
         return Ok(0);
     }
     let bytes = fs::read(path).map_err(|err| format!("{}: {err}", path.display()))?;
-    let text = decode_text(&bytes)
-        .map_err(|err| format!("{}: unreadable text file: {err}", path.display()))?;
-    if text
-        .lines()
-        .any(|line| product_context(line) && contains_version_literal(line, version))
-    {
+    let text = match decode_text(&bytes) {
+        Ok(text) => text,
+        Err(err) if text_extension => {
+            violations.push(format!("{rel}: unreadable text file: {err}"));
+            return Ok(1);
+        }
+        Err(_) => return Ok(0),
+    };
+    if has_product_version(&text, version, name) {
         violations.push(format!(
             "{rel}: product version `{version}` must live only in Cargo.toml, Cargo.lock, or CHANGELOG.md"
         ));
@@ -221,13 +217,79 @@ fn decode_text(bytes: &[u8]) -> Result<String, String> {
     String::from_utf8(bytes.to_vec()).map_err(|err| err.to_string())
 }
 
+fn check_registry(workspace: &Path, violations: &mut Vec<String>) -> Result<(), String> {
+    let path = workspace.join("docs/engineering/release.md");
+    if !path.is_file() {
+        return Ok(());
+    }
+    let text = fs::read_to_string(&path).map_err(|err| format!("{}: {err}", path.display()))?;
+    for (index, line) in text.lines().enumerate() {
+        if !line.trim_start().starts_with('|') {
+            continue;
+        }
+        for token in line.split('`').skip(1).step_by(2) {
+            let token = token.trim();
+            if !token.contains('/')
+                || token.contains(char::is_whitespace)
+                || token.starts_with("//")
+            {
+                continue;
+            }
+            if !workspace.join(token).exists() {
+                violations.push(format!(
+                    "{}:{}: version registry path `{token}` does not exist",
+                    path.display(),
+                    index + 1
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn has_product_version(text: &str, version: &str, file_name: &str) -> bool {
+    let version_file = matches!(file_name, "VERSION" | "version");
+    let mut recent = [false; 2];
+    for line in text.lines() {
+        let context = product_context(line);
+        let version_line = version_key(line);
+        let hit = contains_version_literal(line, version)
+            && !external_context(line)
+            && (context
+                || (recent[0] || recent[1]) && version_line
+                || line.trim_start().starts_with('#')
+                || version_file);
+        if hit {
+            return true;
+        }
+        recent[0] = recent[1];
+        recent[1] = context;
+    }
+    false
+}
+
 fn product_context(line: &str) -> bool {
     let lower = line.to_ascii_lowercase();
     lower.contains("cairn")
         || lower.contains("product version")
         || lower.contains("release")
-        || lower.contains("tag ")
+        || lower.contains("tag")
         || lower.contains("current version")
+        || line.contains("当前版本")
+        || line.contains("发布版本")
+        || line.contains("产品版本")
+        || line.contains("版本号")
+        || line.contains("版本：")
+}
+
+fn version_key(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.contains("version") || line.contains("版本") || lower.contains("tag")
+}
+
+fn external_context(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    EXTERNAL_CONTEXT.iter().any(|term| lower.contains(term))
 }
 
 fn contains_version_literal(text: &str, version: &str) -> bool {
@@ -412,5 +474,63 @@ mod tests {
         .expect("member");
         let err = check_versions(temp.path()).expect_err("outside member fails");
         assert!(err.contains("tools/tool/Cargo.toml"), "{err}");
+    }
+
+    #[test]
+    fn multiline_structured_and_chinese_versions_are_detected() {
+        let version = v();
+        let cases = [
+            (
+                "release.yml",
+                format!("product: Cairn\nversion: {version}\n"),
+            ),
+            (
+                "package.json",
+                format!("{{\n  \"name\": \"cairn-setup\",\n  \"version\": \"{version}\"\n}}\n"),
+            ),
+            ("NOTES.md", format!("当前版本：{version}\n")),
+            ("VERSION", format!("{version}\n")),
+            ("installer.ps1", format!("# Cairn installer {version}\n")),
+            ("RELEASE.md", format!("## {version}\n")),
+        ];
+        for (name, content) in cases {
+            let temp = workspace(&version);
+            fs::write(temp.path().join(name), content).expect("case file");
+            let err = check_versions(temp.path()).expect_err(name);
+            assert!(err.contains(name), "{name}: {err}");
+        }
+    }
+
+    #[test]
+    fn external_context_on_a_cairn_line_is_not_a_product_copy() {
+        let version = v();
+        let temp = workspace(&version);
+        fs::write(
+            temp.path().join("README.md"),
+            format!("Cairn uses gpui-kit {version}\n"),
+        )
+        .expect("readme");
+        check_versions(temp.path()).expect("external dependency");
+    }
+
+    #[test]
+    fn registry_paths_must_exist() {
+        let temp = workspace("1.2.3");
+        fs::create_dir_all(temp.path().join("docs/engineering")).expect("docs");
+        fs::write(temp.path().join("crates/demo/src/lib.rs"), "").expect("lib");
+        fs::write(
+            temp.path().join("docs/engineering/release.md"),
+            "| 标识 | 来源 |\n| --- | --- |\n| demo | `crates/demo/src/lib.rs` |\n",
+        )
+        .expect("registry");
+        check_versions(temp.path()).expect("registry passes");
+
+        fs::write(
+            temp.path().join("docs/engineering/release.md"),
+            "| 标识 | 来源 |\n| --- | --- |\n| demo | `crates/demo/src/missing.rs` |\n",
+        )
+        .expect("registry");
+        let err = check_versions(temp.path()).expect_err("missing registry path fails");
+        assert!(err.contains("crates/demo/src/missing.rs"), "{err}");
     }
 }

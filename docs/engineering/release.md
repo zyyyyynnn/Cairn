@@ -49,9 +49,9 @@ cargo run -p xtask -- package
 ## 6. 版本与兼容性
 
 - 产品版本在发布准备/发布提交中提升；发布准备期间 `main` 可携带下一版本，发布时打 tag。版本号不得回退，发布有缺陷时以新的补丁版本继续前进。
-- 发布 tag 必须为 `vMAJOR.MINOR.PATCH`，并与工作区 `Cargo.toml` 版本一致；应用更新器按 semver 解析 tag，非 semver tag 不会被提供。构建环境声明 `GITHUB_REF_TYPE=tag` 时，`xtask check` 与 `xtask package` 校验 tag 与 workspace 版本一致。
+- 发布 tag 必须为 `vMAJOR.MINOR.PATCH`，并与工作区 `Cargo.toml` 版本一致；应用更新器按 semver 解析 tag，非 semver tag 不会被提供。构建环境声明 `GITHUB_REF_TYPE=tag` 时，`xtask package` 校验 tag 与 workspace 版本一致。
 - 各存储格式独立演进，由读取方校验；版本标记的单一来源与递增规则见 §6.1。
-- MSI `ProductVersion` 只接受数字三段式；`xtask check` 与 `xtask package` 同时校验字段上限（major/minor ≤ 255，build ≤ 65535）与前导零；升级码固定、产品码每构建生成。预发布标签不得直接进入 MSI。
+- MSI `ProductVersion` 只接受数字三段式；`xtask check` 与 `xtask package` 同时校验数字格式、前导零与字段上限（上限以 `xtask::versioning` 为准）；升级码固定、产品码每构建生成。预发布标签不得直接进入 MSI。
 
 ### 6.1 版本登记
 
@@ -64,7 +64,9 @@ cargo run -p xtask -- package
 | `INDEX_MAGIC` / `INDEX_VERSION` | `crates/cairn-core/src/index_file.rs` | 索引快照格式变化时递增；旧快照按不兼容处理 |
 | `CONTENT_BACKFILL_SCHEMA` | `crates/cairn-service/src/sync_engine/content_pipeline/mod.rs` | 内容回填标记结构变化时递增；旧标记丢弃并重建 |
 | comment manifest `schema_version` | `xtask/src/comment_check.rs` 的 `COMMENT_SCHEMA_VERSION` | baseline/debt JSON 结构变化时递增；`xtask check` 读取并校验两者 |
-| installer payload | `crates/cairn-setup/src/payload.rs` 的 `MAGIC`（`CAIRNMSI`） | 无版本；xtask 与 setup 同一构建产物 |
+| installer payload | `crates/cairn-setup/src/payload.rs` 的 `MAGIC`（安装器 payload 魔数） | 无版本；xtask 与 setup 同一构建产物 |
+| MSI 升级码 | `crates/cairn-setup/src/lib.rs` 的 `MSI_UPGRADE_CODE` | 固定；升级识别；不得随构建变化 |
+| MSI 产品码 | WiX 每构建生成 | 不设常量；同版本不同构建靠它区分 |
 | 设置文件 | 无版本；serde 默认值演进 | 只做向后兼容的字段增补 |
 | `skills-lock.json` `version` | 外部技能锁工具生成 | 外部工具 schema，不参与运行时版本 |
 | Common Controls assembly version | `crates/cairn-setup-bin/installer.manifest` | Windows 平台程序集版本，不参与项目版本 |

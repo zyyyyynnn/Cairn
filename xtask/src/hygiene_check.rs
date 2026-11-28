@@ -230,23 +230,7 @@ fn check_workspace_lints(workspace: &Path, violations: &mut Vec<String>) -> Resu
         }
     }
 
-    let mut manifests = Vec::new();
-    let crates_dir = workspace.join("crates");
-    if crates_dir.is_dir() {
-        for entry in
-            fs::read_dir(&crates_dir).map_err(|err| format!("{}: {err}", crates_dir.display()))?
-        {
-            let entry = entry.map_err(|err| format!("{}: {err}", crates_dir.display()))?;
-            let manifest = entry.path().join("Cargo.toml");
-            if manifest.is_file() {
-                manifests.push(manifest);
-            }
-        }
-    }
-    let xtask_manifest = workspace.join("xtask").join("Cargo.toml");
-    if xtask_manifest.is_file() {
-        manifests.push(xtask_manifest);
-    }
+    let mut manifests = xtask::versioning::workspace_members(workspace)?;
     manifests.sort();
 
     let workspace_dep_packages = extract_workspace_dep_packages(workspace_table);
@@ -1205,13 +1189,13 @@ fn skip_char_literal(chars: &[char], idx: usize) -> usize {
 
 pub(crate) fn collect_rust_files(workspace: &Path) -> Result<Vec<PathBuf>, String> {
     let mut files = Vec::new();
-    for root in ["crates", "xtask"] {
-        let dir = workspace.join(root);
-        if dir.is_dir() {
-            collect_rs_recursive(&dir, &mut files)?;
+    for manifest in xtask::versioning::workspace_members(workspace)? {
+        if let Some(member) = manifest.parent() {
+            collect_rs_recursive(member, &mut files)?;
         }
     }
     files.sort();
+    files.dedup();
     Ok(files)
 }
 
