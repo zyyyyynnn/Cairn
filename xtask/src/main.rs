@@ -8,7 +8,6 @@
 
 #[cfg(feature = "bench")]
 mod bench;
-mod comment_check;
 mod corpus;
 mod docs_check;
 mod hygiene_check;
@@ -62,18 +61,6 @@ enum Commands {
         /// The workspace root to inspect.
         #[arg(default_value = ".")]
         workspace: PathBuf,
-    },
-    /// Check or rewrite the per-file non-exempt comment budget
-    CheckComments {
-        /// The workspace root to inspect.
-        #[arg(default_value = ".")]
-        workspace: PathBuf,
-        /// Rewrite the baseline after removing comments; never use it to admit new ones.
-        #[arg(long, default_value_t = false)]
-        update: bool,
-        /// Admit reviewed increases or edits while rewriting the baseline.
-        #[arg(long, default_value_t = false)]
-        allow_increase: bool,
     },
     /// Package the GPUI setup (CairnSetup.exe), WiX MSI, and SHA256 checksums
     #[cfg(feature = "package")]
@@ -129,20 +116,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::CheckHygiene { workspace } => {
             hygiene_check::check_hygiene(&workspace)?;
             version_check::check_versions(&workspace)?;
-        }
-        Commands::CheckComments {
-            workspace,
-            update,
-            allow_increase,
-        } => {
-            let files = hygiene_check::collect_rust_files(&workspace)?;
-            if files.is_empty() {
-                return Err("no Rust source files found for the comment gate".into());
-            }
-            let count = comment_check::check_comments(&workspace, &files, update, allow_increase)?;
-            if !update {
-                println!("comment check passed: {count} non-exempt comment block(s)");
-            }
         }
         #[cfg(feature = "package")]
         Commands::Package { out_dir } => {

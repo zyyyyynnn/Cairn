@@ -63,7 +63,6 @@ cargo run -p xtask -- package
 | `PROTOCOL_VERSION` | `crates/cairn-protocol/src/message.rs` | wire 布局或消息语义变化时递增；帧头与 `Hello` 握手校验；`codec::wire_layout` 钉住负载字节 |
 | `INDEX_MAGIC` / `INDEX_VERSION` | `crates/cairn-core/src/index_file.rs` | 索引快照格式变化时递增；旧快照按不兼容处理 |
 | `CONTENT_BACKFILL_SCHEMA` | `crates/cairn-service/src/sync_engine/content_pipeline/mod.rs` | 内容回填标记结构变化时递增；旧标记丢弃并重建 |
-| comment manifest `schema_version` | `xtask/src/comment_check.rs` 的 `COMMENT_SCHEMA_VERSION` | baseline/debt JSON 结构变化时递增；`xtask check` 读取并校验两者 |
 | installer payload | `crates/cairn-setup/src/payload.rs` 的 `MAGIC`（安装器 payload 魔数） | 无版本；xtask 与 setup 同一构建产物 |
 | MSI 升级码 | `crates/cairn-setup/src/lib.rs` 的 `MSI_UPGRADE_CODE` | 固定；升级识别；不得随构建变化 |
 | MSI 产品码 | WiX 每构建生成 | 不设常量；同版本不同构建靠它区分 |
