@@ -54,7 +54,6 @@ fn ensure_content_runtime_resumes_and_clear_inline_leaves_clean_state() {
         ..Default::default()
     };
 
-    // Populate one indexed document so resume on the content thread can reach Ready without a worker binary.
     {
         let writer = ContentWriter::open_or_create(&content_dir).unwrap();
         writer
@@ -93,7 +92,6 @@ fn ensure_content_runtime_resumes_and_clear_inline_leaves_clean_state() {
     }
     engine.stop_content_worker();
 
-    // When `commands` is None on a freshly built engine, `request_clear_content_index` clears inline.
     let offline_engine = Arc::new(MultiVolumeEngine::with_paths(
         &temp.path().join("index2"),
         &content_dir,

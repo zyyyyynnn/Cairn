@@ -129,7 +129,7 @@ impl CairnClient {
         }
     }
 
-    /// Opens a pipe to `PIPE_NAME` requesting the impersonation security quality of service.
+    /// Opens a pipe to `pipe_name` requesting the impersonation security quality of service.
     ///
     /// The service authorizes requests from the *access token of this process*, which it can only
     /// read (including group membership) when the client asks for `SECURITY_IMPERSONATION` while
@@ -157,8 +157,8 @@ impl CairnClient {
     }
 
     /// Whether the service classified *this process* as administrator or SYSTEM, derived from the
-    /// access token on the server side. A frontend uses it to decide whether editing index scope is
-    /// possible without elevation (SVC-05).
+    /// access token on the server side. The service gates `admin_only_query` and other privileged
+    /// requests on this identity (SVC-02, SVC-05).
     pub fn caller_is_admin(&self) -> bool {
         self.caller_is_admin
     }
@@ -296,7 +296,7 @@ impl CairnClient {
         self.send_request(&ClientRequest::ClearContentIndex).await
     }
 
-    /// Triggers an asynchronous rescan of one volume (`Some(drive_index)`) or all indexed sources.
+    /// Triggers an asynchronous rescan of one volume (`Some(volume_id)`) or all indexed sources.
     pub async fn rescan(
         &mut self,
         volume_id: Option<u16>,

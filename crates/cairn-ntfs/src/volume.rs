@@ -45,8 +45,7 @@ pub fn enumerate_fixed_drives() -> Vec<char> {
         .collect()
 }
 
-/// Opens a raw volume device handle.
-/// Device path format MUST be `\\.\C:` strictly without any trailing backslash.
+/// An open raw volume device handle; the stored path has no trailing separator.
 #[cfg(windows)]
 pub struct RawVolumeHandle {
     handle: HANDLE,
@@ -120,7 +119,7 @@ impl RawVolumeHandle {
         }
 
         let mut bytes_read = 0u32;
-        // SAFETY: ReadFile in windows 0.58 takes safe slice Some(buf) and pointer to bytes_read.
+        // SAFETY: ReadFile takes a writable slice and a pointer to the byte counter.
         let read_ok = unsafe { ReadFile(self.handle, Some(buf), Some(&mut bytes_read), None) };
         if read_ok.is_err() {
             return Err(std::io::Error::last_os_error());

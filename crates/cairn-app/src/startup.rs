@@ -15,7 +15,6 @@ use crate::shell::i18n::I18nManager;
 use crate::shell::settings::AppSettings;
 use crate::shell::theme;
 
-/// Parsed CLI launch arguments passed to the main desktop window.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct LaunchPlan {
     pub initial_query: Option<String>,
@@ -24,7 +23,6 @@ pub(crate) struct LaunchPlan {
 }
 
 impl LaunchPlan {
-    /// Parses CLI arguments once for both single-command handling and initial window flags.
     pub fn parse(raw_args: &[String]) -> Self {
         let mut initial_query: Option<String> = None;
         let mut sidebar_collapsed = false;
@@ -48,7 +46,6 @@ impl LaunchPlan {
     }
 }
 
-/// Runtime side-effect port injected at application construction.
 pub(crate) trait AppRuntimePorts: Send + Sync {
     fn save_settings(&self, settings: &AppSettings) -> std::io::Result<()>;
     #[cfg(windows)]
@@ -56,7 +53,6 @@ pub(crate) trait AppRuntimePorts: Send + Sync {
     fn take_pending_update_target(&self) -> Option<String>;
 }
 
-/// Production runtime ports backed by persisted settings, Win32 global hotkeys, and update markers.
 pub(crate) struct SystemRuntimePorts;
 
 impl AppRuntimePorts for SystemRuntimePorts {
@@ -74,14 +70,12 @@ impl AppRuntimePorts for SystemRuntimePorts {
     }
 }
 
-/// External host reads required during application startup.
 pub(crate) trait BootstrapPorts {
     fn load_settings(&self) -> AppSettings;
     fn system_prefers_dark(&self) -> bool;
     fn runtime_ports(&self) -> Arc<dyn AppRuntimePorts>;
 }
 
-/// Production host ports backed by persisted settings and Windows theme settings.
 pub(crate) struct SystemBootstrapPorts;
 
 impl BootstrapPorts for SystemBootstrapPorts {
@@ -135,7 +129,6 @@ impl BootstrapPorts for TestBootstrapPorts {
     }
 }
 
-/// Consolidated startup artifacts shared across tray initialization, theming, and `CairnApp`.
 pub(crate) struct StartupBundle {
     pub plan: LaunchPlan,
     pub settings: AppSettings,
@@ -151,7 +144,6 @@ impl StartupBundle {
     }
 }
 
-/// Prepares startup state in a single pass with zero blocking Win32 SCM or pipe I/O.
 pub(crate) struct StartupCoordinator;
 
 impl StartupCoordinator {

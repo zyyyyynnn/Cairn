@@ -188,8 +188,6 @@ impl CairnApp {
             return;
         }
 
-        // Cursor navigation and selection updates adjust cursor/highlight only.
-        // Redrawing requires `cx.notify()`, but must NEVER trigger a background query refresh.
         match key {
             "left" => {
                 self.query.search_input.move_cursor_left(shift);
@@ -243,11 +241,9 @@ mod query_edit_tests {
                     app.update(cx, |this, _| {
                         this.query.search_input.text = "hello world".to_string();
 
-                        // Forward selection "world"
                         this.query.search_input.selection = 6..11;
                         assert_eq!(this.selected_query_text().as_deref(), Some("world"));
 
-                        // Backward selection "world" (reversed bounds represent right-to-left drag)
                         this.query.search_input.selection = std::ops::Range { start: 11, end: 6 };
                         assert_eq!(
                             this.selected_query_text().as_deref(),
@@ -255,7 +251,6 @@ mod query_edit_tests {
                             "backward selection must return normalized selected text"
                         );
 
-                        // Empty selection (6..6)
                         this.query.search_input.selection = 6..6;
                         assert_eq!(this.selected_query_text(), None);
 
@@ -274,7 +269,6 @@ mod query_edit_tests {
                             std::ops::Range { start: 6, end: 0 }
                         );
 
-                        // Multi-click must clear text_selection_anchor so drag jitter cannot erase selection.
                         this.handle_search_bar_mouse_down(7, 2, false);
                         assert_eq!(
                             this.query.text_selection_anchor, None,
@@ -290,6 +284,61 @@ mod query_edit_tests {
                         assert_eq!(
                             this.query.search_input.selection,
                             0..this.query.search_input.text.len()
+                        );
+                    });
+
+                    cx.quit();
+                    app
+                },
+            );
+        });
+    }
+
+    fn key_down(key: &'static str) -> gpui_kit::gpui::KeyDownEvent {
+        gpui_kit::gpui::KeyDownEvent {
+            keystroke: gpui_kit::gpui::Keystroke::parse(key).expect("keystroke"),
+            is_held: false,
+            prefer_character_input: false,
+        }
+    }
+
+    #[test]
+    fn cursor_keys_move_the_caret_without_scheduling_a_query() {
+        gpui_kit::application().run(|cx: &mut gpui_kit::gpui::App| {
+            gpui_kit::init(cx);
+            let _ = gpui_kit::open_window(
+                gpui_kit::gpui::WindowOptions {
+                    show: false,
+                    focus: false,
+                    ..gpui_kit::gpui::WindowOptions::default()
+                },
+                cx,
+                |window, cx| {
+                    let app = cx.new(|cx| CairnApp::new(window, cx));
+
+                    app.update(cx, |this, cx| {
+                        this.query.search_input.text = "cairn".to_string();
+                        this.query.search_input.selection = 5..5;
+                        let query_id = this.query.query_id();
+
+                        for key in ["left", "right", "home", "end"] {
+                            this.handle_query_edit_key(&key_down(key), cx);
+                        }
+                        assert_eq!(
+                            this.query.query_id(),
+                            query_id,
+                            "cursor keys must not issue a query"
+                        );
+                        assert!(
+                            !this.query.is_searching(),
+                            "cursor keys must not start a search"
+                        );
+
+                        this.handle_query_edit_key(&key_down("backspace"), cx);
+                        assert_ne!(
+                            this.query.query_id(),
+                            query_id,
+                            "an edit that changes text still asks the service"
                         );
                     });
 

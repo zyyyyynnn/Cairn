@@ -53,8 +53,6 @@ pub struct FolderApplyOutcome {
     pub changed_records: Vec<u64>,
 }
 
-/// Normalizes the path syntax without touching the filesystem. Used to keep an offline source in
-/// the configuration when its root is temporarily unreachable.
 pub(super) fn normalize_folder_root_syntax(path: &Path) -> Result<String, String> {
     let raw = path.to_string_lossy().replace('/', "\\");
     let trimmed = raw.trim();
@@ -151,8 +149,6 @@ fn ensure_local_drive(drive: char) -> Result<(), String> {
     use windows::Win32::Storage::FileSystem::GetDriveTypeW;
     use windows::core::PCWSTR;
 
-    // GetDriveTypeW returns these documented values; they live outside the windows-rs
-    // FileSystem module surface used here.
     const DRIVE_UNKNOWN: u32 = 0;
     const DRIVE_NO_ROOT_DIR: u32 = 1;
     const DRIVE_REMOTE: u32 = 4;
@@ -166,10 +162,6 @@ fn ensure_local_drive(drive: char) -> Result<(), String> {
     Ok(())
 }
 
-/// Stable per-source record key derived from the lower-case relative path.
-///
-/// Folder sources have no NTFS file reference number. A path-derived key keeps a file's identity
-/// stable across rescans so side tables never attach an old file's properties to a new one.
 fn stable_record_key(rel_key: &str) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in rel_key.as_bytes() {
@@ -516,7 +508,6 @@ impl FolderSource {
             }
         }
 
-        // Because every parent directory is pushed before scanning its children, parent_idx < idx holds.
         for idx in (0..records.len()).rev() {
             let parent_idx = records[idx].parent_idx;
             if parent_idx != FileRecord::ROOT_PARENT && (parent_idx as usize) < idx {
@@ -766,7 +757,6 @@ impl FolderSource {
                             .exclusion_rules
                             .excludes(&ExclusionPath::new(&path.to_string_lossy()))
                     {
-                        // A nested directory was created before our table saw it; trigger a quick rescan.
                         needs_rescan = true;
                     }
                 }
@@ -847,8 +837,6 @@ impl Drop for ScanGuard {
     }
 }
 
-/// Reserves the single in-flight scan slot for `source_id`; the caller owns releasing it through a
-/// guard or [`release_scan`].
 pub(super) fn reserve_scan(scanning: &Arc<Mutex<HashSet<SourceId>>>, source_id: SourceId) -> bool {
     scanning.lock().unwrap().insert(source_id)
 }
@@ -857,7 +845,6 @@ pub(super) fn release_scan(scanning: &Arc<Mutex<HashSet<SourceId>>>, source_id: 
     scanning.lock().unwrap().remove(&source_id);
 }
 
-/// Shared engine handles needed to scan, reinstall, and notify property refresh for a folder source.
 #[derive(Clone)]
 pub(super) struct FolderScanContext {
     pub sources: Arc<RwLock<HashMap<SourceId, FolderSource>>>,
@@ -880,10 +867,6 @@ impl FolderScanContext {
         self.spawn_reserved_scan(source_id, now_unix)
     }
 
-    /// Scans one folder source on a background thread and installs the result under a short write lock.
-    ///
-    /// The caller reserves the scan slot and begins the scan (buffering watcher events) before arming
-    /// the watcher, so events that happen during the traversal are replayed onto the installed snapshot.
     pub(super) fn spawn_reserved_scan(&self, source_id: SourceId, now_unix: i64) -> bool {
         let prepared = {
             let folders = self.sources.read().unwrap();
@@ -1035,7 +1018,6 @@ fn install_scanned_source(
     needs_follow_up
 }
 
-/// Active OS directory watcher handle whose drop cleanly cancels and joins its worker thread.
 pub(crate) struct FolderWatcherHandle {
     #[cfg(windows)]
     stop_event: usize,
@@ -1331,8 +1313,6 @@ fn parse_notify_buffer(root: &Path, buf: &[u8]) -> Vec<FolderWatchEvent> {
         offset = next;
     }
 
-    // A rename split across two buffers leaves the old name without its new name here; report the
-    // removal now so the next buffer's Added event cannot leave a ghost row behind.
     if let Some(old_path) = pending_old.take() {
         events.push(FolderWatchEvent::Removed(old_path));
     }
@@ -1391,9 +1371,6 @@ mod tests {
         }
     }
 
-    /// A scan that overflowed retries once. The retry budget lives on the source across the
-    /// reinstall that every completed scan performs; without inheriting it, a repeatedly
-    /// overflowing folder would rescan forever.
     #[test]
     fn scan_overflow_retries_once_across_reinstalls() {
         let dir = tempdir().unwrap();
@@ -1448,9 +1425,6 @@ mod tests {
         );
     }
 
-    /// A scan captures its exclusions before it starts. If the live source gained or lost a rule
-    /// while the scan ran, the installed snapshot must adopt the live rules and ask for a follow-up
-    /// scan so the records match them.
     #[test]
     fn installing_a_scan_adopts_exclusions_changed_while_it_ran() {
         let dir = tempdir().unwrap();
@@ -1514,7 +1488,6 @@ mod tests {
             .unwrap()
             .frn;
 
-        // Replacing directory `bundle` with a regular file must report the tombstoned child FRN.
         fs::remove_dir_all(&sub).unwrap();
         fs::write(&sub, b"now a file").unwrap();
         let replaced = source.apply_folder_events(&[FolderWatchEvent::Added(sub.clone())], None, 1);
@@ -1524,7 +1497,6 @@ mod tests {
             replaced.changed_records
         );
 
-        // Moving an excluded directory into an unexcluded name must ask for a rescan.
         let hidden = canonical_dir.join("ignored_dir");
         let shown = canonical_dir.join("shown_dir");
         fs::create_dir_all(&shown).unwrap();

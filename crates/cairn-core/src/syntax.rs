@@ -19,7 +19,6 @@ use crate::property_store::PropertyKind;
 use crate::sort::SortSpec;
 use serde::{Deserialize, Serialize};
 
-/// Maximum content term length accepted before rejecting as an oversized paste.
 const MAX_CONTENT_TERM_BYTES: usize = 4096;
 
 /// Maximum content terms allowed per query; enforced at the request boundary.
@@ -566,7 +565,6 @@ impl<'a> QueryParser<'a> {
         self.group_depth > 0 && self.peek() == Some('>')
     }
 
-    /// Expression is a list of space-separated OR sequences (AND has lower precedence than OR).
     fn parse_expression(&mut self) -> QueryExpr {
         let mut and_terms = Vec::new();
 
@@ -591,7 +589,6 @@ impl<'a> QueryParser<'a> {
         }
     }
 
-    /// OR sequence has higher precedence: `a|b|c`
     fn parse_or_sequence(&mut self) -> QueryExpr {
         let mut or_terms = Vec::new();
 
@@ -622,7 +619,6 @@ impl<'a> QueryParser<'a> {
         }
     }
 
-    /// Unary: `!term` or `<grouped>` or normal term
     fn parse_unary(&mut self) -> QueryExpr {
         self.skip_whitespace();
         if self.peek() == Some('!') {
@@ -635,7 +631,6 @@ impl<'a> QueryParser<'a> {
         }
     }
 
-    /// Primary: `<group>` or single token (possibly quoted)
     fn parse_primary(&mut self) -> QueryExpr {
         self.skip_whitespace();
         if self.peek() == Some('<') {
@@ -1594,9 +1589,6 @@ mod tests {
         assert!(!terms[1].case_sensitive);
     }
 
-    /// With the content default on, each item's text becomes a content query and stops being
-    /// a name/path term - the semantics the `content:{整段文本}` splice only reached for the
-    /// first word of, because `read_token` stops at whitespace outside quotes.
     #[test]
     fn content_default_moves_each_item_text_into_a_content_query() {
         let content = QueryDefaults {

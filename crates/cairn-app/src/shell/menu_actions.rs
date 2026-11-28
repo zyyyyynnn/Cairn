@@ -234,7 +234,7 @@ impl CairnApp {
         }
     }
 
-    /// What the window knows about the service and the content index right now. The Tools menu
+    /// What the window knows about the service and the content index right now. The Index menu
     /// and the result band's empty state both read this one value, so the rows the menu offers and
     /// the reason the band gives cannot drift apart.
     pub(crate) fn index_menu_state(&self) -> IndexMenuState<'_> {
@@ -358,8 +358,9 @@ impl CairnApp {
     }
 
     /// Rows that would describe an action the current state cannot take are omitted rather than
-    /// shown disabled row after row. In particular a failed index offers one retry, not a second
-    /// "enable" entry that would quietly mean the same request.
+    /// shown disabled row after row: the retry row exists only after a failure, and the clear row
+    /// only when the index holds content or its last build failed. The enable switch stays visible
+    /// and is disabled instead, so its checkmark still reports whether content search is on.
     pub fn command_is_hidden(&self, command: GroupCommand) -> bool {
         if self.location_profile().command_is_hidden(command) {
             return true;
@@ -559,8 +560,6 @@ impl CairnApp {
                     tracing::warn!("Failed to open repository URL: {err}");
                 }
             }
-            // Every variant below owns an Action or query toggle and dispatched above. Listing
-            // them keeps this match exhaustive, so a new command must be classified cleanly.
             GroupCommand::OpenSelected
             | GroupCommand::RevealLocation
             | GroupCommand::CopyPaths

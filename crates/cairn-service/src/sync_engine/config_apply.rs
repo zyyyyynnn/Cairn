@@ -2,8 +2,6 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Service configuration reads, hot apply and secure persistence.
-
 use super::MultiVolumeEngine;
 use crate::config::ServiceConfig;
 use std::sync::atomic::Ordering;
@@ -20,13 +18,6 @@ impl MultiVolumeEngine {
         self.config.read().unwrap().admin_only_query
     }
 
-    /// Applies one configuration change: the new value is built from the live configuration,
-    /// optionally persisted, and installed under one configuration write. Applies are serialized
-    /// from start to finish, so the content-pipeline transition a change triggers runs in the
-    /// same order as the assignment that caused it.
-    ///
-    /// With `persist`, nothing is installed unless the file was written securely, so a
-    /// configuration a standard account could still edit never reaches the running index.
     pub(super) fn apply_config_change(
         &self,
         persist: bool,
@@ -50,8 +41,6 @@ impl MultiVolumeEngine {
             (previous_enabled, property_scope_changed, next)
         };
         if persist {
-            // Only a configuration that reached the protected file is trusted; a plain in-memory
-            // update does not vouch for what was on disk at startup.
             self.config_trusted.store(true, Ordering::SeqCst);
         }
         self.apply_content_switch(previous_enabled, applied.content_index_enabled);
@@ -71,14 +60,11 @@ impl MultiVolumeEngine {
         let _ = self.apply_config_change(false, |_| Ok(new_config.clone()));
     }
 
-    /// Moves the content pipeline when the master switch changed, and retries a failed run when
-    /// the same enabled value is submitted again.
     fn apply_content_switch(&self, previous_enabled: bool, next_enabled: bool) {
         self.content_pipeline
             .apply_switch(previous_enabled, next_enabled);
     }
 
-    /// Drops unindexed drives and updates each surviving volume's full-path exclusion mode.
     fn retain_indexed_volumes(&self, cfg: &ServiceConfig) {
         let full_path_rules =
             crate::exclusion::ExclusionRules::parse(&cfg.excluded_paths).uses_full_path_rules();
@@ -141,8 +127,6 @@ impl MultiVolumeEngine {
     }
 }
 
-/// The administrators-only query mode decides who may query at all, so only an administrator may
-/// change it (SPEC SVC-05); a submission that keeps the current value is not a change.
 fn check_admin_only_query_change(
     current: &ServiceConfig,
     submitted: &ServiceConfig,

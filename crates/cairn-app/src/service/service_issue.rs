@@ -7,10 +7,6 @@
 //! The issue is the window's vocabulary for a service that is unusable (SVC-03, SVC-04). It
 //! carries the condition and the recovery the copy may name, so it is derived from the client
 //! error type rather than from a string match on a message.
-//!
-//! It lives apart from the task orchestration on purpose: the accessibility table and the result
-//! band both read it, and neither of them should have to reach through the window's state to ask
-//! what went wrong.
 
 /// Why the window cannot show results, so the copy can name the condition and the recovery (SVC-03,
 /// SVC-04). Derived from the client error type, never from a string match on a message.
@@ -29,7 +25,6 @@ pub enum ServiceIssue {
 }
 
 impl ServiceIssue {
-    /// Every issue the result band can report, for the coverage checks that walk the vocabulary.
     #[cfg(test)]
     pub const ALL: &[ServiceIssue] = &[
         ServiceIssue::NotRunning,
@@ -130,8 +125,6 @@ mod tests {
         assert_eq!(entry.messages, ["service_timeout_title"].as_slice());
     }
 
-    /// Each issue has its own non-empty message key and announcement key, and the result band
-    /// speaks that registered message without drifting from `accessibility`.
     #[test]
     fn each_issue_has_unique_message_and_registered_announcement() {
         let mut messages = std::collections::HashSet::new();

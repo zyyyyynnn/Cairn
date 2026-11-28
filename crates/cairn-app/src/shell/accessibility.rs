@@ -75,8 +75,8 @@ impl KeyControl {
 
 const EMPTY: &[&str] = &[];
 
-/// Every key control of the main window. Adding a control means adding a row here, and the tests
-/// below reject a row the render path does not build.
+/// Every key control of the main window. Adding a control means adding a row here; the tests below
+/// hold its key, role, element id and messages consistent.
 pub const KEY_CONTROLS: &[KeyControl] = &[
     KeyControl {
         key: "sidebar-toggle",
@@ -676,8 +676,8 @@ pub const KEY_CONTROLS: &[KeyControl] = &[
     },
 ];
 
-/// Registry entry for `key`. An unknown key is a programming error, and the tests in this module walk
-/// every key the view uses, so a miss fails the build instead of reaching a window.
+/// Registry entry for `key`. An unknown key is a programming error: it panics here rather than
+/// reaching a window unnamed.
 pub fn control(key: &'static str) -> &'static KeyControl {
     KEY_CONTROLS
         .iter()
@@ -704,8 +704,7 @@ pub fn control_at(element: &str) -> &'static KeyControl {
 /// `gpui-base`'s own element type, so a call site annotated with `Stateful<Div>` would only compile
 /// in one of the two builds. This alias resolves to `Stateful<Div>` when nothing observes the frame
 /// and to the observation wrapper when it does, so the view styles and nests a control without
-/// knowing which of the two it holds, and [`element`]/[`element_at`] stay the only places that call
-/// `test_support()`.
+/// knowing which of the two it holds.
 pub type ControlElement = ObservedElement<Stateful<Div>>;
 
 /// The element the view builds for `control`: the registered GPUI id, the registered AccessKit role
@@ -721,9 +720,8 @@ pub(crate) fn heading(element: Stateful<Div>, label: impl Into<SharedString>) ->
     element.role(Role::Heading).aria_level(1).aria_label(label)
 }
 
-/// The accessible name for a component-owned control (an Input, a picker) whose
-/// role and element come from the component. The registry still supplies the
-/// words, and the static source check can tell this label from an element label.
+/// The accessible name for a component-owned control (an Input, a picker) whose role and element
+/// come from the component; this resolves the words from the registry.
 pub fn component_name(control: &KeyControl, i18n: &I18nManager) -> String {
     name(control, i18n)
 }
@@ -752,9 +750,7 @@ pub fn surface(id: &'static str) -> ControlElement {
 /// form both AccessKit and the regression test below read.
 ///
 /// The view reads its `aria_keyshortcuts` from here, and the regression test reads the same table to
-/// check [`crate::shell::commands::init_keymap`] keeps every promise. A key written as an argument at a call
-/// site is invisible to that check while still reaching a screen reader, which is how `ctrl-i` ended
-/// up advertised from one place and verified from another.
+/// check [`crate::shell::commands::init_keymap`] keeps every promise.
 ///
 /// Only controls that own keys appear in this table. Commands listed inside a component menu name their
 /// key in the menu model instead — that menu draws its hint from the binding of the Action it
@@ -996,9 +992,8 @@ mod tests {
         );
     }
 
-    /// Structured render contract (without OS window / source scanning): every registered control
-    /// builds a valid `ControlElement` via the registry constructors, preserving indexed vs fixed
-    /// identity conventions.
+    /// Structured render contract: every registered control builds a valid `ControlElement` via the
+    /// registry constructors, preserving indexed vs fixed identity conventions.
     #[test]
     fn every_registered_control_constructs_structured_element_and_name() {
         let zh = zh();
@@ -1143,9 +1138,7 @@ mod tests {
     }
 
     /// The table is the promise, so a row has to describe a real control and reach a screen reader.
-    /// A key the view passes as an argument would be advertised without being registered here, which
-    /// is how one shortcut ended up checked against the source and announced from a call site at the
-    /// same time (UI-03).
+    /// A key the view passes as an argument would be advertised without being registered here (UI-03).
     #[test]
     fn each_promised_shortcut_belongs_to_one_registered_control() {
         for (element, shortcuts) in CONTROL_SHORTCUTS {

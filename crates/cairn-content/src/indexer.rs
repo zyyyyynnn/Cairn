@@ -436,7 +436,6 @@ impl SegmentCollector for FrnSetChild {
     }
 }
 
-/// Field handles shared across reader and writer entry points.
 #[derive(Clone, Copy)]
 struct ContentFields {
     volume_id: Field,

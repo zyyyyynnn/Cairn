@@ -37,7 +37,6 @@ where
     }
 }
 
-/// Column lane identity shared by header cells and row cells.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum HeaderLane {
     Name,

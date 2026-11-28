@@ -85,10 +85,6 @@ pub fn contrast_ratio(foreground: Hsla, background: Hsla) -> f32 {
     (a.max(b) + 0.05) / (a.min(b) + 0.05)
 }
 
-/// The CIE L\* difference between two rendered colors: how far a flat surface moves when it changes
-/// state, independent of which direction it moves. A WCAG ratio compares two inks and calls a
-/// 1.089:1 hover acceptable; on a fill that lights a whole row, menu item or control, L\* is the
-/// scale the change is actually perceived on.
 #[cfg(test)]
 pub fn lightness_step(left: Hsla, right: Hsla) -> f32 {
     fn l_star(y: f32) -> f32 {
@@ -101,9 +97,6 @@ pub fn lightness_step(left: Hsla, right: Hsla) -> f32 {
     (l_star(relative_luminance(left)) - l_star(relative_luminance(right))).abs()
 }
 
-/// The color's position in OKLCH: perceived lightness in `0.0..=1.0`, chroma, and hue angle in
-/// degrees. Equal numbers on this scale are equal perceived steps in a way sRGB and HSL numbers
-/// are not.
 #[cfg(test)]
 pub fn oklch(color: Hsla) -> (f32, f32, f32) {
     let rgb = color.to_rgb();
@@ -124,8 +117,6 @@ pub fn oklch(color: Hsla) -> (f32, f32, f32) {
     (lightness, chroma, hue)
 }
 
-/// The CIE 76 difference between two rendered colors: the scale on which two surfaces placed side
-/// by side read as one color or as two. Around 2 is invisible at a glance, around 10 is obvious.
 #[cfg(test)]
 pub fn perceptual_distance(left: Hsla, right: Hsla) -> f32 {
     fn coordinates(color: Hsla) -> (f32, f32, f32) {
@@ -157,8 +148,6 @@ pub fn perceptual_distance(left: Hsla, right: Hsla) -> f32 {
 /// Every step of the neutral ramp, light to dark.
 pub const NEUTRAL_RAMP: [Hsla; 16] = gray::ALL;
 
-/// Whether an achromatic color is one of the ramp's steps. No neutral in the product may land
-/// between two steps.
 #[cfg(test)]
 pub fn is_neutral_ramp_step(color: Hsla) -> bool {
     let rgb = color.to_rgb();
@@ -341,7 +330,7 @@ pub const fn mode_palette(dark: bool) -> &'static ModePalette {
 }
 
 /// Writes the mode's roles into the component theme. Button fields are written on both the colors
-/// and the tokens, because components read them from the tokens.
+/// and the tokens: the component reads its fill from the tokens and its label from the colors.
 fn apply_mode_palette(theme: &mut Theme) {
     let palette = mode_palette(theme.mode == ThemeMode::Dark);
     theme.background = palette.content;
@@ -781,7 +770,7 @@ mod tests {
             "mid gray sits at OKLCH L {lightness}"
         );
         assert!(chroma.abs() < 1e-4, "a neutral carries no chroma");
-        // A pure red sits at OKLCH hue 29 degrees, the angle the one-color-one-meaning rule compares.
+        // A pure red sits at OKLCH hue 29 degrees.
         let red = Hsla {
             h: 0.0,
             s: 1.0,

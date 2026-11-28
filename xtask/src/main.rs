@@ -8,6 +8,7 @@
 
 #[cfg(feature = "bench")]
 mod bench;
+mod comment_check;
 mod corpus;
 mod docs_check;
 mod hygiene_check;
@@ -61,7 +62,16 @@ enum Commands {
         #[arg(default_value = ".")]
         workspace: PathBuf,
     },
-    /// Package the GPUI setup (CairnSetup.exe), WiX MSI, and SHA256 checksums (REL-01, REL-02, REL-04)
+    /// Check or rewrite the per-file non-exempt comment budget
+    CheckComments {
+        /// The workspace root to inspect.
+        #[arg(default_value = ".")]
+        workspace: PathBuf,
+        /// Rewrite the baseline after removing comments; never use it to admit new ones.
+        #[arg(long, default_value_t = false)]
+        update: bool,
+    },
+    /// Package the GPUI setup (CairnSetup.exe), WiX MSI, and SHA256 checksums
     #[cfg(feature = "package")]
     Package {
         #[arg(short, long, default_value = "dist")]
@@ -113,6 +123,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::CheckHygiene { workspace } => {
             hygiene_check::check_hygiene(&workspace)?;
+        }
+        Commands::CheckComments { workspace, update } => {
+            let files = hygiene_check::collect_rust_files(&workspace)?;
+            comment_check::check_comments(&workspace, &files, update)?;
         }
         #[cfg(feature = "package")]
         Commands::Package { out_dir } => {

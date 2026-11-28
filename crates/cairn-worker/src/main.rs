@@ -4,11 +4,12 @@
 
 #![forbid(unsafe_code)]
 
-//! `CairnWorker.exe`: Isolated content extraction and indexing subprocess.
+//! `CairnWorker.exe`: Isolated content and extended-property extraction subprocess.
 //!
 //! The service owns the MFT and the decision of which files are eligible. This process owns the
-//! risky half: decoding a document, extracting its text and writing the Tantivy index. A malformed
-//! file can crash or stall this process without touching the `LocalSystem` service.
+//! risky half: decoding a document, extracting its text or its extended properties, and writing
+//! the Tantivy index. A malformed file can crash or stall this process without touching the
+//! `LocalSystem` service.
 
 use cairn_content::indexer::ContentWriter;
 use cairn_protocol::{ContentIndexTask, PropertyExtractResult, PropertyExtractTask};

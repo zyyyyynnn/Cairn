@@ -51,8 +51,6 @@ fn directory_sizes_follow_file_resizes_and_deletes() {
     assert_eq!(vol.records()[record_index(&vol, 2) as usize].size, 50);
     assert_eq!(vol.records()[record_index(&vol, 1) as usize].size, 50);
 
-    // Deleting the directory removes its remaining descendant total; the child's later
-    // tombstone must not subtract the same bytes again.
     vol.apply_usn_changes([UsnChange::Deleted { frn: 2 }]);
     assert_eq!(vol.records()[record_index(&vol, 1) as usize].size, 0);
     vol.apply_usn_changes([UsnChange::Deleted { frn: 4 }]);
@@ -90,7 +88,6 @@ fn usn_delete_removes_pending_renames_to_prevent_leak() {
         index_item(2, 1, "test.txt", false),
     ]);
 
-    // First half of a rename: records pending rename
     vol.apply_usn_changes([UsnChange::Renamed {
         frn: 2,
         parent_frn: 1,
@@ -100,7 +97,6 @@ fn usn_delete_removes_pending_renames_to_prevent_leak() {
     }]);
     assert!(vol.has_pending_rename(2));
 
-    // File is deleted before second half of rename arrives
     vol.apply_usn_changes([UsnChange::Deleted { frn: 2 }]);
     assert!(!vol.has_pending_rename(2));
 }
@@ -133,7 +129,6 @@ fn appended_batches_report_folder_sizes() {
         sized_item(3, 2, "a.bin", false, 100),
     ]);
 
-    // Still mid-scan: no finalize ran, yet the parent already totals its indexed child.
     assert_eq!(
         vol.records()[record_index(&vol, 2) as usize].size,
         100,
@@ -180,7 +175,6 @@ fn a_batch_with_several_kind_changes_ends_with_one_correct_aggregate() {
         sized_item(6, 5, "c.bin", false, 25),
     ]);
 
-    // Two files turn into directories, and another file moves from B into A in the same batch.
     vol.apply_usn_changes(vec![
         UsnChange::BasicInfoChanged {
             frn: 3,
@@ -227,8 +221,6 @@ fn a_cache_without_the_directory_size_flag_is_recomputed_and_migrated() {
         sized_item(3, 2, "a.bin", false, 100),
         sized_item(4, 2, "b.bin", false, 50),
     ]);
-    // Exactly what an older cache holds: every directory size is still zero, and the header
-    // has no validity flag because that byte did not exist.
     let mut legacy_records = vol.records().to_vec();
     for record in &mut legacy_records {
         if record.is_dir() && !record.is_tombstone() {
@@ -279,8 +271,6 @@ fn a_cache_with_a_valid_flag_keeps_its_stored_folder_sizes() {
         index_item(2, 1, "A", true),
         sized_item(3, 2, "a.bin", false, 100),
     ]);
-    // A sentinel no aggregation would produce: keeping it proves the load trusted the flag
-    // instead of walking the whole table again.
     let a = record_index(&vol, 2) as usize;
     let mut seeded_records = vol.records().to_vec();
     seeded_records[a].size = 777;
@@ -391,7 +381,6 @@ fn compact_drops_tombstones_and_excluded_subtrees_and_remaps_parents() {
         index_item(10, 9, "scratch.txt", false),
         index_item(6, 3, "deleted.txt", false),
     ]);
-    // Loaded caches predate the exclusion, so the roots are registered after the records.
     vol.set_excluded_roots([2]);
     vol.apply_usn_changes([
         UsnChange::Deleted { frn: 7 },
@@ -410,8 +399,6 @@ fn compact_drops_tombstones_and_excluded_subtrees_and_remaps_parents() {
         min_droppable_percent: 25,
         min_arena_waste_percent: 25,
     };
-    // 2, 4, 7 and 8 are service data (7 is also a tombstone); 9 and 6 are tombstones. 10's
-    // parent is gone but its own row is still live, so it is kept and re-rooted.
     assert_eq!(
         vol.compact_with_policy(policy).map(|r| r.dropped_records),
         Some(6)
@@ -604,13 +591,6 @@ fn test_volume_index_ingest_and_usn_changes() {
 #[test]
 fn matched_bytes_are_counted_once_at_the_highest_matched_point() {
     let mut vol = VolumeIndex::new('C');
-    // Simulate NTFS hierarchy:
-    // FRN 5 (root, parent 5), aggregate size 1000
-    // FRN 10 (dir Windows, parent 5), aggregate size 400
-    // FRN 20 (dir System32, parent 10), aggregate size 200
-    // FRN 30 (file notepad.exe, parent 20), size 50
-    // FRN 40 (dir Users, parent 5), aggregate size 500
-    // FRN 50 (file outside.txt, parent 5), size 100
     vol.ingest_items(vec![
         ExtractedItem {
             frn: 5,
@@ -680,12 +660,6 @@ fn matched_bytes_are_counted_once_at_the_highest_matched_point() {
         },
     ]);
 
-    // After ingest, directory sizes are aggregated:
-    // notepad: 50, outside: 100
-    // System32: 50
-    // Windows: 50
-    // Users: 0
-    // Root (FRN 5): 150
     let root_idx = vol.first_record_index_for_frn(5).expect("root");
     let win_idx = vol.first_record_index_for_frn(10).expect("win");
     let sys_idx = vol.first_record_index_for_frn(20).expect("sys");
@@ -693,7 +667,6 @@ fn matched_bytes_are_counted_once_at_the_highest_matched_point() {
     let note_idx = vol.first_record_index_for_frn(30).expect("note");
     let out_idx = vol.first_record_index_for_frn(50).expect("out");
 
-    // Matching a parent folder covers its nested subfolders once rather than double-counting.
     let all_folders = vec![root_idx, win_idx, sys_idx, users_idx];
     assert_eq!(vol.calculate_matched_bytes(&all_folders), 150);
 
@@ -753,7 +726,6 @@ fn bitset_contains_reports_membership_within_its_capacity() {
         assert!(!bs.contains(bit), "bit {bit} was never inserted");
     }
 
-    // Beyond the capacity there is no member, and the lookup must not panic.
     assert!(!bs.contains(128));
     assert!(!bs.contains(usize::MAX));
 }
@@ -920,7 +892,6 @@ fn the_public_ledger_covers_an_ingested_volume_and_its_single_column() {
     );
 }
 
-/// Ordinary renames keep the shared exclusion table; only a rule-relevant move rebuilds it.
 #[test]
 fn ordinary_renames_keep_the_cached_exclusion_states() {
     let mut vol = VolumeIndex::new('C');
@@ -965,7 +936,6 @@ fn ordinary_renames_keep_the_cached_exclusion_states() {
     );
 }
 
-/// The segment-exclusion table is shared between queries and extended by appends.
 #[test]
 fn appended_records_extend_the_cached_exclusion_states() {
     let mut vol = VolumeIndex::new('C');
@@ -1006,8 +976,6 @@ fn appended_records_extend_the_cached_exclusion_states() {
     assert!(!exclusions.excludes(&volumes[&'C'].view(), kept));
 }
 
-/// A pending change set makes the cached order unreadable; the merged order must match a
-/// fresh build exactly.
 #[test]
 fn an_order_with_pending_changes_reads_as_unbuilt_and_merges_to_the_rebuilt_order() {
     let mut vol = VolumeIndex::new('C');
@@ -1053,7 +1021,6 @@ fn an_order_with_pending_changes_reads_as_unbuilt_and_merges_to_the_rebuilt_orde
         .expect("merged order")
         .to_vec();
 
-    // Switching columns releases the order; switching back rebuilds it from scratch.
     vol.ensure_presorted_column(SortColumn::Size);
     vol.ensure_presorted_column(SortColumn::Name);
     let rebuilt: Vec<u32> = vol
@@ -1063,7 +1030,6 @@ fn an_order_with_pending_changes_reads_as_unbuilt_and_merges_to_the_rebuilt_orde
     assert_eq!(merged, rebuilt, "the merge equals a fresh build");
 }
 
-/// A directory rename invalidates the path order for the whole subtree.
 #[test]
 fn a_directory_rename_invalidates_the_path_order() {
     let mut vol = VolumeIndex::new('C');
@@ -1107,7 +1073,6 @@ fn a_directory_rename_invalidates_the_path_order() {
     assert!(vol.presorted_order(SortColumn::Path).is_some());
 }
 
-/// A file resize moves its ancestors in the size order, not just the file.
 #[test]
 fn a_resize_repositions_the_ancestors_in_the_size_order() {
     let mut vol = VolumeIndex::new('C');
@@ -1159,7 +1124,6 @@ fn a_resize_repositions_the_ancestors_in_the_size_order() {
     );
 }
 
-/// A rule set the segment table cannot answer invalidates open views on every rename.
 #[test]
 fn a_full_path_rule_rename_invalidates_exclusion_verdicts() {
     let mut vol = VolumeIndex::new('C');
@@ -1197,7 +1161,6 @@ fn a_full_path_rule_rename_invalidates_exclusion_verdicts() {
     );
 }
 
-/// The all-files total is a maintained counter, not a scan of the order.
 #[test]
 fn live_file_bytes_tracks_ingest_resize_and_delete() {
     let mut vol = VolumeIndex::new('C');
@@ -1237,7 +1200,6 @@ fn live_file_bytes_tracks_ingest_resize_and_delete() {
     assert_eq!(vol.live_file_bytes(), 10);
 }
 
-/// A record appended after the order was built merges into it; the table is not re-sorted.
 #[test]
 fn appended_records_merge_into_the_cached_presorted_column() {
     let mut vol = VolumeIndex::new('C');
@@ -1283,7 +1245,6 @@ fn appended_records_merge_into_the_cached_presorted_column() {
     assert_eq!(names, ["aardvark.txt", "alpha.txt", "beta.txt"]);
 }
 
-/// A column is invalidated only by the events whose key it sorts on.
 #[test]
 fn an_event_invalidates_only_the_orders_its_key_moves() {
     let mut vol = VolumeIndex::new('C');
@@ -1315,7 +1276,6 @@ fn an_event_invalidates_only_the_orders_its_key_moves() {
     vol.ensure_presorted_column(SortColumn::Name);
     assert!(vol.presorted_order(SortColumn::Name).is_some());
 
-    // A modification time moves only the modification order.
     vol.ensure_presorted_column(SortColumn::Size);
     vol.apply_usn_changes([UsnChange::BasicInfoChanged {
         frn: 10,
@@ -1327,7 +1287,6 @@ fn an_event_invalidates_only_the_orders_its_key_moves() {
         "a new modification time does not move a record in the size order"
     );
 
-    // A size change moves only the size order.
     vol.ensure_presorted_column(SortColumn::DateModified);
     vol.update_file_size(0, 200);
     assert!(

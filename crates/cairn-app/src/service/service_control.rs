@@ -4,10 +4,10 @@
 
 //! Reading and starting the `CairnService` registration.
 //!
-//! The GUI never installs or reconfigures the service. It asks whether the registration exists,
-//! whether it is running, and can request one elevated start when the offline band offers it. That
-//! start is a second copy of this same executable, launched elevated with `--start-service`, so the
-//! consent dialog names Cairn and carries its icon instead of naming a system tool.
+//! The GUI never installs or reconfigures the service. It reads whether the registration exists
+//! and can request one elevated start when the offline band offers it. That start is a second copy
+//! of this same executable, launched elevated with `--start-service`, so the consent dialog names
+//! Cairn and carries its icon instead of naming a system tool.
 
 use crate::service::elevation::{ElevationError, run_elevated_self};
 
@@ -61,7 +61,8 @@ pub enum ServiceState {
     Unreadable,
 }
 
-/// Reads the service registration: whether it exists and whether it runs.
+/// The service registration as SCM reports it: present, absent, or unreadable. Running state comes
+/// from the pipe connection, not from this check.
 #[cfg(windows)]
 pub fn service_state() -> ServiceState {
     use windows::Win32::System::Services::{
@@ -98,12 +99,10 @@ pub fn service_state() -> ServiceState {
     ServiceState::NotInstalled
 }
 
-/// Whether the machine state says the service is registered on this machine.
 pub fn service_is_installed() -> bool {
     matches!(service_state(), ServiceState::Registered)
 }
 
-/// Whether a start command's exit code means the service ended up running.
 fn start_exit_code_is_success(code: u32) -> bool {
     code == 0 || code == ERROR_SERVICE_ALREADY_RUNNING
 }
@@ -180,8 +179,6 @@ pub fn try_start_installed_service() -> Result<(), String> {
 mod tests {
     use super::*;
 
-    /// The elevated copy acts on the flag and nothing else: one extra argument of any kind is
-    /// refused, so it can never be turned into a query or a path-opening run.
     #[test]
     fn only_the_bare_start_flag_is_the_elevated_command() {
         let argv = |values: &[&str]| -> Vec<String> {
@@ -199,8 +196,6 @@ mod tests {
         ])));
     }
 
-    /// A stray argument beside the flag is refused rather than dropped: falling through would spend
-    /// the administrator token on an ordinary window.
     #[test]
     fn the_flag_claims_the_process_and_refuses_any_mixture() {
         let argv = |values: &[&str]| -> Vec<String> {
@@ -214,7 +209,6 @@ mod tests {
         );
     }
 
-    /// The steps that answer "it was already like that" are successes, not failures.
     #[test]
     fn an_already_reached_state_is_not_a_failure() {
         assert!(start_exit_code_is_success(0));

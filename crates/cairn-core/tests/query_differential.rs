@@ -4,30 +4,9 @@
 
 //! Differential test of the query engine against a naive reference implementation.
 //!
-//! The reference derives its expectation from the **raw query string** with plain string
-//! operations, and deliberately does not use `parse_search_term`, `glob_match` or
-//! `SizeFilter`. `parse_query` appears only on the production side, because `execute_query`
-//! takes an AST - the reference never reads its output. If both sides shared the lexer,
-//! any lexing defect would cancel out on both sides (for example, `size:>1mb` truncating to
-//! `And([])` on both sides and reporting zero differences across all 10,000 rounds).
-//! See `differential_shares_no_lexer_with_the_engine` below, which pins that invariant.
-//! (independently of `parse_query`).
-//!
-//! Reference grammar modelled (SPEC QRY-02): literal text items matched as case-insensitive
-//! substrings of the name, AND by whitespace, OR by `|` with spaces around it ignored, `!`
-//! negation, `<...>` grouping, `"..."` literal items, and the precedence rule "OR binds
-//! tighter than AND" (`a b|c` == `a <b|c>`).
-//!
-//! Deliberately NOT generated, because the reference would have to reimplement production
-//! value parsers to judge them - they are covered by exact-count end-to-end tests in
-//! `tests/query_filters.rs` instead:
-//! - functions (`ext:` `size:` `dm:` `dc:` `date-modified:` `date-created:` `parent:`
-//!   `content:`) and the built-in macros (`audio:` `doc:` `exe:` `image:` `video:` `zip:`);
-//! - modifiers (`case:` `ww:` `wfn:` `path:` `file:` `folder:` `prefix:` `regex:` ...);
-//! - wildcards `*` `?` `**`, drive letters, and `\` path matching (SPEC QRY-02, QRY-03);
-//! - regex (SPEC QRY-03, Rust `regex` engine);
-//! - empty operands such as `""` or a dangling `!`, whose chosen semantics (unsatisfiable,
-//!   not "match all") is an explicit product decision pinned in `tests/query_filters.rs`.
+//! The reference works from the raw query string and shares no lexer or AST with production.
+//! Functions, modifiers, wildcards and regex values are outside its grammar and covered by the
+//! exact-hit cases in `tests/query_filters.rs`.
 
 use cairn_core::arena::NamePool;
 use cairn_core::engine::{CancellationToken, execute_query};
@@ -402,16 +381,6 @@ fn differential_against_independent_reference() {
 }
 
 /// Ensures the reference implementation shares no lexer with the production engine.
-///
-/// A bare `>` was a token terminator outside any `<...>` group, so `size:>1mb` lexed to the
-/// item `size:`, which parsed to a term without constraints and dropped out of the AND chain,
-/// leaving `And([])` - "no query" - which the engine resolved to every record. A raw-string
-/// reference that does not share the AST exposes two separate invariants (literal items with `>`
-/// and numeric-function items):
-/// - literal items containing a bare `>`: with the truncating lexer the engine matched every
-///   name containing `apple` while the reference matched nothing, so a lexer-only regression
-///   is caught here even though the unsatisfiable-item rule hides it from the numeric cases;
-/// - numeric-function items: neither side may answer "the whole library".
 #[test]
 fn differential_shares_no_lexer_with_the_engine() {
     let index = Index::new();

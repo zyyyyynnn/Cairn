@@ -31,12 +31,10 @@ const PAGE_INSET: Pixels = px(12.0);
 const MAIN_GAP: Pixels = px(16.0);
 /// Inline tight group spacing (8 px) for related controls on the same row.
 const GROUP_GAP: Pixels = px(8.0);
-/// A thin continuous track; the project's frames stay on small radii, so this is not a capsule.
 const PROGRESS_TRACK_HEIGHT: Pixels = px(10.0);
 const PROGRESS_TRACK_RADIUS: Pixels = px(2.0);
 const PROGRESS_TRACK_BORDER: Pixels = px(0.5);
-/// A soft highlight travels across the completed portion. It is deliberately calm: motion
-/// explains that work is still running, without becoming a second loading indicator.
+/// Width of the indeterminate segment, as a fraction of the track.
 const PROGRESS_INDETERMINATE_WIDTH: f32 = 0.28;
 /// Action bar height: 40 px, leaving 6 px around the 28 px medium buttons.
 const FOOTER_HEIGHT: Pixels = px(40.0);
@@ -185,7 +183,6 @@ fn progress_fill(tokens: &Tokens, progress: f32) -> AnyElement {
 
 /// The track carries determinate progress when MSI provides it and a travelling segment while
 /// the total is unknown. Completion crossfades either state into a solid full track.
-/// [`BaseProgress`] carries the role, label and numeric value for assistive technology.
 fn progress_bar(
     tokens: &Tokens,
     progress: Option<f32>,

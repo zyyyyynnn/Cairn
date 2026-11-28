@@ -20,9 +20,6 @@ fn default_excluded_paths() -> Vec<String> {
     ]
 }
 
-/// System, application and dependency trees are not user documents. They account for most of the
-/// full-text corpus (installed JS/JSON, package registries, browser caches), so they are excluded
-/// from the content index by default while filename search still sees every one of them.
 fn default_content_excluded_paths() -> Vec<String> {
     [
         "Windows",

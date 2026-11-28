@@ -1063,8 +1063,6 @@ mod tests {
 
     #[test]
     fn glob_matching_stays_linear_for_star_chains() {
-        // Alternating star/literal segments backtrack exponentially without the visited-state
-        // memo; both the failing and the matching case must stay fast and correct.
         let pattern = "*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*b";
         let mut text = "a".repeat(400);
         assert!(!glob_match(pattern, &text, false));
@@ -1348,7 +1346,6 @@ mod tests {
         assert_eq!(s_zh, vec![1]);
     }
 
-    /// A record set of `count` names built the way the index stores them.
     fn records_of(names: &[&'static str]) -> (NamePool, Vec<FileRecord>) {
         let mut pool = NamePool::with_capacity(4096);
         let mut records = Vec::with_capacity(names.len());

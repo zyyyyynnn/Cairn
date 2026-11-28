@@ -7,15 +7,13 @@
 //!
 //! This module owns *layout and presentation* only. Every interaction hands the request to an owner
 //! method on [`CairnApp`] (in [`crate::app`]), which is the same method the keymap reaches, so a
-//! dropdown item, a table heading, a sidebar row and a keystroke cannot drift apart (Coding Guides:
-//! *Events, actions, and focus*).
+//! dropdown item, a table heading, a sidebar row and a keystroke cannot drift apart.
 //!
 //! Controls (`Button`, `PopupMenu`, `Spinner`) come from GPUI Component where the component fits
-//! the task, owning their interaction states and keyboard model. Two regions stay drawn here, for
-//! reasons recorded at each one: the query box, because the platform IME drives it through
-//! `impl EntityInputHandler for CairnApp` (SPEC SM-3), and the result band, because the QRY-07
-//! paging contract needs rows the service has not delivered yet to still hold their place on the
-//! scrollbar.
+//! the task, owning their interaction states and keyboard model. The query box lives in
+//! [`crate::search::bar_view`] because the platform IME drives it through
+//! `impl EntityInputHandler for CairnApp` (SPEC SM-3); the result band is drawn in
+//! [`crate::table`].
 
 use crate::app::{CairnApp, element_id, layout};
 use crate::shell::accessibility::{self, ControlElement, KeyControl};
@@ -40,8 +38,6 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-/// The fixed identity of one caption button. The action stays a separate argument so each call
-/// site keeps its own closure.
 struct WindowControl<'a> {
     control: &'static KeyControl,
     label: SharedString,
@@ -50,10 +46,6 @@ struct WindowControl<'a> {
     focus: &'a FocusHandle,
 }
 
-/// One platform caption button. It keeps the square, full-height hit target and the
-/// `window_control_area` that snap layouts and the native caption expect, while adding the
-/// semantics the hand-drawn div lacked: a registered `Button` role and name, a focus stop, and
-/// Enter/Space activation through GPUI's own click path.
 fn render_window_control(
     control: WindowControl<'_>,
     window: &Window,
@@ -69,9 +61,9 @@ fn render_window_control(
         focus,
     } = control;
     let is_close = matches!(area, WindowControlArea::Close);
-    // The caption is a div with a window-control hit target, not a `Button`, so Enter/Space have
-    // to run the same action explicitly. `WINDOW_CONTROL_CONTEXT` binds those keys to `NoAction`
-    // to keep the window's "open result" command from also firing.
+    // The caption is a div with a window-control hit target, so Enter/Space run the action here;
+    // `WINDOW_CONTROL_CONTEXT` binds those keys to `NoAction` to keep the window's open-result
+    // command from also firing.
     let action: std::rc::Rc<dyn Fn(&mut Window)> = std::rc::Rc::new(on_click);
     let click_action = action.clone();
     let key_action = action;
@@ -115,7 +107,6 @@ fn render_window_control(
 
 static FIRST_ROWS_FRAME: AtomicBool = AtomicBool::new(false);
 
-/// Runtime click handler for dynamically generated submenu rows (for example indexed sources).
 pub type MenuSelectHandler = Rc<dyn Fn(&mut CairnApp, &mut Window, &mut Context<'_, CairnApp>)>;
 
 /// One row of a command-group menu, already resolved to what this frame shows.
@@ -241,8 +232,8 @@ pub fn build_menu(
                         item = item.icon(Icon::default().path(RADIO_DOT_ICON_PATH));
                     }
                     if let Some(hint) = entry.hint.as_ref() {
-                        // `PopupMenuItem` runs the click handler before the action, so the action
-                        // only contributes the binding that draws the hint.
+                        // `PopupMenuItem` runs the click handler instead of the action, so the
+                        // action only contributes the binding that draws the hint.
                         item = item.action(hint.boxed_clone());
                     }
                     menu.item(item.on_click(move |_, window, cx| {
@@ -256,16 +247,6 @@ pub fn build_menu(
     menu
 }
 
-/// Announce the keystrokes [`accessibility::shortcuts_for`] registers for `control`, when it registers
-/// any (UI-03).
-///
-/// The query box takes its advertised key from the registry table rather than from an argument at the
-/// call site: a key written into the chain still reaches AccessKit, but no check can then tell an
-/// advertised shortcut from a forgotten one. Commands listed inside a component menu are the
-/// exception — that menu reads the keymap for its hint, so the table that binds the key also draws it.
-///
-/// A region answered by several keys announces them as one list, because AccessKit carries
-/// `keyboard_shortcut` as a single string.
 pub(crate) fn announce_shortcut(element: ControlElement, control: &KeyControl) -> ControlElement {
     let shortcuts = accessibility::shortcuts_for(control.element);
     if shortcuts.is_empty() {
@@ -274,11 +255,6 @@ pub(crate) fn announce_shortcut(element: ControlElement, control: &KeyControl) -
     element.aria_keyshortcuts(shortcuts.join(", "))
 }
 
-/// The one rounded content panel used by the result table:
-/// the 4px frame gap, the panel surface and the corner crescent overlay.
-///
-/// `cover` is painted over the panel's content but under the crescents, so a
-/// covering surface cannot square off the panel's rounded corners.
 fn content_panel(tokens: &ShellTokens, child: impl IntoElement, cover: Option<AnyElement>) -> Div {
     v_flex()
         .flex_1()
@@ -295,12 +271,6 @@ fn content_panel(tokens: &ShellTokens, child: impl IntoElement, cover: Option<An
         .child(rounded_panel_corners(tokens.radius, tokens.chrome))
 }
 
-/// Repaints the four corner crescents a rounded panel cuts out of its rectangle.
-///
-/// GPUI clips children to a rectangle, so the heading and row surfaces inside a panel paint over
-/// its corner radii and square them off. The overlay repaints only the area between each corner's
-/// edge and its arc, in the band colour behind the panel. It takes no part in layout or hit
-/// testing, so the heading stays where the shell's bands put it.
 fn rounded_panel_corners(radius: Pixels, color: Hsla) -> impl IntoElement {
     canvas(
         |_, _, _| {},
@@ -318,8 +288,6 @@ fn rounded_panel_corners(radius: Pixels, color: Hsla) -> impl IntoElement {
             let at = |x: f32, y: f32| point(px(x), px(y));
 
             let mut path = PathBuilder::fill();
-            // Each crescent runs along the arc between its two tangency points, then back
-            // through the outer corner.
             path.move_to(at(left + r, top));
             path.cubic_bezier_to(
                 at(left, top + r),
@@ -365,15 +333,12 @@ fn rounded_panel_corners(radius: Pixels, color: Hsla) -> impl IntoElement {
     .inset_0()
 }
 
-/// The query band acts through the window entity and shares its focus state, so the content column
-/// is handed one bundle instead of three parameters that never separate.
 struct QueryBand {
     is_query_focused: bool,
     search_focus: FocusHandle,
     view: Entity<CairnApp>,
 }
 
-/// Table parameters bundled together for rendering the content column.
 struct TableBand {
     visible: Range<usize>,
     row_height: Pixels,
@@ -394,35 +359,18 @@ impl Render for CairnApp {
         let search_focus = self.query.search_focus.clone();
         let is_query_focused = search_focus.is_focused(window);
         self.query.search_input.is_focused = is_query_focused;
-        // The result table ring is drawn from the render pass, so the frame that shows it has to know
-        // which region the window actually holds focus in. `contains_focused`, not `is_focused`: Tab
-        // walks from the region into the retry button inside it, and a ring that vanishes the moment
-        // focus moves one step further in is a keyboard focus with no visible focus. The modifier is
-        // input modality: a pointer click focuses the region too, and a second border around the whole
-        // table on top of the row selection is noise, not a focus cue.
         let results_hold_focus = self.results.results_focus.contains_focused(window, cx)
             && cairn_ui::focus::keyboard_navigation(cx);
         let view = cx.entity();
 
-        // A header-boundary resize follows the pointer through frame-scoped window listeners.
-        // They are registered from a paint callback: `Window::on_mouse_event` only accepts
-        // listeners for the next frame while the window is painting, not while the tree is built.
         let drag_paint_view = view.clone();
 
-        // Frame-scoped geometry read from the band's own scroll owner, then used to pick the window.
-        // The native scroll area measures the row band itself, so a visible horizontal scrollbar or
-        // any other chrome inside the region is excluded from the viewport. Only the first frame,
-        // before layout has given the handle bounds, falls back to the window arithmetic.
         let measured_viewport = f32::from(self.results.rows_scroll.bounds().size.height);
         self.results.table.viewport_height = if measured_viewport > 0.0 {
             measured_viewport
         } else {
             f32::from(layout::viewport_height(window))
         };
-        // The handle can hold an offset the current result set cannot reach — the list shrank, or
-        // the measured viewport differs from the estimate. `visible_range` clamps internally, but
-        // `rows_to_paint` and the band's top use the published value directly, so clamp it once
-        // here before it decides what this frame renders.
         let row_height_f = f32::from(row_height);
         let max_scroll = self.results.table.max_scroll_top(row_height_f);
         let current_scroll = self.scrolled_pixels();
@@ -444,17 +392,12 @@ impl Render for CairnApp {
         {
             crate::shell::perf::mark("rows first frame");
         }
-        // Wheel, pointer and keyboard page directly; a scrollbar drag only moves the scroll handle.
-        // Detect the unloaded band here, after the handle's offset became this frame's scroll_top,
-        // and schedule one ensure after the frame. The `is_fetching_more` guard makes the callback
-        // idempotent, so a second schedule before the first lands cannot spawn a second request.
         if self.needs_visible_rows_page(visible.clone()) {
             cx.defer_in(window, |this, window, cx| {
                 this.ensure_visible_rows_loaded(layout::row_height(window), cx);
             });
         }
 
-        // One transition value drives the sidebar as it collapses or expands.
         let target_sidebar_width = if self.sidebar_collapsed {
             0.0
         } else {
@@ -537,8 +480,6 @@ impl Render for CairnApp {
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseDownEvent, _, cx| {
                     this.restore_result_tooltips(cx);
-                    // A press on the window's chrome returns the input modality to
-                    // the pointer.
                     if cairn_ui::focus::keyboard_navigation(cx) {
                         cairn_ui::focus::set_keyboard_navigation(false, cx);
                         cx.notify();
@@ -584,9 +525,6 @@ impl Render for CairnApp {
                                         if table_width <= 0.0 {
                                             return;
                                         }
-                                        // The lanes are flex-grow ratios, so a pointer delta has to
-                                        // be converted into the configured space those ratios are
-                                        // written in, or the boundary drifts from the cursor.
                                         let delta_px = f32::from(event.position.x - drag.start_x);
                                         let delta = delta_px * drag.widths.total() / table_width;
                                         this.resize_columns_to(
@@ -682,8 +620,6 @@ impl CairnApp {
         )
     }
 
-    /// One top-level menu trigger and the popup it owns. The trigger is a text button, not a glyph;
-    /// the popup is anchored to its bottom-left corner, the way a desktop menu bar opens.
     fn render_menu_bar_trigger(
         &self,
         view: &Entity<CairnApp>,
@@ -723,9 +659,6 @@ impl CairnApp {
                 tokens.muted_foreground
             })
             .when(is_open, |this| this.bg(tokens.row_hover))
-            // Toggle on mouse-down and stop propagation. The open PopupMenu treats any click
-            // outside itself as dismissal; without this, the menu would close on mouse-down and
-            // the click handler would immediately reopen it, so a second click only reopened.
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                 window.prevent_default();
                 cx.stop_propagation();
@@ -733,8 +666,6 @@ impl CairnApp {
                 view.update(cx, |this, cx| this.toggle_group(group, window, cx));
             })
             .on_click(move |event: &ClickEvent, window, cx| {
-                // Mouse activation already ran on mouse-down. Only the keyboard path (Enter/Space
-                // on the focused trigger) needs this handler.
                 if matches!(event, ClickEvent::Mouse(_)) {
                     return;
                 }
@@ -759,10 +690,9 @@ impl CairnApp {
             .items_center()
             .child(trigger)
             .when_some(menu.filter(|_| is_open), |this, menu| {
-                // `PopupMenu` paints and dismisses itself with `deferred`; wrapping it in a
-                // `Popover` gave its modal surface focus and left the menu's own Up/Down/Enter
-                // handling unreachable. Anchor it below the trigger instead, the same shape the
-                // framework's app menu bar uses, and focus the menu in `build_group_menu`.
+                // `PopupMenu` paints and dismisses itself with `deferred`; a `Popover` wrapper
+                // would take its focus and leave its Up/Down/Enter handling unreachable. Anchor
+                // the menu below the trigger and focus it in `build_group_menu`.
                 this.child(deferred(
                     anchored()
                         .anchor(Anchor::TopLeft)
@@ -834,9 +764,6 @@ impl CairnApp {
             .border_b_1()
             .border_color(tokens.border)
             .bg(tokens.chrome)
-            // The left half keeps the sidebar's width, so the brand and navigation controls do not
-            // move when the tree collapses. The divider belongs to the sidebar below; it stops at
-            // the title bar instead of drawing a line through the window chrome.
             .child(
                 h_flex()
                     .items_center()
@@ -844,8 +771,6 @@ impl CairnApp {
                     .gap(rems(layout::SPACE_12))
                     .pl(rems(layout::CONTENT_INSET))
                     .pr(rems(layout::INNER_SPACING))
-                    // The title bar's geometry is stable: collapsing the sidebar hides the tree
-                    // below but must not slide the menu bar or the navigation controls sideways.
                     .w(rems(layout::SIDEBAR_WIDTH))
                     .flex_shrink_0()
                     .justify_between()
@@ -948,7 +873,6 @@ impl CairnApp {
                         h_flex()
                             .items_center()
                             .h_full()
-                            // `MENU_LEAD` + Button's 0.5rem ghost padding aligns the first menu label at 0.75rem.
                             .pl(rems(layout::MENU_LEAD))
                             .child(self.render_menu_bar(&view, tokens, window.rem_size())),
                     )
@@ -1015,11 +939,7 @@ impl CairnApp {
 
     /// Drops a resize cover once the window's size has stopped changing.
     ///
-    /// GPUI consumes `WM_EXITSIZEMOVE` inside its own modal-loop handling and never
-    /// redispatches it, so no event marks the end of a drag and nothing repaints after
-    /// the last size change: a timer has to make the settle call. It only ever settles
-    /// the generation it was armed for, and the poll ceiling bounds a window whose
-    /// geometry never goes quiet.
+    /// See docs/engineering/frontend.md#壳层布局与动效.
     pub(crate) fn watch_window_resize(&mut self, epoch: u64, cx: &mut Context<'_, Self>) {
         cx.spawn(async move |this, cx| {
             for _ in 0..WindowResizeTracker::max_polls() {
@@ -1054,9 +974,6 @@ impl CairnApp {
         .detach();
     }
 
-    /// The plate a live resize puts over the content panel, so the reflowing table
-    /// stays one stable surface while the window is being dragged. It dissolves
-    /// over [`crate::motion::MASK_DISSOLVE`] once the geometry has settled and the layout reflowed.
     fn render_window_resize_cover(&self, tokens: &ShellTokens) -> Option<AnyElement> {
         let epoch = self.window_resize.fading_epoch();
         if self.window_resize.is_covered() {

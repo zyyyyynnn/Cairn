@@ -30,8 +30,6 @@ pub(super) fn sort(column: SortColumn, asc: bool) -> SortSpec {
     SortSpec::single(column, dir)
 }
 
-/// Builds volume `C` from relative paths (directories first, file last) and returns the file
-/// FRNs in input order. Reparse points are expressed through `flags`, as the scanner does.
 pub(super) fn volume_with_files(files: &[(&[&str], u16)]) -> (VolumeIndex, Vec<u64>) {
     let mut items = Vec::new();
     let mut directories: HashMap<String, u64> = HashMap::new();

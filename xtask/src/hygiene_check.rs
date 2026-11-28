@@ -32,9 +32,10 @@ const FORBID_UNSAFE_ENTRYPOINTS: &[&str] = &[
     "xtask/src/main.rs",
 ];
 
-struct ScannedSource {
-    comments: Vec<(usize, String)>,
-    code_lines: Vec<(usize, String)>,
+pub(crate) struct ScannedSource {
+    pub(crate) comments: Vec<(usize, String)>,
+    pub(crate) code_lines: Vec<(usize, String)>,
+    pub(crate) block_comment_lines: Vec<usize>,
 }
 
 pub fn check_hygiene(workspace: &Path) -> Result<(), String> {
@@ -44,6 +45,7 @@ pub fn check_hygiene(workspace: &Path) -> Result<(), String> {
     let member_count = check_workspace_lints(workspace, &mut violations)?;
     let ignored_count = check_sources(workspace, &rust_files, &mut violations)?;
     let copy_count = check_copy_symbols(workspace, &mut violations)?;
+    let comment_count = crate::comment_check::check_comments(workspace, &rust_files, false)?;
 
     if !violations.is_empty() {
         return Err(format!(
@@ -54,11 +56,12 @@ pub fn check_hygiene(workspace: &Path) -> Result<(), String> {
     }
 
     println!(
-        "hygiene check passed: {} crates opt into workspace lints, {} ignored tests registered, {} Rust files & {} copy/spec files clean",
+        "hygiene check passed: {} crates opt into workspace lints, {} ignored tests registered, {} Rust files & {} copy/spec files clean, {} non-exempt comment blocks within baseline",
         member_count,
         ignored_count,
         rust_files.len(),
-        copy_count
+        copy_count,
+        comment_count
     );
     Ok(())
 }
@@ -972,10 +975,11 @@ fn is_forbidden_copy_char(ch: char) -> bool {
 
 /// Scans Rust source once, splitting comment lines from non-string code lines so neither
 /// `#[ignore]` detection nor comment checks false-trigger on string literals.
-fn scan_rust_source(source: &str) -> ScannedSource {
+pub(crate) fn scan_rust_source(source: &str) -> ScannedSource {
     let chars: Vec<char> = source.chars().collect();
     let mut comments = Vec::new();
     let mut code_lines = Vec::new();
+    let mut block_comment_lines = Vec::new();
     let mut cur_code = String::new();
     let mut line = 1usize;
     let mut i = 0usize;
@@ -1054,6 +1058,7 @@ fn scan_rust_source(source: &str) -> ScannedSource {
         }
 
         if ch == '/' && i + 1 < chars.len() && chars[i + 1] == '*' {
+            block_comment_lines.push(line);
             let mut depth = 1usize;
             let mut cur_line = line;
             let mut buf = String::new();
@@ -1093,6 +1098,7 @@ fn scan_rust_source(source: &str) -> ScannedSource {
     ScannedSource {
         comments,
         code_lines,
+        block_comment_lines,
     }
 }
 
@@ -1183,7 +1189,7 @@ fn skip_char_literal(chars: &[char], idx: usize) -> usize {
     idx + 1
 }
 
-fn collect_rust_files(workspace: &Path) -> Result<Vec<PathBuf>, String> {
+pub(crate) fn collect_rust_files(workspace: &Path) -> Result<Vec<PathBuf>, String> {
     let mut files = Vec::new();
     for root in ["crates", "xtask"] {
         let dir = workspace.join(root);

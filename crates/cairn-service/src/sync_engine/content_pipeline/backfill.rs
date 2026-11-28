@@ -2,8 +2,6 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Content task construction, eligibility rules and backfill/incremental scheduling.
-
 use super::{BatchOutcome, ContentCommand};
 use cairn_protocol::status::{ContentIndexState, ContentIndexTask};
 use std::collections::{HashMap, HashSet};
@@ -14,15 +12,9 @@ use crate::exclusion::{ExclusionPath, ExclusionRules};
 use crate::sync_engine::volume_index::RefreshedRecordMetadata;
 use crate::sync_engine::{MultiVolumeEngine, VolumeIndex};
 
-/// Files handed to one worker process. A worker restart is cheap; a batch small enough to finish
-/// within the timeout keeps a single malformed file from stalling the whole backfill.
 const CONTENT_BATCH_SIZE: usize = 500;
-/// Records inspected per lock acquisition while collecting a batch.
 const CONTENT_SCAN_CHUNK: usize = 2_000;
 
-/// Configuration and parsed exclusion rules shared by one content batch. A full backfill and one
-/// incremental drain each build it once, so a rule string is parsed per operation instead of per
-/// record. An empty or non-matching rule set short-circuits before a path is prepared.
 pub(super) struct ContentRules<'a> {
     cfg: &'a ServiceConfig,
     excluded: ExclusionRules,
@@ -48,8 +40,6 @@ impl<'a> ContentRules<'a> {
 }
 
 impl MultiVolumeEngine {
-    /// Number of eligible records, used for the backfill denominator. Uses the same task builder
-    /// as the scan so path exclusions cannot make the progress total disagree with the work.
     fn count_eligible(&self, rules: &ContentRules<'_>) -> u64 {
         let volumes = self.volumes.read().unwrap();
         volumes
@@ -68,8 +58,6 @@ impl MultiVolumeEngine {
         };
         if rec.is_tombstone()
             || rec.is_dir()
-            // A reparse point's target can lie outside the volume, outside the size limit or in
-            // an excluded directory, and the worker follows the path it is handed.
             || rec.is_reparse_point()
             || rec.size > cfg.content_index_max_bytes
         {
@@ -122,8 +110,6 @@ impl MultiVolumeEngine {
         })
     }
 
-    /// One bounded scan of a volume. Returns the next record index so a volume is never copied
-    /// into a second full-sized task list.
     fn next_content_batch(
         &self,
         drive: char,
@@ -146,8 +132,6 @@ impl MultiVolumeEngine {
         (tasks, cursor)
     }
 
-    /// Returns the replacement tasks and the documents whose record no longer qualifies (renamed
-    /// out of the whitelist, grew past the limit, became excluded, or was tombstoned).
     pub(super) fn changed_content_tasks(
         &self,
         changes: &HashMap<char, HashSet<u64>>,
@@ -166,9 +150,6 @@ impl MultiVolumeEngine {
                 };
                 for &index in indices {
                     let index = index as usize;
-                    // The service's own writes are not user content. They must not create tasks
-                    // and must not create deletion commits either: a commit rewrites `meta.json`,
-                    // whose change event would otherwise start another incremental cycle.
                     if self.is_self_data_path(&Self::record_path(volume, index)) {
                         continue;
                     }
@@ -191,8 +172,6 @@ impl MultiVolumeEngine {
             .collect()
     }
 
-    /// A deleted FRN can be reused before the debounce fires. Keep the deletion only when no live
-    /// eligible record now owns that FRN; otherwise the replacement task is about to overwrite it.
     pub(super) fn resolve_content_deletions(
         &self,
         pending: HashSet<(u64, u64)>,
@@ -208,8 +187,6 @@ impl MultiVolumeEngine {
                 else {
                     return true;
                 };
-                // A deleted batch file, log or index segment never had a document worth committing
-                // a deletion for; replaying that churn would rewrite the index it belongs to.
                 if volume.record_indices_for_frn(*frn).is_some_and(|indices| {
                     indices.iter().all(|&index| {
                         self.is_self_data_path(&Self::record_path(volume, index as usize))
@@ -242,15 +219,6 @@ impl MultiVolumeEngine {
         result
     }
 
-    /// Reads size, timestamps and the directory/reparse bits for records whose journal events do
-    /// not carry them.
-    ///
-    /// A USN `Created` record has no file size and only the event time, so without this pass every
-    /// file created while the service was away would keep `0 B` until something touched it again.
-    /// The same pass re-reads the attribute bits, so a create whose journal record lost them still
-    /// stops a symlink from looking like a regular file. Paths are resolved under the read lock,
-    /// the filesystem is queried without any lock, and the records are updated under the write
-    /// lock by `(drive, index, frn)`.
     fn refresh_pending_metadata(&self, changes: &HashMap<char, HashSet<u64>>) {
         let mut pending: Vec<(char, u32, u64, String)> = Vec::new();
         {
@@ -371,8 +339,6 @@ impl MultiVolumeEngine {
             return;
         }
         self.drop_content_searcher();
-        // A new backfill invalidates any previous completion until it reaches Ready again; a
-        // cancelled or failed run must not leave a marker that a later restart would trust.
         self.remove_backfill_marker();
         self.cleanup_stale_content_files();
 
@@ -425,7 +391,6 @@ impl MultiVolumeEngine {
             }
         }
 
-        // An empty eligible set still has to clear a previous index through the worker.
         if !cleared {
             match self.run_worker_batch_with(port, &[], &[], true) {
                 BatchOutcome::Completed => {}
@@ -445,9 +410,6 @@ impl MultiVolumeEngine {
             return;
         }
         self.reopen_content_index_ready();
-        // Only a published Ready index is a reusable backfill. `write_backfill_marker` re-checks
-        // the state, so a reopen failure leaves no marker behind. The marker records `cfg`, the
-        // snapshot this run was built from, not a configuration that changed mid-run.
         self.write_backfill_marker(&cfg);
     }
 
@@ -457,8 +419,6 @@ impl MultiVolumeEngine {
         });
     }
 
-    /// The batch runner is a parameter so a test can exercise the failure policy without spawning
-    /// `CairnWorker`; production always passes [`Self::run_worker_batch`].
     pub(super) fn run_incremental_with<F>(
         &self,
         tasks: &[ContentIndexTask],
@@ -481,11 +441,8 @@ impl MultiVolumeEngine {
             return;
         }
 
-        // Incremental batches never leave Ready: the worker commits new segments while the
-        // existing read-only searcher keeps answering from the last committed snapshot.
         if tasks.is_empty() {
-            // A deletion-only cycle still has to run the worker once; it never writes from the
-            // service process.
+            // A deletion-only cycle still has to run the worker once so its deletions are committed.
             match run_batch(&[], deletions, false) {
                 BatchOutcome::Completed => {}
                 BatchOutcome::Cancelled => {
@@ -506,8 +463,6 @@ impl MultiVolumeEngine {
                     self.set_content_disabled();
                     return;
                 }
-                // Deletions travel with the last chunk so one worker process applies the whole
-                // incremental cycle when possible.
                 let chunk_deletions = if chunk_index + 1 == chunk_count {
                     deletions
                 } else {
@@ -528,14 +483,10 @@ impl MultiVolumeEngine {
             }
         }
 
-        // Replace the reader once the batch is fully committed and refresh the published
-        // document count and size. A failure to reopen is reported as Error; the old searcher
-        // stays unused behind a non-Ready state.
         self.reopen_content_index_ready();
     }
 }
 
-/// Directory and reparse-point bits of an entry, read without following the final link.
 fn directory_and_reparse(metadata: &std::fs::Metadata) -> (bool, bool) {
     #[cfg(windows)]
     {
@@ -553,8 +504,6 @@ fn directory_and_reparse(metadata: &std::fs::Metadata) -> (bool, bool) {
     }
 }
 
-/// Case-insensitive containment on directory boundaries, so `C:\ProgramData\Cairn2` is not
-/// considered to be inside `C:\ProgramData\Cairn`.
 fn path_is_under(path: &str, root: &Path) -> bool {
     let path = path.replace('/', "\\");
     let path = path.trim_end_matches('\\');

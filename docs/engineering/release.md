@@ -44,6 +44,7 @@ cargo run -p xtask -- package
 ## 5. 发布状态
 
 - 代码签名（REL-02）尚未完成前，不得把未签名产物描述为已签名发布。
+- 当前 `xtask package` 只生成 MSI、`CairnSetup.exe` 载荷与校验和，不执行签名；REL-02 完成前所有发布产物均为未签名。
 - 版本取自 workspace `Cargo.toml`，升级码由 `cairn-setup` 持有、由 `xtask` 注入打包产物；发布前运行完整测试、`cargo fmt --all --check`、clippy `-D warnings`、`cargo doc`、`xtask check`（含 `check-i18n`、`check-docs`、`check-size` 与 `check-hygiene`）、`xtask bench-query --check` 与 `cargo deny check`。
 
 ## 6. 版本与兼容性

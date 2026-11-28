@@ -2,22 +2,19 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Search query coordinator: adaptive short-window debounce, stale-timer token checks, explicit
+//! Search query coordinator: short-window debounce, stale-timer token checks, explicit
 //! immediate dispatch, and prior in-flight `Cancel` issuance before dispatching a newer query.
 
 use std::time::{Duration, Instant};
 
 use cairn_protocol::message::{QueryDefaults, SortSpec, SourceId};
 
-/// Default cooldown / coalesce window for rapid typing bursts.
 pub(crate) const SEARCH_COALESCE_WINDOW: Duration = Duration::from_millis(50);
 
-/// Monotonic time source seam for search debouncing.
 pub(crate) trait Clock {
     fn now(&self) -> Instant;
 }
 
-/// Production monotonic clock.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct MonotonicClock;
 
@@ -27,7 +24,6 @@ impl Clock for MonotonicClock {
     }
 }
 
-/// Complete specification of a single query RPC issued to the service.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SearchCommand {
     pub query: String,
@@ -39,19 +35,21 @@ pub(crate) struct SearchCommand {
     pub source_scope: Option<SourceId>,
 }
 
-/// Output transport seam used by [`SearchCoordinator`] to send `Cancel` and `Query` requests.
 pub(crate) trait ServiceTransport {
     fn send_cancel(&mut self, query_id: u64);
     fn send_query(&mut self, query_id: u64, command: SearchCommand);
 }
 
-/// Outcome returned when submitting a query edit to [`SearchCoordinator`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SearchPlan {
-    /// Query `query_id` was dispatched right away.
-    Dispatched { query_id: u64 },
+    Dispatched {
+        query_id: u64,
+    },
     /// Rapid edit was queued behind `delay`; caller should flush with `token` when the timer fires.
-    Debounced { token: u64, delay: Duration },
+    Debounced {
+        token: u64,
+        delay: Duration,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -60,8 +58,6 @@ struct PendingSearch {
     command: SearchCommand,
 }
 
-/// Coordinates query lifecycle across debounced keystrokes, explicit triggers, cancellations, and
-/// out-of-order responses.
 #[derive(Debug)]
 pub(crate) struct SearchCoordinator {
     debounce_window: Duration,
@@ -308,11 +304,9 @@ mod tests {
         };
         assert_ne!(token1, token2);
 
-        // Stale timer token must do nothing.
         clock.advance(Duration::from_millis(50));
         assert_eq!(coord.flush_debounced(token1, &clock, &mut transport), None);
 
-        // Current timer fires: cancels query_id 1 before sending query_id 2 ("car").
         assert_eq!(
             coord.flush_debounced(token2, &clock, &mut transport),
             Some(2)
@@ -353,7 +347,6 @@ mod tests {
             other => panic!("expected debounce while in flight, got {other:?}"),
         };
 
-        // Explicit trigger (Enter / filter change / sort) runs immediately and kills stale token.
         let qid = coord.dispatch_immediate(cmd("beta", true), &clock, &mut transport);
         assert_eq!(qid, 2);
         assert_eq!(

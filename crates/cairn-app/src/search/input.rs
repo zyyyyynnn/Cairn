@@ -119,8 +119,8 @@ impl Default for QueryTextMetrics {
     }
 }
 
-/// Platform IME geometry, in screen pixels. These must not scale with interface zoom: Windows
-/// places the candidate window against the physical caret, not against the application's `rem`.
+/// Platform IME geometry in GPUI logical pixels. It does not follow the shell's `rem`, so interface
+/// zoom leaves the candidate window placement unchanged.
 const IME_FALLBACK_BAR_HEIGHT: Pixels = px(26.0);
 const IME_FLIP_ABOVE_Y: Pixels = px(600.0);
 const IME_GAP: Pixels = px(4.0);
@@ -174,8 +174,8 @@ impl SearchInputState {
         self.last_snapshot_time = Some(Instant::now());
     }
 
-    /// Conditionally pushes an undo snapshot for normal sequential character typing.
-    /// Groups rapid keystrokes within 500ms or after spaces/punctuations.
+    /// Pushes a typing snapshot when more than 500 ms have passed since the last one. A paste or
+    /// replacement always pushes.
     pub fn push_typing_undo_snapshot(&mut self, is_replacement_or_paste: bool) {
         if is_replacement_or_paste {
             self.push_undo_snapshot();
@@ -326,7 +326,6 @@ impl SearchInputState {
         new_text: &str,
     ) {
         let now = Instant::now();
-        // Suppress duplicate insertion when Win32 posts a trailing WM_CHAR for an active IME commit.
         if let Some(ref last_committed) = self.last_committed_text
             && let Some(last_time) = self.last_commit_time
             && now.duration_since(last_time) < Duration::from_millis(80)
@@ -367,7 +366,6 @@ impl SearchInputState {
         self.selection = new_cursor..new_cursor;
         self.marked_range = None;
 
-        // Record last commit ONLY if we just committed from an active IME composition
         if had_marked_range && !new_text.is_empty() {
             self.last_committed_text = Some(new_text.to_string());
             self.last_commit_time = Some(now);
@@ -727,10 +725,9 @@ mod tests {
         let mapper = Utf16Utf8Mapper::new(s);
 
         // "架构设计" has 4 Chinese characters, each 3 bytes in UTF-8 and 1 code unit in UTF-16
-        // "content:" is 8 bytes / 8 code units
         let u16_off = 8 + 2; // pointing after '构'
         let u8_off = mapper.utf16_to_utf8_offset(u16_off);
-        assert_eq!(u8_off, 8 + 6); // 8 + 2*3 = 14 bytes
+        assert_eq!(u8_off, 8 + 6);
 
         let back_u16 = mapper.utf8_to_utf16_offset(u8_off);
         assert_eq!(back_u16, u16_off);
@@ -745,7 +742,6 @@ mod tests {
         state.handle_replace_text_in_range(None, "文件");
         assert_eq!(state.text, "文件");
 
-        // Immediately following redundant WM_CHAR should be suppressed
         state.handle_replace_text_in_range(None, "文件");
         assert_eq!(state.text, "文件");
     }
@@ -764,7 +760,6 @@ mod tests {
         assert_eq!(state.marked_range, None);
         assert_eq!(state.selection, 6..6);
 
-        // Candidate bounds track measured caret_x instead of fixed-width character estimates.
         let bounds = candidate_window_bounds(
             Bounds {
                 origin: point(px(100.0), px(20.0)),
@@ -826,7 +821,7 @@ mod tests {
     fn test_chinese_cursor_navigation_and_deletion() {
         let mut state = SearchInputState::default();
         state.handle_replace_text_in_range(None, "测试中文搜索");
-        assert_eq!(state.text.len(), 18); // 6 Chinese characters * 3 bytes
+        assert_eq!(state.text.len(), 18);
 
         state.move_cursor_left(false);
         state.move_cursor_left(false);
@@ -931,10 +926,8 @@ mod tests {
         state.select_word_at(6);
         assert_eq!(&state.text[state.selection.clone()], "测试搜索");
 
-        // Full-width punctuation and emoji are punctuation/symbols, not alphanumeric words
         state.clear();
         state.handle_replace_text_in_range(None, "测试，文件！");
-        // "测试" is 6 bytes (0..6), "，" is 3 bytes (6..9), "文件" is 6 bytes (9..15), "！" is 3 bytes (15..18)
         state.select_word_at(0);
         assert_eq!(&state.text[state.selection.clone()], "测试");
 
@@ -949,7 +942,6 @@ mod tests {
 
         state.clear();
         state.handle_replace_text_in_range(None, "rust🦀code");
-        // "rust" is 4 bytes (0..4), "🦀" is 4 bytes (4..8), "code" is 4 bytes (8..12)
         state.select_word_at(4);
         assert_eq!(&state.text[state.selection.clone()], "🦀");
     }
@@ -1052,8 +1044,6 @@ mod tests {
             text: "文档检索".to_string(),
             ..Default::default()
         };
-        // Byte index 1 and 2 are inside '文' (0..3)
-        // Without UTF-8 char boundary guard, this panics with slice error
         let prev = state.find_prev_word_boundary(1);
         assert_eq!(prev, 0);
         let next = state.find_next_word_boundary(1);

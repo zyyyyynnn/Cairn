@@ -2,9 +2,6 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! View-level tests for the presorted order (FST-01, FST-02). The order itself is owned by
-//! `VolumeIndex`; these tests exercise it through whole queries.
-
 #[cfg(test)]
 mod tests {
     use crate::sync_engine::{MatchSet, MultiVolumeEngine, VolumeIndex};
@@ -41,11 +38,9 @@ mod tests {
             is_reparse_point: false,
         }]);
 
-        // After ingest, presorted is clean and lazily unbuilt.
         assert!(!vol.is_presorted_dirty());
         assert!(!vol.has_presorted_column(SortColumn::Name));
 
-        // Apply a USN change
         vol.apply_usn_changes([UsnChange::Created {
             frn: 11,
             parent_frn: 5,
@@ -55,13 +50,10 @@ mod tests {
             ts: 200,
         }]);
 
-        // The unbuilt column must be built before it can answer an ordered read.
         assert!(vol.needs_presorted_column(SortColumn::Name));
 
-        // Add volume to engine
         engine.add_volume(vol);
 
-        // The all-files query is the one that consumes the order, so it triggers the lazy build.
         let cancel = CancellationToken::new();
         let outcome = engine.execute_search_multi(
             "",
@@ -74,7 +66,6 @@ mod tests {
         assert_eq!(total, 2);
         assert_eq!(results.len(), 2);
 
-        // Dirty flag must now be cleared and ONLY the requested Name column is materialized.
         engine.with_volumes(|volumes| {
             let v = &volumes[&'C'];
             assert!(
@@ -93,7 +84,6 @@ mod tests {
         });
     }
 
-    /// A column without a presorted array must not disturb the warm order an open view uses.
     #[test]
     fn a_created_sorted_view_keeps_the_warm_name_order() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
@@ -138,8 +128,6 @@ mod tests {
         });
     }
 
-    /// A drive-scoped view is served for its own volume no matter how many other volumes are
-    /// indexed, and only its order is built.
     #[test]
     fn a_drive_scoped_view_serves_beside_another_indexed_volume() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
@@ -187,7 +175,6 @@ mod tests {
         assert_eq!(all.total, 2);
     }
 
-    /// A rename repositions equal-key rows through the name tiebreak in every keyed column.
     #[test]
     fn a_rename_merges_the_size_order_to_the_rebuilt_order() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
@@ -289,7 +276,6 @@ mod tests {
         assert_eq!(merged, rebuilt);
     }
 
-    /// A cancelled textless query with path rules reports no rows instead of walking the order.
     #[test]
     fn a_cancelled_view_query_reports_no_rows() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
@@ -320,8 +306,6 @@ mod tests {
         assert!(matches!(outcome.rows, MatchSet::Items(items) if items.is_empty()));
     }
 
-    /// One active volume beside an empty one still gets its order built and its view served.
-    /// The build predicate and the view predicate are the same one.
     #[test]
     fn a_single_active_volume_still_serves_the_view_beside_an_empty_volume() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
@@ -358,8 +342,6 @@ mod tests {
         });
     }
 
-    /// A textless whole-volume query is answered by the view, not by a materialized list;
-    /// its exact totals still describe the same records.
     #[test]
     fn the_all_files_view_carries_the_exact_totals() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
@@ -418,9 +400,6 @@ mod tests {
         assert_eq!(filtered.total, 1);
     }
 
-    /// The sidebar's all-files view is a drive-scoped textless query (`C: `). It is the same
-    /// whole-volume view, so it must build and consume the presorted order instead of sorting
-    /// every match per request.
     #[test]
     fn a_drive_scoped_all_files_query_uses_the_presorted_column() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
@@ -472,8 +451,6 @@ mod tests {
         });
     }
 
-    /// A directory rename invalidates the path order; the next path-sorted view rebuilds it
-    /// instead of silently falling back to a materialized result.
     #[test]
     fn a_directory_rename_rebuilds_the_path_view() {
         let temp_dir = tempfile::tempdir().expect("tempdir");

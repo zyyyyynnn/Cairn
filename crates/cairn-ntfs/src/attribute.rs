@@ -11,6 +11,7 @@ pub const ATTR_FILE_NAME: u32 = 0x30;
 pub const ATTR_DATA: u32 = 0x80;
 pub const ATTR_BITMAP: u32 = 0xB0;
 pub const ATTR_REPARSE_POINT: u32 = 0xC0;
+const ATTR_END_MARKER: u32 = 0xFFFF_FFFF;
 
 pub const NAMESPACE_DOS: u8 = 0x02;
 
@@ -69,8 +70,8 @@ pub fn parse_attributes(
             buf[cursor + 3],
         ]);
 
-        if type_id == 0xFFFFFFFF {
-            break; // 0xFFFFFFFF marks end of attributes
+        if type_id == ATTR_END_MARKER {
+            break;
         }
 
         let attr_len = u32::from_le_bytes([

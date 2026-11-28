@@ -123,17 +123,13 @@ pub struct VolumeSnapshot<'a> {
     pub directory_sizes_valid: bool,
 }
 
-/// Streaming chunk size for decoding records without holding a full parallel byte buffer (384 KiB).
 const DECODE_CHUNK_RECORDS: usize = 8_192;
 const STREAM_CHUNK_BYTES: usize = DECODE_CHUNK_RECORDS * RECORD_SIZE;
 
-/// Controlled growth headroom (~3.1%) reserved on loaded/compacted record tables so small USN
-/// bursts do not trigger immediate 2x `Vec` reallocations.
 pub(crate) fn headroom_for_records(len: usize) -> usize {
     if len == 0 { 0 } else { (len / 32).max(64) }
 }
 
-/// Controlled growth headroom (~3.1%) reserved on loaded/compacted string arenas.
 pub(crate) fn headroom_for_arena(len: usize) -> usize {
     if len == 0 { 0 } else { (len / 32).max(2_048) }
 }
@@ -157,7 +153,6 @@ pub fn save_volume_index_atomic(
     let folded_len =
         u32::try_from(folded_bytes.len()).map_err(|_| PersistenceError::InvalidPayloadLength)?;
 
-    // The checksum covers the encoded payload exactly as it will be written.
     let mut hasher = Hasher::new();
     let mut record_buf = [0u8; RECORD_SIZE];
     for record in snapshot.records {
@@ -182,8 +177,6 @@ pub fn save_volume_index_atomic(
     .encode();
 
     {
-        // Records are encoded one at a time to avoid a second full-size allocation; the buffer
-        // keeps the write pattern batched instead of one syscall per record.
         let mut writer = BufWriter::with_capacity(1 << 20, raw_file);
         writer.write_all(&header)?;
         for record in snapshot.records {
@@ -208,7 +201,6 @@ fn volume_guid_sidecar_path(dir: &Path, drive_letter: char) -> PathBuf {
     dir.join(format!("vol_{}.guid", drive_letter.to_ascii_uppercase()))
 }
 
-/// Atomically persists the Win32 Volume GUID sidecar paired with `vol_<drive>.idx`.
 pub(crate) fn save_volume_guid_sidecar(
     dir: &Path,
     drive_letter: char,
@@ -222,7 +214,6 @@ pub(crate) fn save_volume_guid_sidecar(
     atomic_write_bytes(&target_path, trimmed.as_bytes())
 }
 
-/// Loads the persisted Win32 Volume GUID sidecar for `drive_letter`, if present and non-empty.
 pub(crate) fn load_volume_guid_sidecar(dir: &Path, drive_letter: char) -> Option<String> {
     let raw = fs::read_to_string(volume_guid_sidecar_path(dir, drive_letter)).ok()?;
     let trimmed = raw.trim();
@@ -595,8 +586,6 @@ mod tests {
             },
         )
         .expect("save should succeed");
-        // A zero validity byte is the on-disk form of a cache whose folder sizes were never
-        // proven; the rest of the file is unchanged, so only that byte needs rewriting.
         let mut bytes = fs::read(&saved_path).expect("read cache");
         bytes[HEADER_DIRECTORY_SIZES_VALID] = 0;
         fs::write(&saved_path, &bytes).expect("write legacy cache");
@@ -626,8 +615,6 @@ mod tests {
         .expect("save should succeed");
 
         let mut bytes = fs::read(&saved_path).expect("read cache");
-        // Set record_count = u32::MAX (~192 GiB if allocated unchecked) on a 64-byte file. The
-        // count lives at header bytes 40..44.
         bytes[40..44].copy_from_slice(&u32::MAX.to_le_bytes());
         fs::write(&saved_path, &bytes).expect("write corrupted header");
 
@@ -727,8 +714,6 @@ mod tests {
         let final_content = fs::read_to_string(&target).unwrap();
         assert!(final_content.starts_with("guid-"));
 
-        // When target is a directory, atomic replace fails without deleting the destination and
-        // drops the staged temporary file cleanly.
         let dir_target = temp.path().join("blocked");
         fs::create_dir_all(&dir_target).unwrap();
         let sentinel = dir_target.join("keep.txt");

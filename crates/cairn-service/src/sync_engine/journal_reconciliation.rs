@@ -275,7 +275,6 @@ mod tests {
         assert!(!is_live_poll_trackable(VolumeState::SnapshotMode));
         assert!(!is_live_poll_trackable(VolumeState::Rebuilding));
 
-        // ERROR_DEVICE_NOT_CONNECTED (1167) and ERROR_NOT_READY (21) mark the volume Offline.
         assert!(is_device_offline_win32_error(1167));
         assert!(is_device_offline_win32_error(21));
         assert!(!is_device_offline_win32_error(0));
@@ -320,7 +319,6 @@ mod tests {
             lowest_valid_usn: 0,
         };
 
-        // Case 1: t1 failed while volume was not yet USN-enabled -> SnapshotMode instead of CatchingUp(0).
         let mut non_usn_vol = VolumeIndex::new('C');
         non_usn_vol.usn_enabled = false;
         let port = Box::new(StubJournalPort {
@@ -332,7 +330,6 @@ mod tests {
             .expect("missing T1 on non-USN volume falls back to SnapshotMode");
         assert_eq!(non_usn_vol.status.state(), VolumeState::SnapshotMode);
 
-        // Case 1b: t1 failed on a USN-enabled volume -> CatchingUp(0) so polling recovers it.
         let mut usn_vol = VolumeIndex::new('E');
         usn_vol.usn_enabled = true;
         let port_usn = Box::new(StubJournalPort {
@@ -345,7 +342,6 @@ mod tests {
         assert!(usn_vol.usn_enabled);
         assert_eq!(usn_vol.status.state(), VolumeState::CatchingUp(0));
 
-        // Case 2: replay advances last_usn to t1.next_usn -> uses updated last_usn so state reaches Synced.
         let mut replay_vol = VolumeIndex::new('D');
         let t1 = cairn_ntfs::usn::UsnJournalData {
             journal_id: 7,

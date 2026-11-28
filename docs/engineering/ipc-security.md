@@ -25,9 +25,13 @@
 ## 3. 授权与协议
 
 - 客户端身份由服务端从管道客户端的 **OS access token** 推导；`pid` 仅用于日志，`client_protocol_version` 只参与版本协商，二者都不作为权限依据。
-- 管道拒绝远程客户端；DACL 由当前配置生成。`admin_only_query` 变更在配置写锁内提交，下一次请求即生效；既有连接上的每个请求都会再次授权。
-- 协议版本：帧头与 `Hello` 握手携带显式 `PROTOCOL_VERSION`，与产品版本解耦，只在 wire 布局或消息语义变化时递增，防止未升级旧端误读错位字段。连接必须先完成 `Hello` 握手；协议版本不一致、未握手和未授权分别返回专用错误码。
-- 查询结果采用会话游标分页，不在一次响应中反序列化完整结果集。
+- 无法推导身份的连接在 Windows 上直接断开，不服务任何帧；`CallerAuthorization::Unauthenticated` 仅用于非 Windows 构建与单元测试，除握手外的请求一律拒绝。
+- `Hello` 与 `Cancel` 始终允许；索引配置是本地用户操作，`admin_only_query` 是唯一需要管理员的配置项，由配置写锁内的比较保护，并发提交不会各自基于过期值判断。
+- 组枚举依赖客户端 `CreateFile` 授予 `SECURITY_IMPERSONATION`；级别不足时探针失败，调用方按标准用户处理。身份判决使用 `CheckTokenMembership`（计入禁用与 deny-only 组），`TokenGroups` 只用于日志审计。
+- 管道拒绝远程客户端；DACL 由当前配置生成，DACL 变更对之后创建的实例生效。`admin_only_query` 变更在配置写锁内提交，下一次请求即生效；既有连接上的每个请求都会再次授权。
+- 连接数与重请求并发分别由信号量限额，避免连接洪泛与 O(records) 请求同时占用内存和卷读锁。
+- 协议版本：帧头与 `Hello` 握手携带显式 `PROTOCOL_VERSION`，与产品版本解耦，只在 wire 布局或消息语义变化时递增，防止未升级旧端误读错位字段。连接必须先完成 `Hello` 握手；协议版本不一致、未握手和未授权分别返回专用错误码。帧头版本在任何反序列化之前校验，版本不一致时按对端版本回帧。
+- 查询结果采用会话游标分页，不在一次响应中反序列化完整结果集；查询应答的卷摘要必须在查询释放卷读锁后读取。
 - 客户端连接使用退避重试；服务端每个连接独立处理，支持并发客户端。
 
 ### 3.1 错误码
@@ -46,9 +50,14 @@
 
 ## 4. 权限使用
 
-- `SeRestorePrivilege`：用于服务数据目录的 owner 修复；只有该特权允许把任意有效 SID 设为 owner。使用后按原状态释放。
-- `SeTakeOwnershipPrivilege`：只在确有必要的所有权修复路径中使用；单独持有它并不能把 owner 设为任意 SID。
+- `SeRestorePrivilege`：服务数据目录 owner 修复所必需；只有该特权允许把任意有效 SID 设为 owner。`SeTakeOwnershipPrivilege` 单独只能把 owner 设为自己可合法声明的 SID，只有它时 elevated `--console` 会以 `ERROR_INVALID_OWNER` 失败。`SeRestorePrivilege` 在使用后按原状态释放，长期索引进程不保留该权限。
 - 服务数据目录的 ACL 只允许 SYSTEM 与内置 Administrators；桌面客户端不写入服务数据目录。
+- 服务数据根整体受保护，配置与日志随根目录覆盖，不逐个子目录枚举；启动时未被认证的 `service.toml` 不会因后续 reload 重新读取而变为可信。
+- `Path::exists()` 不能用于创建决策：它把“不存在”和“存在但无权查询”都报为 `false`。存在性按 I/O 错误类型区分，只有 `NotFound` 才是缺失；`PermissionDenied` 表示目录存在但不可列出，应直接进入 ACL 检查而不是 `create_dir_all`。
+- 创建与修复分离：先创建证明缺失的目录，再对每个位置独立执行 DACL/owner 修复；一个位置失败不阻止其余位置，首个失败最后返回。目录存在性由读取安全描述符本身证明，`READ_CONTROL` 是 owner 的隐式权限，不依赖目录项查询。
+- DACL 写入只需对象 owner 的隐式 `WRITE_DAC`，非特权进程也能完成；受保护 DACL（`PROTECTED_DACL`）切断 `%ProgramData%` 对 `BUILTIN\Users` 的继承。`enforce` 先写 DACL 再修 owner，owner 修复失败不回滚 DACL，DACL 校验优先。
+- owner 与 primary group 分开写；省略 group 是为了避免无法以 `SY` 为主组的进程连 owner 写入都被拒绝。
+- 服务启动先完成数据目录的 ACL/owner 修复，修复失败则拒绝索引，不能在未受控的目录上运行。
 - 索引/查询代码不得跨线程共享可变状态；管道读写必须带超时、背压与取消路径。
 
 ## 5. UAC 与提权操作

@@ -9,9 +9,9 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// The interface languages `AppSettings::language` stores, the `I18nManager` selects its bundle with,
-/// and the settings dialog offers. The dialog's option list, the startup selection and the persisted
-/// value all read these, so a third locale cannot be offered before it can be resolved.
+/// The interface languages `AppSettings::language` stores and the `I18nManager` selects its bundle
+/// with. The Tools menu's option list, the startup selection and the persisted value all read
+/// these, so a third locale cannot be offered before it can be resolved.
 pub const LANGUAGE_SYSTEM: &str = "system";
 pub const LANGUAGE_ZH_CN: &str = "zh-CN";
 pub const LANGUAGE_EN_US: &str = "en-US";

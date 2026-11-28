@@ -330,7 +330,7 @@ fn public_desktop_root() -> std::io::Result<PathBuf> {
     known_folder(&FOLDERID_PublicDesktop)
 }
 
-/// Administrator-owned staging root for the extracted MSI, logs and cleanup helper. `%ProgramData%`
+/// Administrator-owned staging root for the extracted MSI and logs. `%ProgramData%`
 /// grants standard users the right to create children, so the root is created with a protected
 /// DACL and an Administrators owner instead of inheriting the parent. An existing root is re-owned
 /// and re-locked; release builds refuse one that cannot be secured. Debug builds fall back to
@@ -792,9 +792,9 @@ fn verify_staging_root(root: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Failed or interrupted transactions can leave a payload directory or helper copy behind. Only
-/// entries that are unmistakably ours and a day old are removed, so a concurrent transaction is
-/// never disturbed. The `logs` directory is not part of this sweep.
+/// Removes stale payload directories and old cleanup copies. Only entries that are unmistakably
+/// ours and a day old are removed, so a concurrent transaction is never disturbed. The `logs`
+/// directory is not part of this sweep.
 fn sweep_stale_staging(root: &Path) {
     let Ok(entries) = std::fs::read_dir(root) else {
         return;

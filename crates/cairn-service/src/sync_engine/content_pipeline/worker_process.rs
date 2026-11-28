@@ -2,8 +2,6 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Worker process surface: locating, spawning, bounding and collecting `CairnWorker` batches.
-
 use super::BatchOutcome;
 use crate::sync_engine::MultiVolumeEngine;
 use crate::sync_engine::worker_runner::{
@@ -15,10 +13,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-/// Upper bound for one worker batch. Cancellation is checked every 100 ms while waiting.
 const CONTENT_WORKER_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// Port abstracting child-process execution and retry backoff for one `CairnWorker` batch.
 pub(super) trait WorkerProcessPort {
     fn run_batch(
         &self,
@@ -27,7 +23,6 @@ pub(super) trait WorkerProcessPort {
         clear: bool,
     ) -> BatchOutcome;
 
-    /// Waits before retrying a transient sharing conflict; returns `false` if cancelled.
     fn wait_before_retry(&self) -> bool;
 }
 
@@ -77,9 +72,6 @@ impl MultiVolumeEngine {
         self.worker_locator.locate()
     }
 
-    /// Runs one worker batch, retrying once when the failure looks like a transient sharing
-    /// conflict. The previous searcher is dropped first so its mapped index segments cannot keep
-    /// the files locked while the retry runs.
     pub(super) fn run_worker_batch(
         &self,
         tasks: &[ContentIndexTask],
@@ -180,8 +172,6 @@ impl MultiVolumeEngine {
                 let processed = summary["processed"].as_u64().unwrap_or(0);
                 let failed = summary["failed"].as_u64().unwrap_or(0);
                 if failed > 0 {
-                    // A file can vanish between the USN event and extraction; the worker still
-                    // committed its deletions, so only a non-zero exit is a batch failure.
                     tracing::warn!(
                         processed,
                         failed,
@@ -202,7 +192,6 @@ impl MultiVolumeEngine {
     }
 }
 
-/// Whether the worker's exit code names a handle conflict a retry can clear.
 pub(super) fn worker_exit_is_transient(exit_code: Option<i32>) -> bool {
     matches!(
         exit_code,

@@ -168,7 +168,7 @@ fn pure_rust_parsers_extract_media_image_and_document_properties() {
         "corrupt headers must degrade cleanly to None"
     );
 
-    // JPEG SOF0 + GIF89a + BMP + WebP VP8X
+    // JPEG SOF0 + GIF89a + BMP
     let jpeg = vec![
         0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x04, 0x38, 0x07, 0x80, 0x01, 0x01, 0x11, 0x00,
     ];

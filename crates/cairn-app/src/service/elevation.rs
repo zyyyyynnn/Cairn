@@ -2,13 +2,13 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! One elevation, one place.
+//! Every UAC request starts here.
 //!
-//! The window itself stays unprivileged. The only thing that ever asks for an administrator is a
-//! change to the machine's service registration, and that change has to happen as one unit: one
-//! prompt per step would ask the user three times and could leave the service stopped between two
-//! of them. Every elevated command therefore goes through this one function, so the UAC prompt,
-//! the wait and the exit-code reading behave identically every time.
+//! The window itself stays unprivileged. Two actions need an administrator: starting the installed
+//! service, which runs this same image elevated with `--start-service`, and handing a verified
+//! update installer to the elevated setup. Keeping both entrypoints in one module keeps the consent
+//! prompt, the wait and the exit-code reading in one place instead of spreading `ShellExecuteExW`
+//! calls across the shell.
 
 use std::path::Path;
 

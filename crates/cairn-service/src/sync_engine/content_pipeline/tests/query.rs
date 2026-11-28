@@ -67,7 +67,6 @@ fn test_content_query_intersection_with_mft() {
 
     let cancel = CancellationToken::new();
 
-    // Query 1: Pure content query "content:架构" -> should match architecture.md (frn 101 on C:)
     let outcome = engine.execute_search_multi(
         "content:架构",
         &QueryDefaults::default(),
@@ -80,14 +79,13 @@ fn test_content_query_intersection_with_mft() {
     assert_eq!(total, 1);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].source_id.drive_letter(), Some('C'));
-    assert_eq!(results[0].record_idx, 0); // 101
+    assert_eq!(results[0].record_idx, 0);
     let c_source = SourceId::for_drive('C').unwrap();
     assert!(snippets.contains_key(&(c_source.0, 101)));
 
-    // Multi-volume isolation: Add volume D with an unrelated file having identical FRN 101
     let mut vol_d = VolumeIndex::new('D');
     vol_d.ingest_items(vec![ExtractedItem {
-        frn: 101, // Identical FRN on Drive D
+        frn: 101,
         parent_frn: 5,
         name: "d_unrelated.txt".to_string(),
         is_dir: false,
@@ -99,7 +97,6 @@ fn test_content_query_intersection_with_mft() {
     }]);
     engine.add_volume(vol_d);
 
-    // Content search should STILL only return C:\docs\architecture.md and NOT D:\d_unrelated.txt
     let outcome = engine.execute_search_multi(
         "content:架构",
         &QueryDefaults::default(),
@@ -111,7 +108,6 @@ fn test_content_query_intersection_with_mft() {
     assert_eq!(total_mv, 1);
     assert_eq!(results_mv[0].source_id.drive_letter(), Some('C'));
 
-    // Query 2: Combined MFT filter and content "ext:md content:架构" -> matches 101
     let outcome = engine.execute_search_multi(
         "ext:md content:架构",
         &QueryDefaults::default(),
@@ -123,7 +119,6 @@ fn test_content_query_intersection_with_mft() {
     assert_eq!(total_c, 1);
     assert_eq!(results_combined.len(), 1);
 
-    // Query 3: Combined MFT filter mismatch "ext:txt content:架构" -> 0 matches
     let outcome = engine.execute_search_multi(
         "ext:txt content:架构",
         &QueryDefaults::default(),
@@ -135,7 +130,6 @@ fn test_content_query_intersection_with_mft() {
     assert_eq!(total_m, 0);
     assert!(results_mismatch.is_empty());
 
-    // Query 4: Content query for non-existent word -> 0 matches
     let outcome = engine.execute_search_multi(
         "content:不存在的词",
         &QueryDefaults::default(),
@@ -190,7 +184,6 @@ fn test_clear_content_index_roundtrip() {
     let total = outcome.total;
     assert_eq!(total, 1);
 
-    // Clear content index (CNT-07)
     engine.clear_content_index().unwrap();
 
     let outcome = engine.execute_search_multi(
@@ -215,8 +208,6 @@ fn the_service_never_creates_a_content_index() {
     );
 }
 
-/// truncating at the content top-K first would drop a matching low-BM25 row that the `ext:`
-/// filter would have kept.
 #[test]
 fn positive_content_conjunction_never_truncates_beyond_top_k_before_mft_filter() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -337,7 +328,6 @@ fn clear_content_runs_even_after_business_cancel_and_stops_on_shutdown() {
         fake_worker,
     )));
 
-    // Simulate ClearContentIndex calling disable_content_index() -> cancel = true before Clear runs.
     engine
         .content_pipeline
         .cancel_flag()
@@ -351,7 +341,6 @@ fn clear_content_runs_even_after_business_cancel_and_stops_on_shutdown() {
     assert_eq!(status.indexed_documents, 0);
     assert_eq!(status.index_bytes, 0);
 
-    // Once service shutdown begins, clear respects shutdown_flag() and aborts without spawning.
     std::fs::remove_file(&args_log).expect("remove log");
     engine.stop_content_worker();
     engine.run_clear_content();

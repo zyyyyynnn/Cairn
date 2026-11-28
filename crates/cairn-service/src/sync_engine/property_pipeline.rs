@@ -31,8 +31,6 @@ use std::time::Duration;
 const PROPERTY_BATCH_SIZE: usize = 64;
 const DEFAULT_PROPERTY_WORKER_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Autonomous extended-property pipeline owning side-table storage, status, coalesced refresh
-/// state, cancellation, and serialization of extraction passes.
 pub(super) struct PropertyPipeline {
     tables: Arc<RwLock<PropertySideTables>>,
     status: RwLock<PropertyIndexStatus>,
@@ -986,7 +984,6 @@ mod tests {
             .unwrap();
         assert!(matches!(status.state, ContentIndexState::Error(_)));
 
-        // An empty delta (no tasks) must keep Error instead of clearing it to Ready.
         engine
             .property_pipeline
             .refresh
@@ -1001,7 +998,6 @@ mod tests {
             ContentIndexState::Error(_)
         ));
 
-        // Re-submitting enabled via apply_config_change retries from Error -> Backfilling.
         engine.update_config(ServiceConfig {
             folder_sources: vec![folder_root],
             excluded_paths: Vec::new(),
@@ -1014,8 +1010,6 @@ mod tests {
             ContentIndexState::Backfilling { .. }
         ));
 
-        // Seed one valid slot and confirm a single-item parse failure keeps Ready, whereas a
-        // launch failure (`exit_code: None`) on every queued task still transitions to Error.
         {
             let mut tables = engine.property_pipeline.tables.write().unwrap();
             assert!(tables.upsert(
@@ -1083,7 +1077,6 @@ mod tests {
             },
         ));
 
-        // Simulate disable -> enable advancing generation while a stale refresh could be checked.
         let gen_before = engine.property_pipeline.generation.load(Ordering::SeqCst);
         engine.apply_property_config_change(false, false);
         engine.apply_property_config_change(true, false);
@@ -1094,7 +1087,6 @@ mod tests {
         assert!(engine.property_pipeline.refresh.lock().unwrap().has_work());
         assert!(!engine.property_pipeline.is_run_current(gen_before));
 
-        // stop_property_extraction permanently blocks background spawns even if work is queued.
         engine.stop_property_extraction();
         engine.property_pipeline.refresh.lock().unwrap().mark_full();
         engine.spawn_property_extraction();
@@ -1151,8 +1143,6 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
 
-        // Disable then immediately re-enable while the generation-0 worker is still winding down;
-        // the configuration apply wakes the registered runtime without a second manual spawn.
         engine.set_property_index_enabled(false);
         engine.set_property_index_enabled(true);
 
@@ -1209,7 +1199,6 @@ mod tests {
             .push(folder_root.clone());
         engine.folder_sources.write().unwrap().insert(sid, folder);
 
-        // Drain the initial excluded scope into settled Ready with an empty refresh queue.
         engine.spawn_property_extraction();
         let settled_deadline = std::time::Instant::now() + Duration::from_secs(5);
         while engine.property_pipeline.running.load(Ordering::SeqCst)
@@ -1220,7 +1209,6 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
 
-        // Clearing excluded_paths triggers property_scope_changed and wakes registered runtime.
         engine.update_config(ServiceConfig {
             folder_sources: vec![folder_root],
             excluded_paths: Vec::new(),
@@ -1239,7 +1227,6 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
 
-        // Retrying enabled after Error must drain cleanly through the registered spawner.
         engine.set_property_index_enabled(true);
         let retry_deadline = std::time::Instant::now() + Duration::from_secs(5);
         while engine.property_pipeline.running.load(Ordering::SeqCst)
@@ -1297,7 +1284,6 @@ mod tests {
             .unwrap()
             .insert(source_id, folder);
 
-        // Discard the initial full pass so this run is an incremental delta with an empty store.
         engine.property_pipeline.refresh.lock().unwrap().take();
         engine
             .property_pipeline
@@ -1424,7 +1410,6 @@ mod tests {
             |t| t.record_key == 30 && t.path.eq_ignore_ascii_case(r"C:\Docs\album\nested.png")
         ));
 
-        // Renaming directory `album` into excluded `Hidden` must drop its child's task eligibility.
         assert!(engine.update_volume('C', |v| {
             v.apply_usn_changes([
                 cairn_ntfs::usn::UsnChange::Renamed {

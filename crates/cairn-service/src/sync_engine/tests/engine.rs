@@ -115,9 +115,6 @@ fn the_exclusion_mask_matches_the_full_path_reference() {
         index_item(8, 1, "System Volume Information", true),
         index_item(9, 8, "tracking.log", false),
         index_item(10, 2, "$recycle.bin", false),
-        // A directory whose name starts with a ruled name but is not it. The fast path
-        // compares whole segments while the full-path check matches a substring; both
-        // routes must agree on this file.
         index_item(11, 1, "node_modules", true),
         index_item(12, 11, "kept.txt", false),
         index_item(13, 1, "node_modules_cache", true),
@@ -158,8 +155,6 @@ fn the_exclusion_mask_matches_the_full_path_reference() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let engine = MultiVolumeEngine::with_index_dir_and_drives(temp_dir.path(), vec![]);
     engine.add_volume(vol);
-    // The query has to run under the same rules the mask was built from, so the two routes
-    // are compared on one configuration rather than on two.
     let mut config = engine.get_config();
     config.excluded_paths = rules;
     engine.update_config(config);
@@ -217,8 +212,6 @@ fn the_query_total_bytes_follow_the_highest_matched_point() {
     assert_eq!(total, 1);
     assert_eq!(bytes, 100);
 
-    // A folder-only result reports the folder's recursive space, and the highest matched
-    // ancestor carries it once.
     let outcome = engine.execute_search_multi(
         "folder:",
         &QueryDefaults::default(),
@@ -242,8 +235,6 @@ fn the_query_total_bytes_follow_the_highest_matched_point() {
     assert_eq!(bytes, 300, "the folder reports its recursive space");
 }
 
-/// A rule the per-record mask cannot express is still answered by the same exclusion view, which
-/// reads the record's full path with the once-parsed rule set.
 #[test]
 fn unsupported_exclusion_rule_forms_keep_the_reference_fallback() {
     let mut vol = VolumeIndex::new('C');
@@ -291,8 +282,6 @@ fn a_contended_volume_lock_serves_the_cached_summary() {
     let first = engine.get_volume_summaries();
     assert_eq!(first.len(), 1);
 
-    // A query holds this write guard for its whole run. The envelope must answer from the
-    // cache instead of waiting for the read lock (which would deadlock this thread here).
     let guard = engine.volumes.write().unwrap();
     let cached = engine.get_volume_summaries();
     drop(guard);
@@ -325,17 +314,14 @@ fn test_volume_cache_invalidation_does_not_silently_return_stale_data() {
     persistence::save_volume_index_atomic(temp_dir.path(), &vol_z.snapshot())
         .expect("save_volume_index_atomic");
 
-    // Corrupt cache file (simulating invalidation / corrupt index)
     let cache_file = temp_dir.path().join("vol_Z.idx");
     std::fs::write(&cache_file, b"corrupted content").expect("write corrupted");
 
-    // Load into engine: cache is invalid and live MFT scan for Z: fails
     let engine = MultiVolumeEngine::with_index_dir_and_drives(temp_dir.path(), vec!['Z']);
 
     let summaries = engine.get_volume_summaries();
     assert_eq!(summaries.len(), 1);
     assert_eq!(summaries[0].drive_letter, 'Z');
-    // Must NOT remain in VolumeState::Synced and must NOT retain stale records (IDX-05, IDX-07)
     assert_ne!(
         summaries[0].status,
         VolumeState::Synced,
@@ -378,8 +364,6 @@ fn test_journal_id_mismatch_and_usn_out_of_range_invalidates_volume() {
     vol.last_usn = 1000;
     assert_eq!(vol.records().len(), 1);
 
-    // A journal recreated under a snapshot leaves it on no valid timeline (IDX-05), and the
-    // rebuild verdict comes from the same function the full-scan paths run through.
     assert_eq!(
         post_scan_decision(true, 1000, Some(2000), Some(2000)),
         PostScanDecision::Rebuild
@@ -389,7 +373,6 @@ fn test_journal_id_mismatch_and_usn_out_of_range_invalidates_volume() {
         "an unreconcilable volume must not be kept"
     );
 
-    // Must be marked Rebuilding with records wiped (never Synced with stale data)
     assert_eq!(vol.status.state(), VolumeState::Rebuilding);
     assert_eq!(vol.records().len(), 0);
     assert_eq!(vol.arena().len(), 0);
@@ -411,7 +394,6 @@ fn test_usn_create_already_captured_by_the_snapshot_is_not_duplicated() {
     }]);
     assert_eq!(vol.records().len(), 1);
 
-    // `[T0, T1)` overlaps the scan itself, so the create for a captured file arrives again.
     vol.apply_usn_changes([UsnChange::Created {
         frn: 20,
         parent_frn: 5,
@@ -431,7 +413,6 @@ fn test_usn_create_already_captured_by_the_snapshot_is_not_duplicated() {
         "the real size beats the journal's zero"
     );
 
-    // A different name for the same FRN is a hard link and stays a record of its own (IDX-06).
     vol.apply_usn_changes([UsnChange::Created {
         frn: 20,
         parent_frn: 9,
@@ -670,7 +651,6 @@ fn test_excluded_paths_filtering_and_hot_apply() {
     assert_eq!(total, 0);
     assert!(results.is_empty());
 
-    // Removing **/*.tmp via hot config update must surface scratch.tmp without restart (IDX-09).
     let mut new_cfg = engine.get_config();
     new_cfg.excluded_paths.retain(|p| !p.contains("*.tmp"));
     engine.update_config(new_cfg);
@@ -765,10 +745,6 @@ fn engine_with_config_file(temp: &std::path::Path) -> MultiVolumeEngine {
     )
 }
 
-/// The admin-only switch is compared against the live value while the configuration is being
-/// written, so the decision cannot be taken against a value another connection has replaced.
-/// A submission that keeps the current value is not a change and stays available to standard
-/// users; only the secure persistence of `service.toml` can still refuse it.
 #[test]
 fn changing_admin_only_query_requires_privilege_inside_the_configuration_write() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -780,8 +756,6 @@ fn changing_admin_only_query_requires_privilege_inside_the_configuration_write()
     assert!(err.contains("administrator"), "{err}");
     assert!(!engine.get_config().admin_only_query);
 
-    // The secure write restores a trusted owner, which needs SeRestorePrivilege; an
-    // unelevated test process can only reach the ACL refusal.
     match engine.apply_config_toml("admin_only_query = false\n", false) {
         Ok(()) => assert!(!engine.get_config().admin_only_query),
         Err(err) => assert!(
@@ -791,8 +765,6 @@ fn changing_admin_only_query_requires_privilege_inside_the_configuration_write()
     }
     assert!(!engine.get_config().admin_only_query);
 
-    // The comparison uses the live value: a standard user's request that was authorized while
-    // the mode was off must not switch off an enabled mode.
     let temp = tempfile::tempdir().expect("tempdir");
     let engine = engine_with_config_file(temp.path());
     engine.update_config(ServiceConfig {
@@ -811,8 +783,6 @@ fn an_administrator_may_change_admin_only_query_inside_the_configuration_write()
     let temp = tempfile::tempdir().expect("tempdir");
     let engine = engine_with_config_file(temp.path());
 
-    // The secure write restores a trusted owner, which needs SeRestorePrivilege; an
-    // unelevated test process can only reach the ACL refusal.
     match engine.apply_config_toml("admin_only_query = true\n", true) {
         Ok(()) => assert!(engine.get_config().admin_only_query),
         Err(err) => assert!(

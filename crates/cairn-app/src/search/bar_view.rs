@@ -14,15 +14,11 @@ use gpui_kit::component::{Icon, IconName, Sizable as _, h_flex};
 use gpui_kit::gpui::prelude::FluentBuilder as _;
 use gpui_kit::gpui::*;
 
-/// One device pixel: the caret and the hairline edges the shell draws itself. Physical boundaries,
-/// so they do not scale with zoom.
+/// One pixel: the caret and the hairline edges the shell draws itself. Not a rem token, so it does
+/// not scale with interface zoom.
 const HAIRLINE: Pixels = theme::HAIRLINE;
 
 impl CairnApp {
-    /// The primary search band.
-    ///
-    /// Houses the primary search query box with integrated match filter dropdown on the trailing edge.
-    /// Directly connects to the table header below, eliminating empty intermediate bars.
     pub(crate) fn render_search_band(
         &self,
         tokens: &ShellTokens,
@@ -36,20 +32,11 @@ impl CairnApp {
             .h(rems(layout::SEARCH_BAND_HEIGHT))
             .items_center()
             .pl(rems(layout::SEARCH_BAND_LEAD))
-            // The box's outer margins are symmetric: the same tight lead on both sides.
             .pr(rems(layout::SEARCH_BAND_LEAD))
-            // The search band is part of the window frame, so the title bar and the query row
-            // read as one continuous chrome region instead of a bright strip between two gray bands.
             .bg(tokens.chrome)
             .child(self.render_query_box(tokens, is_focused, focus_handle, view, window, cx))
     }
 
-    /// The query box stays drawn here rather than using the `Input` component for one reason: the
-    /// platform IME drives this box through `impl EntityInputHandler for CairnApp`, with an
-    /// [`ElementInputHandler`] bound to this entity (SPEC SM-3). `Input` owns its own `InputState`
-    /// entity, and routing composition through two owners would either split the UTF-16/UTF-8
-    /// mapping or silently drop candidate text. Everything else — the themed surface, the rem
-    /// geometry, the focus treatment, the search glyph — comes from the tokens the components read.
     pub(crate) fn render_query_box(
         &self,
         tokens: &ShellTokens,
@@ -77,8 +64,6 @@ impl CairnApp {
             .flex_1()
             .min_w_0()
             .h(rems(layout::ROW_HEIGHT))
-            // The band lead plus this inner lead puts the search glyph on the content baseline;
-            // the same inner lead on the trailing side keeps the box's text padding symmetric.
             .pl(rems(layout::SEARCH_INPUT_LEAD))
             .pr(rems(layout::SEARCH_INPUT_LEAD))
             .gap(rems(layout::INNER_SPACING))
@@ -106,9 +91,6 @@ impl CairnApp {
                     cx.notify();
                 }),
             )
-            // Keys the window keymap did not claim belong to text editing in this box. The handler
-            // has to sit on the element that tracks the focus handle: GPUI dispatches keys to the
-            // focused node and its ancestors only, so a listener on a child would never see them.
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 this.handle_query_edit_key(event, cx);
             }))
@@ -144,9 +126,6 @@ impl CairnApp {
                         canvas(
                             |_bounds, _window, _cx| {},
                             move |bounds, _, window, cx| {
-                                // The canvas fills the text area, so its paint bounds are exactly
-                                // where glyph zero starts. Publishing them from paint keeps the
-                                // cache current without notifying (and repainting) every frame.
                                 {
                                     let style = window.text_style();
                                     let mut metrics = metrics.borrow_mut();

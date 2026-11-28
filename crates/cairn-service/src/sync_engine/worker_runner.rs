@@ -100,7 +100,6 @@ pub(super) fn next_batch_seq() -> u64 {
     BATCH_COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
-/// RAII cleanup guard for per-batch worker scratch files across all exit paths.
 pub(super) struct TempFileGuard {
     paths: Vec<PathBuf>,
 }
@@ -119,7 +118,6 @@ impl Drop for TempFileGuard {
     }
 }
 
-/// Low-level outcome of running a single bounded subprocess.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum WorkerProcessOutcome {
     Completed {
@@ -139,7 +137,6 @@ pub(super) enum WorkerProcessOutcome {
     },
 }
 
-/// Outcome of running an isolated property extraction batch in `CairnWorker.exe`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum PropertyIsolationOutcome {
     Completed(Vec<PropertyExtractResult>),
@@ -156,7 +153,6 @@ pub(super) enum PropertyIsolationOutcome {
     },
 }
 
-/// Spawns `program` at below-normal priority with capped pipe drains until exit, timeout, or cancel.
 pub(super) fn run_bounded_worker(
     program: &Path,
     args: &[OsString],
@@ -195,8 +191,6 @@ pub(super) fn run_bounded_worker(
         return WorkerProcessOutcome::IsolationFailed { reason: error };
     }
 
-    // Drain stdout and stderr concurrently up to 64 KiB, discarding excess so OS pipe buffers
-    // cannot fill and deadlock the child or exhaust service memory.
     let stdout_reader = match child.stdout.take().map(spawn_pipe_drain).transpose() {
         Ok(reader) => reader,
         Err(err) => {
@@ -270,7 +264,6 @@ pub(super) fn run_bounded_worker(
     }
 }
 
-/// Extracts extended properties for `tasks` via `CairnWorker --extract-properties`.
 pub(super) fn extract_properties_isolated(
     worker_binary: &Path,
     tasks: &[PropertyExtractTask],

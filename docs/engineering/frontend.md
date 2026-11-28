@@ -22,6 +22,11 @@
 12. **文本光标绝对定位**：搜索框聚焦光标用 `div().absolute().left_0()` 脱离 flex 流；保证占位符不因光标占位发生位移。
 13. **字体等宽元组**：`FontFeatures` 是 `Arc<Vec<(String, u32)>>` 的公开元组，没有 `tabular()` 辅助；用 `("tnum", 1)` 显式构造。
 
+- **焦点恢复**：渲染区域消失导致焦点丢失时，`on_focus_lost` 先回到窗口给出的最近恢复目标；目标不在查询框内时回到查询框，键盘命令始终可达。
+- **重命名草稿**：编辑器失焦不丢弃草稿（点击编辑器内部不应清空输入），只有 Escape 取消；写入进行中由草稿独占，第二次 Enter 不会重复提交。
+- **结果表入口策略**：`ResultSetChange` 集中决定行与滚动去留——Replace 立即清行并回到顶部，Refresh 在索引追赶期间保留行，Background 与 Probe 保持行和滚动且不淡入，InPlace 保留行但新顺序从顶部开始。只有真正的内容到达才播放入口淡入，Reduce Motion 下直接落位。
+- **快捷键播报**：控件注册表（`CONTROL_SHORTCUTS`）是广告快捷键的唯一来源，多个键合并为一个字符串（AccessKit 的 `keyboard_shortcut` 只承载单值）；组件菜单内的快捷键由 keymap 提示，不在调用点重复注册。
+
 ## 交互与渲染
 
 14. **Hover 挂在命中区域上**：在交互包装层的普通子节点上增加 `.hover()`，可能不触发；把 hover 样式放在拥有 hitbox 的交互节点上。
@@ -41,6 +46,21 @@
 25. **显式状态机**：搜索匹配模式使用 `QueryMatchMode::{Plain(TextModifiers), Regex}` 表达互斥转换；导航历史使用 `NavHistory` 维护非空历史与游标；工作区位置与结果表面使用 `ActiveLocation::{Index, RecycleBin}`、`LocationProfile` 与 `SurfaceLocation::{Index, LocalListing(LocalListingStage)}` 约束命令、排序回退与列显隐。
 26. **异步代次守卫**：`ServiceDomain::probe_generation`、`SubsystemState::generation`（配合 `begin_load`/`finish_load_if_current`/`supersede_load`/`begin_action`）与回收站删除后的 `DeleteRefreshContext` 代次/查询校验隔离并发异步回调，防止过期任务覆盖当前状态；`schedule_delayed_refresh` 仅在服务已连接时调度。
 27. **运行时端口与系统边界**：`AppRuntimePorts` 注入设置持久化、全局热键注册与更新状态读取；应用内更新仅接受 `https://` 且命中 GitHub 主机白名单的重定向/下载链路、限制下载体量并通过唯一临时文件 `sync_all()` + `MoveFileExW` 原子落盘；配置持久化采用 `create_new(true)` + `sync_all()` + `MoveFileExW`；定位文件经 Shell COM `SHParseDisplayName` + `SHOpenFolderAndSelectItems` 执行；托盘退出通过 `tokio::sync::watch` 通知主循环调用 `cx.quit()`，窗口查找限定为当前 PID 或校验进程映像路径。
+
+## 壳层布局与动效
+
+28. **布局阶梯**：`app::layout::STEP` 是 4px 的 rem 换算；只有 `CONTROL_HEIGHT`（32px）与 `ROW_HEIGHT`（28px）是独立数值，其余带高与间距都表达为二者的倍数。100% 缩放时得到整数像素，缩放时整体等比换算；新增带高应引入命名关系而不是新字面量。
+29. **标题栏固定几何**：标题栏左侧保持 `SIDEBAR_WIDTH`，折叠侧栏只隐藏其下方的树，不移动菜单栏与导航控件。
+30. **对齐脊线**：`CONTENT_INSET`（12px）是查询带、表头、行图标和状态摘要的共享左缘；`TIGHT_LEAD`（4px）是外层收紧量，由内部控件的 8px 内边距补足到 12px。搜索带使用与标题栏相同的 chrome 底色，两者读作同一块连续框架。
+31. **光学修正**：侧栏标签按字体墨迹中心校正（行框中心不等于表意文字墨迹中心）；图标进入 1rem 盒时通过 1.75 单位描边的侧栏变体保持 0.875rem 时的笔画重量；状态句的 24px 图标动作按测得墨迹中心落座（`STATE_ACTION_OPTICAL_OFFSET`）。
+32. **面板圆角遮罩**：GPUI 按矩形裁剪子节点，面板内的表头与行表面会覆盖圆角；`rounded_panel_corners` 只在四角弧线与矩形之间补绘背景色，不参与布局与命中测试。缩放遮罩绘制在内容之上、四角月牙之下。
+33. **列宽拖拽**：表头列宽是 flex-grow 比例，指针位移须换算回配置空间（`delta_px * widths.total() / table_width`），否则边界会偏离光标。
+34. **顶栏菜单**：触发器在 mouse-down 切换并阻止冒泡，否则 `PopupMenu` 的“外部点击关闭”会与 click 阶段的重开叠加；菜单用 `deferred` + `anchored` 锚定在触发器左下，不用 `Popover`——其模态表面会截走菜单自身的 Up/Down/Enter。
+35. **结果表焦点环**：用 `contains_focused` 判断表格是否持有焦点（Tab 会进入区域内部的重试按钮），且仅在键盘模态下绘制，避免指针点击时在行选中之外再加一圈外框。
+36. **窗口缩放遮罩**：拖动窗口时内容区覆盖一层实心遮罩，几何静止 `RESIZE_QUIET` 后按 `MASK_DISSOLVE` 淡出。GPUI 在内部模态循环中消费 `WM_EXITSIZEMOVE` 且不重新派发，因此只能在窗口 bounds 观察回调里用计时器判定结束（`WindowResizeTracker`：代数守卫加轮询上限）；观察挂在 `render` 之外，`render` 不修改状态也不启动任务。
+37. **启动顺序**：`gpui_kit::init` → `init_layout_direction` → 字体与文本渲染 → `init_keymap` → 应用主题 → `gpui_kit::open_window`。keymap 必须先于任何窗口或菜单读取，`open_window` 让 `Root` 拥有窗口第一层；持久化外观在首帧前安装，窗口直接以用户离开时的缩放与明暗打开。
+38. **窗口选项**：以 `TitleBar::window_options()` 为基线；标题仍交给平台（任务栏与 Alt+Tab 读取），`hide_title` 只影响自绘标题栏。默认与最小尺寸同为 1280x800 逻辑像素并居中摆放（左上原点会让状态栏落到任务栏下方）。
+39. **对话框页脚**：左取消、右确认；浅色中性按钮按填充亮度判断后向内收缩 1 个设备像素，色度按钮保留整块填充，两种尺寸在视觉上等大。
 
 ## 相关代码
 
@@ -98,6 +118,7 @@
 - **光标导航性能不变量**：方向键（Left/Right/Home/End）及 Shift/Ctrl 组合移动光标仅重绘光标与选区（`cx.notify()`），后台查询仅在文本内容变更时触发，纯光标位移保持查询结果稳定。
 - **输入法映射**：中文输入法组合文本通过 `marked_range` 跟踪，组合期间精准维护替换区间、候选窗屏幕定位与 UTF-16/UTF-8 选区映射。
 - **按键派发**：搜索框的 `on_key_down` 挂在持有 `track_focus` 的节点上。
+- **自绘查询框**：查询框不使用 `Input` 组件——平台 IME 通过 `impl EntityInputHandler for CairnApp` 驱动它（SPEC SM-3），两个输入所有者会拆分 UTF-16/UTF-8 映射或丢候选文本；主题表面、rem 几何、焦点样式与搜索图标仍取自组件 tokens。
 
 ### 4. 验证位置
 

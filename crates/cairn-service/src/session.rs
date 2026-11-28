@@ -17,7 +17,6 @@ use std::time::{Duration, Instant};
 /// Idle sessions older than 5 minutes are evicted when a new session is created.
 pub const DEFAULT_SESSION_TTL: Duration = Duration::from_secs(300);
 
-/// Maximum total `SearchResultItem` entries retained across all cached sessions (~256 MiB ceiling).
 const MAX_TOTAL_CACHED_ITEMS: usize = 16 * 1024 * 1024;
 
 /// Monotonic time source injected into [`SessionManager`] for lock-free reads and deterministic TTL tests.
@@ -70,8 +69,6 @@ pub struct QuerySession {
 }
 
 impl MatchSet {
-    /// Rows this result holds in memory. A live all-files view holds no rows: it pages the
-    /// volume's order, so it never counts against the cache budget.
     fn retained_items(&self) -> usize {
         match self {
             MatchSet::Items(items) => items.len(),
@@ -100,9 +97,6 @@ pub struct QueryOwner {
 pub struct SessionManager {
     sessions: RwLock<HashMap<u64, QuerySession>>,
     active_queries: RwLock<HashMap<(QueryOwner, u64), CancellationToken>>,
-    /// Open pipe connections per client. A client's cached results cannot be paged once its
-    /// last connection closes, so the last release frees them immediately instead of waiting
-    /// for the TTL or LRU pressure.
     connections: Mutex<HashMap<QueryOwner, usize>>,
     next_session_id: AtomicU64,
     max_sessions: usize,
@@ -142,8 +136,6 @@ impl SessionManager {
     /// Drops one open connection. The last one releases the client's cached sessions and
     /// cancels its in-flight queries: nothing can page or join them after the process leaves.
     pub fn release_client(&self, owner: &QueryOwner) {
-        // The registration lock stays held through the purge: a reconnecting client cannot
-        // register and open a session between the last release and the cleanup that removes it.
         let mut connections = self.connections.lock().unwrap();
         let last = match connections.get_mut(owner) {
             Some(count) if *count > 1 => {
@@ -202,6 +194,11 @@ impl SessionManager {
             .remove(&(owner.clone(), query_id));
     }
 
+    #[cfg(test)]
+    pub(crate) fn active_query_count(&self) -> usize {
+        self.active_queries.read().unwrap().len()
+    }
+
     /// Cancels one client's in-flight query by `query_id`. An unknown id is a no-op: ids are
     /// client-local, so a stale id must never cancel another client's query.
     pub fn cancel_query(&self, owner: &QueryOwner, query_id: u64) {
@@ -222,13 +219,11 @@ impl SessionManager {
         let mut lock = self.sessions.write().unwrap();
         let now = self.clock.now_nanos();
 
-        // Evict idle sessions that have exceeded their TTL.
         lock.retain(|_, s| {
             let last_accessed = s.last_accessed_nanos.load(Ordering::Relaxed);
             now.saturating_sub(last_accessed) < self.ttl_nanos
         });
 
-        // LRU eviction if session count or total retained item budget is exceeded.
         let new_items = rows.retained_items();
         while !lock.is_empty() && {
             let total_items: usize = lock.values().map(QuerySession::retained_items).sum();
@@ -271,8 +266,7 @@ impl SessionManager {
     }
 
     /// Drops a session whose cached record indices can no longer be served. Later pages of that
-    /// session become [`RowsError::UnknownSession`] and return an empty page, which is what the
-    /// protocol already does for an evicted session.
+    /// session answer `ERROR_CODE_SESSION_EXPIRED`, like any unknown session.
     pub fn invalidate(&self, session_id: u64) {
         self.sessions.write().unwrap().remove(&session_id);
     }
@@ -324,8 +318,6 @@ pub struct SourceTables<'a> {
     pub properties: &'a PropertySideTables,
 }
 
-/// Pages one live all-files view: the volume's order is the answer, filtered by the
-/// exclusions the query applied. The offset counts visible rows, not raw order slots.
 fn rows_for_all_files(
     view: &AllFilesView,
     offset: usize,
@@ -364,7 +356,6 @@ fn rows_for_all_files(
     }
 }
 
-/// Materializes one page of a session against the current volume and folder source tables.
 fn rows_for_items(
     session: &QuerySession,
     items: &[SearchResultItem],
@@ -559,8 +550,6 @@ mod tests {
         (view, volumes)
     }
 
-    /// The default view retains no row list: it pages the volume's presorted order, and the
-    /// page offset counts visible rows.
     #[test]
     fn an_all_files_view_pages_the_presorted_order_without_retaining_items() {
         let sessions = SessionManager::default();
@@ -584,8 +573,6 @@ mod tests {
         assert_eq!(second[0].name, "c.txt");
     }
 
-    /// A rename that can move a record across an exclusion verdict makes open pages stale;
-    /// an ordinary rename keeps them readable.
     #[test]
     fn a_view_refuses_pages_after_a_rule_relevant_rename() {
         let sessions = SessionManager::default();
@@ -654,8 +641,6 @@ mod tests {
         assert_eq!(page[1].name, "b.txt");
     }
 
-    /// A rebuilt order makes the session's offsets meaningless; the page is refused instead
-    /// of naming a different row.
     #[test]
     fn an_all_files_view_refuses_pages_after_a_rebuild() {
         let sessions = SessionManager::default();
@@ -704,7 +689,6 @@ mod tests {
         let session_id = create_items(&sessions, client.clone(), vec![item(vol.generation())]);
         let mut volumes = HashMap::from([('C', vol)]);
 
-        // Replacing the table (rescan, reload, compaction) invalidates every cached record index.
         volumes.get_mut(&'C').unwrap().clear();
         let error = get_rows(&sessions, &client, session_id, 0, 10, &volumes)
             .expect_err("a stale page must not be served");
@@ -808,7 +792,6 @@ mod tests {
             "session accessed before TTL must stay live"
         );
 
-        // Accessing s1 reset its idle timer; advance full 300s to cross expiry.
         clock.advance(Duration::from_secs(300));
         let _s3 = create_items(&sessions, client.clone(), vec![item(generation)]);
         assert_eq!(
@@ -921,8 +904,6 @@ mod tests {
         assert!(!second_query.is_cancelled());
     }
 
-    /// A client's cached match lists can only be paged while it holds a connection; the last
-    /// release frees them instead of waiting for the TTL.
     #[test]
     fn the_last_connection_release_frees_only_that_clients_sessions() {
         let sessions = SessionManager::default();
@@ -1039,7 +1020,6 @@ mod tests {
         assert_eq!(rows[0].snippets, vec!["first snippet", "second snippet"]);
         assert_eq!(rows[0].properties.as_ref(), Some(&expected_props));
 
-        // Rescanning advances folder generation -> stale error names the folder source id.
         folders.get_mut(&source_id).unwrap().rescan(&[]).unwrap();
         assert_eq!(
             sessions.get_rows_multi(

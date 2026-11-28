@@ -185,6 +185,7 @@ impl PresortedCache {
 }
 
 impl VolumeIndex {
+    /// Whether the cached order holds records waiting to be merged. An unbuilt column is not
     /// dirty: it simply has not been requested yet.
     pub fn is_presorted_dirty(&self) -> bool {
         !self.presorted.delta.is_empty()

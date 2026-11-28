@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Cairn release packaging automation (REL-01 ~ REL-04).
+//! Cairn release packaging automation.
 //! Builds a WiX v5 MSI and wraps it in the GPUI setup front end (`CairnSetup.exe`). The MSI remains
 //! the transaction engine; the setup binary carries it as a verified payload and owns the visible
 //! maintenance flow. Packaging is fail-closed: a missing WiX toolset, manifest tool, binary, or a

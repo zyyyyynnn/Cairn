@@ -49,14 +49,8 @@ use std::time::Instant;
 /// is not an extra boundary — GPUI lays a box out border-box, so it sits inside the height pinned
 /// for that band.
 ///
-/// # The ladder has two rungs
-///
-/// `CONTROL_HEIGHT` and `ROW_HEIGHT` are the only numbers chosen for themselves. Every band is an
-/// expression over the row step, and taller pointer targets use the control step. A band that wants
-/// its own step gets a new named relationship, not a new literal, and the invariant test below
-/// verifies that every band height is a named step:
-/// `CairnApp::the_band_measures_rows_in_the_same_rem_step_the_row_renders_at` fails the suite when
-/// someone writes a literal where an expression belongs.
+/// Every band height is an expression over `ROW_HEIGHT`; `CONTROL_HEIGHT` is the shared control
+/// step.
 pub mod layout {
     use gpui_kit::component::TITLE_BAR_HEIGHT as KIT_TITLE_BAR_HEIGHT;
     use gpui_kit::gpui::{Pixels, Window};
@@ -81,7 +75,6 @@ pub mod layout {
     pub const SEARCH_BAND_HEIGHT: f32 = ROW_HEIGHT + 2.0 * TIGHT_LEAD;
     pub const HEADER_HEIGHT: f32 = ROW_HEIGHT;
     pub const STATUS_HEIGHT: f32 = ROW_HEIGHT;
-    // Heading and result rows read the same widths so column dividers never drift.
     pub const NAME_MIN_COLUMN: f32 = 42.0 * STEP;
     pub const PATH_MIN_COLUMN: f32 = 28.0 * STEP;
     pub const SIZE_COLUMN: f32 = 21.0 * STEP;
@@ -127,16 +120,13 @@ pub mod layout {
     pub const SIDEBAR_VIEWPORT_LEAD: f32 = TIGHT_LEAD;
 
     /// The bands stacked between the window's top edge and the scrollable row band, in the order the
-    /// shell renders them, each paired with the name the view pins it under. The status line is in the
-    /// total because it sits below the row band and takes the same window height away from it.
+    /// shell renders them. The status line is in the total because it sits below the row band and
+    /// takes the same window height away from it.
     ///
     /// Nothing else belongs in the window's column: the title bar is platform geometry and the result
     /// band is what is left over. The hairlines are deliberately absent — GPUI lays a box out with
     /// `box-sizing: border-box` (taffy's default), so a band's 1px edge is drawn *inside* the height
     /// pinned above, and counting it again would shrink the measured viewport by four pixels.
-    ///
-    /// The names are carried for the invariant test, which reads this array as the definition of
-    /// "which bands the arithmetic knows about" instead of keeping a second list.
     pub const CHROME_BANDS: [(&str, f32); 3] = [
         ("SEARCH_BAND_HEIGHT", SEARCH_BAND_HEIGHT),
         ("HEADER_HEIGHT", HEADER_HEIGHT),
@@ -169,13 +159,10 @@ pub mod layout {
     pub const RESULT_PAGE_SIZE: usize = 200;
 }
 
-/// Stored column widths are expressed in this fixed unit. Load and save both convert through it,
-/// so the factor cancels; it stays constant so existing settings keep their widths while the
-/// shell's rem follows zoom.
 pub(crate) const COLUMN_WIDTH_STORAGE_UNIT: f32 = 16.0;
 
-/// One in-flight header-boundary drag. The widths at press time are carried so every move
-/// recomputes the same answer instead of accumulating pointer deltas.
+/// Widths at press time, so every move recomputes the same answer instead of accumulating pointer
+/// deltas.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ColumnDrag {
     pub boundary: ColumnBoundary,
@@ -321,7 +308,6 @@ impl QueryDomain {
     }
 }
 
-/// Prevents tooltips from painting over an open context menu.
 #[derive(Default)]
 pub(crate) struct TooltipSuppression {
     suppressed: bool,
@@ -357,22 +343,16 @@ pub struct ResultsDomain {
     pub table: TableState,
     /// Lane widths in rem, shared by the heading row and content rows.
     pub column_widths: ColumnWidths,
-    /// Set between a header boundary's mouse down and its release.
     pub(crate) column_drag: Option<ColumnDrag>,
-    /// Active content-snippet preview popover state, when open on a row.
     pub(crate) snippet_preview: Option<crate::table::snippets::SnippetPreviewState>,
-    /// Whether this window has published its first query result or rejection.
     pub(crate) has_presented_results: bool,
 }
 
 /// The indexer this window talks to, and everything it reports back.
 pub struct ServiceDomain {
     pub(crate) connection: ServiceConnection,
-    /// Active connection probe/start generation; prevents duplicate probes and discards stale completions.
     pub(crate) probe_generation: u64,
     pub(crate) active_probe: Option<u64>,
-    /// One status-refresh loop while a volume is building or catching up; it stops at the first
-    /// all-Synced answer so the sidebar index status line can disappear.
     pub(crate) is_refreshing_status: bool,
     pub status: StatusBarModel,
     /// Persistent named-pipe session reused across status, query, page and config RPCs.
@@ -382,13 +362,8 @@ pub struct ServiceDomain {
     pub journal: SubsystemState<IndexJournalStatus>,
     pub journal_entries: SubsystemState<Vec<IndexJournalEntry>>,
     pub sources: Vec<SourceStatusSummary>,
-    /// One add/remove request at a time: the manager dialog disables its actions until the
-    /// service answers, so a double press cannot register the same path twice.
     pub(crate) folder_source_action_pending: bool,
-    /// Active `GetSources` read generation; `None` when idle or superseded by a source write.
     pub(crate) in_flight_sources_refresh: Option<u64>,
-    /// Monotonic token incremented whenever a sources read or mutation is launched, so stale
-    /// `GetSources` responses cannot overwrite a newer source list.
     pub(crate) sources_generation: u64,
 }
 
@@ -411,8 +386,6 @@ pub(crate) struct OpenGroupMenu {
     pub entered: bool,
 }
 
-/// The in-place rename editor: the selected row swaps its name cell for this input while a draft
-/// is present. A shell write owns the draft until it answers, so a second Enter cannot duplicate it.
 pub(crate) struct RenameEditor {
     pub input: Entity<InputState>,
     pub draft: Option<crate::shell::rename::RenameDraft>,
@@ -501,14 +474,13 @@ pub struct CairnApp {
     pub root_focus: FocusHandle,
     pub zoom_level: f32,
     pub settings: AppSettings,
-    /// Whether Windows is using its dark app appearance, read once per run and refreshed when the
-    /// settings dialog opens. `theme = system` resolves through this value.
+    /// Whether Windows is using its dark app appearance. Read once per run and re-read when
+    /// `system` is selected in the theme menu; `theme = system` resolves through this value.
     pub system_dark: bool,
     pub(crate) open_group_menu: Option<OpenGroupMenu>,
     pub(crate) result_menu_dismiss: Option<Subscription>,
-    /// Window-level focus-lost subscriptions, held so they stay registered for
-    /// the lifetime of the view. Never read: dropping this field would cancel
-    /// the focus restoration above.
+    /// Window-level focus-lost subscriptions, held so they stay registered for the lifetime of the
+    /// view. Never read: dropping this field would cancel the focus restoration.
     pub _focus_lost: Vec<Subscription>,
     /// Records whether the keyboard drives focus, including the Tab the focus walk consumes.
     pub _keyboard_modality: Subscription,
@@ -516,27 +488,17 @@ pub struct CairnApp {
     pub(crate) sidebar_focus: FocusHandle,
     pub nav_history: NavHistory,
     pub sidebar_scroll: ScrollHandle,
-    /// The in-place rename editor for the single selected result row.
     pub(crate) rename: RenameEditor,
-    /// The global summon hotkey; the guard unregisters the chord when it drops.
     #[cfg(windows)]
     pub(crate) _hotkey: Option<crate::shell::hotkey::GlobalHotkey>,
-    /// The Recycle Bin view. The bin is a location, not a search scope: the view owns its rows,
-    /// its selection and its error band together, so any query releases the whole location
-    /// instead of leaving half of it behind.
     pub(crate) recycle_bin: crate::shell::recycle_bin::RecycleBinView,
-    /// True while a delete-to-bin task is running outside the bin.
     pub(crate) delete_in_flight: bool,
-    /// The app-owned transient status surface and its explicit lifecycle.
     pub(crate) toast: crate::shell::toast::ToastState,
     pub(crate) tooltip_suppression: TooltipSuppression,
     pub(crate) next_toast_id: u64,
     pub table_reveal: TableRevealState,
-    /// In-app update lifecycle rendered on the Help menu's update row.
     pub(crate) update_state: crate::shell::update::UpdateState,
-    /// The live window resize and the cover it owns, judged by this window's own geometry.
     pub(crate) window_resize: crate::shell::window_resize::WindowResizeTracker,
-    /// Keeps the bounds observer alive for the window's lifetime.
     window_resize_subscription: Option<Subscription>,
     pub(crate) runtime_ports: Arc<dyn crate::startup::AppRuntimePorts>,
 }
@@ -564,8 +526,6 @@ impl CairnApp {
             runtime_ports,
         } = startup;
 
-        // `TableState` keeps its fetched window private, so the restored sort state is assigned
-        // through its public fields instead of a struct literal.
         let mut table = TableState::default();
         table.sort_spec =
             crate::table::columns::SortSpec::parse_clause(&settings.columns.sort_spec)
@@ -584,16 +544,8 @@ impl CairnApp {
         let search_focus = cx.focus_handle().tab_stop(true);
         let sidebar_focus = cx.focus_handle();
         let root_focus = cx.focus_handle();
-        // A tab stop in its own right: the table owns a keyboard path that nothing else answers, so
-        // Tab has to be able to reach it (Design Guides Accessibility checklist: "every action is
-        // reachable and operable by keyboard"). Where it falls in the walk is decided by paint order
-        // — the top bar and query box come first — and no test pins that index, so none is claimed
-        // here.
         let results_focus = cx.focus_handle().tab_stop(true);
 
-        // Keep the window key context reachable: if a rendered region disappears and focus is
-        // dropped, return it to the nearest still-rendered target rather than leaving the commands
-        // unreachable (Focus guide: restore lost focus).
         let focus_lost = cx.on_focus_lost(window, |this, window, cx| {
             let target = window
                 .focus_lost_restore_target(cx)
@@ -610,9 +562,6 @@ impl CairnApp {
             window,
             |this, _, event: &InputEvent, window, cx| match event {
                 InputEvent::PressEnter { .. } => this.commit_rename(window, cx),
-                // A blur only moves the keyboard; the draft stays so a press
-                // inside the editor never discards what was typed. Only Escape
-                // cancels the rename.
                 InputEvent::Blur => {}
                 InputEvent::Change => this.rename_text_changed(cx),
                 InputEvent::Focus => {}
@@ -717,10 +666,7 @@ impl CairnApp {
             runtime_ports,
         };
         window.focus(&app.query.search_focus, cx);
-        // The window's own bounds event is the only trustworthy signal that a resize is
-        // happening: a drag runs inside the system's modal loop, GPUI consumes the end of it
-        // internally, and nothing repaints once the geometry goes quiet. Observing it here
-        // keeps the cover out of `render`, which must not mutate state or start tasks.
+        // See docs/engineering/frontend.md#壳层布局与动效.
         app.window_resize_subscription =
             Some(cx.observe_window_bounds(window, |this, window, cx| {
                 let size = (
@@ -756,16 +702,10 @@ impl CairnApp {
         self.label_cache.get(&self.i18n, control.message_at(index))
     }
 
-    /// Opens a fresh table session. Every entry point that replaces the result set starts
-    /// one, so the entrance waits for real content instead of firing over an empty frame.
     pub(crate) fn begin_table_session(&mut self) {
         self.table_reveal.begin_session();
     }
 
-    /// Replaces the visible result set as a new location. The old rows leave at
-    /// once so a category or history switch never shows the previous place's
-    /// rows while the new query runs; the first new content then fades in.
-    /// Typed edits keep their rows and do not call this.
     pub(crate) fn begin_table_replacement(&mut self) {
         self.begin_table_session();
         self.results.snippet_preview = None;
@@ -777,7 +717,6 @@ impl CairnApp {
         self.service.status.clear_objects_count();
     }
 
-    /// Starts the results panel's entrance and closes the pending session.
     pub(crate) fn bump_table_reveal(&mut self, cx: &mut Context<'_, Self>) {
         let reduce_motion = cx.reduce_motion();
         let Some(epoch) = self.table_reveal.start_reveal(reduce_motion) else {
@@ -797,16 +736,12 @@ impl CairnApp {
         .detach();
     }
 
-    /// Starts the table entrance once a panel session actually has rows, so the
-    /// fade begins with content rather than while the query is still in flight.
     pub(crate) fn note_table_content(&mut self, cx: &mut Context<'_, Self>) {
         if self.table_reveal.is_waiting() && self.results.table.total_rows() > 0 {
             self.bump_table_reveal(cx);
         }
     }
 
-    /// Starts the same entrance for a new session whose answer is empty; the
-    /// state band is content too, not a reason to leave the old frame static.
     pub(crate) fn note_table_empty(&mut self, cx: &mut Context<'_, Self>) {
         if self.table_reveal.is_waiting() {
             self.bump_table_reveal(cx);
@@ -863,10 +798,8 @@ impl CairnApp {
     }
 }
 
-/// Trims the process working set, discarding unreferenced memory pages back to the operating system.
-///
-/// On Windows, this calls `SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX)`,
-/// which drops the working set from ~120MB down to ~1-2MB when the application is idle or hidden to tray.
+/// Trims the process working set, discarding unreferenced memory pages back to the operating
+/// system.
 #[cfg(windows)]
 pub fn trim_working_set() {
     use windows::Win32::System::Threading::{GetCurrentProcess, SetProcessWorkingSetSize};
@@ -1086,8 +1019,6 @@ mod tests {
         }
     }
 
-    /// A folder-source row scopes the current query; pressing the same row again releases it, and
-    /// an NTFS source never owns the scope. The text and category stay untouched.
     #[test]
     fn a_folder_source_row_sets_and_clears_the_query_scope() {
         use crate::search::filters::FilterCategory;
@@ -1129,8 +1060,6 @@ mod tests {
         });
     }
 
-    /// A file-type row is a location and releases the scope, even when that category was already
-    /// active.
     #[test]
     fn a_file_type_row_releases_the_query_scope() {
         use crate::search::filters::FilterCategory;
@@ -1146,8 +1075,6 @@ mod tests {
         });
     }
 
-    /// A source removed by the service can no longer own the query: the next snapshot releases
-    /// the scope and asks for the unscoped result set.
     #[test]
     fn a_removed_source_releases_its_query_scope() {
         with_app(|this, cx| {
@@ -1162,8 +1089,6 @@ mod tests {
         });
     }
 
-    /// A location switch replaces the old result set at once and opens a fresh
-    /// entrance; the fade begins only when the new page actually arrives.
     #[test]
     fn a_category_switch_starts_a_replacement_entrance() {
         use crate::search::filters::FilterCategory;
@@ -1230,7 +1155,6 @@ mod tests {
         });
     }
 
-    /// Sorting is in-place: the rows stay on screen and no entrance runs.
     #[test]
     fn a_sort_keeps_the_rows_without_a_table_entrance() {
         with_app(|this, cx| {
@@ -1247,7 +1171,6 @@ mod tests {
         });
     }
 
-    /// A background refresh keeps the current result set and never reveals it.
     #[test]
     fn a_background_refresh_keeps_rows_without_a_table_entrance() {
         with_app(|this, cx| {
@@ -1260,8 +1183,6 @@ mod tests {
         });
     }
 
-    /// A probe is a refresh, not a place change: rows stay and no entrance runs,
-    /// including while the table is empty.
     #[test]
     fn a_probe_refreshes_silently_with_or_without_rows() {
         with_app(|this, cx| {
@@ -1287,8 +1208,6 @@ mod tests {
         });
     }
 
-    /// A refresh keeps the rows that already describe this place until the index
-    /// poll can answer it; a place change clears them at once even mid catch-up.
     #[test]
     fn a_refresh_keeps_the_rows_while_a_place_change_does_not() {
         use crate::search::filters::FilterCategory;
@@ -1362,8 +1281,6 @@ mod tests {
         });
     }
 
-    /// The index-loading shortcut must supersede an answer still on its way;
-    /// otherwise it installs rows for text the replacement already left.
     #[test]
     fn a_replacement_supersedes_the_answer_the_index_guard_leaves_behind() {
         with_app(|this, cx| {

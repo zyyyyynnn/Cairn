@@ -72,8 +72,6 @@ impl WorkerBinaryLocator for AdjacentWorkerBinaryLocator {
         let dir = exe
             .parent()
             .ok_or_else(|| "service executable has no parent directory".to_string())?;
-        // Production ships both binaries side by side; locating adjacent to the service binary
-        // prevents copies in a parent directory from shadowing the packaged worker.
         for name in ["CairnWorker.exe", "CairnWorker"] {
             let candidate = dir.join(name);
             if candidate.exists() {
@@ -96,13 +94,7 @@ impl WorkerBinaryLocator for FixedWorkerBinaryLocator {
 }
 
 pub struct MultiVolumeEngine {
-    // Lock order invariant:
-    //   persist_lock -> config_apply_lock -> volumes -> folder_sources
-    //   -> folder_watchers -> property_pipeline.(tables -> refresh -> status) -> index_journal
-    // Secondary leaf edges:
-    //   volumes -> config | summary_cache
-    //   folder_sources -> folder_scanning
-    //   usn_read_buf, volume.exclusion_cache, content_pipeline.(commands, cancel_lock, indexing_paths) are leaf locks
+    // See docs/engineering/indexing.md#3-并发内存与流式查询 for the lock order.
     persist_lock: Mutex<()>,
     volumes: RwLock<HashMap<char, VolumeIndex>>,
     folder_sources: Arc<RwLock<HashMap<SourceId, folder_source::FolderSource>>>,
@@ -112,26 +104,14 @@ pub struct MultiVolumeEngine {
     property_pipeline: property_pipeline::PropertyPipeline,
     index_journal: Arc<Mutex<index_journal::IndexJournal>>,
     index_dir: PathBuf,
-    /// Directories written by this process (MFT cache, Tantivy index, configuration and logs).
-    /// Content extraction must never read them back: a Tantivy commit rewrites `meta.json`, and
-    /// indexing that file would feed the index's own writes back in as new user content.
     self_data_dirs: Vec<PathBuf>,
     config_path: PathBuf,
     config: RwLock<ServiceConfig>,
-    /// Serializes configuration applies from the comparison through the content-pipeline
-    /// transition, so a switch command cannot be overtaken by the change that reverses it.
     config_apply_lock: Mutex<()>,
     content_pipeline: content_pipeline::ContentPipeline,
-    /// Last complete set of volume summaries, outside the volume lock. A query holds the volume
-    /// read lock for seconds; serving the response envelope from this cache keeps new connections
-    /// (handshake, status probes) from waiting behind it. Refreshed on every uncontended read.
     summary_cache: Mutex<Vec<VolumeStatusSummary>>,
-    /// Reused across 50ms USN journal polls so cold/hot polling avoids repeated 512 KiB heap churn.
-    #[cfg_attr(not(windows), allow(dead_code))]
     usn_read_buf: Mutex<Vec<u8>>,
     worker_locator: Arc<dyn WorkerBinaryLocator>,
-    /// Whether the configuration on disk was authenticated at startup. A rejected file must not
-    /// become trusted merely because a later reload reads it again.
     config_trusted: AtomicBool,
 }
 
@@ -214,17 +194,12 @@ impl MultiVolumeEngine {
         let mut self_data_dirs = Vec::new();
         Self::push_self_data_dir(&mut self_data_dirs, content_dir);
         Self::push_self_data_dir(&mut self_data_dirs, index_dir);
-        // Configuration and logs sit beside these two directories. Protecting their common parent
-        // covers the whole service data tree without having to enumerate every child.
         if let Some(parent) = content_dir.parent() {
             Self::push_self_data_dir(&mut self_data_dirs, parent);
         }
-        // Resolve the roots to file ids once, before any volume exists, so an initial $MFT scan, a
-        // cached-index replay and every later USN batch all filter the same subtree by identity.
         let excluded_roots = Self::excluded_roots_by_drive(&self_data_dirs);
         let mut map = HashMap::new();
 
-        // Filter excluded_drives during volume initialization and scanning (IDX-01)
         let active_drives: Vec<char> = drives
             .into_iter()
             .filter(|&d| {
@@ -301,9 +276,6 @@ impl MultiVolumeEngine {
                                 }
                             }
 
-                            // Caches written before folder sizes were persisted still store zeroes for
-                            // every directory. Aggregate once and immediately rewrite the flag, so only
-                            // the first launch after the upgrade pays for it.
                             if !vol.directory_sizes_valid() {
                                 vol.recompute_directory_sizes();
                                 match vol.save_to_dir(index_dir) {
@@ -319,18 +291,11 @@ impl MultiVolumeEngine {
                                 }
                             }
 
-                            // Validate against live volume if accessible and catch up USN (IDX-04, IDX-05, IDX-07)
                             #[cfg(windows)]
                             if enumerate_fixed_drives().contains(&d) {
                                 match cairn_ntfs::RawVolumeHandle::open(d) {
                                     Ok(handle) => match handle.query_usn_journal() {
                                         Ok(usn_data) => {
-                                            // A saved position must lie inside the journal's current
-                                            // [first, next] window. Checking only the lower bound left a
-                                            // cache whose USN was ahead of the journal (a reset/replaced
-                                            // journal or a stale cache) permanently CatchingUp: every
-                                            // read started past the tail and the index could never catch
-                                            // up. Treat any out-of-window position as a rebuild.
                                             if !Self::cached_position_is_usable(
                                                 vol.journal_id,
                                                 vol.last_usn,
@@ -361,10 +326,6 @@ impl MultiVolumeEngine {
                                                 vol.status.set(VolumeState::Rebuilding);
                                                 loaded_ok = false;
                                             } else {
-                                                // Replay the change journal from the saved position up to
-                                                // the journal tail (IDX-04). An index whose backlog is not
-                                                // exhausted is reported as CatchingUp, never as Synced,
-                                                // because stale results must be annotated (IDX-07).
                                                 let mut buf = vec![0u8; 512 * 1024];
                                                 match replay_usn_backlog(
                                                     &handle,
@@ -407,8 +368,6 @@ impl MultiVolumeEngine {
                                         }
                                     },
                                     Err(e) => {
-                                        // The cached index is retained but its freshness cannot be
-                                        // established, so it is Offline rather than Synced (IDX-07).
                                         tracing::warn!(
                                             "Cannot open live handle for {} ({:?}), retaining cached index as Offline",
                                             d,
@@ -419,7 +378,6 @@ impl MultiVolumeEngine {
                                     }
                                 }
                             } else {
-                                // The drive is not present anymore: the cached index can only be stale.
                                 tracing::info!(
                                     "Volume {} is no longer enumerated: marked Offline",
                                     d
@@ -429,8 +387,6 @@ impl MultiVolumeEngine {
                             }
                             #[cfg(not(windows))]
                             {
-                                // No change journal exists here, so the cached index is served as a
-                                // snapshot whose freshness nobody has proven (IDX-07).
                                 vol.status.set(VolumeState::SnapshotMode);
                                 vol.usn_enabled = false;
                                 loaded_ok = true;
@@ -461,8 +417,6 @@ impl MultiVolumeEngine {
                         "No cache or invalid cache for {}: attempting live MFT scan...",
                         d
                     );
-                    // T0 is captured before the scan runs, so every record produced while `$MFT` is
-                    // being read is replayed afterwards instead of being skipped forever (IDX-07).
                     let scan_start = open_journal_at_scan_start(d);
                     match cairn_ntfs::scan_live_volume_mft(d, 4096) {
                         Ok(items) if !items.is_empty() => {
@@ -484,16 +438,12 @@ impl MultiVolumeEngine {
                     }
                 }
 
-                // Without a usable scan the volume holds no records at all, so it must not be
-                // reported as fresh data (IDX-05, IDX-07).
                 if !scan_succeeded {
                     vol.clear();
                     vol.status.set(VolumeState::Rebuilding);
                 }
             }
 
-            // Caches written before the service data root was excluded still hold its files and an
-            // unbounded tombstone history. Reclaim both before the volume serves queries.
             let before_compact = vol.records().len();
             if vol.compact_if_needed() {
                 tracing::info!(
@@ -542,14 +492,8 @@ impl MultiVolumeEngine {
         self.content_pipeline.dir()
     }
 
-    /// Adds the data root that holds this indexer's content index, MFT cache, configuration and
-    /// logs. The root itself is protected, not just its known children, so `service.toml` and the
-    /// log directory are covered without enumerating them here. A bare volume root is ignored:
-    /// protecting it would disable content indexing for the whole disk.
     pub(crate) fn with_service_data_root(mut self, root: &Path) -> Self {
         if Self::push_self_data_dir(&mut self.self_data_dirs, root) {
-            // Volumes already loaded (the service layout) need the root for the USN events that
-            // follow; a fresh scan is not repeated here.
             self.add_self_data_exclusion(root);
         }
         self
@@ -568,8 +512,6 @@ impl MultiVolumeEngine {
         true
     }
 
-    /// Resolves every service data directory to the FRN of the volume that owns it. A path that no
-    /// longer exists (an old layout, an unmounted drive) is skipped: it cannot be indexed either.
     fn excluded_roots_by_drive(dirs: &[std::path::PathBuf]) -> HashMap<char, HashSet<u64>> {
         let mut roots: HashMap<char, HashSet<u64>> = HashMap::new();
         for dir in dirs {
@@ -589,8 +531,6 @@ impl MultiVolumeEngine {
         roots
     }
 
-    /// Seeds an already loaded volume with one excluded root. Used when the data root is attached
-    /// after the volumes were built, so subsequent USN events are filtered immediately.
     fn add_self_data_exclusion(&self, dir: &Path) {
         let Some(drive) = Self::drive_letter_of_path(dir) else {
             return;
@@ -846,7 +786,6 @@ impl MultiVolumeEngine {
         }
     }
 
-    /// A folder source inside an indexed NTFS volume duplicates records the volume already serves.
     fn folder_source_volume_conflict(&self, root: &Path) -> Option<char> {
         let display = root.to_string_lossy();
         let drive = cairn_core::path_cache::drive_letter_prefix(&display)?.to_ascii_uppercase();
@@ -1146,7 +1085,6 @@ impl MultiVolumeEngine {
             }
         }
         total.property_store_bytes += self.property_pipeline.allocated_bytes();
-        // The journal buffers are engine-wide allocations read outside volume/folder locks.
         total.scratch_bytes += self.usn_read_buf.lock().unwrap().capacity();
         total.scratch_bytes += self.index_journal.lock().unwrap().status().resident_bytes;
         total

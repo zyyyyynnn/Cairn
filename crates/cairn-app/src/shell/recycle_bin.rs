@@ -147,7 +147,6 @@ impl RecycleBinView {
         )
     }
 
-    /// Marks whether a write operation on an already-loaded bin is in flight.
     pub(crate) fn set_mutating(&mut self, next: bool) {
         if let RecycleBinState::Open {
             stage: BinStage::Ready { mutating, .. },
@@ -361,8 +360,7 @@ pub(crate) fn row_for_filtered(
 }
 
 /// Orders bin items by a table column. The comparison is independent of the shell's listing
-/// order, so the header the person clicked always describes the order they see. Name and path
-/// sort keys are lowercased once per item instead of twice per comparison.
+/// order, so the header the person clicked always describes the order they see.
 pub(crate) fn sort_items(
     items: &mut [std::sync::Arc<RecycleBinItem>],
     column: SortColumn,
@@ -756,11 +754,9 @@ impl CairnApp {
 
     /// A failed shell operation is reported where the operation was started. Cancellation is not
     /// a failure: the shell returns `COPYENGINE_E_USER_CANCELLED` when the native warning was
-    /// dismissed, and a toast for that decision would be noise. Real failures name the items the
-    /// action covered and replace the raw HRESULT with a readable reason.
-    /// A structured native outcome is reported once: cancellation stays silent,
-    /// and a failure names the items the shell actually could not process
-    /// (falling back to the selected set only when the shell reported none).
+    /// dismissed, and a toast for that decision would be noise. A real failure names the items the
+    /// shell actually could not process (falling back to the selected set only when it reported
+    /// none) and replaces the raw HRESULT with a readable reason.
     pub(crate) fn notify_bin_operation_error(
         &mut self,
         title_key: &str,

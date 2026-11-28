@@ -2,8 +2,6 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Volume acquisition, rescans, journal polling and index persistence.
-
 use super::{MultiVolumeEngine, VolumeIndex};
 use cairn_core::property_store::SourceId;
 #[cfg(windows)]
@@ -19,9 +17,6 @@ use super::journal_reconciliation::{
 };
 use crate::persistence;
 
-/// A journal backlog beyond this size is cheaper to recover with a fresh `$MFT` scan than by
-/// replaying hundreds of thousands of USN records, and it bounds how long a cold start may spend
-/// catching up.
 const MAX_USN_REPLAY_BACKLOG_BYTES: i64 = 64 * 1024 * 1024;
 
 impl MultiVolumeEngine {
@@ -47,8 +42,6 @@ impl MultiVolumeEngine {
             .count()
     }
 
-    /// Marks a volume as rebuilding before its long scan starts. The summary cache is updated
-    /// under its own lock so a handshake during the scan cannot report the previous state.
     #[cfg(windows)]
     pub(super) fn mark_volume_rebuilding(&self, drive: char) -> Option<VolumeState> {
         let previous = {
@@ -96,8 +89,6 @@ impl MultiVolumeEngine {
             let previous_status = self
                 .mark_volume_rebuilding(drive)
                 .ok_or_else(|| format!("volume {drive}: is not indexed"))?;
-            // T0 must be read before the scan and the scan must stay outside the volume lock, so the
-            // journal is bracketed here and only reconciled once the records are in hand (IDX-07).
             let scan_start = open_journal_at_scan_start(drive);
             let result = match cairn_ntfs::scan_live_volume_mft(drive, 4096) {
                 Ok(items) if !items.is_empty() => {
@@ -210,9 +201,6 @@ impl MultiVolumeEngine {
         Ok(())
     }
 
-    /// A cached journal position is usable only when it belongs to the current journal and lies in
-    /// the current `[first_usn, next_usn]` window. A position ahead of `next_usn` cannot be caught
-    /// up by reading records (there are none), so it must rebuild instead of polling forever.
     pub(super) fn cached_position_is_usable(
         cached_journal_id: u64,
         last_usn: i64,
@@ -265,8 +253,6 @@ impl MultiVolumeEngine {
 
             for drive in drives {
                 if !present.contains(&drive) {
-                    // The volume is gone (ejected, unmounted): the retained index is stale by
-                    // definition, so it must not stay reported as Synced (IDX-07).
                     let mut lock = self.volumes.write().unwrap();
                     if let Some(vol) = lock.get_mut(&drive)
                         && vol.status.state() != VolumeState::Offline
@@ -339,10 +325,6 @@ impl MultiVolumeEngine {
 
                 match handle.read_usn_journal(active_jid, query_usn, &mut buf) {
                     Ok((next_usn, changes)) => {
-                        // Query the tail for *every* batch, including an empty one. An empty read
-                        // means no records were available from `query_usn`, not that the caller is
-                        // at the tail; only a real tail can prove Synced. Omitting this query on an
-                        // empty batch left a fully caught-up volume stuck in CatchingUp forever.
                         let tail_usn = handle.query_usn_journal().ok().map(|data| data.next_usn);
                         let mut lock = self.volumes.write().unwrap();
                         if let Some(vol) = lock.get_mut(&drive) {
@@ -439,8 +421,6 @@ impl MultiVolumeEngine {
 
 #[cfg(windows)]
 fn usn_change_needs_source_refresh(change: &UsnChange) -> bool {
-    // Moving or renaming a directory changes descendants' paths without emitting child USN rows,
-    // which can move existing subtrees into or out of excluded_paths and content_excluded_paths.
     matches!(change, UsnChange::Renamed { is_dir: true, .. })
 }
 

@@ -18,8 +18,7 @@ pub enum ExclusionRule {
     /// the rule when it contains that sequence of segments at a segment boundary: `C:\proj\
     /// node_modules` is excluded by `node_modules`, and `C:\proj\node_modules_cache` is not.
     Segments(Vec<String>),
-    /// A pattern, e.g. `*.tmp`. Matched against the path as written, so the pattern's case
-    /// counts the way the user's rule does.
+    /// A pattern, e.g. `*.tmp`. Matched case-insensitively against the path as written.
     Glob(String),
     /// A drive-qualified prefix, e.g. `C:\Users`. A path falls under it when it starts with the
     /// prefix at a segment boundary.
@@ -91,9 +90,7 @@ impl ExclusionRule {
 /// A path, prepared once so every rule reads it the same way.
 #[derive(Clone, Debug)]
 pub struct ExclusionPath {
-    /// The path as written, with forward slashes folded to backslashes.
     normalized: String,
-    /// The same path in lower case, for the comparisons that ignore case.
     lower: String,
 }
 
@@ -105,7 +102,6 @@ impl ExclusionPath {
         Self { normalized, lower }
     }
 
-    /// Whether the path contains the given sequence of segments at a segment boundary.
     fn contains_segments(&self, segments: &[String]) -> bool {
         let path_segments: Vec<&str> = self.lower.split('\\').filter(|s| !s.is_empty()).collect();
         if segments.len() > path_segments.len() {
@@ -171,8 +167,6 @@ mod tests {
         ExclusionRules::parse(&[rule.to_string()]).excludes(&ExclusionPath::new(path))
     }
 
-    /// A bare segment names a directory, so it excludes that directory and everything under it —
-    /// and nothing that merely starts with the same letters.
     #[test]
     fn a_bare_segment_rule_matches_whole_segments_only() {
         assert!(excluded(r"C:\proj\node_modules\x.txt", "node_modules"));
@@ -184,8 +178,6 @@ mod tests {
         assert!(!excluded(r"C:\proj\my_node_modules\x.txt", "node_modules"));
     }
 
-    /// A rule with separators names a path fragment, and it has to land on a segment boundary on
-    /// both sides.
     #[test]
     fn a_relative_path_rule_matches_whole_segment_sequences() {
         assert!(excluded(r"C:\proj\target\debug\x.txt", r"target\debug"));
@@ -196,7 +188,6 @@ mod tests {
         );
     }
 
-    /// A drive-qualified rule is a prefix, and it stops at a segment boundary.
     #[test]
     fn an_absolute_rule_matches_whole_path_prefixes() {
         assert!(excluded(r"C:\Users\alice\a.txt", r"C:\Users"));
@@ -204,14 +195,12 @@ mod tests {
         assert!(!excluded(r"C:\UsersData\alice\a.txt", r"C:\Users"));
     }
 
-    /// A pattern is matched against the path as written.
     #[test]
     fn a_pattern_rule_matches_the_path_as_written() {
         assert!(excluded(r"C:\proj\a.tmp", "*.tmp"));
         assert!(!excluded(r"C:\proj\a.txt", "*.tmp"));
     }
 
-    /// An empty rule excludes nothing, so it never turns a result set into an empty one.
     #[test]
     fn an_empty_rule_excludes_nothing() {
         assert!(!excluded(r"C:\proj\a.txt", ""));
@@ -219,8 +208,6 @@ mod tests {
         assert!(ExclusionRules::parse(&[String::new()]).is_empty());
     }
 
-    /// A mixed rule set cannot use the per-record mask; each form still answers from the parsed
-    /// rules against a full path.
     #[test]
     fn a_mixed_rule_set_falls_back_to_the_full_path_check() {
         let rules = vec![
@@ -231,8 +218,6 @@ mod tests {
         ];
         let parsed = ExclusionRules::parse(&rules);
 
-        // The fast path only builds from rules that match one segment, so a mixed set falls
-        // back to the full-path check.
         assert!(
             parsed.single_segments().is_none(),
             "a rule set that mixes segment, path, pattern and prefix rules cannot use the fast path"
@@ -259,7 +244,6 @@ mod tests {
         );
     }
 
-    /// A rule that matches one segment can be decided from a name alone.
     #[test]
     fn a_single_segment_rule_answers_from_the_name_alone() {
         fn single_segment_of(rule: &str) -> Option<String> {

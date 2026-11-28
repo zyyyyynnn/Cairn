@@ -4,11 +4,8 @@
 
 //! End-to-end regressions for SPEC QRY-02 (operators), QRY-03 (modifiers) and QRY-04 (functions).
 //!
-//! Every case runs the real pipeline `parse_query` -> `execute_query`. The filter parsers
-//! have their own unit tests, but those call `SizeFilter::parse(">10mb")` directly and so
-//! bypass the lexer; the defects covered here (a bare `>` truncating the search item, and
-//! `ext:` rejecting wildcards) are only visible through the full chain. Each case asserts an
-//! exact hit count so a query that silently degrades to "the whole library" cannot pass.
+//! Every case runs the real pipeline `parse_query` -> `execute_query` and asserts an exact hit
+//! count, so a query that silently degrades to "the whole library" cannot pass.
 
 use cairn_core::arena::NamePool;
 use cairn_core::engine::{CancellationToken, execute_query};
@@ -269,8 +266,8 @@ fn size_operators_are_lexed_and_executed() {
     );
     f.expect("size:=0", &["apple.txt", "orange.rs", "Docs"]);
 
-    // `<` and `<=` worked before the fix; the cases above pin them so the fix cannot
-    // regress them. A degraded "match everything" answer is the specific failure mode.
+    // `<` and `<=` pin the opposite direction of the same operators. A degraded "match
+    // everything" answer is the specific failure mode.
     for query in [
         "size:>1mb",
         "size:>=1mb",
