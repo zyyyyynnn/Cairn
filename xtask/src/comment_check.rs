@@ -895,6 +895,11 @@ mod tests {
         let path = write_source(&temp, &text);
         let err = check_comments(temp.path(), &[path], false, false).expect_err("split fails");
         assert!(err.contains("lint suppression"), "{err}");
+
+        let text = format!("{}\n#\n[allow(dead_code)]\nfn helper() {{}}\n", source());
+        let path = write_source(&temp, &text);
+        let err = check_comments(temp.path(), &[path], false, false).expect_err("hash split fails");
+        assert!(err.contains("lint suppression"), "{err}");
     }
 
     #[test]

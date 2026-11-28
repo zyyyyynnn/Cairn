@@ -4,10 +4,11 @@
 
 //! Version governance gate: keeps the product version in one place, requires every workspace
 //! member to inherit it, rejects the current product version outside the manifests/lockfile/
-//! changelog, validates MSI numeric fields, and checks the release tag when one is present.
+//! changelog, validates MSI numeric fields and registered release sources, and leaves release-tag
+//! equality to the packaging path that sees the tag environment.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Component, Path};
 
 use toml::{Table, Value};
 
@@ -233,6 +234,17 @@ fn check_registry(workspace: &Path, violations: &mut Vec<String>) -> Result<(), 
                 || token.contains(char::is_whitespace)
                 || token.starts_with("//")
             {
+                continue;
+            }
+            if Path::new(token)
+                .components()
+                .any(|component| !matches!(component, Component::Normal(_)))
+            {
+                violations.push(format!(
+                    "{}:{}: version registry path `{token}` must stay inside the workspace",
+                    path.display(),
+                    index + 1
+                ));
                 continue;
             }
             if !workspace.join(token).exists() {
@@ -532,5 +544,13 @@ mod tests {
         .expect("registry");
         let err = check_versions(temp.path()).expect_err("missing registry path fails");
         assert!(err.contains("crates/demo/src/missing.rs"), "{err}");
+
+        fs::write(
+            temp.path().join("docs/engineering/release.md"),
+            "| 标识 | 来源 |\n| --- | --- |\n| demo | `../outside.rs` |\n",
+        )
+        .expect("registry");
+        let err = check_versions(temp.path()).expect_err("escaping registry path fails");
+        assert!(err.contains("must stay inside the workspace"), "{err}");
     }
 }
