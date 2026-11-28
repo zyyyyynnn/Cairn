@@ -2,9 +2,6 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Integration seams for indexed platform sources, bounded change journal, real volume identity,
-//! metadata refresh attribute parity, isolated property extraction, and un-truncated conjunctions.
-
 use cairn_core::engine::CancellationToken;
 use cairn_core::property_store::{PropertyKind, SourceId};
 use cairn_core::query::QueryDegradedReason;
@@ -241,7 +238,6 @@ fn folder_source_scans_updates_incrementally_and_recovers_on_buffer_overflow() {
     fs::write(root.join("sub\\beta.md"), "world").unwrap();
     fs::write(external.join("loop_target.txt"), "skip me").unwrap();
 
-    // Real NTFS directory junction must not cause infinite loop or pull external targets.
     let status = std::process::Command::new("cmd")
         .args(["/C", "mklink", "/J"])
         .arg(root.join("junction_out"))
@@ -268,9 +264,6 @@ fn folder_source_scans_updates_incrementally_and_recovers_on_buffer_overflow() {
     assert!(names.contains(&"beta.md"));
     assert!(!names.contains(&"loop_target.txt"));
 
-    // Incremental event applies directly without overflow.
-    // Event paths come from the watcher rooted at the normalized source path, so build them the
-    // same way instead of relying on the temp path's original spelling.
     let source_root = PathBuf::from(source.display_root());
     let new_file = source_root.join("sub\\gamma.txt");
     fs::write(&new_file, "added incrementally").unwrap();
@@ -300,7 +293,6 @@ fn folder_source_scans_updates_incrementally_and_recovers_on_buffer_overflow() {
         "the removed record must be reported for property cleanup"
     );
 
-    // Writing another file missed by buffered watcher triggers fallback rescan when > cap.
     fs::write(source_root.join("delta.txt"), "missed during overflow").unwrap();
     let mut burst = Vec::with_capacity(FOLDER_CHANGE_BUFFER_CAP + 1);
     for idx in 0..=FOLDER_CHANGE_BUFFER_CAP {
@@ -320,7 +312,6 @@ fn folder_source_scans_updates_incrementally_and_recovers_on_buffer_overflow() {
             && source.arena().get_name(r.name_offset, r.name_len) == "delta.txt")
     );
 
-    // Deleting the root folder marks the source Offline cleanly.
     fs::remove_dir_all(&root).unwrap();
     assert!(source.rescan(&[]).is_err());
     assert_eq!(source.to_summary().status, VolumeState::Offline);
@@ -371,7 +362,6 @@ fn engine_folder_source_watch_and_persistence_work_end_to_end() {
         "folder watcher must be armed before creating live files"
     );
 
-    // Live watcher should pick up a file created right inside the watched folder.
     let created = watch_root.join("live_watch_target.txt");
     fs::write(&created, "watched").unwrap();
 
@@ -403,7 +393,6 @@ fn engine_folder_source_watch_and_persistence_work_end_to_end() {
         "live folder event must appear in read-only IndexJournal: {entries:?}"
     );
 
-    // Config reload/restart retains folder sources cleanly.
     config.folder_sources = vec![watch_root.to_string_lossy().into_owned()];
     let restarted = MultiVolumeEngine::with_paths(
         &dir.path().join("index"),
@@ -425,7 +414,6 @@ fn index_journal_enforces_entry_and_byte_caps_and_drops_memory_when_disabled() {
     let mut journal = IndexJournal::new(true);
     assert_eq!(journal.status().entry_count, 0);
 
-    // Push past INDEX_JOURNAL_MAX_ENTRIES with short paths -> capped strictly at 200_000.
     for i in 0..(INDEX_JOURNAL_MAX_ENTRIES + 25) {
         journal.push(
             SourceId(2),
@@ -445,7 +433,6 @@ fn index_journal_enforces_entry_and_byte_caps_and_drops_memory_when_disabled() {
     assert_eq!(page.len(), 3);
     assert_eq!(page[0].seq, 26);
 
-    // Large payloads must trigger the 32 MiB byte ceiling long before another 200k entries.
     let mut sized_journal = IndexJournal::new(true);
     let long_path = format!("C:\\{}\\{}.bin", "segment\\".repeat(120), "payload");
     let count = (INDEX_JOURNAL_MAX_BYTES / long_path.len()) + 500;
@@ -516,7 +503,6 @@ fn apply_refreshed_metadata_synchronizes_all_indexed_attribute_bits() {
         is_reparse_point: false,
     }]);
 
-    // Turn off Hidden/System and turn on ReadOnly + ReparsePoint via refreshed Win32 attributes.
     vol.apply_refreshed_metadata(RefreshedRecordMetadata {
         index: 0,
         frn: 55,
@@ -540,7 +526,6 @@ fn apply_refreshed_metadata_synchronizes_all_indexed_attribute_bits() {
         "new ReparsePoint bit must be set"
     );
 
-    // And setting Hidden | System turns them back on.
     vol.apply_refreshed_metadata(RefreshedRecordMetadata {
         index: 0,
         frn: 55,
@@ -595,7 +580,6 @@ fn property_index_degrades_explicitly_when_off_and_handles_missing_worker_cleanl
     );
     assert_eq!(engine.memory_footprint().property_store_bytes, 0);
 
-    // Enabling without an available worker binary must isolate failure without crashing or bloating store.
     engine.set_property_index_enabled(true);
     let missing_worker = temp.path().join("missing-worker.exe");
     let status = engine
@@ -609,7 +593,6 @@ fn property_index_degrades_explicitly_when_off_and_handles_missing_worker_cleanl
         "{status:?}"
     );
 
-    // Re-submitting the enabled switch retries a failed pass instead of leaving the error sticky.
     let retry = engine.set_property_index_enabled(true);
     assert!(matches!(retry.state, ContentIndexState::Backfilling { .. }));
     let retry_status = engine
@@ -617,7 +600,6 @@ fn property_index_degrades_explicitly_when_off_and_handles_missing_worker_cleanl
         .expect("worker invocation failure stays contained");
     assert!(matches!(retry_status.state, ContentIndexState::Error(_)));
 
-    // An unrelated empty delta (no eligible records queued) preserves Error until retry.
     let unrelated = media_dir.join("notes.txt");
     fs::write(&unrelated, b"plain text").unwrap();
     let empty_pass = engine
@@ -625,7 +607,6 @@ fn property_index_degrades_explicitly_when_off_and_handles_missing_worker_cleanl
         .expect("worker invocation failure stays contained");
     assert!(matches!(empty_pass.state, ContentIndexState::Error(_)));
 
-    // Submitting `property_index_enabled = true` via `update_config` retries just like the direct switch.
     let cfg = engine.get_config();
     engine.update_config(cfg);
     assert!(matches!(
@@ -667,7 +648,6 @@ fn property_index_extracts_through_real_worker_and_recovers_from_corrupt_files()
     wait_for_folder_scan(&engine, 2);
 
     let cancel = CancellationToken::new();
-    // Enable properties and invoke real CairnWorker extraction across good + corrupt files.
     engine.set_property_index_enabled(true);
     engine
         .run_property_extraction_with_worker(&cairn_worker_exe(), Duration::from_secs(10))
@@ -690,7 +670,6 @@ fn property_index_extracts_through_real_worker_and_recovers_from_corrupt_files()
     assert_eq!(enabled_outcome.degraded, None);
     assert_eq!(enabled_outcome.total, 1);
 
-    // A live modification re-extracts only that record; the stale slot must not satisfy the query.
     wait_for_live_folder_watchers(&engine, 1);
     fs::write(&good_png, minimal_png_bytes(640, 480)).unwrap();
     run_property_extraction_until(&engine, "dimensions:640x480", 1);
@@ -701,7 +680,6 @@ fn property_index_extracts_through_real_worker_and_recovers_from_corrupt_files()
         "the modified record must replace its slot, not add a second one"
     );
 
-    // Overwriting an indexed file with unparseable bytes must drop its old slot and stay Ready.
     let sibling_png = media_dir.join("keep.png");
     fs::write(&sibling_png, minimal_png_bytes(1024, 768)).unwrap();
     run_property_extraction_until(&engine, "dimensions:1024x768", 1);
@@ -727,7 +705,6 @@ fn property_index_extracts_through_real_worker_and_recovers_from_corrupt_files()
         ContentIndexState::Ready
     );
 
-    // A source that finishes scanning after properties were enabled queues its own extraction.
     let second_dir = temp.path().join("second");
     fs::create_dir_all(&second_dir).unwrap();
     let second_png = second_dir.join("cover.png");
@@ -736,7 +713,6 @@ fn property_index_extracts_through_real_worker_and_recovers_from_corrupt_files()
     wait_for_folder_scans(&engine, 2);
     run_property_extraction_until(&engine, "dimensions:800x600", 1);
 
-    // Deleting the file prunes its property slot instead of leaving it resident.
     let indexed_before_delete = engine.property_index_status().indexed_records;
     assert!(indexed_before_delete >= 2);
     fs::remove_file(&second_png).unwrap();
@@ -755,7 +731,6 @@ fn property_index_extracts_through_real_worker_and_recovers_from_corrupt_files()
         std::thread::sleep(Duration::from_millis(50));
     }
 
-    // Disabling drops every slot; enabling again must leave Backfilling and complete a fresh pass.
     engine.set_property_index_enabled(false);
     assert_eq!(engine.memory_footprint().property_store_bytes, 0);
     engine.set_property_index_enabled(true);
@@ -770,7 +745,6 @@ fn property_index_extracts_through_real_worker_and_recovers_from_corrupt_files()
     assert_eq!(reenabled.state, ContentIndexState::Ready);
     assert!(reenabled.indexed_records >= 1);
 
-    // Exclusion rules are part of the extraction scope; changing them drops slots they exclude.
     let canonical = std::fs::canonicalize(&good_png).expect("canonical banner path");
     let canonical = canonical.to_string_lossy();
     let canonical_good = canonical
@@ -785,7 +759,6 @@ fn property_index_extracts_through_real_worker_and_recovers_from_corrupt_files()
         .expect("isolated extraction");
     assert_eq!(engine.property_index_status().indexed_records, 0);
 
-    // Turning properties back off drops all side-table heap memory immediately.
     engine.set_property_index_enabled(false);
     assert_eq!(engine.memory_footprint().property_store_bytes, 0);
 }

@@ -50,7 +50,6 @@ impl TextModifiers {
     }
 }
 
-/// Individual plain-text matching modifier flags.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TextModifier {
     Pinyin,
@@ -111,7 +110,6 @@ impl QueryMatchMode {
     }
 }
 
-/// Unified toggle action across case/word/path flags, regex mode, and plain-text modifiers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum QueryToggle {
     Case,

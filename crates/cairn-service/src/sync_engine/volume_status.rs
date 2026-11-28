@@ -2,12 +2,6 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Volume status transitions. The journal ledger's catch-up is the only path that can produce
-//! `Synced` for a volume; a folder source reaches `Synced` only through an active live watcher.
-//! Every newly chosen state goes through [`VolumeStatus::set`], which rejects `Synced`, so no
-//! scan, poll or recovery path can hand-pick freshness without a journal position or a watcher.
-//! [`VolumeStatus::restore`] only rolls back a state the volume already held.
-
 use super::journal_reconciliation::catch_up_state;
 use cairn_protocol::status::VolumeState;
 
@@ -23,8 +17,6 @@ impl VolumeStatus {
         self.0
     }
 
-    /// Applies a non-synced state. `Synced` is produced only by [`Self::reconcile`] and
-    /// [`Self::reconcile_poll`].
     pub(super) fn set(&mut self, state: VolumeState) {
         assert!(
             !matches!(state, VolumeState::Synced),
@@ -33,8 +25,6 @@ impl VolumeStatus {
         self.0 = state;
     }
 
-    /// Marks a directory-backed source after a complete subtree walk. Only a live watcher can
-    /// claim `Synced`; a scan-only source stays in `SnapshotMode`.
     pub(super) fn mark_folder_scanned(&mut self, live_watch: bool) {
         self.0 = if live_watch {
             VolumeState::Synced
@@ -43,25 +33,18 @@ impl VolumeStatus {
         };
     }
 
-    /// Marks a folder source synchronized once its watcher is armed and delivering events.
     pub(super) fn mark_folder_live(&mut self) {
         self.0 = VolumeState::Synced;
     }
 
-    /// Restores a state captured earlier, such as the pre-scan state of a volume whose rescan
-    /// failed. The caller rolls back to a value the volume already held; this is not a new claim
-    /// of freshness.
     pub(super) fn restore(&mut self, state: VolumeState) {
         self.0 = state;
     }
 
-    /// Applies the journal ledger's catch-up result between `start_usn` and the journal tail.
     pub(super) fn reconcile(&mut self, start_usn: i64, applied_usn: i64, tail_usn: i64) {
         self.0 = catch_up_state(start_usn, applied_usn, tail_usn);
     }
 
-    /// Applies a live poll's catch-up result. Without a tail sample the poll has no new proof of
-    /// freshness and the volume keeps its state.
     pub(super) fn reconcile_poll(
         &mut self,
         start_usn: i64,

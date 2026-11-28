@@ -21,11 +21,14 @@
 1. `cargo fmt --all --check`（遵循根目录 `rustfmt.toml`）
 2. `cargo clippy --workspace --all-targets -- -D warnings`（继承根目录 `[workspace.lints]`，含 `unsafe_op_in_unsafe_fn = "deny"`、`elided_lifetimes_in_paths = "warn"`、全部 8 项 clippy `deny` 规则 `undocumented_unsafe_blocks`/`missing_safety_doc`/`await_holding_lock`/`too_many_arguments`/`large_enum_variant`/`dbg_macro`/`todo`/`unimplemented`、4 项 clippy `warn` 规则 `uninlined_format_args`/`redundant_closure_for_method_calls`/`unnested_or_patterns`/`manual_let_else` 与 `rustdoc` 断链检查，零警告）
 3. `cargo doc --workspace --no-deps`（`RUSTDOCFLAGS=-D warnings` 零警告）
-4. `cargo run -p xtask -- check`（CI 的 `Repository Gates` 使用 `--no-default-features` 在 `ubuntu-latest` 上统一执行 `check-i18n`、`check-docs`、`check-size` 与 `check-hygiene`，覆盖排除 `#[cfg(test)]` 后的本地化键值及 `{ $var }` 插值变量对齐、核心文档集与根相对/工作区相对链接、2000 行上限、`[workspace.lints]` 继承、15 处纯安全入口 `#![forbid(unsafe_code)]`、`cairn-service`/`cairn-content` 的 manifest 与 `Cargo.lock` 传递依赖隔离、8 项 `deny` lint 反抑制、按模块限定名登记的 `#[ignore]` 测试台账及全仓非调研文档/注释/文案规范）
+4. `cargo run -p xtask -- check`（CI 的 `Repository Gates` 使用 `--no-default-features` 在 `ubuntu-latest` 上统一执行 `check-i18n`、`check-docs`、`check-size`、`check-hygiene` 与版本治理，覆盖排除 `#[cfg(test)]` 后的本地化键值及 `{ $var }` 插值变量对齐、核心文档集与根相对/工作区相对链接、2000 行上限、`[workspace.lints]` 继承、15 处纯安全入口 `#![forbid(unsafe_code)]`、`cairn-service`/`cairn-content` 的 manifest 与 `Cargo.lock` 传递依赖隔离、8 项 `deny` lint 反抑制、按模块限定名登记的 `#[ignore]` 测试台账及全仓非调研文档/注释/文案规范）
 5. `cargo deny check`（许可证、安全漏洞与 yanked 检查；仓库已提供 `deny.toml`）
 6. `cargo run --release -p xtask -- bench-query --check`（CI `Release / Engine` 在 release 编译后直接运行同机 `CairnXtask.exe bench-query --check`，执行全账本内存与查询延迟回归门禁）
+7. 版本治理：`cargo run -p xtask -- check` 校验当前产品版本字面量只允许出现在 `Cargo.toml`、`Cargo.lock` 与 `CHANGELOG.md`（若存在）；外部依赖版本仅在依赖名与版本相邻时豁免；成员 manifest 必须使用 `version.workspace = true`；`check` 与 `package` 同时校验数字三段式、前导零与 MSI 字段上限；`check` 同时校验 `release.md` §6.1 登记的来源路径存在。
 
-纯文档变更仅在 `ubuntu-latest` 执行 `check-docs` 与 `check-hygiene`（`--docs-only`），跳过所有 Windows 编译、测试与发布作业，`Code Quality & Static Analysis`、`Dependency Policy`、`Domain & System Test Suite` 与 `Installer Package` 均以最小开销通过。代码变更必须通过全部必需门禁，`Installer Package` 在 Release 构建与 `Test / Engine & Tooling` 完成后执行。
+注释保留公共 API 文档、live `SAFETY:` 与有效决策链接；清理结果以外部审计报告为准。
+
+纯文档变更仅在 `ubuntu-latest` 执行 `check-docs`、`check-hygiene` 与版本治理（`--docs-only`），跳过所有 Windows 编译、测试与发布作业，`Code Quality & Static Analysis`、`Dependency Policy`、`Domain & System Test Suite` 与 `Installer Package` 均以最小开销通过。代码变更必须通过全部必需门禁，`Installer Package` 在 Release 构建与 `Test / Engine & Tooling` 完成后执行。
 
 `deny.toml` 只针对 `x86_64-pc-windows-msvc`；许可证白名单与 GPUI 栈的 unmaintained 例外均有理由记录。漏洞与 yanked 不设全局忽略，新增 ignore 必须附上游依据。
 

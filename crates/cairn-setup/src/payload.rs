@@ -4,7 +4,7 @@
 
 //! The installer payload appended to `CairnSetup.exe`.
 //!
-//! The file is one signed executable on the release page: the GPUI setup front end, followed by the
+//! The file is one executable on the release page: the GPUI setup front end, followed by the
 //! MSI and a fixed footer. The footer is deliberately small and self-describing so the setup binary
 //! can find its engine without a second file or a self-extraction directory format.
 

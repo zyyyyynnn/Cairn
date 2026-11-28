@@ -30,7 +30,8 @@ pub enum FixupError {
 
 /// Validates the `FILE` signature and restores sector-end bytes from the Update Sequence Array (USA).
 ///
-/// Modifies `buf` in-place to restore original bytes before disk write.
+/// Modifies `buf` in-place, restoring the bytes the record carried when it was written so a record
+/// read from disk parses as stored.
 pub fn apply_fixup(buf: &mut [u8], sector_size: usize) -> Result<(), FixupError> {
     if buf.len() < 48 || sector_size < 512 || !sector_size.is_power_of_two() {
         return Err(FixupError::BufferTooSmall(buf.len()));

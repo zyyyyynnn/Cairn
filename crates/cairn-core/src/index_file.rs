@@ -26,7 +26,10 @@ pub const RECORD_SIZE: usize = size_of::<FileRecord>();
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum IndexFileError {
-    #[error("invalid index file magic signature: expected CAIRNIDX")]
+    #[error(
+        "invalid index file magic signature (expected {})",
+        String::from_utf8_lossy(INDEX_MAGIC)
+    )]
     InvalidMagic,
     #[error("unsupported index format version: {0}")]
     UnsupportedVersion(u32),
@@ -209,10 +212,10 @@ mod tests {
         );
 
         let mut newer_version = header.encode();
-        newer_version[8..12].copy_from_slice(&9u32.to_le_bytes());
+        newer_version[8..12].copy_from_slice(&(INDEX_VERSION + 1).to_le_bytes());
         assert_eq!(
             IndexHeader::decode(&newer_version),
-            Err(IndexFileError::UnsupportedVersion(9))
+            Err(IndexFileError::UnsupportedVersion(INDEX_VERSION + 1))
         );
     }
 }

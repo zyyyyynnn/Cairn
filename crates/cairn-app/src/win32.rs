@@ -39,9 +39,7 @@ mod tests {
     fn an_hresult_from_win32_carries_the_win32_code() {
         // HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED)
         assert_eq!(win32_code_from_hresult(0x8007_0005u32 as i32), Some(5));
-        // A success HRESULT carries no error code.
         assert_eq!(win32_code_from_hresult(0), None);
-        // A failure from another facility is not a Win32 error.
         assert_eq!(win32_code_from_hresult(0x8004_0000u32 as i32), None);
     }
 }

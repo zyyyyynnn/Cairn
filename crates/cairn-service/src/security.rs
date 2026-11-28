@@ -8,7 +8,9 @@
 #[cfg(windows)]
 use windows::Win32::Foundation::{HLOCAL, LocalFree};
 #[cfg(windows)]
-use windows::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
+use windows::Win32::Security::Authorization::{
+    ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+};
 #[cfg(windows)]
 use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
 #[cfg(windows)]
@@ -48,7 +50,7 @@ impl SafeSecurityDescriptor {
         unsafe {
             ConvertStringSecurityDescriptorToSecurityDescriptorW(
                 PCWSTR(wide_sddl.as_ptr()),
-                1, // SDDL_REVISION_1
+                SDDL_REVISION_1,
                 &mut sd_ptr,
                 None,
             )?;
@@ -123,10 +125,7 @@ pub fn default_service_data_root() -> std::path::PathBuf {
     program_data.join("Cairn")
 }
 
-/// Held for exactly as long as the SPEC SET-02 ownership repair needs `SeRestorePrivilege`.
 struct RestorePrivilege {
-    /// `true` only when this process turned it on. The `LocalSystem` service already holds it, and
-    /// starting up must not take it away from the account that is meant to have it.
     taken_here: bool,
 }
 
@@ -144,28 +143,7 @@ impl Drop for RestorePrivilege {
     }
 }
 
-/// Puts this process into the state the SPEC SET-02 ownership repair needs, on a best-effort basis.
-///
-/// `windows_acl::enforce` writes the protected DACL first and only then restores the SYSTEM owner.
-/// That second step names a SID the caller is not, which requires **two** privileges:
-/// `SeTakeOwnershipPrivilege` lets a holder set an owner only among the
-/// SIDs it may legitimately claim — an elevated administrator can claim itself, not `SY` — while
-/// `SeRestorePrivilege` is what Microsoft documents as permitting any valid SID as owner. With only
-/// the first one enabled, an elevated `CairnService --console` still fails the owner write with
-/// `ERROR_INVALID_OWNER`.
-///
-/// Neither adjustment changes any outcome. A process that still cannot restore ownership fails closed
-/// exactly as before, because a privilege is a capability of the token and never a relaxation of the
-/// descriptor requirement — nothing here widens `RESTRICTED_SDDL`, skips a verification, or turns a
-/// refusal into an acceptance. `SeRestorePrivilege` is released again once the tree has been enforced,
-/// because it grants write access control over any file regardless of that file's ACL and no indexer
-/// needs that lying around.
-///
-/// The logging keeps the service quiet without a console-only gate: the already-enabled case, which is
-/// what `LocalSystem` sees on every start, is recorded at `debug`, while the warning only ever fires for
-/// a token that genuinely lacks the privilege. Gating that warning on `--console` instead would
-/// silence the only signal that the *service* account has been stripped of it, which is a real
-/// misconfiguration worth hearing about.
+// See docs/engineering/ipc-security.md#4-权限使用.
 fn apply_ownership_privileges() -> RestorePrivilege {
     #[cfg(windows)]
     let taken_here = {
@@ -205,41 +183,15 @@ fn apply_ownership_privileges() -> RestorePrivilege {
     };
 
     #[cfg(not(windows))]
-    // Nothing to enable: descriptor control has no implementation here, so
-    // [`enforce_restricted_acl`] already refuses every location and startup fails closed for
-    // that reason alone.
     let taken_here = false;
 
     RestorePrivilege { taken_here }
 }
 
-/// Whether one service data location still has to be created.
-///
-/// `Path::exists()` cannot answer this. It reports `false` both when nothing is at the path and when
-/// the directory *is* there but this process may not query it, and the second case is the normal state
-/// of a `%ProgramData%\Cairn` that a `LocalSystem` run has already locked down: SPEC SET-02 grants
-/// `BUILTIN\Users` nothing at all, so the attribute query a standard account makes for
-/// `%ProgramData%\Cairn\index` is refused while the directory sits there. Reading that refusal as
-/// absence sends `create_dir_all` into an existing directory, `ERROR_ALREADY_EXISTS` (os error 183)
-/// comes back as [`DataDirectoryError::Create`], and the run ends there: the locations never reach
-/// [`enforce_restricted_acl`], so the ownership refusal the operator actually has to act on is never
-/// reported. The tree is no more usable afterwards — startup still fails closed — only the diagnosis
-/// is wrong.
-///
-/// The two states separate on the I/O error *kind* rather than on a Win32 code guess: a path that is
-/// genuinely missing is `NotFound`, one the caller is barred from is `PermissionDenied`. Measured on a
-/// locked-down parent, a name that was never created still answers `NotFound`, so the creation path
-/// stays reachable; a name that exists answers the refusal, and a refusal is not evidence of absence.
-/// Any other failure has an unknown cause, which is no more evidence of absence either.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LocationPresence {
-    /// Nothing is at the path, so the location has to be created before it can be locked down.
     Absent,
-    /// The location is there and its attributes are readable.
     Present,
-    /// The location is there, but this process is refused the query that would show it. Creation must
-    /// not be attempted; the descriptor check decides what its access control is, and it reaches the
-    /// object through the owner's `READ_CONTROL` right rather than through the directory entry.
     NotListable,
 }
 
@@ -268,7 +220,6 @@ fn location_presence(path: &std::path::Path) -> LocationPresence {
 pub fn prepare_data_layout(
     root: &std::path::Path,
 ) -> Result<ServiceDataLayout, DataDirectoryError> {
-    // Held until the tree has been enforced; dropping it releases `SeRestorePrivilege` again.
     let _ownership_privileges = apply_ownership_privileges();
 
     let mut layout = ServiceDataLayout::new(root);
@@ -283,9 +234,6 @@ pub fn prepare_data_layout(
             }
             LocationPresence::Present => {}
             LocationPresence::NotListable => {
-                // Nothing here may reach into a location this process cannot even resolve: the
-                // descriptor check below is what decides whether startup continues, and it reads the
-                // stored owner and DACL rather than the directory entry.
                 tracing::warn!(
                     "{path} is already present but this process cannot read it, so it is not \
                      created again; its access control is enforced as it stands. If the tree belongs \
@@ -432,7 +380,8 @@ mod windows_acl {
     };
     use windows::Win32::Security::Authorization::{
         ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
-        ConvertStringSidToSidW, GetNamedSecurityInfoW, SE_FILE_OBJECT, SetNamedSecurityInfoW,
+        ConvertStringSidToSidW, GetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT,
+        SetNamedSecurityInfoW,
     };
     use windows::Win32::Security::{
         ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, AdjustTokenPrivileges, DACL_SECURITY_INFORMATION,
@@ -449,26 +398,19 @@ mod windows_acl {
     use windows::core::{BOOL, PCWSTR, PWSTR};
 
     const GENERIC_ALL: u32 = 0x1000_0000;
-    /// `FILE_ALL_ACCESS`, the standard-plus-specific form the object store keeps once a `GA` ACE has
-    /// been written to a file DACL. [`is_full_control`] accepts both shapes and nothing else.
-    const FILE_ALL_ACCESS: u32 = 0x001f_01ff;
+    /// `FILE_ALL_ACCESS`: the form the object store keeps once a `GA` ACE has been written to a
+    /// file DACL. [`is_full_control`] accepts both shapes and nothing else.
+    const FILE_ALL_ACCESS: u32 = windows::Win32::Storage::FileSystem::FILE_ALL_ACCESS.0;
 
-    /// Whether `mask` is exactly the full control this service writes, generic or already expanded.
-    /// Any other value — a narrower grant, extra bits, or an unexpected combination — is a deviation
-    /// from [`RESTRICTED_SDDL`] and makes the location non-compliant.
     fn is_full_control(mask: u32) -> bool {
         mask == GENERIC_ALL || mask == FILE_ALL_ACCESS
     }
     const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
-    /// `ACE_HEADER` is 4 bytes and `Mask` adds 4, so the variable-length SID of an
-    /// `ACCESS_ALLOWED_ACE` starts at offset 8.
-    const SID_OFFSET_IN_ACCESS_ALLOWED_ACE: usize = 8;
     const SID_LOCAL_SYSTEM: &str = "S-1-5-18";
     const SID_BUILTIN_ADMINISTRATORS: &str = "S-1-5-32-544";
     const ERROR_FILE_NOT_FOUND: u32 = 2;
     const ERROR_PATH_NOT_FOUND: u32 = 3;
 
-    /// A `PSID` allocated by `ConvertStringSidToSidW`, released with `LocalFree`.
     struct OwnedSid(PSID);
 
     impl Drop for OwnedSid {
@@ -483,7 +425,6 @@ mod windows_acl {
         }
     }
 
-    /// A `PSECURITY_DESCRIPTOR` allocated by advapi32, released with `LocalFree`.
     struct OwnedDescriptor(PSECURITY_DESCRIPTOR);
 
     impl Drop for OwnedDescriptor {
@@ -499,7 +440,6 @@ mod windows_acl {
         }
     }
 
-    /// A process token handle opened by `OpenProcessToken`, released with `CloseHandle`.
     struct OwnedToken(HANDLE);
 
     impl Drop for OwnedToken {
@@ -533,7 +473,6 @@ mod windows_acl {
         attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_REPARSE_POINT.0) != 0
     }
 
-    /// Builds one of the two SIDs that may own a service data location.
     fn trusted_sid(text: &str) -> Option<OwnedSid> {
         let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
         let mut sid = PSID(std::ptr::null_mut());
@@ -596,11 +535,6 @@ mod windows_acl {
         })
     }
 
-    /// Reads the stored owner and DACL of `path` and reports whether they are what SPEC SET-02 requires.
-    ///
-    /// Existence comes from the descriptor read itself: a location this process just locked down can
-    /// no longer be stat'd (the owner holds implicit `READ_CONTROL`, not `FILE_READ_ATTRIBUTES`), and
-    /// the verification step has to be able to read exactly that object back.
     pub fn inspect(path: &Path) -> Result<Option<PathTrust>, DataDirectoryError> {
         let Some(descriptor) = read_descriptor(path)? else {
             return Ok(None);
@@ -610,21 +544,24 @@ mod windows_acl {
             .filter_map(trusted_sid)
             .collect();
 
-        // SAFETY: `descriptor` is a self-describing security descriptor kept alive by the guard for
-        // the whole block; `owner`, `dacl` and every ACE pointer below belong to it.
+        let mut owner = PSID(std::ptr::null_mut());
+        let mut owner_defaulted = BOOL::default();
+        // SAFETY: `descriptor` is a live self-describing descriptor owned by the guard; `owner` is a
+        // writable out-parameter.
         unsafe {
-            let mut owner = PSID(std::ptr::null_mut());
-            let mut owner_defaulted = BOOL::default();
             GetSecurityDescriptorOwner(descriptor.0, &mut owner, &mut owner_defaulted).map_err(
                 |_| DataDirectoryError::Inspect {
                     path: path.to_path_buf(),
                     reason: "descriptor carries no owner".to_string(),
                 },
             )?;
+        }
 
-            let mut dacl_present = BOOL::default();
-            let mut dacl: *mut ACL = std::ptr::null_mut();
-            let mut dacl_defaulted = BOOL::default();
+        let mut dacl_present = BOOL::default();
+        let mut dacl: *mut ACL = std::ptr::null_mut();
+        let mut dacl_defaulted = BOOL::default();
+        // SAFETY: as above; the returned DACL pointer lives as long as `descriptor`.
+        unsafe {
             GetSecurityDescriptorDacl(
                 descriptor.0,
                 &mut dacl_present,
@@ -635,78 +572,77 @@ mod windows_acl {
                 path: path.to_path_buf(),
                 reason: "descriptor DACL could not be read".to_string(),
             })?;
+        }
 
-            let mut control = 0u16;
-            let mut revision = 0u32;
+        let mut control = 0u16;
+        let mut revision = 0u32;
+        // SAFETY: as above; both out-parameters are writable and the descriptor stays alive.
+        unsafe {
             GetSecurityDescriptorControl(descriptor.0, &mut control, &mut revision).map_err(
                 |_| DataDirectoryError::Inspect {
                     path: path.to_path_buf(),
                     reason: "descriptor control flags could not be read".to_string(),
                 },
             )?;
-
-            let mut grants = Vec::new();
-            // A NULL DACL grants universal access; an absent DACL is just as unusable here.
-            let ace_count = if !dacl_present.as_bool() {
-                grants.push("no DACL present".to_string());
-                0
-            } else if dacl.is_null() {
-                grants.push("NULL DACL grants universal access".to_string());
-                0
-            } else {
-                (*dacl).AceCount as usize
-            };
-
-            for index in 0..ace_count {
-                let mut entry: *mut core::ffi::c_void = std::ptr::null_mut();
-                if GetAce(dacl as *const ACL, index as u32, &mut entry).is_err() {
-                    grants.push(format!("ACE #{index} could not be read"));
-                    continue;
-                }
-                // SAFETY: GetAce returned a pointer to a well-formed ACE inside `dacl`.
-                let header = &*(entry as *const ACE_HEADER);
-                if header.AceType != ACCESS_ALLOWED_ACE_TYPE {
-                    grants.push(format!("ACE #{index} type {}", header.AceType));
-                    continue;
-                }
-                if header.AceFlags != 0 {
-                    // Inherited (0x80) or object-carrying ACEs are not what this service writes.
-                    grants.push(format!("ACE #{index} flags {:#04x}", header.AceFlags));
-                    continue;
-                }
-                // SAFETY: the entry was validated as an ACCESS_ALLOWED_ACE just above.
-                let ace = &*(entry as *const ACCESS_ALLOWED_ACE);
-                // SAFETY: the SID of an ACCESS_ALLOWED_ACE starts at a fixed offset in the ACE.
-                let sid = PSID(entry.wrapping_add(SID_OFFSET_IN_ACCESS_ALLOWED_ACE));
-                if !is_trusted_sid(sid, &trusted) {
-                    grants.push(format!("{} holds {:#010x}", sid_to_string(sid), ace.Mask));
-                } else if !is_full_control(ace.Mask) {
-                    grants.push(format!(
-                        "{} holds a partial mask {:#010x}",
-                        sid_to_string(sid),
-                        ace.Mask
-                    ));
-                }
-            }
-
-            let acl_compliant = ace_count == trusted.len()
-                && grants.is_empty()
-                && (control & SE_DACL_PROTECTED.0) != 0;
-
-            Ok(Some(PathTrust {
-                path: path.to_path_buf(),
-                owner: sid_to_string(owner),
-                owner_trusted: is_trusted_sid(owner, &trusted),
-                acl_compliant,
-                untrusted_grants: grants,
-            }))
         }
+
+        let mut grants = Vec::new();
+        let ace_count = if !dacl_present.as_bool() {
+            grants.push("no DACL present".to_string());
+            0
+        } else if dacl.is_null() {
+            grants.push("NULL DACL grants universal access".to_string());
+            0
+        } else {
+            // SAFETY: a non-null DACL returned by the descriptor is live for this borrow.
+            unsafe { (*dacl).AceCount as usize }
+        };
+
+        for index in 0..ace_count {
+            let mut entry: *mut core::ffi::c_void = std::ptr::null_mut();
+            // SAFETY: `dacl` is non-null and `index` indexes its `AceCount` entries.
+            if unsafe { GetAce(dacl as *const ACL, index as u32, &mut entry) }.is_err() {
+                grants.push(format!("ACE #{index} could not be read"));
+                continue;
+            }
+            // SAFETY: GetAce returned a pointer to a well-formed ACE inside `dacl`.
+            let header = unsafe { &*(entry as *const ACE_HEADER) };
+            if header.AceType != ACCESS_ALLOWED_ACE_TYPE {
+                grants.push(format!("ACE #{index} type {}", header.AceType));
+                continue;
+            }
+            if header.AceFlags != 0 {
+                // A DACL this service writes carries no ACE flags; inherited (0x10), propagation
+                // and the audit-only success/failure flags (0x40/0x80) are all deviations.
+                grants.push(format!("ACE #{index} flags {:#04x}", header.AceFlags));
+                continue;
+            }
+            // SAFETY: the entry was validated as an ACCESS_ALLOWED_ACE just above.
+            let ace = unsafe { &*(entry as *const ACCESS_ALLOWED_ACE) };
+            let sid = PSID(entry.wrapping_add(core::mem::offset_of!(ACCESS_ALLOWED_ACE, SidStart)));
+            if !is_trusted_sid(sid, &trusted) {
+                grants.push(format!("{} holds {:#010x}", sid_to_string(sid), ace.Mask));
+            } else if !is_full_control(ace.Mask) {
+                grants.push(format!(
+                    "{} holds a partial mask {:#010x}",
+                    sid_to_string(sid),
+                    ace.Mask
+                ));
+            }
+        }
+
+        let acl_compliant =
+            ace_count == trusted.len() && grants.is_empty() && (control & SE_DACL_PROTECTED.0) != 0;
+
+        Ok(Some(PathTrust {
+            path: path.to_path_buf(),
+            owner: sid_to_string(owner),
+            owner_trusted: is_trusted_sid(owner, &trusted),
+            acl_compliant,
+            untrusted_grants: grants,
+        }))
     }
 
-    /// A descriptor parsed from an SDDL string, plus the two components SPEC SET-02 writes.
-    ///
-    /// The DACL and owner are re-read from the owned descriptor on every access: the `&self` borrow is
-    /// what proves the returned pointers cannot outlive the allocation that owns them.
     struct ParsedDescriptor {
         descriptor: OwnedDescriptor,
     }
@@ -740,8 +676,6 @@ mod windows_acl {
         }
     }
 
-    /// Parses `sddl` and rejects a descriptor without a readable DACL, so an empty or NULL DACL can
-    /// never be pushed onto a real path. The owner is only required by [`apply_owner`].
     fn parse_descriptor(path: &Path, sddl: &str) -> Result<ParsedDescriptor, DataDirectoryError> {
         let wide_sddl: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();
         let mut raw_descriptor = PSECURITY_DESCRIPTOR(std::ptr::null_mut());
@@ -749,7 +683,7 @@ mod windows_acl {
         unsafe {
             ConvertStringSecurityDescriptorToSecurityDescriptorW(
                 PCWSTR(wide_sddl.as_ptr()),
-                1, // SDDL_REVISION_1
+                SDDL_REVISION_1,
                 &mut raw_descriptor,
                 None,
             )
@@ -770,11 +704,6 @@ mod windows_acl {
         Ok(parsed)
     }
 
-    /// Writes only the protected DACL onto `path`.
-    ///
-    /// The object owner holds an implicit `WRITE_DAC` right, so this step succeeds even in a
-    /// non-privileged process; severing inheritance is the part that keeps `%ProgramData%\Cairn` from
-    /// the `BUILTIN\Users` grants of its parent. `Ok(None)` means the write was accepted.
     fn apply_dacl(
         path: &Path,
         parsed: &ParsedDescriptor,
@@ -805,9 +734,6 @@ mod windows_acl {
         })
     }
 
-    /// Moves one privilege on this process token to `enable`, and reports whether the token already
-    /// held that state.
-    ///
     /// `AdjustTokenPrivileges` returns success even when the privilege is not part of the token at
     /// all, so the trailing `ERROR_NOT_ALL_ASSIGNED` is the only honest result: the last-error slot is
     /// cleared immediately before the call and read immediately after it, with no other Win32 call in
@@ -880,42 +806,23 @@ mod windows_acl {
         Ok(previous.Privileges[0].Attributes & SE_PRIVILEGE_ENABLED == SE_PRIVILEGE_ENABLED)
     }
 
-    /// Enables `SeTakeOwnershipPrivilege`, which lets a holder set an owner **only among the SIDs it
-    /// may legitimately claim** — for an elevated administrator, itself.
     pub fn enable_take_ownership_privilege() -> Result<bool, String> {
         adjust_privilege("SeTakeOwnershipPrivilege", SE_TAKE_OWNERSHIP_NAME, true)
     }
 
-    /// Enables `SeRestorePrivilege`, the one privilege that permits naming **any valid SID** as an
-    /// object's owner. [`apply_owner`] needs it, and `SeTakeOwnershipPrivilege` alone does not
-    /// provide it: an elevated `CairnService --console` taking ownership may set its own SID, not `SY`.
     pub fn enable_restore_privilege() -> Result<bool, String> {
         adjust_privilege("SeRestorePrivilege", SE_RESTORE_NAME, true)
     }
 
-    /// Puts `SeRestorePrivilege` back the way it was. Granting it means "write access control to any
-    /// file regardless of the ACL", so a long-running indexer must not keep it for the ownership
-    /// repair alone.
     pub fn disable_restore_privilege() -> Result<(), String> {
         adjust_privilege("SeRestorePrivilege", SE_RESTORE_NAME, false).map(|_| ())
     }
 
-    /// Writes only the owner onto `path`, separately from the DACL.
-    ///
-    /// Naming an owner the caller is not needs `SeRestorePrivilege` *enabled*; `SeTakeOwnershipPrivilege`
-    /// on its own only lets a holder claim the object for a SID it may legitimately use, which for an
-    /// elevated administrator means itself and never `SY`. Both are attempted by
-    /// [`super::apply_ownership_privileges`] before anything is enforced, and the `LocalSystem` service
-    /// holds both from the start. Group is deliberately left alone: bundling it would refuse the owner
-    /// for any process that cannot claim `SY` as its primary group. `Ok(None)` means the write was
-    /// accepted.
     fn apply_owner(
         path: &Path,
         parsed: &ParsedDescriptor,
     ) -> Result<Option<String>, DataDirectoryError> {
         let wide_path = to_wide(path);
-        // An owner this process cannot read from the descriptor is reported the same way a refused
-        // write is: the DACL lockdown above already happened and must not be downgraded by it.
         let Some(owner) = parsed.owner() else {
             return Ok(Some(
                 "the descriptor of this path exposes no owner SID".to_string(),
@@ -940,14 +847,7 @@ mod windows_acl {
         })
     }
 
-    /// Applies [`RESTRICTED_SDDL`] to `path`, then verifies that the stored descriptor is the
-    /// expected one. Fails closed: a path that cannot be brought under SYSTEM/Administrators control
-    /// is an error, never a warning.
-    ///
-    /// Order matters and is the whole point: the DACL is written unconditionally first, and only then
-    /// is ownership attempted as a separate call. A refused owner repair cannot undo the lockdown,
-    /// because leaving the inherited `BUILTIN\Users` grants in place would let a standard account
-    /// pre-empt the directory and feed the `LocalSystem` service a `service.toml` it controls.
+    // See docs/engineering/ipc-security.md#4-权限使用.
     pub fn enforce(path: &Path) -> Result<(), DataDirectoryError> {
         if is_reparse_point(path) {
             return Err(DataDirectoryError::ReparsePoint {
@@ -973,8 +873,6 @@ mod windows_acl {
         }
 
         let owner_failure = apply_owner(path, &parsed)?;
-        // The DACL is what makes the location usable, so it is verified even when the owner could
-        // not be restored; a failed lockdown outranks the ownership complaint.
         verify(path, owner_failure.is_none())?;
         match owner_failure {
             None => Ok(()),
@@ -992,9 +890,6 @@ mod windows_acl {
         }
     }
 
-    /// Re-reads the stored descriptor and refuses anything SPEC SET-02 does not allow.
-    /// `require_trusted_owner` is false only when this process was refused the owner repair and the
-    /// caller reports that separately as [`DataDirectoryError::Ownership`].
     fn verify(path: &Path, require_trusted_owner: bool) -> Result<(), DataDirectoryError> {
         let after = inspect(path)?.ok_or_else(|| DataDirectoryError::NotRemediated {
             path: path.to_path_buf(),
@@ -1025,7 +920,7 @@ mod tests {
         use std::os::windows::ffi::OsStrExt;
         use windows::Win32::Foundation::{HLOCAL, LocalFree};
         use windows::Win32::Security::Authorization::{
-            ConvertStringSecurityDescriptorToSecurityDescriptorW, SE_FILE_OBJECT,
+            ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1, SE_FILE_OBJECT,
             SetNamedSecurityInfoW,
         };
         use windows::Win32::Security::{
@@ -1050,7 +945,7 @@ mod tests {
         unsafe {
             ConvertStringSecurityDescriptorToSecurityDescriptorW(
                 PCWSTR(wide_sddl.as_ptr()),
-                1,
+                SDDL_REVISION_1,
                 &mut raw,
                 None,
             )
@@ -1157,7 +1052,6 @@ mod tests {
         );
         assert!(dacl.contains("(A;;GA;;;SY)"), "{dacl}");
         assert!(dacl.contains("(A;;GA;;;BA)"), "{dacl}");
-        // Interactive, built-in users, everyone and authenticated users must appear nowhere.
         for forbidden in ["IU", "BU", "WD", "WO", "AU", "S-1-5-32-545", "S-1-1-0"] {
             assert!(
                 !RESTRICTED_SDDL.contains(forbidden),
@@ -1191,10 +1085,6 @@ mod tests {
         assert_eq!(layout.writable_locations().len(), 4);
     }
 
-    /// Creating a location is the response to it being *missing*, and to nothing else. A path the
-    /// caller is barred from is a security question for SPEC SET-02, not an invitation to `create_dir_all`,
-    /// so the classification has to hold even for the states that never reach a locked-down tree: a
-    /// plain file, and a name whose parent does not exist either.
     #[test]
     fn location_presence_only_calls_a_missing_path_absent() {
         let stamp = std::time::SystemTime::now()
@@ -1217,10 +1107,7 @@ mod tests {
             LocationPresence::Absent,
             "a location that was never created must still be creatable"
         );
-        // Something at the path that is not a directory is still not absent: creating it would be the
-        // wrong response, and the descriptor check is what has to refuse it.
         assert_eq!(location_presence(&file), LocationPresence::Present);
-        // A location whose parent chain is missing is absent as well, not unreachable.
         assert_eq!(
             location_presence(&base.join("absent-parent").join("index")),
             LocationPresence::Absent
@@ -1231,8 +1118,6 @@ mod tests {
 
     #[test]
     fn pipe_dacl_keeps_standard_users_able_to_connect() {
-        // SPEC SVC-02: standard users may connect and query; only the admin-only switch removes that,
-        // while remote Network Users and Everyone/World are always excluded.
         assert!(DEFAULT_SDDL.contains("SY"), "{DEFAULT_SDDL}");
         assert!(DEFAULT_SDDL.contains("BA"), "{DEFAULT_SDDL}");
         assert!(DEFAULT_SDDL.contains("(A;;GRGW;;;IU)"), "{DEFAULT_SDDL}");
@@ -1271,9 +1156,6 @@ mod tests {
         assert!(summary.contains("trusted: false"), "{summary}");
     }
 
-    /// A temporary root that no earlier run can have left behind. A protected directory from a
-    /// previous run is not listable by this account, so reusing a name would turn a fresh test into
-    /// a create failure.
     #[cfg(windows)]
     fn fresh_probe_root(prefix: &str) -> PathBuf {
         let stamp = std::time::SystemTime::now()
@@ -1283,9 +1165,6 @@ mod tests {
         std::env::temp_dir().join(format!("cairn-{prefix}-{}-{stamp}", std::process::id()))
     }
 
-    /// SPEC SET-02 effect measured on the real object store: a location created by the current account
-    /// (which inherits writable ACEs from its parent) is locked down to SYSTEM/Administrators, and
-    /// the outcome is read back from the stored descriptor rather than assumed.
     #[cfg(windows)]
     #[test]
     fn enforce_locks_a_real_directory_down_and_reports_ownership_needs() {
@@ -1297,20 +1176,16 @@ mod tests {
             .expect("inspection after repair")
             .expect("probe still present");
 
-        // Whatever happened, give the creator its access back so the probe can be deleted.
         let cleanup = apply_sddl(&probe, "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;CO)");
         let removed = std::fs::remove_dir(&probe);
 
-        // The DACL is the part any owner can fix with its implicit WRITE_DAC right.
         assert!(
             trust.acl_compliant,
             "DACL not locked down: {}",
             trust.summary()
         );
         match result {
-            // LocalSystem / SeTakeOwnershipPrivilege: fully remediated.
             Ok(()) => assert!(trust.owner_trusted, "{}", trust.summary()),
-            // Standard or non-privileged account: the DACL is fixed, ownership needs the service.
             Err(DataDirectoryError::Ownership { owner, .. }) => {
                 assert!(!trust.owner_trusted);
                 assert_ne!(owner, "S-1-5-18");
@@ -1321,9 +1196,6 @@ mod tests {
         removed.expect("probe directory removable after cleanup");
     }
 
-    /// The compliance check has to tell the SPEC SET-02 lockdown apart from a look-alike descriptor that
-    /// grants less: the right principals with a narrower mask are not what this service writes, while
-    /// a `GA` grant the object store has expanded to `FILE_ALL_ACCESS` is exactly what it is.
     #[cfg(windows)]
     #[test]
     fn a_partial_grant_is_not_mistaken_for_the_restricted_descriptor() {
@@ -1366,15 +1238,6 @@ mod tests {
         let outcome = prepare_data_layout(&probe);
         let layout = ServiceDataLayout::new(&probe);
 
-        // All four locations exist and are locked even when the identity step could not be
-        // completed: the tree is created first, every location is then locked down, and a partial
-        // lock must never be silently accepted.
-        //
-        // Existence is proven by reading the stored descriptor rather than by `is_dir()`: listing
-        // the entries of the protected parent needs `FILE_LIST_DIRECTORY`, which SPEC SET-02 grants only
-        // to SYSTEM and Administrators, while this process keeps the implicit `READ_CONTROL` right
-        // of an owner that `GetNamedSecurityInfoW` uses. A location that does not exist yields
-        // `Ok(None)` here, so this loop fails on a missing directory too.
         for dir in layout.writable_locations() {
             let trust = inspect_path_trust(&dir)
                 .expect("inspect")
@@ -1403,25 +1266,15 @@ mod tests {
         let _ = std::fs::remove_dir(&probe);
     }
 
-    /// The state a locked-down tree leaves a standard account in: every location exists, and none of
-    /// them can be listed through the protected parent. Treating that as "absent, mine to create"
-    /// makes the run end on `create_dir_all`'s `ERROR_ALREADY_EXISTS`, before any location is
-    /// enforced, so the ownership or repair refusal the operator must act on is never produced.
     #[cfg(windows)]
     #[test]
     fn an_existing_but_unlistable_tree_is_enforced_rather_than_failed_to_create() {
         let probe = fresh_probe_root("unlistable-tree");
         let layout = ServiceDataLayout::new(&probe);
-        // The whole tree exists first, exactly as `%ProgramData%\Cairn` does after a service run: the
-        // defect is about an existing location being read as a missing one, so a location that really
-        // is missing would take a different, correct path through the same loop.
         for dir in layout.writable_locations() {
             std::fs::create_dir_all(&dir).expect("probe tree");
         }
 
-        // Lock the root down on its own: each child keeps the owner's implicit READ_CONTROL, which is
-        // what lets the descriptor check reach it, while the query that would have to prove the child
-        // exists is refused by the protected parent.
         apply_sddl(&probe, RESTRICTED_SDDL).expect("lock the probe root down");
 
         let cleanup = |probe: &std::path::Path| {
@@ -1432,10 +1285,6 @@ mod tests {
         };
 
         if location_presence(&layout.index_dir) != LocationPresence::NotListable {
-            // A token holding the built-in Administrators group has Generic All on the descriptor
-            // SPEC SET-02 writes, so it can still list the protected parent and this machine cannot produce
-            // the blocked traversal at all. Nothing here is an existing tree that has to be enforced,
-            // so record that the case was not exercised rather than assert a different one.
             eprintln!(
                 "this token can still list the locked-down parent; unlistable-tree check not exercised"
             );
@@ -1443,8 +1292,6 @@ mod tests {
             return;
         }
 
-        // A location that genuinely is not there still reads as absent behind this same protected
-        // parent, so refusing to create an unreachable one cannot turn a first install into a failure.
         assert_eq!(
             location_presence(&probe.join("never-created")),
             LocationPresence::Absent,
@@ -1453,7 +1300,6 @@ mod tests {
 
         let outcome = prepare_data_layout(&probe);
 
-        // The failure must come from the access control, never from the creation attempt.
         if let Err(error) = &outcome {
             assert!(
                 !matches!(error, DataDirectoryError::Create { .. }),
@@ -1471,9 +1317,6 @@ mod tests {
             );
         }
 
-        // And enforcement really ran. A run that stopped at the create error would leave `index` with
-        // the grants it inherited from an unprotected parent instead of the SPEC SET-02 descriptor, so this
-        // fails on the misclassification alone, independently of the error category above.
         let trust = inspect_path_trust(&layout.index_dir)
             .expect("inspect index")
             .expect("index still present");
@@ -1486,8 +1329,6 @@ mod tests {
         cleanup(&probe);
     }
 
-    /// A reparse point in the data path would let the `LocalSystem` process write through a link that
-    /// an unprivileged account created, so it must be refused outright.
     #[cfg(windows)]
     #[test]
     fn reparse_point_is_refused_instead_of_followed() {
@@ -1496,8 +1337,6 @@ mod tests {
         let link = base.join("link");
         std::fs::create_dir_all(&target).expect("target directory");
 
-        // `mklink /J` creates a directory junction, which is the form an unprivileged account can
-        // create inside a parent it may write to.
         let made = std::process::Command::new("cmd")
             .args(["/C", "mklink", "/J"])
             .arg(&link)
@@ -1516,19 +1355,10 @@ mod tests {
         let _ = std::fs::remove_dir(&link);
         let _ = std::fs::remove_dir_all(&base);
         if !made {
-            // The machine refused to create the junction; nothing to assert, so record that fact.
             eprintln!("junction could not be created; reparse check not exercised");
         }
     }
 
-    /// `AdjustTokenPrivileges` answers success even when the privilege is not part of the token at
-    /// all, so a naive implementation would report the ownership repair as reachable from a process
-    /// that still cannot perform it. The report therefore has to agree with what the token actually
-    /// holds, read through an independent call.
-    ///
-    /// Whichever token the suite runs under, one of the two branches is exercised: a standard account
-    /// has no `SeTakeOwnershipPrivilege` to enable, an elevated one has it assigned and disabled until
-    /// this call enables it, and `LocalSystem` holds it enabled from the start.
     #[cfg(windows)]
     #[test]
     fn the_privilege_report_agrees_with_the_token_that_holds_it() {

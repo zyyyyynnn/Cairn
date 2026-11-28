@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! What the index rows of the Tools menu may do, stated without the window.
+//! What the index rows of the Index menu may do, stated without the window.
 
 use crate::service::SubsystemState;
 use cairn_protocol::status::{ContentIndexState, IndexJournalStatus, PropertyIndexStatus};

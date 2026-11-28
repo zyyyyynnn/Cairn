@@ -17,7 +17,6 @@ fn row(name: &str) -> FileRowData {
     }
 }
 
-/// A table whose server-reported total is `total` but whose fetched window is `loaded` rows.
 fn table(loaded: usize, total: usize) -> TableState {
     let mut table = TableState {
         total_rows: total,
@@ -79,7 +78,6 @@ fn visible_range_tracks_the_scroll_offset() {
 fn visible_range_rejects_degenerate_geometry() {
     assert_eq!(visible_range(0.0, 0.0, ROW_HEIGHT, 10), 0..0);
     assert_eq!(visible_range(0.0, VIEWPORT, 0.0, 10), 0..0);
-    // Overscroll bounces off the end of the result set rather than panicking.
     assert_eq!(visible_range(1.0e9, VIEWPORT, ROW_HEIGHT, 10), 0..10);
 }
 
@@ -97,8 +95,6 @@ fn a_million_rows_render_a_constant_number_of_slots() {
 #[test]
 fn scroll_top_is_clamped_to_the_band() {
     let mut table = table(100, 100_000);
-    // The band is 100,000 rows * 22px tall, so only a delta beyond that extent can reach the
-    // far clamp.
     table.set_scroll_top(table.scroll_top + 5_000_000.0, ROW_HEIGHT);
     assert_eq!(table.scroll_top, table.max_scroll_top(ROW_HEIGHT));
     table.set_scroll_top(table.scroll_top - 1.0e9, ROW_HEIGHT);
@@ -185,9 +181,6 @@ fn no_page_is_requested_when_everything_is_loaded() {
     assert_eq!(TableState::default().page_request(0..10, PAGE), None);
 }
 
-/// The service skips rows whose volume or record vanished and still returns `RowsResult`; an
-/// empty page must still advance `loaded_range` so the render pass does not ask for the same
-/// offset again every frame, forever.
 #[test]
 fn an_empty_page_is_not_requested_again() {
     let mut table = table(200, 1_000);
@@ -208,12 +201,6 @@ fn an_empty_page_is_not_requested_again() {
     );
 }
 
-/// A page that is already inside the fetched window cannot advance it either. Recording it is
-/// what keeps a duplicate or overlapping response from becoming the offset the next viewport
-/// jump asks for again and again.
-/// A page that is already inside the fetched window does not widen it, but contains valid
-/// rows and must NOT be marked as an empty page. If the window later evicts or jumps away,
-/// scrolling back to that range must request it again rather than permanently refusing it.
 #[test]
 fn a_contained_non_empty_page_is_not_marked_empty() {
     let mut table = table(0, 1_000);
@@ -237,7 +224,7 @@ fn a_contained_non_empty_page_is_not_marked_empty() {
 }
 
 #[test]
-fn lru_eviction_prunes_empty_page_offsets() {
+fn directional_truncation_prunes_empty_page_offsets() {
     let mut table = table(0, 10_000);
 
     table.apply_page(1000, (1000..3000).map(|i| row(&format!("f{i}"))).collect());
@@ -298,8 +285,6 @@ fn a_new_query_clears_recorded_empty_pages() {
     );
 }
 
-/// A short page must still advance the window: the next request starts after the rows that did
-/// arrive, so one offset is never fetched twice and a row's absolute index stays its position.
 #[test]
 fn a_short_page_advances_the_next_request_without_misaligning_rows() {
     let mut table = table(200, 1_000);
@@ -462,9 +447,6 @@ fn a_background_refresh_keeps_the_viewport_and_drops_dead_selection() {
     assert_eq!(table.loaded_range(), 0..5);
 }
 
-/// A status refresh only carries the first page. Splicing it into the window replaces every
-/// row the reader paged to with an unloaded index, and the table turns into placeholders until
-/// the viewport's own page is fetched again.
 #[test]
 fn a_background_refresh_does_not_replace_a_deep_window() {
     let mut table = table(0, 1_000_000);
@@ -493,8 +475,6 @@ fn a_background_refresh_does_not_replace_a_deep_window() {
     );
 }
 
-/// The refreshed first page is newer than the rows below it, but dropping those rows would
-/// leave a viewport that is still inside the fetched window without any rows to draw.
 #[test]
 fn a_top_anchored_refresh_keeps_rows_below_its_first_page() {
     let mut table = table(400, 1_000);
@@ -512,8 +492,6 @@ fn a_top_anchored_refresh_keeps_rows_below_its_first_page() {
     );
 }
 
-/// A refresh that arrives without a first page cannot update anything; it also must not clear
-/// the only rows the table has to show.
 #[test]
 fn an_empty_background_refresh_keeps_the_window() {
     let mut table = table(200, 1_000);
@@ -522,9 +500,6 @@ fn an_empty_background_refresh_keeps_the_window() {
     assert_eq!(table.total_rows(), 1_200);
 }
 
-/// A deep window cannot be rewritten by a first-page refresh, so its rows stay on screen. They
-/// are of the old generation, though: the next viewport request must fetch that region again
-/// and replace the window instead of being suppressed by the rows still loaded there.
 #[test]
 fn a_deep_window_refresh_revalidates_the_visible_rows() {
     let mut table = table(0, 1_000_000);
@@ -580,9 +555,6 @@ fn a_deep_window_refresh_revalidates_the_visible_rows() {
     );
 }
 
-/// A page that was in flight before the refresh landed carries the invalidated generation.
-/// Installing it would put stale rows or their old order back into the window before the
-/// revalidation request returns.
 #[test]
 fn a_page_from_before_the_refresh_cannot_consume_the_revalidation() {
     let mut table = table(0, 1_000_000);
@@ -600,7 +572,6 @@ fn a_page_from_before_the_refresh_cannot_consume_the_revalidation() {
         1_000_100,
     );
 
-    // A pre-refresh page for another offset lands before the revalidation page is fetched.
     table.apply_page(0, (0..200).map(|i| row(&format!("stale{i}.rs"))).collect());
     assert_eq!(
         table.loaded_range(),
@@ -627,9 +598,6 @@ fn a_page_from_before_the_refresh_cannot_consume_the_revalidation() {
     );
 }
 
-/// A top-anchored refresh only invalidates the rows below its first page. A viewport that stays
-/// within that page needs no fetch, and the refresh drops the selection it can no longer name —
-/// including rows that still exist, since the new order can have moved them.
 #[test]
 fn a_top_window_inside_the_fresh_page_does_not_refetch() {
     let mut table = table(400, 1_000);
@@ -650,9 +618,6 @@ fn a_top_window_inside_the_fresh_page_does_not_refetch() {
     );
 }
 
-/// An empty revalidation page means the service cannot fill the visible region. Keeping the old
-/// generation there would show stale rows indefinitely, so the window is dropped and the band
-/// can show its loading state; the offset is retired rather than requested every frame.
 #[test]
 fn an_empty_revalidation_page_drops_the_stale_window() {
     let mut table = table(0, 1_000_000);
@@ -788,8 +753,6 @@ fn sort_toggles_direction_only_on_the_active_column() {
     assert_eq!(table.primary_sort(), (SortColumn::Name, true));
 }
 
-/// Every expected string here was produced by .NET's `DateTimeOffset.FromUnixTimeSeconds` over the
-/// A row with no recorded time stays blank rather than becoming the epoch.
 #[test]
 fn an_absent_timestamp_stays_blank() {
     assert_eq!(format_timestamp(0), "");

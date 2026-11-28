@@ -9,9 +9,6 @@ use cairn_core::engine::CancellationToken;
 use cairn_core::sort::SortColumn;
 use cairn_core::syntax::QueryDefaults;
 
-/// An engine with a real on-disk content index (four documents) and matching volume rows.
-/// The tests below cross the public `execute_search_multi` seam, so the content combination
-/// is exercised exactly as a client sees it.
 fn engine_with_indexed_content() -> (MultiVolumeEngine, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("index dir");
     let config = ServiceConfig {
@@ -70,8 +67,6 @@ fn matched_content_frns(engine: &MultiVolumeEngine, query: &str) -> Vec<u64> {
     frns
 }
 
-/// An engine whose content index holds one document for a FRN that two hardlink rows share,
-/// plus one unrelated document. The tests below cross the public `execute_search_multi` seam.
 fn engine_with_hardlinked_content() -> (MultiVolumeEngine, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("index dir");
     let config = ServiceConfig {
@@ -106,8 +101,6 @@ fn engine_with_hardlinked_content() -> (MultiVolumeEngine, tempfile::TempDir) {
     (engine, dir)
 }
 
-/// A content hit belongs to the FRN, and every hardlink row of that FRN is a record of its own:
-/// negation must exclude all of them, disjunction must return all of them.
 #[test]
 fn hardlink_rows_share_the_content_hit_of_their_frn() {
     let (engine, _dir) = engine_with_hardlinked_content();

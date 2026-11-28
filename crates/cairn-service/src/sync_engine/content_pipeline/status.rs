@@ -2,8 +2,6 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Content index lifecycle: searcher access, published status, backfill marker and commands.
-
 use super::{
     BackfillMarker, BatchOutcome, CONTENT_BACKFILL_MARKER, CONTENT_BACKFILL_MARKER_TMP,
     CONTENT_BACKFILL_SCHEMA, ContentCommand, ContentPipeline,
@@ -18,8 +16,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::config::ServiceConfig;
 use crate::sync_engine::MultiVolumeEngine;
 
-/// Sums the content index files currently on disk, without following links. Used only on
-/// lifecycle transitions, never by the status poll.
 pub(super) fn content_dir_bytes(path: &Path) -> u64 {
     fn walk(dir: &Path) -> u64 {
         let Ok(entries) = std::fs::read_dir(dir) else {
@@ -118,7 +114,6 @@ impl ContentPipeline {
         let _ = self.searcher.write().unwrap().take();
     }
 
-    /// Opens the existing index read-only. The service must never hold a Tantivy writer.
     pub(super) fn get_or_create_searcher(&self) -> Option<Arc<ContentSearcher>> {
         if let Some(searcher) = self.searcher() {
             return Some(searcher);
@@ -399,8 +394,6 @@ impl MultiVolumeEngine {
         self.content_pipeline.searcher()
     }
 
-    /// Opens the existing index read-only. The service answers queries and must never own a
-    /// Tantivy writer: a writer locks the directory, starts merge threads and rewrites meta.json.
     pub(crate) fn get_or_create_content_searcher(&self) -> Option<Arc<ContentSearcher>> {
         self.content_pipeline.get_or_create_searcher()
     }

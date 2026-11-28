@@ -200,7 +200,6 @@ pub fn key_bindings() -> Vec<KeyBindingEntry> {
         // Alt+Enter opens the system properties sheet directly from the result list alongside the
         // context and File menus.
         bind("alt-enter", ShowProperties, WINDOW_CONTEXT),
-        // Desktop back/forward navigation shortcuts
         bind("alt-left", NavigateBack, WINDOW_CONTEXT),
         bind("alt-right", NavigateForward, WINDOW_CONTEXT),
         bind("ctrl-\\", ToggleSidebar, WINDOW_CONTEXT),
@@ -223,9 +222,9 @@ pub fn key_bindings() -> Vec<KeyBindingEntry> {
         // Rename edits the row the table has focused, so it is the table's key too.
         bind("f2", RenameSelected, RESULTS_CONTEXT),
         bind("alt-space", PreviewSnippet, RESULTS_CONTEXT),
-        // A focused caption button is still inside the window key context, so `enter` there would
-        // out-rank nothing and open the selected row. Consume the activation keys in the control's own
-        // context; the button's click handler runs on key-up, like every native button.
+        // A focused caption button is still inside the window key context, so `enter` there would also
+        // open the selected row. Consume the activation keys in the control's own context; the
+        // button activates on key-down through its own handler.
         bind("enter", NoAction {}, WINDOW_CONTROL_CONTEXT),
         bind("space", NoAction {}, WINDOW_CONTROL_CONTEXT),
     ]

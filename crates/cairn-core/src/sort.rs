@@ -449,7 +449,6 @@ fn cmp_opt_property<T>(
     }
 }
 
-/// Compares record `a` from `ctx_a` against record `b` from `ctx_b` solely by `(col, dir)`.
 fn cmp_column_between(
     ctx_a: &SortContext<'_>,
     a: u32,
@@ -578,7 +577,6 @@ pub fn compare_cross_source_records(
     }
 }
 
-/// Compares `a` and `b` solely by `col` in `dir`, without tiebreak fallback.
 fn cmp_column_only(
     ctx: &SortContext<'_>,
     col: SortColumn,
@@ -589,7 +587,6 @@ fn cmp_column_only(
     cmp_column_between(ctx, a, ctx, b, col, dir)
 }
 
-/// The column's ascending order, including the name tiebreak the presorted column builders use.
 fn cmp_indices(col: SortColumn, a: u32, b: u32, ctx: &SortContext<'_>) -> Ordering {
     if col == SortColumn::Name {
         return cmp_name_entries(

@@ -84,10 +84,6 @@ fn index_configuration_requests_are_accepted_from_a_standard_user_caller() {
 fn a_standard_user_can_set_index_configuration_but_not_admin_only_query() {
     let harness = Harness::new(ServiceConfig::default());
 
-    // The authorization boundary is what this test can decide without a LocalSystem process:
-    // an index change from a standard user must not be a 403. Persisting the document requires
-    // the service's SYSTEM/Administrators descriptor, which the real service (LocalSystem)
-    // exercises in the installer test rather than in this unprivileged unit process.
     let payload = harness.handle(
         ClientRequest::SetConfig {
             config_toml: "content_index_enabled = true".to_string(),
@@ -123,8 +119,6 @@ fn a_standard_user_can_set_index_configuration_but_not_admin_only_query() {
     );
 }
 
-/// Keeping the current value is not a change to the switch, so the authorization gate lets it
-/// through; only the protected write of `service.toml` can still refuse it in this process.
 #[test]
 fn a_standard_user_may_submit_the_current_admin_only_query_value() {
     let harness = Harness::new(ServiceConfig::default());
@@ -169,7 +163,6 @@ fn an_administrator_may_change_admin_only_query() {
 #[test]
 fn reload_config_is_applied_for_an_administrator_caller() {
     let harness = Harness::new(ServiceConfig::default());
-    // The harness config path does not exist yet, so a reload resolves to the shipped defaults.
     let payload = harness.handle(
         ClientRequest::ReloadConfig,
         CallerAuthorization::Administrator,
@@ -185,8 +178,6 @@ fn reload_config_is_applied_for_an_administrator_caller() {
 
 #[test]
 fn admin_only_query_switch_denies_reads_for_standard_users_immediately() {
-    // The switch is read from the engine's live configuration, which is the same state the
-    // authorization of a request uses; enabling it through the engine is what a ReloadConfig does.
     let harness = Harness::new(ServiceConfig {
         admin_only_query: true,
         ..ServiceConfig::default()
@@ -213,7 +204,6 @@ fn admin_only_query_switch_denies_reads_for_standard_users_immediately() {
         assert_eq!(code, ERROR_CODE_ADMIN_ONLY_QUERY);
     }
 
-    // Administrators keep full access, and a standard user may still negotiate and cancel.
     assert!(matches!(
         harness.handle(ClientRequest::GetConfig, CallerAuthorization::Administrator),
         ResponsePayload::ConfigResult { .. }
@@ -283,7 +273,6 @@ fn hello_ack_reports_the_callers_privilege_not_a_fixed_value() {
 #[test]
 fn rescan_reports_failure_instead_of_claiming_success() {
     let harness = Harness::new(ServiceConfig::default());
-    // No volume is indexed in this harness, so rescan requests must return failure.
     match harness.handle(
         ClientRequest::Rescan { volume_id: None },
         CallerAuthorization::Administrator,
@@ -362,7 +351,6 @@ fn hello_uses_the_connection_protocol_version_and_keeps_full_diagnostics() {
     assert!(message.contains("service version 7"), "{message}");
 }
 
-/// A peer whose protocol version differs from this build's is refused at the message gate.
 #[test]
 fn a_client_from_another_build_is_rejected_at_the_message_gate() {
     let harness = Harness::new(ServiceConfig::default());
@@ -428,7 +416,6 @@ fn a_rebuilt_volume_expires_the_session_instead_of_paging_other_rows() {
     assert_eq!(first_page.len(), 1);
     assert_eq!(first_page[0].name, "notes.txt");
 
-    // Unchanged volumes keep paging normally.
     match harness.handle(
         ClientRequest::GetRows {
             session_id,
@@ -444,8 +431,6 @@ fn a_rebuilt_volume_expires_the_session_instead_of_paging_other_rows() {
         other => panic!("unexpected response: {other:?}"),
     }
 
-    // A rescan replaces every record index; the old session must not return the new file in
-    // the row that used to describe notes.txt.
     harness.engine.update_volume('C', |volume| {
         volume.ingest_items(vec![cairn_ntfs::mft::ExtractedItem {
             frn: 20,
@@ -493,9 +478,6 @@ fn content_query_request(terms: usize) -> ClientRequest {
     }
 }
 
-/// The content-term limit is request validation: a query above it is refused before the
-/// engine evaluates anything, and a query at it is answered normally. The refusal must not
-/// touch the active-query registry, whose new query would cancel every other in-flight one.
 #[test]
 fn a_query_above_the_content_term_limit_is_rejected_before_evaluation() {
     use cairn_core::syntax::MAX_CONTENT_TERMS;
@@ -518,8 +500,6 @@ fn a_query_above_the_content_term_limit_is_rejected_before_evaluation() {
     );
     harness.sessions.finish_query(&QueryOwner::default(), 41);
 
-    // No content index is ready in this harness, so the query at the limit answers an empty
-    // result set instead of a rejection.
     assert!(matches!(
         harness.handle(
             content_query_request(MAX_CONTENT_TERMS),
@@ -651,6 +631,7 @@ fn slow_query_does_not_block_concurrent_hello_or_status_on_single_worker_runtime
     ));
     engine.add_volume(crate::sync_engine::VolumeIndex::new('C'));
     let sessions = Arc::new(SessionManager::default());
+    let sessions_probe = sessions.clone();
     let custom_pipe = format!(r"\\.\pipe\Cairn.TestConcurrency.{}", std::process::id());
     let server = Arc::new(PipeServer::with_pipe_name(
         engine.clone(),
@@ -701,8 +682,6 @@ fn slow_query_does_not_block_concurrent_hello_or_status_on_single_worker_runtime
         client
     });
 
-    // Block execute_search_multi inside process_request by holding the volumes write lock
-    // on a helper thread via the public update_volume boundary.
     let (locked_tx, locked_rx) = std::sync::mpsc::channel::<()>();
     let blocker_engine = engine.clone();
     let blocker = std::thread::spawn(move || {
@@ -729,11 +708,15 @@ fn slow_query_does_not_block_concurrent_hello_or_status_on_single_worker_runtime
         env.payload
     });
 
-    // Give the server's worker time to pick up Query and block on volumes.read().
-    std::thread::sleep(std::time::Duration::from_millis(50));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while sessions_probe.active_query_count() == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "server never started the query"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
 
-    // Connect a second client from an independent OS thread while client A's synchronous
-    // Query holds the worker thread unless process_request runs via spawn_blocking.
     let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
     let pipe_b = custom_pipe.clone();
     let client_b_thread = std::thread::spawn(move || {
@@ -805,8 +788,6 @@ fn platform_source_property_and_journal_requests_round_trip_with_auth_enforced()
         ..ServiceConfig::default()
     });
 
-    // Pre-populate a folder source without privileged service.toml persistence so the IPC
-    // read/query/rescan/journal endpoints can be exercised deterministically unprivileged.
     let added = harness
         .engine
         .add_folder_source(&watch, false)
@@ -880,7 +861,6 @@ fn platform_source_property_and_journal_requests_round_trip_with_auth_enforced()
         other => panic!("unexpected degraded QueryResult: {other:?}"),
     }
 
-    // Toggle in-memory property index & inspect status + journal over IPC.
     let status = harness.engine.set_property_index_enabled(true);
     assert!(status.enabled);
     match harness.handle(
@@ -901,8 +881,6 @@ fn platform_source_property_and_journal_requests_round_trip_with_auth_enforced()
         ResponsePayload::IndexJournalResult { .. }
     ));
 
-    // Persisting mutations pass caller auth (`!= 401/403`); when unprivileged on Windows,
-    // `save_atomic_secure` fails closed instead of silently skipping ACL enforcement.
     for req in [
         ClientRequest::AddFolderSource {
             path: watch.to_string_lossy().into_owned(),
@@ -939,8 +917,6 @@ fn clear_content_index_short_circuits_when_disable_config_fails() {
     let config_dir_blocker = root.path().join("config-as-dir");
     std::fs::create_dir_all(&config_dir_blocker).unwrap();
 
-    // Seed an indexable document and marker to verify clearing does NOT execute when disabling
-    // `content_index_enabled` fails.
     {
         let writer = cairn_content::ContentWriter::open_or_create(&content_dir).unwrap();
         writer

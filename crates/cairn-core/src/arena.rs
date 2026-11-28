@@ -11,7 +11,6 @@ use std::fmt;
 /// Ensures maximum CPU cache locality and zero individual heap allocations per file.
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct NamePool {
-    /// Original UTF-8 filename bytes.
     arena: Vec<u8>,
     /// Case-folded (lowercase) byte copy for case-insensitive substring searching.
     /// Strictly maintains a 1:1 byte length correspondence with `arena`.

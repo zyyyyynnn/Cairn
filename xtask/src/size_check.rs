@@ -11,15 +11,9 @@ use std::path::{Path, PathBuf};
 const MAX_LINES: usize = 2000;
 
 pub fn check_size(workspace: &Path) -> Result<(), String> {
-    let mut files = Vec::new();
-    for root in ["crates", "xtask"] {
-        let dir = workspace.join(root);
-        if !dir.is_dir() {
-            return Err(format!("source root does not exist: {}", dir.display()));
-        }
-        collect_rust_files(&dir, &mut files);
-    }
+    let mut files = crate::hygiene_check::collect_rust_files(workspace)?;
     files.sort();
+    files.dedup();
 
     let mut oversized = Vec::new();
     let mut largest: (usize, PathBuf) = (0, PathBuf::new());
@@ -57,33 +51,36 @@ pub fn check_size(workspace: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn collect_rust_files(dir: &Path, files: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            if path.file_name().is_some_and(|name| name == "target") {
-                continue;
-            }
-            collect_rust_files(&path, files);
-        } else if path.extension().is_some_and(|ext| ext == "rs") {
-            files.push(path);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn workspace() -> tempfile::TempDir {
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            temp.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/demo\", \"xtask\"]\n",
+        )
+        .expect("root manifest");
+        fs::create_dir_all(temp.path().join("crates/demo/src")).expect("create src");
+        fs::write(
+            temp.path().join("crates/demo/Cargo.toml"),
+            "[package]\nname = \"demo\"\n",
+        )
+        .expect("demo manifest");
+        fs::create_dir_all(temp.path().join("xtask")).expect("create xtask root");
+        fs::write(
+            temp.path().join("xtask/Cargo.toml"),
+            "[package]\nname = \"xtask\"\n",
+        )
+        .expect("xtask manifest");
+        temp
+    }
+
     #[test]
     fn a_file_at_the_limit_passes_and_one_above_it_fails() {
-        let temp = tempfile::tempdir().expect("tempdir");
+        let temp = workspace();
         let src = temp.path().join("crates").join("demo").join("src");
-        fs::create_dir_all(&src).expect("create src");
-        fs::create_dir_all(temp.path().join("xtask")).expect("create xtask root");
         fs::write(src.join("ok.rs"), "x\n".repeat(MAX_LINES)).expect("write at limit");
         check_size(temp.path()).expect("a file at the limit passes");
 
@@ -97,22 +94,24 @@ mod tests {
 
     #[test]
     fn non_rust_files_do_not_count() {
-        let temp = tempfile::tempdir().expect("tempdir");
+        let temp = workspace();
         let src = temp.path().join("crates").join("demo").join("src");
-        fs::create_dir_all(&src).expect("create src");
-        fs::create_dir_all(temp.path().join("xtask")).expect("create xtask root");
         fs::write(src.join("notes.md"), "x\n".repeat(MAX_LINES + 1)).expect("write markdown");
         check_size(temp.path()).expect("only Rust sources are gated");
     }
 
     #[test]
-    fn a_missing_source_root_is_an_error_not_a_silent_pass() {
+    fn a_missing_member_source_root_is_an_error_not_a_silent_pass() {
         let temp = tempfile::tempdir().expect("tempdir");
-        fs::create_dir_all(temp.path().join("crates")).expect("create crates");
-        let err = check_size(temp.path()).expect_err("a workspace without xtask must fail");
+        fs::write(
+            temp.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/demo\", \"xtask\"]\n",
+        )
+        .expect("root manifest");
+        let err = check_size(temp.path()).expect_err("a missing member source root must fail");
         assert!(
-            err.contains("xtask"),
-            "the error must name the missing root: {err}"
+            err.contains("crates") && err.contains("demo"),
+            "the error must name the missing member: {err}"
         );
     }
 }

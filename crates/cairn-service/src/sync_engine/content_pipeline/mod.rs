@@ -5,9 +5,10 @@
 //! Full-text content index pipeline (CNT-01, CNT-04, CNT-05, CNT-06, CNT-07).
 //!
 //! The service owns MFT discovery and decides which files are eligible. Extraction and Tantivy
-//! writes happen in `CairnWorker.exe`; this module only builds batches, drives the worker and
-//! publishes a state machine the GUI can show. The worker is never handed the `LocalSystem`
-//! service's address space, so a malformed document cannot take the service down.
+//! writes happen in `CairnWorker.exe`; this module builds batches, drives the worker and
+//! publishes a state machine the GUI can show. The one in-process write is the explicit clear
+//! (`clear_index_inline`), used when no content thread exists. The worker is never handed the
+//! `LocalSystem` service's address space, so a malformed document cannot take the service down.
 
 use cairn_content::ContentSearcher;
 use cairn_protocol::status::{ContentIndexState, ContentIndexStatus, ContentIndexTask};
@@ -23,8 +24,6 @@ mod worker_process;
 use self::status::content_dir_bytes;
 use self::worker_process::worker_exit_is_transient;
 
-/// Autonomous full-text content pipeline owning index directory, read-only searcher handle,
-/// published status, cancellation flag, and background command channel.
 pub(in crate::sync_engine) struct ContentPipeline {
     dir: PathBuf,
     searcher: RwLock<Option<Arc<ContentSearcher>>>,
@@ -86,12 +85,8 @@ impl ContentPipeline {
     }
 }
 
-/// Format version of the completed-backfill marker. Bump it when the content index layout
-/// changes; an old marker then forces a full rebuild instead of trusting an incompatible index.
 const CONTENT_BACKFILL_SCHEMA: u32 = 2;
-/// Proof that a full backfill with the current configuration finished and published Ready.
 const CONTENT_BACKFILL_MARKER: &str = "backfill.complete.json";
-/// Half-written replacement, renamed over the marker only after its payload is on disk.
 const CONTENT_BACKFILL_MARKER_TMP: &str = "backfill.complete.json.tmp";
 
 /// Commands handled by the single content thread. The thread owns the full-backfill state machine
@@ -119,8 +114,6 @@ enum BatchOutcome {
     Failed(WorkerFailure),
 }
 
-/// A failed worker batch. `transient` records whether the worker's exit code names a handle
-/// conflict that a retry can clear; the message keeps the process output for the log.
 struct WorkerFailure {
     message: String,
     transient: bool,
@@ -142,8 +135,6 @@ impl BatchOutcome {
     }
 }
 
-/// Marker written after a full backfill reaches Ready. It records the configuration the index was
-/// built with, not a live checksum: incremental updates deliberately do not rewrite it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct BackfillMarker {
     schema: u32,

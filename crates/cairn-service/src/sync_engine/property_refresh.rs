@@ -2,14 +2,11 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Coalesced property refresh requests and the handles shared with index sources.
-
 use super::MultiVolumeEngine;
 use cairn_core::property_store::{PropertySideTables, SourceId};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
-/// Above this many individually tracked records a full revalidation pass replaces the delta set.
 const PROPERTY_DELTA_RECORD_LIMIT: usize = 50_000;
 
 pub(super) type PropertySpawner = Arc<Mutex<Option<Weak<MultiVolumeEngine>>>>;
@@ -95,9 +92,6 @@ impl PropertyRefreshHandles {
     }
 }
 
-/// Coalesced work for the property pipeline. Sources request a complete recheck; USN and watcher
-/// batches request individual records. Requests accumulate while extraction runs and are drained in
-/// the worker loop until idle, so a busy volume never blocks callers or drops concurrent wakeups.
 #[derive(Default)]
 pub(super) struct PropertyRefresh {
     full: bool,

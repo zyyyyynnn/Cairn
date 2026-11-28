@@ -75,8 +75,6 @@ impl ServiceRuntime {
             sessions: _sessions,
         } = self;
 
-        // Poll backlog volumes at 50ms so cold-start CatchingUp drains in seconds before returning
-        // to the 500ms steady cadence once every volume is Synced.
         let engine_usn = engine.clone();
         let usn_task = tokio::spawn(async move {
             let mut catching_up = match tokio::task::spawn_blocking({
@@ -205,9 +203,6 @@ impl ServiceRuntime {
     }
 }
 
-/// Loads `service.toml` unless the SPEC SET-02/SVC-05 check found it under the control of accounts that must
-/// not control it, or unless it cannot be parsed. Falling back to the shipped defaults is logged
-/// either way: a silently wrong configuration is worse than a default one.
 fn load_configuration(layout: &ServiceDataLayout) -> ServiceConfig {
     if layout.config_untrusted {
         return ServiceConfig::default();

@@ -2,12 +2,13 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Win32 Shell API integrations for Opening, Highlighting, Properties dialog, Clipboard, native
-//! icons, and the explicit "start the installed service" action.
+//! Win32 Shell API integrations: opening and revealing files, the properties dialog, clipboard
+//! access, Recycle Bin enumeration and operations, shell rename, atomic file replacement, and the
+//! explicit elevation actions ("Start service", installing an in-app update).
 //!
-//! The GUI itself is never elevated. Index configuration goes through the service pipe; the only
-//! UAC request is the user's explicit click on "Start service", which elevates a second copy of
-//! this executable and waits for its exit code.
+//! The GUI itself is never elevated. Index configuration goes through the service pipe; UAC is
+//! requested only by those explicit actions: "Start service" elevates a second copy of this
+//! executable and waits for its exit code, and an update install elevates the installer.
 
 #[cfg(windows)]
 use windows::Win32::Foundation::{FILETIME, HWND, PROPERTYKEY};
@@ -199,13 +200,13 @@ fn recycle_bin_extension_lower(name: &str, fs_path: &str, is_dir: bool) -> Strin
 pub struct RecycleBinItem {
     /// Original name, as Explorer shows it in the bin.
     pub name: String,
-    /// Lowercased name and directory, computed once at enumeration for the bin's
-    /// case-insensitive in-place filter and cached sort keys.
+    /// Lowercased [`name`](Self::name) for the bin's case-insensitive filter.
     pub name_lower: String,
-    /// Lowercased extension without the leading dot, cached for extension sorting.
+    /// Lowercased extension without the leading dot, for extension sorting.
     pub extension_lower: String,
     /// The directory the item was deleted from.
     pub original_dir: String,
+    /// Lowercased [`original_dir`](Self::original_dir) for the bin's case-insensitive filter.
     pub original_dir_lower: String,
     /// Filesystem path of the bin payload (`C:\$Recycle.Bin\...\$R...`),
     /// what restore and open-from-bin act on.
@@ -494,9 +495,6 @@ fn enumerate_recycle_bin(_com: &ComApartment) -> Result<Vec<BinEntry<'_>>, Strin
             let is_dir = unsafe { shell_item.GetAttributes(SFGAO_FOLDER) }
                 .is_ok_and(|flags: SFGAO_FLAGS| flags.contains(SFGAO_FOLDER));
 
-            // Cast before taking the optional filesystem path: a failed cast must not strand the
-            // CoTaskMem PWSTR that GetDisplayName would have handed out.
-            // SAFETY: the item casts to its typed interface for property reads.
             let item2: IShellItem2 = match shell_item.cast() {
                 Ok(it) => it,
                 Err(err) => {
@@ -507,7 +505,10 @@ fn enumerate_recycle_bin(_com: &ComApartment) -> Result<Vec<BinEntry<'_>>, Strin
                 }
             };
             // SAFETY: `shell_item` is a live shell item; `SIGDN_FILESYSPATH` returns a CoTaskMem string freed via `shell_string`.
-            let fs_path = unsafe { shell_item.GetDisplayName(SIGDN_FILESYSPATH) }.ok();
+            let fs_path = unsafe { shell_item.GetDisplayName(SIGDN_FILESYSPATH) }
+                .ok()
+                .map(|pwstr| unsafe { shell_string(pwstr) })
+                .unwrap_or_default();
             // SAFETY: `item2` and `deleted_from_key` are valid; `shell_string` frees the returned CoTaskMem `PWSTR`.
             let original_dir = unsafe { item2.GetString(&deleted_from_key) }
                 .map(|pwstr| unsafe { shell_string(pwstr) })
@@ -521,10 +522,6 @@ fn enumerate_recycle_bin(_com: &ComApartment) -> Result<Vec<BinEntry<'_>>, Strin
                 });
             // SAFETY: `item2` and `size_key` are valid property-store arguments.
             let size = unsafe { item2.GetUInt64(&size_key) }.unwrap_or(0);
-            // SAFETY: `pwstr` came from `GetDisplayName(SIGDN_FILESYSPATH)` above and is consumed once here.
-            let fs_path = fs_path
-                .map(|pwstr| unsafe { shell_string(pwstr) })
-                .unwrap_or_default();
             // The display name of a shortcut commonly hides its `.lnk` suffix. The shell's
             // filesystem path keeps the real extension, so the result icon and extension sort
             // still describe the item rather than only its visible label.
@@ -1134,6 +1131,9 @@ fn rename_conflicts(code: windows::core::HRESULT) -> bool {
         || matches!(code.0 as u32, 0x8027_0029..=0x8027_002C)
 }
 
+#[cfg(windows)]
+const CF_UNICODETEXT: u32 = 13;
+
 /// Copies text to the Windows system clipboard.
 pub fn set_clipboard_text(text: &str) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(windows)]
@@ -1173,10 +1173,11 @@ pub fn set_clipboard_text(text: &str) -> Result<(), Box<dyn std::error::Error>> 
             }
             std::ptr::copy_nonoverlapping(u16_chars.as_ptr(), ptr, u16_chars.len());
             let _ = GlobalUnlock(h_val);
-            // CF_UNICODETEXT = 13. On success the clipboard owns h_val; on failure we must free it.
-            if let Err(err) =
-                SetClipboardData(13, Some(windows::Win32::Foundation::HANDLE(h_val.0)))
-            {
+            // On success the clipboard owns h_val; on failure we must free it.
+            if let Err(err) = SetClipboardData(
+                CF_UNICODETEXT,
+                Some(windows::Win32::Foundation::HANDLE(h_val.0)),
+            ) {
                 let _ = GlobalFree(Some(h_val));
                 let _ = CloseClipboard();
                 return Err(format!("Failed to set clipboard data: {err}").into());
@@ -1206,15 +1207,14 @@ pub fn get_clipboard_text() -> Option<String> {
 
         // SAFETY: OpenClipboard and GetClipboardData for CF_UNICODETEXT format.
         unsafe {
-            // CF_UNICODETEXT = 13
-            if IsClipboardFormatAvailable(13).is_err() {
+            if IsClipboardFormatAvailable(CF_UNICODETEXT).is_err() {
                 return None;
             }
             if OpenClipboard(None).is_err() {
                 return None;
             }
             let res = (|| {
-                let handle = GetClipboardData(13).ok()?;
+                let handle = GetClipboardData(CF_UNICODETEXT).ok()?;
                 let h_global = windows::Win32::Foundation::HGLOBAL(handle.0);
                 let ptr = GlobalLock(h_global) as *const u16;
                 if ptr.is_null() {

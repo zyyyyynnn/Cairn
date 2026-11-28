@@ -57,7 +57,6 @@ impl BitSet {
         }
     }
 
-    /// Whether `bit` is a member. A bit beyond the capacity is never a member.
     #[inline(always)]
     pub(super) fn contains(&self, bit: usize) -> bool {
         self.words
@@ -65,7 +64,6 @@ impl BitSet {
             .is_some_and(|word| word & (1u64 << (bit % 64)) != 0)
     }
 
-    /// Grows the set so `bits` are addressable; existing bits are untouched.
     pub(super) fn ensure_capacity(&mut self, bits: usize) {
         let words = bits.div_ceil(64);
         if self.words.len() < words {
@@ -73,8 +71,6 @@ impl BitSet {
         }
     }
 
-    /// Unions `other` into `self`. Both sets describe the same record table, so their word
-    /// vectors have equal length.
     pub(super) fn merge(&mut self, other: &Self) {
         for (word, &incoming) in self.words.iter_mut().zip(&other.words) {
             *word |= incoming;
@@ -82,21 +78,16 @@ impl BitSet {
     }
 }
 
-/// The per-volume segment-exclusion state table, keyed by the rules and the path epoch.
 struct ExclusionStatesCache {
     segments: Vec<String>,
     epoch: u64,
     states: Arc<Vec<u8>>,
 }
 
-/// A smaller volume is rebuilt quickly enough that compaction on every start would cost more than
-/// it returns.
 const COMPACT_MIN_RECORDS: usize = 100_000;
 
-/// Compaction only pays off once at least this percentage of the table is dead weight.
 const COMPACT_MIN_DROPPABLE_PERCENT: usize = 25;
 
-/// Compaction also reclaims arena rename/delete bloat once dead name bytes pass this share.
 const COMPACT_MIN_ARENA_WASTE_PERCENT: usize = 25;
 
 /// Policy governing whether a volume index should be compacted to drop dead records and arena slack.
@@ -133,16 +124,11 @@ pub struct RefreshedRecordMetadata {
     pub win32_attributes: u32,
 }
 
-/// Compaction verdict for a record's ancestor chain. A tombstone is not part of it: a dead parent
-/// does not make a live child service data, but a tombstoned directory can still sit below an
-/// excluded root, so the walk has to continue through it.
 const SUBTREE_UNKNOWN: u8 = 0;
 const SUBTREE_KEPT: u8 = 1;
 pub(super) const SUBTREE_EXCLUDED: u8 = 2;
 const SUBTREE_IN_PROGRESS: u8 = 3;
 
-/// Applies a signed byte delta to an unsigned aggregate. Saturating keeps a corrupt journal from
-/// wrapping a directory's total around; a negative step cannot go below zero.
 fn apply_size_delta(value: u64, delta: i128) -> u64 {
     if delta >= 0 {
         value.saturating_add(delta as u64)
@@ -151,7 +137,6 @@ fn apply_size_delta(value: u64, delta: i128) -> u64 {
     }
 }
 
-/// Builds one wire row for `record_idx` from a borrowed [`SourceView`].
 pub(crate) fn build_file_row<F, P>(
     view: &SourceView<'_>,
     record_idx: u32,
@@ -213,34 +198,18 @@ pub struct VolumeIndex {
     pending_renames: HashMap<u64, (u64, String)>,
     pending_data_changes: HashSet<u64>,
     pending_content_deletions: HashSet<(u64, u64)>,
-    /// FRNs of service-owned directories and everything indexed below them. They are filtered out
-    /// of scans, journal events and loaded caches so the index never describes its own writes.
     excluded_frns: HashSet<u64>,
     pub last_usn: i64,
     pub journal_id: u64,
     pub volume_serial: u64,
     pub usn_enabled: bool,
     pub(super) usn_parse_failed: bool,
-    /// Monotonic version of the record table. Every operation that rebuilds or reorders the
-    /// table (`clear`, `ingest_items`, compaction) increments it, so a query session can refuse
-    /// record indices that no longer describe the same rows.
     generation: u64,
-    /// Live records (tombstones excluded), maintained incrementally so status summaries stay O(1).
     live_count: u64,
-    /// Sum of live file sizes. The all-files view reports it without scanning the order.
     live_file_bytes: u64,
-    /// Whether `FileRecord.size` on directory rows is the recursive aggregate of their indexed
-    /// descendants. A cache written before folder sizes existed cannot prove this, so a load
-    /// aggregates once and rewrites the flag; every later update maintains the totals in place.
     directory_sizes_valid: bool,
-    /// Bumped when a rename can change an exclusion verdict or the table is replaced, so the
-    /// cached exclusion states rebuild.
     exclusion_epoch: u64,
-    /// Whether the active rule set has forms the segment table cannot answer, so every rename
-    /// bumps `exclusion_epoch` to invalidate open views.
     full_path_exclusion_rules: bool,
-    /// Segment-exclusion states are the same for every query until a path changes; rebuilding
-    /// the 1.5M-entry table per query would cost more than the search itself.
     exclusion_cache: Mutex<Option<ExclusionStatesCache>>,
 }
 
@@ -269,7 +238,6 @@ impl VolumeIndex {
             generation: 0,
             live_count: 0,
             live_file_bytes: 0,
-            // An empty table has no totals to be wrong about; the invariant holds trivially.
             directory_sizes_valid: true,
             exclusion_epoch: 0,
             full_path_exclusion_rules: false,
@@ -294,9 +262,6 @@ impl VolumeIndex {
         self.last_usn = 0;
         self.journal_id = 0;
         self.usn_parse_failed = false;
-        // Record indices captured by an open session stop describing rows the moment the table is
-        // emptied; the generation lets the pagination path notice that instead of serving a row
-        // that now belongs to another file.
         self.generation = self.generation.wrapping_add(1);
         self.directory_sizes_valid = true;
         self.exclusion_epoch = self.exclusion_epoch.wrapping_add(1);
@@ -339,8 +304,6 @@ impl VolumeIndex {
         self.exclusion_cache = Mutex::new(None);
     }
 
-    /// Registers directory FRNs whose whole subtree must stay out of this volume's index. Adding a
-    /// root that is already known is a no-op, so callers may seed the set more than once.
     pub(crate) fn set_excluded_roots(&mut self, roots: impl IntoIterator<Item = u64>) {
         self.excluded_frns.extend(roots);
     }
@@ -463,7 +426,6 @@ impl VolumeIndex {
         self.pending_content_deletions.contains(&(volume_id, frn))
     }
 
-    /// Whether the cached order holds records waiting to be merged. An unbuilt column is not
     /// Full heap-allocation ledger of this volume's resident structures.
     pub fn memory_footprint(&self) -> IndexMemoryFootprint {
         let (arena_bytes, folded_arena_bytes) = self.arena.allocated_bytes();
@@ -490,11 +452,6 @@ impl VolumeIndex {
         self.records.push(record);
     }
 
-    /// Classifies every record by whether it belongs to an excluded subtree: its own FRN is an
-    /// excluded root, or one of its ancestors is. The walk follows parent indices and marks
-    /// visited nodes, so a parent chain is resolved once per record instead of once per
-    /// descendant. Tombstones are not part of this verdict; a cycle (or a self-parent) is kept and
-    /// the walk stops there, because corrupt input must not hang startup.
     fn subtree_states_by(&self, is_excluded_root: impl Fn(usize, &FileRecord) -> bool) -> Vec<u8> {
         let count = self.records.len();
         let mut states = vec![SUBTREE_UNKNOWN; count];
@@ -558,15 +515,6 @@ impl VolumeIndex {
     /// so one memoized pass produces an O(1) lookup table. Rules with globs, embedded separators,
     /// or a drive-qualified path never reach this method; `PathExclusions` answers those from the
     /// parsed rule set against the full path.
-    /// Per-record exclusion state table built from segment-only exclusion rules.
-    ///
-    /// Path exclusions are tested against every match after query evaluation. For a broad query
-    /// returning most of the volume, calling `get_full_path` + glob evaluation against the parsed
-    /// rules is O(records × path). For a bare directory/file segment such as `$Recycle.Bin` or
-    /// `System Volume Information` the same verdict is a name comparison along the parent chain,
-    /// so one memoized pass produces an O(1) lookup table. Rules with globs, embedded separators,
-    /// or a drive-qualified path never reach this method; `PathExclusions` answers those from the
-    /// parsed rule set against the full path.
     pub(crate) fn segment_excluded_states(&self, segments: &[String]) -> Vec<u8> {
         self.subtree_states_by(|_, record| {
             let name = self.arena.get_name(record.name_offset, record.name_len);
@@ -589,8 +537,6 @@ impl VolumeIndex {
         self.full_path_exclusion_rules = active;
     }
 
-    /// The segment-exclusion states, cached until a verdict can change. Appended records extend
-    /// the cached table; a verdict-changing rename or a rebuilt table starts it over.
     pub(crate) fn segment_excluded_states_cached(&self, segments: &[String]) -> Arc<Vec<u8>> {
         let mut cache = self.exclusion_cache.lock().unwrap();
         let needs_rebuild = match cache.as_ref() {
@@ -620,9 +566,6 @@ impl VolumeIndex {
         entry.states.clone()
     }
 
-    /// Whether a rename can change any record's exclusion verdict. An ordinary rename under
-    /// kept parents keeps the cached table valid; only a name that matches a rule or a move
-    /// across an excluded boundary can move records between verdicts.
     fn rename_changes_exclusion_states(
         &self,
         old_name: &str,
@@ -645,7 +588,6 @@ impl VolumeIndex {
         }
         let state_of = |index: u32| {
             if index == FileRecord::ROOT_PARENT {
-                // Records at the volume root sit under no named segment.
                 Some(SUBTREE_KEPT)
             } else {
                 entry.states.get(index as usize).copied()
@@ -654,8 +596,6 @@ impl VolumeIndex {
         state_of(old_parent) != Some(SUBTREE_KEPT) || state_of(new_parent) != Some(SUBTREE_KEPT)
     }
 
-    /// Classifies records appended since `states` was built. Ancestors below the old length
-    /// already carry a final verdict, so the same walk reaches it without revisiting them.
     fn extend_segment_states(&self, states: &mut Vec<u8>, segments: &[String]) {
         let from = states.len();
         let count = self.records.len();
@@ -708,8 +648,6 @@ impl VolumeIndex {
         }
     }
 
-    /// Rewrites the table without tombstones or excluded subtrees and repacks the name arena with
-    /// controlled growth headroom.
     fn compact_with_states(&mut self, excluded: &[u8], kept_name_bytes: usize) -> CompactionReport {
         let old_len = self.records.len();
         let old_arena_len = self.arena.len();
@@ -772,15 +710,7 @@ impl VolumeIndex {
         self.arena = arena;
         self.frn_to_idx = frn_to_idx;
         self.path_cache.clear();
-        // The pending sets are keyed by FRN (or volume id + FRN), not by record index, so
-        // compaction cannot invalidate them. They usually hold the journal backlog replayed just
-        // before startup compaction; clearing them here would drop metadata refreshes, content
-        // rebuilds and deletion commits for everything that changed while the service was down.
-        // Entries whose records were dropped are skipped safely by the later drain paths.
         self.generation = self.generation.wrapping_add(1);
-        // Dropping tombstones and excluded subtrees can leave ancestor totals from an older
-        // session; one linear aggregation restores the invariant while leaving presorted indices
-        // lazy until an all-files query requests a column.
         self.recompute_directory_sizes();
         self.presorted.reset(false);
         self.exclusion_epoch = self.exclusion_epoch.wrapping_add(1);
@@ -821,8 +751,6 @@ impl VolumeIndex {
         Some(self.compact_with_states(&states, kept_name_bytes))
     }
 
-    /// Compacts large volumes once dead weight or arena rename bloat crosses the production
-    /// threshold.
     pub(crate) fn compact_if_needed(&mut self) -> bool {
         self.compact_with_policy(CompactPolicy::PRODUCTION)
             .is_some()
@@ -889,10 +817,6 @@ impl VolumeIndex {
         }
     }
 
-    /// Sums the space the matched set describes at its highest hit point: a matched directory
-    /// contributes its recursive size once, and a match already covered by a matched ancestor
-    /// directory adds nothing. A folder-only hit therefore reports the folder's space without
-    /// any file being counted twice.
     pub(crate) fn calculate_matched_bytes(&self, matched_indices: &[u32]) -> u64 {
         calculate_matched_bytes_for_records(&self.records, matched_indices)
     }
@@ -919,8 +843,6 @@ pub(crate) fn calculate_matched_bytes_for_records(
     }
 
     let mut seen = BitSet::with_capacity(records.len());
-    // Coverage is only consulted when a matched directory can cover a descendant; a
-    // file-only match set sums its own sizes without the lookup table.
     let mut coverage = has_matched_dirs.then(|| vec![0u8; records.len()]);
     let mut path = Vec::new();
     let mut total: u64 = 0;
@@ -934,7 +856,6 @@ pub(crate) fn calculate_matched_bytes_for_records(
         if record.is_tombstone() {
             continue;
         }
-        // The volume root is its own parent; a record is never covered by itself.
         let covered = record.parent_idx != index as u32
             && coverage.as_mut().is_some_and(|coverage| {
                 parent_is_covered_in_records(
@@ -953,7 +874,6 @@ pub(crate) fn calculate_matched_bytes_for_records(
     total
 }
 
-/// Whether `parent` or one of its ancestors is a matched live directory.
 fn parent_is_covered_in_records(
     records: &[FileRecord],
     mut parent: u32,

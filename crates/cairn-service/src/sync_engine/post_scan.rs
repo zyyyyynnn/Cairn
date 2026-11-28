@@ -145,8 +145,6 @@ mod tests {
             is_reparse_point: false,
         }]);
 
-        // Exactly what a full scan whose replay stopped short of T1 produces: the journal position
-        // is behind the tail, and the state is whatever the reconciliation decided.
         vol.journal_id = 7;
         vol.usn_enabled = true;
         vol.last_usn = 1500;

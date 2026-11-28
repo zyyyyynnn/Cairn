@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Cairn release packaging automation (REL-01 ~ REL-04).
+//! Cairn release packaging automation.
 //! Builds a WiX v5 MSI and wraps it in the GPUI setup front end (`CairnSetup.exe`). The MSI remains
 //! the transaction engine; the setup binary carries it as a verified payload and owns the visible
 //! maintenance flow. Packaging is fail-closed: a missing WiX toolset, manifest tool, binary, or a
@@ -15,6 +15,16 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const CAIRN_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+fn validate_package_version() -> Result<(), Box<dyn Error>> {
+    crate::versioning::msi_version(CAIRN_VERSION)
+        .map_err(|err| -> Box<dyn Error> { err.into() })?;
+    let tag = crate::versioning::release_tag_from_env()
+        .map_err(|err| -> Box<dyn Error> { err.into() })?;
+    crate::versioning::validate_release_tag(tag.as_deref(), CAIRN_VERSION)
+        .map_err(|err| -> Box<dyn Error> { err.into() })
+}
+
 pub const SETUP_EXE_NAME: &str = "CairnSetup.exe";
 pub const UNINSTALLER_NAME: &str = "CairnUninstall.exe";
 pub const MSI_NAME: &str = "cairn.msi";
@@ -55,6 +65,7 @@ pub const LOGO_NAME: &str = "cairn-64.png";
 /// Binaries are read from `CAIRN_BIN_DIR` when set, otherwise from `target/release` of the
 /// workspace. The WiX executable is taken from `CAIRN_WIX` when set, otherwise from `PATH`.
 pub fn run_package<P: AsRef<Path>>(out_dir: P) -> Result<(), Box<dyn Error>> {
+    validate_package_version()?;
     let workspace_root = workspace_root();
     let bin_dir = std::env::var_os("CAIRN_BIN_DIR").map_or_else(
         || workspace_root.join("target").join("release"),
@@ -447,6 +458,8 @@ fn run_command(command: &mut Command, what: &str) -> Result<(), Box<dyn Error>> 
 }
 
 fn generate_wix_template(wxs_path: &Path) -> Result<(), Box<dyn Error>> {
+    let product_version = crate::versioning::msi_version(CAIRN_VERSION)
+        .map_err(|err| -> Box<dyn Error> { err.into() })?;
     let wxs_content = format!(
         r#"<?xml version="1.0" encoding="utf-8"?>
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
@@ -644,7 +657,7 @@ fn generate_wix_template(wxs_path: &Path) -> Result<(), Box<dyn Error>> {
   </Package>
 </Wix>
 "#,
-        version = CAIRN_VERSION,
+        version = product_version,
         upgrade_code = cairn_setup::MSI_UPGRADE_CODE,
         service_name = cairn_protocol::message::SERVICE_NAME,
         icon = ICON_NAME,

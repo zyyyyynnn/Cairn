@@ -140,7 +140,6 @@ fn prepare_failed(detail: String) -> SubmissionState {
     }
 }
 
-/// Reads the configuration the running service reports (read class).
 async fn read_live_config(session: &ServiceSession) -> Result<ServiceConfigDocument, ClientError> {
     let envelope = session.get_config().await?;
 
@@ -150,7 +149,6 @@ async fn read_live_config(session: &ServiceSession) -> Result<ServiceConfigDocum
     }
 }
 
-/// Sends the edited document to the service, which persists and applies it.
 async fn submit_config(
     session: &ServiceSession,
     document: &str,
@@ -196,8 +194,6 @@ mod tests {
         ));
     }
 
-    /// The document replaces `service.toml` as a whole, so fields the GUI does not model have to
-    /// survive the edit.
     #[test]
     fn toggling_the_content_index_keeps_every_other_field() {
         let live = r#"admin_only_query = false

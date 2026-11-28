@@ -18,7 +18,6 @@ pub(crate) enum ResultSurface {
     Offline,
 }
 
-/// Lifecycle stage of a shell-backed local listing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LocalListingStage {
     Loading,
@@ -34,7 +33,6 @@ pub(crate) enum SurfaceLocation {
     LocalListing(LocalListingStage),
 }
 
-/// The panel facts that decide what the result region shows.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ResultSurfaceInputs {
     pub(crate) total_rows: usize,

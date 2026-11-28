@@ -11,8 +11,8 @@
 //! Identity is derived exclusively from the access token of the connected pipe client:
 //! `GetNamedPipeClientProcessId` -> `ImpersonateNamedPipeClient` -> `OpenThreadToken` ->
 //! `GetTokenInformation(TokenUser)` -> `CreateWellKnownSid` + `CheckTokenMembership`.
-//! A caller that cannot be attributed is `CallerAuthorization::Unauthenticated` and is served the
-//! handshake only.
+//! A caller whose identity cannot be derived is disconnected before any frame is served; on
+//! non-Windows builds requests other than the handshake are refused.
 
 use cairn_protocol::message::{
     ClientRequest, ERROR_CODE_ADMIN_ONLY_QUERY, ERROR_CODE_UNAUTHORIZED,
@@ -67,13 +67,6 @@ pub enum CallerAuthError {
     TokenUnavailable(String),
 }
 
-/// Which callers may issue a request. `Hello` and `Cancel` are always allowed: the first is
-/// negotiation, the second only stops the caller's own in-flight query.
-///
-/// Index configuration is a local-user operation: the service owns and persists the protected
-/// `service.toml`, so an authenticated interactive caller does not need elevation to change what
-/// the service indexes. `admin_only_query` is the exception and is guarded where the new
-/// configuration is applied, because a standard user must not be able to disable that mode.
 fn access_class(req: &ClientRequest) -> AccessClass {
     match req {
         ClientRequest::Hello { .. } | ClientRequest::Cancel { .. } => AccessClass::Handshake,
@@ -152,7 +145,6 @@ mod platform {
     use windows::core::BOOL;
     use windows::core::PWSTR;
 
-    /// Reverts thread impersonation when dropped, including on early returns.
     pub struct Impersonation;
 
     impl Impersonation {
@@ -191,8 +183,6 @@ mod platform {
         io::Error::from_raw_os_error(code as i32).to_string()
     }
 
-    /// Renders a SID as its string form. The buffer returned by `ConvertSidToStringSidW` is
-    /// released with `LocalFree` before returning.
     pub(super) fn sid_to_string(sid: PSID) -> Option<String> {
         if sid.is_invalid() {
             return None;
@@ -208,8 +198,6 @@ mod platform {
         }
     }
 
-    /// Builds a well-known SID into a caller-owned buffer. The buffer must outlive every use of the
-    /// `PSID` handed out by the caller.
     pub(super) fn well_known_sid(kind: WELL_KNOWN_SID_TYPE) -> Option<Vec<u8>> {
         let mut size = 0u32;
         // SAFETY: passing a null target buffer queries only the required byte length and intentionally returns ERROR_INSUFFICIENT_BUFFER.
@@ -230,7 +218,6 @@ mod platform {
         result.is_ok().then_some(buffer)
     }
 
-    /// 8-byte aligned buffer for Win32 `GetTokenInformation` structures (`TOKEN_USER`, `TOKEN_GROUPS`).
     pub(super) struct AlignedTokenBuffer {
         words: Vec<u64>,
         byte_len: usize,
@@ -263,8 +250,6 @@ mod platform {
             self.words.len().saturating_mul(size_of::<u64>())
         }
 
-        /// Returns a reference to the leading `T` header when `byte_len` covers `size_of::<T>()`
-        /// within allocated capacity and `T`'s alignment does not exceed 8 bytes.
         pub(super) fn read_header<T>(&self) -> Option<&T> {
             const {
                 assert!(align_of::<T>() <= align_of::<u64>());
@@ -278,7 +263,6 @@ mod platform {
         }
     }
 
-    /// Reads a variable-length token information class into an 8-byte aligned buffer.
     fn token_information(
         token: HANDLE,
         class: TOKEN_INFORMATION_CLASS,
@@ -325,7 +309,6 @@ mod platform {
         let mut client_pid = 0u32;
         // SAFETY: `pipe_handle` is a connected pipe instance handle provided by the caller.
         if unsafe { GetNamedPipeClientProcessId(pipe_handle, &mut client_pid) }.is_err() {
-            // Fails for remote and already-disconnected clients: no local identity means no grant.
             return Err(CallerAuthError::NoLocalClient(last_os_error()));
         }
 
@@ -405,8 +388,6 @@ mod platform {
             }
         }
 
-        // TokenGroups is only read to make the derived identity auditable; the access decision uses
-        // CheckTokenMembership, which also honours disabled and deny-only group SIDs.
         if let Ok(groups_buffer) = token_information(token, TokenGroups)
             && let Some(groups) = groups_buffer.read_header::<TOKEN_GROUPS>()
         {
@@ -590,7 +571,6 @@ mod tests {
                 "caller identity could not be derived from the pipe client token".to_string()
             ))
         );
-        // The handshake itself still works so the client learns the server is there (SVC-03/04).
         assert!(
             authorize(
                 &ClientRequest::Hello {

@@ -39,6 +39,8 @@ pub fn enable_safe_dll_search() -> std::io::Result<()> {
 pub fn enable_safe_dll_search() -> std::io::Result<()> {
     Ok(())
 }
+
+/// The payload format is a contract between the packaging step that writes it and this crate
 /// that reads it, so both ends stay published: `xtask` packaging calls the writer, and the setup
 /// binary and the packaging test call the reader.
 pub mod payload;

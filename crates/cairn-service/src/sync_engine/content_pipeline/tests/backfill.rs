@@ -247,9 +247,6 @@ fn a_basic_info_change_to_a_reparse_point_queues_a_deletion() {
     assert_eq!(deletions, vec![(2, frn)]);
 }
 
-/// Startup replays the change journal into the pending sets and only then compacts the cached
-/// table. Compaction must not swallow that replay: a create/modify would keep its stale
-/// metadata and missing document, and a deletion would leave its body document behind.
 #[test]
 fn compaction_keeps_pending_work_replayed_before_startup() {
     let (mut volume, frns) = volume_with_files(&[
@@ -272,7 +269,6 @@ fn compaction_keeps_pending_work_replayed_before_startup() {
         UsnChange::Deleted { frn: gone },
     ]);
 
-    // A cache written before the service data root was excluded still holds its files.
     let cairn = volume
         .records()
         .iter()
@@ -303,7 +299,6 @@ fn compaction_keeps_pending_work_replayed_before_startup() {
         "the exclusion itself is configuration and must survive"
     );
 
-    // Both downstream consumers still find their work through the existing paths.
     let index = tempfile::tempdir().expect("index");
     let engine = MultiVolumeEngine::with_index_dir_and_drives(index.path(), vec![]);
     let cfg = content_config();
@@ -328,9 +323,6 @@ fn compaction_keeps_pending_work_replayed_before_startup() {
     );
 }
 
-/// A USN `Created` record can arrive without complete attribute bits. The debounce pass reads
-/// filesystem metadata and synchronizes `FLAG_INDEXED_ATTRIBUTES_MASK` (`Hidden`, `System`,
-/// `ReadOnly`, `ReparsePoint`) unconditionally against disk.
 #[cfg(windows)]
 #[test]
 fn the_debounce_refresh_marks_reparse_and_syncs_win32_attributes() {
@@ -418,7 +410,6 @@ fn the_debounce_refresh_marks_reparse_and_syncs_win32_attributes() {
         size: 0,
         created_ts: 1,
         modified_ts: 1,
-        // Stale READONLY bit must be cleared when disk attrs are HIDDEN | SYSTEM.
         flags: cairn_core::FLAG_READONLY,
         is_reparse_point: false,
     });
@@ -481,7 +472,6 @@ fn test_pending_data_changes_tracking_and_drain() {
         is_reparse_point: false,
     }]);
 
-    // A DataChanged event is debounced until the next drain.
     vol.apply_usn_changes([UsnChange::DataChanged { frn: 42 }]);
     assert!(vol.has_pending_data_change(42));
 
@@ -492,7 +482,6 @@ fn test_pending_data_changes_tracking_and_drain() {
     let drained = engine.drain_pending_data_changes();
     assert_eq!(drained.get(&'C').map(|s| s.contains(&42)), Some(true));
 
-    // After drain, pending set is empty.
     let drained_again = engine.drain_pending_data_changes();
     assert!(drained_again.is_empty());
 }
@@ -594,9 +583,6 @@ fn excluded_paths_are_not_sent_to_the_content_worker() {
     );
 }
 
-/// A create event only says a name appeared. The row must still report the file's real size and
-/// timestamps, and that has to happen with content indexing off, because the table shows it
-/// either way.
 #[test]
 fn a_created_event_reads_the_real_size_and_time_from_disk() {
     use std::path::Component;
@@ -756,8 +742,6 @@ fn backfill_marker_for(config: &ServiceConfig) -> BackfillMarker {
     }
 }
 
-/// Builds a real on-disk index with one searchable document and records the completion marker
-/// through the production writer, exactly as a finished backfill does.
 fn engine_with_completed_backfill(
     index_dir: &std::path::Path,
     config: &ServiceConfig,
@@ -777,9 +761,6 @@ fn engine_with_completed_backfill(
     engine
 }
 
-/// The marker has to describe the configuration the backfill ran with. A change made while the
-/// job is running cannot retroactively cover the files it already skipped, so the marker must
-/// keep the old scope; the restart check then sees the difference and rebuilds.
 #[test]
 fn the_backfill_marker_keeps_the_configuration_the_backfill_ran_with() {
     let index = tempfile::tempdir().expect("index");
@@ -836,9 +817,6 @@ fn only_file_handle_conflicts_count_as_transient_worker_failures() {
     }
 }
 
-/// A single bad file (including a worker crash) must not turn the whole content index into
-/// Error. The old searcher keeps answering from its last committed snapshot, and removing the
-/// resume marker makes the next start rebuild the gaps that this batch could not apply.
 #[test]
 fn a_failed_incremental_batch_keeps_the_ready_snapshot() {
     let index = tempfile::tempdir().expect("index");
@@ -859,8 +837,6 @@ fn a_failed_incremental_batch_keeps_the_ready_snapshot() {
         path: r"C:\docs\new.txt".to_string(),
     }];
     engine.run_incremental_with(&tasks, &[], |_, _, _| {
-        // A crashed worker (WER 0xc0000409) is a permanent failure for this batch, but still
-        // not a reason to disable content search for every other file.
         BatchOutcome::failed("CairnWorker exited with 0xc0000409")
     });
 
@@ -885,7 +861,6 @@ fn a_completed_backfill_is_reused_on_restart_without_a_writer() {
     let index = tempfile::tempdir().expect("index");
     let config = backfill_config();
     let engine = engine_with_completed_backfill(index.path(), &config);
-    // A writer creates this lock file. The resume path must not recreate it.
     let writer_lock = engine.content_dir().join(".tantivy-writer.lock");
     let _ = std::fs::remove_file(&writer_lock);
     drop(engine);
@@ -972,7 +947,6 @@ fn a_marker_that_disagrees_with_the_configuration_is_discarded() {
 fn a_marker_without_a_usable_index_is_discarded() {
     let config = backfill_config();
 
-    // The marker exists but no index was ever written.
     let missing = tempfile::tempdir().expect("index");
     let engine =
         MultiVolumeEngine::with_index_dir_drives_and_config(missing.path(), vec![], config.clone());
@@ -992,7 +966,6 @@ fn a_marker_without_a_usable_index_is_discarded() {
     );
     assert!(!engine.content_index_status().state.is_ready());
 
-    // The index opens but holds no documents.
     let empty = tempfile::tempdir().expect("index");
     let engine =
         MultiVolumeEngine::with_index_dir_drives_and_config(empty.path(), vec![], config.clone());
@@ -1009,9 +982,6 @@ fn a_marker_without_a_usable_index_is_discarded() {
     assert!(!engine.backfill_marker_path().exists());
 }
 
-/// A USN burst writes through the worker while the service keeps answering `content:` queries.
-/// The published searcher must not be dropped when the incremental batch starts, and the
-/// end-of-batch reopen must publish the new count without a Backfilling gap.
 #[test]
 fn an_incremental_commit_keeps_the_index_searchable_until_reopen() {
     let index = tempfile::tempdir().expect("index");
@@ -1021,7 +991,6 @@ fn an_incremental_commit_keeps_the_index_searchable_until_reopen() {
         backfill_config(),
     );
 
-    // Finished backfill: one committed document and a published read-only searcher.
     let writer = ContentIndex::open_or_create(engine.content_dir()).expect("content index");
     writer
         .index_document_deferred(2, 101, 7, 1, r"C:\docs\first.txt", "first needle")
@@ -1032,7 +1001,6 @@ fn an_incremental_commit_keeps_the_index_searchable_until_reopen() {
     assert!(engine.content_index_status().state.is_ready());
     assert!(engine.content_index_status().state.is_ready());
 
-    // The worker commits its batch while the service still holds the existing reader.
     let worker =
         ContentIndex::open_or_create(engine.content_dir()).expect("incremental content index");
     worker
@@ -1054,7 +1022,6 @@ fn an_incremental_commit_keeps_the_index_searchable_until_reopen() {
         "the reader must keep serving after the worker commit"
     );
 
-    // Reopening after the batch publishes the new document count and stays Ready.
     engine.reopen_content_index_ready();
     let status = engine.content_index_status();
     assert_eq!(status.state, ContentIndexState::Ready);
@@ -1080,8 +1047,6 @@ fn cleanup_keeps_the_backfill_marker_and_remove_deletes_it() {
     std::fs::write(engine.content_dir().join(CONTENT_BACKFILL_MARKER_TMP), "{}")
         .expect("write tmp marker");
 
-    // Age both files beyond the stale threshold: the completion marker must survive any age,
-    // while a leftover half-written replacement is cleaned up.
     for name in [CONTENT_BACKFILL_MARKER, CONTENT_BACKFILL_MARKER_TMP] {
         let file = std::fs::File::options()
             .write(true)
@@ -1127,8 +1092,6 @@ fn a_content_command_without_a_receiver_reports_an_error() {
     }
 }
 
-/// The workspace-built content worker, injected into the engine's test seam so
-/// the harness location never decides how the service finds its worker.
 fn content_worker_path() -> std::path::PathBuf {
     let target = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
         || {
@@ -1159,10 +1122,6 @@ fn content_worker_path() -> std::path::PathBuf {
     worker
 }
 
-/// End-to-end backfill: enables the switch, waits for the controller, and verifies that a file
-/// which existed before enabling becomes searchable. Ignored by default because it spawns the real
-/// `CairnWorker`; the Service job in `.github/workflows/ci.yml` builds the worker and runs it
-/// explicitly.
 #[test]
 #[ignore = "requires target/debug/CairnWorker.exe"]
 fn a_full_backfill_reaches_ready_and_indexes_existing_files() {
@@ -1214,8 +1173,6 @@ fn a_full_backfill_reaches_ready_and_indexes_existing_files() {
         content_index_enabled: true,
         content_index_extensions: vec!["txt".to_string()],
         content_index_max_bytes: 1024 * 1024,
-        // The fixture tree lives under %TEMP%, which the shipped content exclusions cover; this
-        // test exercises the backfill pipeline, not the default rule set.
         excluded_paths: Vec::new(),
         content_excluded_paths: Vec::new(),
         ..Default::default()
@@ -1259,8 +1216,6 @@ fn a_full_backfill_reaches_ready_and_indexes_existing_files() {
     let total = outcome.total;
     assert_eq!(total, 1, "the pre-existing file must be searchable");
 
-    // A file created after the ready state is queued through the USN path and sent to a fresh
-    // worker batch; it must become searchable without a second manual backfill.
     let later = tree.path().join("later.txt");
     std::fs::write(&later, "later needle content").expect("later fixture");
     let later_frn = next_frn + 1;
@@ -1301,8 +1256,6 @@ fn a_full_backfill_reaches_ready_and_indexes_existing_files() {
     let total = outcome.total;
     assert_eq!(total, 1, "the new file must be searchable");
 
-    // A deleted file must lose its body document; keeping it would return stale content and
-    // could expose a previous file after NTFS reuses the FRN.
     std::fs::remove_file(&later).expect("remove later fixture");
     engine.update_volume('C', |volume| {
         volume.apply_usn_changes([UsnChange::Deleted { frn: later_frn }]);
@@ -1330,7 +1283,6 @@ fn a_full_backfill_reaches_ready_and_indexes_existing_files() {
     let total = outcome.total;
     assert_eq!(total, 0, "a deleted file must not stay searchable");
 
-    // Renaming out of the whitelist is a deletion, not a stale document under the old name.
     engine.update_volume('C', |volume| {
         volume.apply_usn_changes([UsnChange::Renamed {
             frn: hello_frn,
@@ -1440,7 +1392,6 @@ fn worker_port_full_backfill_retries_transient_failure_without_sleeping() {
     assert_eq!(status.indexed_documents, 1);
     assert!(engine.backfill_marker_path().exists());
 
-    // Cancelling during retry backoff aborts without running a duplicate worker batch.
     struct CancelOnWaitPort {
         calls: RefCell<usize>,
     }

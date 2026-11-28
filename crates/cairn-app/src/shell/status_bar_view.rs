@@ -166,8 +166,8 @@ impl CairnApp {
             }));
         let refresh_slot = div()
             .flex_shrink_0()
-            // The window root clears selection on every left press; the idle refresh is a control,
-            // not a click on the canvas.
+            // The status bar clears the result selection on every left press; the idle refresh is a
+            // control, not a press on the bar itself.
             .on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
             })

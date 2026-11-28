@@ -70,9 +70,6 @@ pub struct TableState {
     rows: VecDeque<FileRowData>,
     rows_offset: usize,
     total_rows: usize,
-    /// Offsets already requested that produced no row. The service skips rows whose volume or
-    /// record is gone and can still answer an in-range page with an empty list, so without this set
-    /// the same viewport keeps asking for the same offset every frame and never stops.
     empty_page_offsets: HashSet<usize>,
     /// Absolute end (exclusive) of the first page received from the most recent background
     /// refresh. Only `0..fresh_page_end` is known to carry the refreshed order.
@@ -158,9 +155,7 @@ impl TableState {
                 }
             }
         }
-        // A result set that shrank below the window still owns the display; clip only the part
-        // that no longer exists. A deep window stays where it is and its page is fetched by the
-        // viewport when the list itself changes.
+        // See docs/engineering/performance.md#21-流式与虚拟化.
         let keep = total_rows
             .saturating_sub(self.rows_offset)
             .min(self.rows.len());
@@ -169,13 +164,11 @@ impl TableState {
             self.rows_offset = 0;
         }
         self.clear_selection();
-        // A deep window is wholly old, and even a top-anchored one stops being trustworthy below
-        // the rows the refresh actually delivered.
         self.revalidate = self.rows_offset != 0 || total_rows > self.fresh_page_end;
     }
 
-    /// Installs a fetched page at its absolute offset, extending the window when it is contiguous
-    /// or overlapping, with bounded LRU eviction to prevent runaway heap growth.
+    /// Installs a fetched page at its absolute offset, extending the window when it is contiguous or
+    /// overlapping; the window is truncated to [`MAX_LOADED_ROWS`] from the edge the page grew toward.
     ///
     /// The page requested to revalidate a window after a background refresh replaces that window
     /// outright: the old rows must not survive just because they still cover the requested range.
@@ -184,20 +177,11 @@ impl TableState {
     pub fn apply_page(&mut self, offset: usize, page: Vec<FileRowData>) {
         if self.revalidate {
             if self.revalidate_offset != Some(offset) {
-                // A page requested before the refresh is still arriving. It carries the
-                // generation that was just invalidated, so merging it would put stale rows (or
-                // their old order) back into the window. The pending revalidation request fetches
-                // the visible range again.
                 return;
             }
-            // The response the view asked for after the refresh replaces the stale generation;
-            // containment against the old window must not turn it into a no-op.
             self.revalidate = false;
             self.revalidate_offset = None;
             if page.is_empty() {
-                // Retaining the old rows would leave the stale generation on screen for as long
-                // as the viewport stays here. Drop them so the band can show its loading state,
-                // and retire the offset so the same empty page is not requested every frame.
                 self.rows.clear();
                 self.rows_offset = 0;
                 self.empty_page_offsets.insert(offset);
@@ -219,7 +203,6 @@ impl TableState {
             return;
         }
 
-        // A non-empty page clears any empty marker that covered its range.
         self.empty_page_offsets
             .retain(|&off| off < offset || off >= offset + page.len());
 
@@ -314,11 +297,6 @@ impl TableState {
             return None;
         }
         if self.revalidate && (self.rows_offset != 0 || visible.end > self.fresh_page_end) {
-            // The rows inside the window predate the refresh, so their presence says nothing
-            // about the visible range still being current. Fetch from the page that covers the
-            // viewport and far enough to replace every row it shows; the old rows stay on screen
-            // until this page lands. `empty_page_offsets` was cleared by the refresh, so a fresh
-            // generation never inherits the previous one's retired offsets.
             let offset = (visible.start / page_size * page_size).min(self.total_rows);
             let limit = visible
                 .end
@@ -376,9 +354,6 @@ impl TableState {
     }
 
     /// A page request for `offset`, unless that offset already answered with nothing usable.
-    ///
-    /// [`Self::apply_page`] records empty and non-extending pages; repeating one would keep the
-    /// frame's placeholder band alive forever, because the fetched window never advances past it.
     fn requestable_page(&self, offset: usize, limit: usize) -> Option<(usize, usize)> {
         if limit == 0 || self.empty_page_offsets.contains(&offset) {
             None

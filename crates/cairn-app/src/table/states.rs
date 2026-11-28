@@ -18,7 +18,6 @@ use gpui_kit::base::Disableable as _;
 use gpui_kit::component::{Icon, IconName};
 use gpui_kit::gpui::*;
 
-/// Reason a `content:` query has no rows to display when the service is reachable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ContentQueryNotice {
     Loading,

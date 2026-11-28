@@ -213,23 +213,7 @@ fn check_workspace_lints(workspace: &Path, violations: &mut Vec<String>) -> Resu
         }
     }
 
-    let mut manifests = Vec::new();
-    let crates_dir = workspace.join("crates");
-    if crates_dir.is_dir() {
-        for entry in
-            fs::read_dir(&crates_dir).map_err(|err| format!("{}: {err}", crates_dir.display()))?
-        {
-            let entry = entry.map_err(|err| format!("{}: {err}", crates_dir.display()))?;
-            let manifest = entry.path().join("Cargo.toml");
-            if manifest.is_file() {
-                manifests.push(manifest);
-            }
-        }
-    }
-    let xtask_manifest = workspace.join("xtask").join("Cargo.toml");
-    if xtask_manifest.is_file() {
-        manifests.push(xtask_manifest);
-    }
+    let mut manifests = xtask::versioning::workspace_members(workspace)?;
     manifests.sort();
 
     let workspace_dep_packages = extract_workspace_dep_packages(workspace_table);
@@ -1049,7 +1033,7 @@ fn scan_rust_source(source: &str) -> ScannedSource {
                 buf.push(chars[i]);
                 i += 1;
             }
-            comments.push((start_line, buf));
+            push_comment(&mut comments, start_line, buf);
             continue;
         }
 
@@ -1060,7 +1044,7 @@ fn scan_rust_source(source: &str) -> ScannedSource {
             i += 2;
             while i < chars.len() && depth > 0 {
                 if chars[i] == '\n' {
-                    comments.push((cur_line, std::mem::take(&mut buf)));
+                    push_comment(&mut comments, cur_line, std::mem::take(&mut buf));
                     code_lines.push((line, std::mem::take(&mut cur_code)));
                     line += 1;
                     cur_line = line;
@@ -1077,7 +1061,7 @@ fn scan_rust_source(source: &str) -> ScannedSource {
                 }
             }
             if !buf.is_empty() {
-                comments.push((cur_line, buf));
+                push_comment(&mut comments, cur_line, buf);
             }
             continue;
         }
@@ -1094,6 +1078,13 @@ fn scan_rust_source(source: &str) -> ScannedSource {
         comments,
         code_lines,
     }
+}
+
+fn push_comment(comments: &mut Vec<(usize, String)>, line: usize, mut text: String) {
+    if text.ends_with('\r') {
+        text.pop();
+    }
+    comments.push((line, text));
 }
 
 fn prev_is_boundary(chars: &[char], idx: usize) -> bool {
@@ -1183,15 +1174,15 @@ fn skip_char_literal(chars: &[char], idx: usize) -> usize {
     idx + 1
 }
 
-fn collect_rust_files(workspace: &Path) -> Result<Vec<PathBuf>, String> {
+pub(crate) fn collect_rust_files(workspace: &Path) -> Result<Vec<PathBuf>, String> {
     let mut files = Vec::new();
-    for root in ["crates", "xtask"] {
-        let dir = workspace.join(root);
-        if dir.is_dir() {
-            collect_rs_recursive(&dir, &mut files)?;
+    for manifest in xtask::versioning::workspace_members(workspace)? {
+        if let Some(member) = manifest.parent() {
+            collect_rs_recursive(member, &mut files)?;
         }
     }
     files.sort();
+    files.dedup();
     Ok(files)
 }
 
@@ -1200,7 +1191,12 @@ fn collect_rs_recursive(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), Stri
     for entry in entries {
         let entry = entry.map_err(|err| format!("{}: {err}", dir.display()))?;
         let path = entry.path();
-        if path.is_dir() {
+        let metadata =
+            fs::symlink_metadata(&path).map_err(|err| format!("{}: {err}", path.display()))?;
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        if metadata.is_dir() {
             if path.file_name().is_some_and(|name| name == "target") {
                 continue;
             }
@@ -1452,6 +1448,20 @@ mod tests {
     }
 
     #[test]
+    fn crlf_comment_markers_are_detected() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        seed_valid_workspace(temp.path());
+        fs::write(
+            temp.path().join("crates/demo/src/crlf.rs"),
+            "// TODO clean up\r\nfn f() {}\r\n",
+        )
+        .expect("crlf rs");
+
+        let err = check_hygiene(temp.path()).expect_err("CRLF marker must fail");
+        assert!(err.contains("TODO"), "{err}");
+    }
+
+    #[test]
     fn missing_forbid_unsafe_numbered_step_and_eng_stage_fail() {
         let temp = tempfile::tempdir().expect("tempdir");
         seed_valid_workspace(temp.path());
@@ -1689,7 +1699,7 @@ mod tests {
         seed_valid_workspace(lock.path());
         fs::write(
             lock.path().join("Cargo.lock"),
-            "version = 4\n\n[[package]]\nname = \"cairn-content\"\nversion = \"0.1.0\"\ndependencies = [\"helper\"]\n\n[[package]]\nname = \"helper\"\nversion = \"0.1.0\"\ndependencies = [\"quick_xml 0.42.0\"]\n\n[[package]]\nname = \"quick_xml\"\nversion = \"0.42.0\"\n",
+            "version = 4\n\n[[package]]\nname = \"cairn-content\"\nversion = \"0.0.0\"\ndependencies = [\"helper\"]\n\n[[package]]\nname = \"helper\"\nversion = \"0.0.0\"\ndependencies = [\"quick_xml 9.9.9\"]\n\n[[package]]\nname = \"quick_xml\"\nversion = \"9.9.9\"\n",
         )
         .expect("write lockfile");
         let err = check_hygiene(lock.path()).expect_err("transitive lockfile dep must fail");

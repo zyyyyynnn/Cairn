@@ -27,7 +27,6 @@ fn engine_with_sorting_fixture() -> (tempfile::TempDir, MultiVolumeEngine) {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let engine = MultiVolumeEngine::with_index_dir_and_drives(temp_dir.path(), vec![]);
 
-    // Record order deliberately differs from every sorted order.
     let mut vol = VolumeIndex::new('C');
     vol.ingest_items(vec![
         sorted_test_item(1, "charlie.txt", 200),
@@ -61,7 +60,6 @@ fn result_names(engine: &MultiVolumeEngine, sort_by: SortColumn, sort_asc: bool)
     })
 }
 
-/// A folder hit carries its recursive space; a descendant that also matches adds nothing.
 #[test]
 fn a_folder_match_reports_its_recursive_space_once() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
@@ -163,8 +161,6 @@ fn a_filtered_query_does_not_rebuild_the_whole_volume_sort() {
 fn test_single_volume_query_sorts_columns_without_presorted_arrays() {
     let (_temp_dir, engine) = engine_with_sorting_fixture();
 
-    // DateCreated and Extension have no presorted array, so the single-volume fast path must
-    // fall back to the global sort instead of returning record order.
     assert_eq!(
         result_names(&engine, SortColumn::DateCreated, true),
         ["bravo.png", "charlie.txt", "alpha.md"]
@@ -481,9 +477,6 @@ fn single_volume_filtered_sort_and_exclusions_keep_presorted_unbuilt() {
     engine.add_volume(vol);
 
     let cancel = CancellationToken::new();
-    // The recursive directory size makes `"C:"` > 1 MB as well, and a matched folder carries
-    // its whole subtree: the excluded `ExcludedDir` is not a row, but its bytes are part of
-    // the matched root's space.
     let outcome = engine.execute_search_multi(
         "size:>1mb",
         &QueryDefaults::default(),
@@ -533,8 +526,6 @@ fn single_volume_filtered_sort_and_exclusions_keep_presorted_unbuilt() {
     assert_eq!(file_names, vec!["alpha.bin", "zeta.bin"]);
 }
 
-/// An excluded subtree hides rows but stays inside the space of the matched root, so the total
-/// does not depend on whether the view or a materialized result answers the query.
 #[test]
 fn an_excluded_subtree_keeps_the_all_files_space_total() {
     fn fixture() -> VolumeIndex {
@@ -595,8 +586,6 @@ fn an_excluded_subtree_keeps_the_all_files_space_total() {
     );
 }
 
-/// A rule that excludes the volume root leaves its children visible; the total then comes from
-/// the visible top-level records rather than from the root's recursive size.
 #[test]
 fn an_excluded_root_totals_the_visible_top_level_records() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -633,8 +622,6 @@ fn an_excluded_root_totals_the_visible_top_level_records() {
     );
 }
 
-/// A volume whose root record is absent keeps its top-level records under `ROOT_PARENT`. Segment
-/// rules then make those top-level records the highest hit points.
 #[test]
 fn a_volume_without_a_root_record_totals_its_visible_top_level() {
     let temp = tempfile::tempdir().expect("tempdir");

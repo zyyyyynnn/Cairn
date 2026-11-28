@@ -15,7 +15,6 @@ use gpui_kit::gpui::SharedString;
 
 const MAX_MINUTE_CACHE_ENTRIES: usize = 512;
 
-/// Local wall-clock calendar breakdown for a timestamp.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct LocalDateTime {
     pub year: u16,
@@ -25,12 +24,10 @@ pub(crate) struct LocalDateTime {
     pub minute: u8,
 }
 
-/// Port converting a UTC Unix timestamp (seconds) into local wall-clock calendar components.
 pub(crate) trait LocalTimePort {
     fn to_local(&self, unix_seconds: i64) -> Option<LocalDateTime>;
 }
 
-/// Pure UTC calendar conversion used as cross-platform fallback and deterministic test seam.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct UtcLocalTimePort;
 
@@ -48,7 +45,6 @@ impl LocalTimePort for UtcLocalTimePort {
     }
 }
 
-/// Production Windows/system local time converter.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct SystemLocalTimePort;
 
@@ -115,9 +111,9 @@ fn civil_from_days(days_since_1970: i64) -> (i64, u32, u32) {
     (if month <= 2 { year + 1 } else { year }, month, day)
 }
 
-/// Bounded minute-bucket timestamp formatter cache for per-frame row rendering.
-/// The converter applies each timestamp's own DST rule, so a DST transition does not
-/// invalidate cached minutes; a runtime timezone configuration change shows on the next start.
+/// Bounded timestamp cache keyed by UTC minute for per-frame row rendering. Conversion applies the
+/// system time zone rules for each timestamp, so a time-zone change during a run leaves already-cached
+/// minutes at their earlier rendering; a restart re-reads the zone.
 pub(crate) struct RowPresentationCache<P: LocalTimePort> {
     port: P,
     capacity: usize,
@@ -173,7 +169,6 @@ thread_local! {
         ));
 }
 
-/// Formats a Windows FILETIME timestamp using the UI thread's bounded minute-bucket cache.
 pub(crate) fn format_timestamp_cached(ts: i64) -> SharedString {
     UI_ROW_PRESENTATION_CACHE.with(|cache| cache.borrow_mut().format_timestamp(ts))
 }
@@ -278,7 +273,6 @@ mod tests {
         assert_eq!(ts_zero.as_ref(), "");
         assert_eq!(calls.get(), 0);
 
-        // Two distinct FILETIME values in the same UTC minute (1970.01.01 00:00).
         let base: i64 = 116_444_736_000_000_000;
         let first = cache.format_timestamp(base);
         let second = cache.format_timestamp(base + 59 * 10_000_000);
@@ -286,14 +280,12 @@ mod tests {
         assert_eq!(second, first);
         assert_eq!(calls.get(), 1);
 
-        // Next minute hits port once, then stays cached.
         let next_min = cache.format_timestamp(base + 60 * 10_000_000);
         assert_eq!(next_min.as_ref(), "1970.01.01 00:01");
         assert_eq!(calls.get(), 2);
         let _ = cache.format_timestamp(base + 60 * 10_000_000);
         assert_eq!(calls.get(), 2);
 
-        // Third distinct minute evicts the oldest bucket because capacity is 2.
         let third_min = cache.format_timestamp(base + 120 * 10_000_000);
         assert_eq!(third_min.as_ref(), "1970.01.01 00:02");
         assert_eq!(cache.entries.len(), 2);

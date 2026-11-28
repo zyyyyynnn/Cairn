@@ -152,12 +152,12 @@ fn sidebar_icon(icon: IconName, metrics: SidebarIconMetrics) -> Div {
 
 /// The visible surface of one sidebar row.
 ///
-/// A plain row, not a `SidebarMenuItem`: the component renders its own `TreeItem` with a name and
-/// selected state, and this app already wraps every row in the registered control that owns focus,
-/// activation and the accessible name. Two nested controls announced the same row twice. GPUI has no
-/// `aria_hidden` in this version, so the inner row keeps only its pixels; the wrapper is the single
-/// accessible node. The surface copies the component's icon, selected fill and hover from the same
-/// theme tokens.
+/// A plain row, not a `SidebarMenuItem`: that component renders its own `TreeItem` with a name and
+/// selected state, and this app wraps every row in the registered control that owns focus,
+/// activation and the accessible name. Nested controls would announce the same row twice, and GPUI
+/// has no `aria_hidden` in this version, so the inner row keeps only its pixels; the wrapper is the
+/// single accessible node. The surface copies the component's icon, selected fill and hover from
+/// the same theme tokens.
 fn sidebar_row(
     icon: IconName,
     label: impl Into<SharedString>,
@@ -630,8 +630,8 @@ impl CairnApp {
 
 /// The icon a file-type row shows. It repeats the words beside it rather than replacing them.
 ///
-/// `main.rs` installs the complete icon catalog, so each kind can use its own shape instead of
-/// the nearest default glyph.
+/// Every name resolves through the scoped asset source in `shell/assets.rs`, which serves GPUI
+/// Kit's default catalog plus the Cairn-specific additions.
 fn category_icon(category: FilterCategory) -> IconName {
     match category {
         FilterCategory::All => IconName::LayoutDashboard,

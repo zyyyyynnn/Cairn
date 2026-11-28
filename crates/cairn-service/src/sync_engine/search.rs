@@ -2,9 +2,6 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Metadata and content search: unified multi-source evaluation, exclusion filtering,
-//! multi-column sorting and batched multi-snippet extraction.
-
 use super::folder_source::FolderSource;
 use super::path_exclusions::PathExclusions;
 use super::volume_index::{BitSet, SUBTREE_EXCLUDED, calculate_matched_bytes_for_records};
@@ -54,8 +51,6 @@ pub struct AllFilesView {
     pub(crate) presorted_version: u64,
     pub(crate) exclusion_epoch: u64,
     pub(crate) exclusions: PathExclusions,
-    /// Cumulative visible-record count at every `ALL_FILES_PREFIX_BLOCK_SIZE` boundary in
-    /// ascending `column` order. Built lazily on deep pagination for O(log(N/B) + B) seeking.
     block_prefix: OnceLock<Box<[u32]>>,
 }
 
@@ -567,7 +562,6 @@ fn collect_content_hits(
 }
 
 impl MultiVolumeEngine {
-    /// Returns the sole active NTFS volume eligible for the zero-materialization presorted view.
     fn all_files_view_drive(
         &self,
         drive_scope: Option<char>,
@@ -748,7 +742,6 @@ impl MultiVolumeEngine {
             (cfg.excluded_drives.clone(), cfg.excluded_paths.clone())
         };
 
-        // Run Tantivy hit collection outside index locks so concurrent writes are not stalled.
         let mut content_plan: Option<(Arc<ContentSearcher>, ContentHits, Vec<String>)> = None;
         if !content_queries.is_empty() {
             let searcher = if self.content_index_status().state.is_ready() {

@@ -63,8 +63,6 @@ pub fn split_name_highlights<'a>(
         }];
     }
 
-    // Fast path: for small highlight arrays (>=99% of searches), avoid all heap allocations
-    // for filtering and merging highlight intervals.
     let (merged_buf, merged_len): ([(usize, usize); 8], usize) = if highlights.len() <= 8 {
         let mut valid = [(0usize, 0usize); 8];
         let mut valid_count = 0;
@@ -192,7 +190,6 @@ pub enum QueryRejection {
 }
 
 impl QueryRejection {
-    /// Every refusal the service can report, for the checks that walk the vocabulary.
     /// The rejection a service error code names, if any.
     pub fn from_error_code(code: u32) -> Option<Self> {
         match code {
@@ -967,8 +964,6 @@ mod tests {
         );
     }
 
-    /// Every refusal the service states must be a message the result band already registers for
-    /// its own state row, or the band would show a raw id.
     #[test]
     fn every_query_rejection_speaks_a_message_the_result_band_registers() {
         let result_state = crate::shell::accessibility::KEY_CONTROLS
@@ -1108,8 +1103,6 @@ mod tests {
         });
     }
 
-    /// An empty query with a scope still names a place the service can list: the command carries
-    /// the scope without inventing text.
     #[test]
     fn build_search_command_forwards_an_empty_query_scope() {
         use cairn_protocol::message::SourceId;

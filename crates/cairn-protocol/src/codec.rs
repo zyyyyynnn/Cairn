@@ -9,7 +9,8 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use thiserror::Error;
 
-pub const MAX_FRAME_PAYLOAD: usize = 16 * 1024 * 1024; // 16 MiB limit to prevent OOM
+/// Largest accepted frame payload; a larger frame is refused instead of buffered.
+pub const MAX_FRAME_PAYLOAD: usize = 16 * 1024 * 1024;
 /// `[u32 length][u16 version]` preceding every payload.
 pub const HEADER_SIZE: usize = 6;
 

@@ -99,8 +99,6 @@ impl CairnApp {
     /// Opens the Recycle Bin view: the shell reports the bin's contents and
     /// the table renders them. Any query leaves the view.
     pub fn open_recycle_bin(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) {
-        // The bin is a location, so its first listing fades in instead of
-        // replacing the table text in place.
         self.discard_rename(cx);
         self.close_group();
         // Keep the query the person left behind in the current history entry
@@ -121,8 +119,6 @@ impl CairnApp {
         self.query.source_scope = None;
         self.results.rows_scroll.set_offset(Point::default());
         self.results.table.scroll_top = 0.0;
-        // `begin_recycle_bin_load` opens the view and resets every part of the bin's state, so
-        // the location starts from one clean listing instead of a half-cleared one.
         self.begin_recycle_bin_load(cx);
         cx.notify();
     }
@@ -370,7 +366,6 @@ impl CairnApp {
         );
     }
 
-    /// Action handler for the `RestoreAll` command.
     pub fn restore_all_action(
         &mut self,
         _: &RestoreAll,
@@ -418,7 +413,6 @@ impl CairnApp {
         });
     }
 
-    /// Dispatches restore of all items in the bin.
     pub fn execute_restore_all(&mut self, cx: &mut Context<'_, Self>) {
         if !self.active_location().is_recycle_bin() || self.recycle_bin.is_loading() {
             return;

@@ -35,7 +35,6 @@ mod tests {
 
     #[test]
     fn a_known_instant_becomes_its_filetime() {
-        // 2026-10-20T00:00:00Z, computed independently of this function.
         let time = UNIX_EPOCH + Duration::from_secs(1_792_454_400);
         assert_eq!(system_time_to_filetime(Ok(time)), 134_369_280_000_000_000);
     }

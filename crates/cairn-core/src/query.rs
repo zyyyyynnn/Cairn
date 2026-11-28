@@ -338,7 +338,6 @@ fn matches_property_text(value: &str, pattern: &str) -> bool {
 #[derive(Default)]
 pub(crate) struct HierarchyOracle {
     depths: Vec<u16>,
-    /// Per-record `(child_files, child_folders)`.
     child_counts: Vec<(u32, u32)>,
     child_matches: HashMap<String, Vec<bool>>,
 }

@@ -39,7 +39,6 @@ const FRAME_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1
 const IDLE_FRAME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 const FRAME_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// Releases oversized response buffer capacity after large `GetRows` frames.
 fn shrink_oversized_write_buf(buf: &mut Vec<u8>) {
     if buf.is_empty() && buf.capacity() > WRITE_BUF_SHRINK_THRESHOLD_BYTES {
         buf.shrink_to(WRITE_BUF_RETAIN_BYTES);
@@ -51,10 +50,7 @@ pub struct PipeServer {
     sessions: Arc<SessionManager>,
     pipe_name: String,
     protocol_version: u16,
-    /// Caps concurrent connected client tasks so Slowloris or connection floods cannot exhaust
-    /// pipe server memory or spawn tasks unboundedly.
     active_clients: Arc<Semaphore>,
-    /// Caps record-scanning requests that hold O(records) memory and volume read locks.
     heavy_tasks: Arc<Semaphore>,
 }
 
@@ -150,12 +146,8 @@ impl PipeServer {
     ) -> Result<NamedPipeServer, std::io::Error> {
         let mut options = ServerOptions::new();
         options.first_pipe_instance(first_instance);
-        // SPEC SVC-02: no client arriving over the network may reach the index.
         options.reject_remote_clients(true);
 
-        // The DACL is read from the live configuration, so the switch applies to every instance
-        // created from now on. Requests are additionally authorized per request, which covers
-        // instances that were created before the switch changed.
         #[cfg(windows)]
         {
             let admin_only_query = self.engine.admin_only_query();
@@ -192,18 +184,18 @@ fn is_pipe_closed_error(err: &std::io::Error) -> bool {
         _ => {
             #[cfg(windows)]
             if let Some(code) = err.raw_os_error() {
-                // 109: ERROR_BROKEN_PIPE (The pipe has been ended)
-                // 232: ERROR_NO_DATA (The pipe is being closed)
-                // 233: ERROR_PIPE_NOT_CONNECTED (No process is on the other end of the pipe)
-                return code == 109 || code == 232 || code == 233;
+                use windows::Win32::Foundation::{
+                    ERROR_BROKEN_PIPE, ERROR_NO_DATA, ERROR_PIPE_NOT_CONNECTED,
+                };
+                return code == ERROR_BROKEN_PIPE.0 as i32
+                    || code == ERROR_NO_DATA.0 as i32
+                    || code == ERROR_PIPE_NOT_CONNECTED.0 as i32;
             }
             false
         }
     }
 }
 
-/// Releases the connection's client registration on every exit path. The last lease of a
-/// client frees its cached sessions.
 struct ClientLease {
     sessions: Arc<SessionManager>,
     owner: QueryOwner,
@@ -273,9 +265,6 @@ async fn handle_client(
     protocol_version: u16,
     heavy_tasks: Arc<Semaphore>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Identity comes from the OS token of the connected process, once per connection: the client
-    // cannot change it while the pipe instance is alive. The call is synchronous and performs no
-    // await, so thread-bound impersonation cannot outlive it.
     #[cfg(windows)]
     let (caller, owner) =
         match authenticate_pipe_client(std::os::windows::io::AsRawHandle::as_raw_handle(&pipe)) {
@@ -291,9 +280,6 @@ async fn handle_client(
                 (identity.authorization(), owner)
             }
             Err(err) => {
-                // Unattributable connections are closed instead of being served: the pipe grants
-                // interactive users connect access, so the token is the only thing standing between
-                // them and a privileged operation.
                 warn!("rejecting pipe connection: {err}");
                 return Ok(());
             }
@@ -314,8 +300,6 @@ async fn handle_client(
     let mut frame_deadline: Option<Instant> = None;
 
     loop {
-        // The frame header carries the version, so the gate runs before any payload is deserialized:
-        // a peer of another version may serialize a message that would decode into the wrong variant.
         if let Some(header) = peek_frame_header(&read_buf)? {
             if header.version != protocol_version {
                 write_buf = protocol_mismatch_frame(header.version, protocol_version)?;
@@ -335,7 +319,6 @@ async fn handle_client(
 
                 let (resp_payload, volumes) =
                     if !hello_done && !matches!(req, ClientRequest::Hello { .. }) {
-                        // Version negotiation is explicit (SVC-03): nothing is served before it.
                         (
                             ResponsePayload::Error {
                                 code: ERROR_CODE_HANDSHAKE_REQUIRED,
@@ -376,8 +359,6 @@ async fn handle_client(
                                     ..
                                 }
                             );
-                            // A query answer decides whether the table is still loading, so its
-                            // envelope reads the volume state after the query released the index.
                             let volumes = if omit_volumes {
                                 Vec::new()
                             } else if matches!(&resp_payload, ResponsePayload::QueryResult { .. }) {
@@ -486,7 +467,6 @@ fn handle_query_request(
         source_scope,
     } = params;
 
-    // Validation runs before `begin_query` so rejected queries do not cancel valid in-flight work.
     if let Some(source_id) = source_scope
         && !engine.is_known_source(source_id)
     {
@@ -755,11 +735,6 @@ fn process_request(
             ResponsePayload::ConfigResult { config_toml }
         }
         ClientRequest::SetConfig { config_toml } => {
-            // Index configuration is a local-user operation, but `admin_only_query` decides who
-            // may query at all. A standard user must not be able to switch that mode on (locking
-            // everyone else out) or off (defeating it); only an administrator may change it. The
-            // engine compares the submitted value with the live one inside its configuration
-            // write, so two concurrent submissions cannot both be decided against a stale value.
             match engine.apply_config_toml(&config_toml, caller.is_privileged()) {
                 Ok(()) => ResponsePayload::SetConfigAck {
                     success: true,
@@ -788,8 +763,6 @@ fn process_request(
             success: engine.disable_content_index().is_ok(),
         },
         ClientRequest::ClearContentIndex => {
-            // Disabling first stops the active worker batch; return immediately on persistence or
-            // policy failure instead of wiping the content index underneath an active config.
             if engine.disable_content_index().is_err() {
                 ResponsePayload::ClearContentIndexAck { success: false }
             } else {

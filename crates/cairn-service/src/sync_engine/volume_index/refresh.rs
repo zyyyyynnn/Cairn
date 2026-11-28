@@ -48,11 +48,7 @@ impl VolumeIndex {
         self.append_items(items);
         self.recompute_directory_sizes();
 
-        // Keep presorted arrays empty until an all-files query actually requests a column.
         self.presorted.reset(false);
-        // A snapshot by itself proves nothing about freshness: the journal position is only known
-        // once the scan has been reconciled with the change journal. Until then the volume is
-        // still being rebuilt, so no path can report it as in sync with data it never read.
         self.status.set(VolumeState::Rebuilding);
     }
 
@@ -85,10 +81,6 @@ impl VolumeIndex {
         let mut parent_frns: Vec<u64> = Vec::with_capacity(items.len());
 
         for item in items {
-            // Service-owned data is not user content, and every Tantivy commit or index save writes
-            // more of it. The roots arrive by FRN, so a hard link of an excluded file is covered
-            // too. An excluded parent condemns the child; remembering only directories keeps the
-            // set small while still propagating to the whole subtree.
             if self.excluded_frns.contains(&item.frn) {
                 continue;
             }
@@ -124,19 +116,12 @@ impl VolumeIndex {
             parent_frns.push(item.parent_frn);
         }
 
-        // Link after the whole batch is inserted, so an MFT scan whose children precede their
-        // parents still resolves. A parent from an earlier batch is found in the same map.
         for (offset, &parent_frn) in parent_frns.iter().enumerate() {
             if let Some(parent_idx) = self.frn_to_idx.first(parent_frn) {
                 self.records[first_new + offset].parent_idx = parent_idx;
             }
         }
 
-        // Folder totals stay current between batches instead of waiting for finalization: each new
-        // file's own bytes walk up its parent chain once, so a directory already reports the sum of
-        // every child indexed so far while the scan is still running. Directories start at zero and
-        // collect their children the same way. The finalize pass still aggregates the whole table,
-        // which keeps the persisted totals authoritative even if a batch was skipped or duplicated.
         if self.directory_sizes_valid {
             for offset in 0..parent_frns.len() {
                 let idx = first_new + offset;
@@ -151,9 +136,6 @@ impl VolumeIndex {
         self.mark_presorted_appended((first_new..self.records.len()).map(|index| index as u32));
     }
 
-    /// Aggregates the indexed descendants of every directory into `FileRecord.size`. The record's
-    /// existing `size` field already costs 8 bytes per entry, so folder sizes need no second
-    /// resident structure; files keep their own size and tombstones are ignored.
     pub(crate) fn recompute_directory_sizes(&mut self) {
         DirectorySizeIndex::apply_directory_sizes(&mut self.records, &self.arena);
         self.directory_sizes_valid = true;
@@ -167,21 +149,16 @@ impl VolumeIndex {
         self.mark_presorted_sizes_changed(directories);
     }
 
-    /// Flags the totals as stale without paying for a rebuild per event. Callers that can change a
-    /// record's kind in a batch mark here and run [`Self::ensure_directory_sizes`] once at the end.
     pub(crate) fn mark_directory_sizes_dirty(&mut self) {
         self.directory_sizes_valid = false;
     }
 
-    /// Rebuilds the folder totals only when an event invalidated them.
     pub(crate) fn ensure_directory_sizes(&mut self) {
         if !self.directory_sizes_valid {
             self.recompute_directory_sizes();
         }
     }
 
-    /// Moves one size delta up the parent chain. Tombstoned ancestors stop the walk: the deleted
-    /// subtree's total was already removed when that ancestor was deleted.
     fn adjust_parent_sizes(&mut self, mut parent_idx: u32, delta: i128) {
         let tracks_sizes = self.presorted.column == Some(SortColumn::Size);
         let mut changed: Vec<u32> = Vec::new();
@@ -244,8 +221,6 @@ impl VolumeIndex {
         }
     }
 
-    /// Replaces a live file's size and moves the difference through its ancestors. Directory
-    /// records are skipped: their size is the aggregate maintained here, not a filesystem value.
     pub(crate) fn update_file_size(&mut self, index: u32, new_size: u64) {
         let Some(record) = self.records.get(index as usize) else {
             return;
@@ -264,7 +239,6 @@ impl VolumeIndex {
         self.mark_presorted_sizes_changed(std::iter::once(index));
     }
 
-    /// `true` when a live record for this `(frn, parent, name)` triple is already indexed.
     fn has_live_record_at(&self, frn: u64, parent_frn: u64, name: &str) -> bool {
         self.frn_to_idx.get(frn).is_some_and(|indices| {
             indices.iter().copied().any(|idx| {
@@ -274,7 +248,6 @@ impl VolumeIndex {
                     return false;
                 }
                 match rec.parent_idx {
-                    // The snapshot could not resolve this parent, so the name is all there is.
                     FileRecord::ROOT_PARENT => true,
                     parent_idx if (parent_idx as usize) < self.records.len() => {
                         self.records[parent_idx as usize].frn == parent_frn
@@ -330,8 +303,6 @@ impl VolumeIndex {
         match change {
             UsnChange::Deleted { frn } => {
                 self.pending_renames.remove(&frn);
-                // The root disappeared: any later create under a recycled FRN has to be judged on
-                // its own. A file that was never indexed has no row and no content document.
                 if self.excluded_frns.remove(&frn) {
                     return;
                 }
@@ -375,9 +346,6 @@ impl VolumeIndex {
                 attributes,
                 ts,
             } => {
-                // The journal carries the attribute set that says whether this is a directory or a
-                // reparse point. Losing it here would let a freshly created symlink look like an
-                // ordinary file and reach the content worker.
                 let mut flags = file_record_flags(attributes);
                 if is_dir {
                     flags |= cairn_core::FLAG_DIRECTORY;
@@ -393,10 +361,6 @@ impl VolumeIndex {
                     return;
                 }
 
-                // A full `$MFT` scan and the replay that follows it overlap on `[T0, T1)`, so a
-                // create can describe a file the snapshot already captured. Re-inserting it would
-                // yield the same path twice; a different name or parent is a real hard link and
-                // must still become its own record (IDX-06).
                 if self.has_live_record_at(frn, parent_frn, &name) {
                     return;
                 }
@@ -440,9 +404,6 @@ impl VolumeIndex {
                         now_unix,
                     );
                 }
-                // The journal record carries no size, and its timestamp is the event time rather
-                // than the file's. Read the file once on the next debounce pass, or every file
-                // created during a catch-up would be displayed as 0 B.
                 if !is_dir {
                     self.pending_data_changes.insert(frn);
                 }
@@ -459,9 +420,6 @@ impl VolumeIndex {
                     return;
                 }
                 if self.excluded_frns.contains(&parent_frn) {
-                    // The target lies in service data, so this path must not become a row. Only a
-                    // new-name record describes the destination; the old-name half of a rename out
-                    // of the subtree must not keep a directory excluded forever.
                     self.pending_renames.remove(&frn);
                     if is_new_name && is_dir {
                         self.excluded_frns.insert(frn);
@@ -546,8 +504,6 @@ impl VolumeIndex {
                                 now_unix,
                             );
                         }
-                        // The content document stores the path; a rename has to replace it,
-                        // and a rename out of the extension whitelist has to delete it.
                         self.pending_data_changes.insert(frn);
                         self.mark_presorted_names_changed(std::iter::once(idx));
                         if self.records[idx as usize].is_dir() {
@@ -578,14 +534,13 @@ impl VolumeIndex {
                         let record = &mut self.records[idx as usize];
                         record.modified_ts = ts;
                         let was_dir = record.is_dir();
-                        // The event owns only the directory/reparse bits; tombstone and the other
-                        // flags stay as they are.
+                        // Directory and reparse bits are replaced from the event; other attribute
+                        // bits are ORed in and re-synced from disk by the debounce pass. The
+                        // tombstone bit always survives.
                         record.flags = (record.flags
                             & !(cairn_core::FLAG_DIRECTORY | cairn_core::FLAG_REPARSE_POINT))
                             | mapped;
                         if was_dir != record.is_dir() {
-                            // The size now means the other thing: a file's stream size or a
-                            // directory's aggregate. A fresh aggregation restores the tree.
                             if !was_dir {
                                 self.live_file_bytes =
                                     self.live_file_bytes.saturating_sub(record.size);
@@ -622,13 +577,8 @@ impl VolumeIndex {
                     }
                 }
                 if kind_changed {
-                    // One aggregation per applied batch, not one per event; the batch caller runs
-                    // `ensure_directory_sizes` after the last change.
                     self.mark_directory_sizes_dirty();
                 }
-                // A file that became a reparse point (or a directory) is no longer eligible
-                // content. Re-running the record through the debounce pass removes the document
-                // whose path can no longer be opened without following the link.
                 self.pending_data_changes.insert(frn);
             }
             UsnChange::DataChanged { frn } => {
@@ -666,8 +616,6 @@ impl VolumeIndex {
         let parent_idx = rec.parent_idx;
         let size = rec.size as i128;
         let was_file = !rec.is_dir();
-        // A descendant of an already deleted directory has already left the ancestor totals with
-        // that directory's recursive size.
         if !self.has_tombstone_ancestor(parent_idx) {
             self.adjust_parent_sizes(parent_idx, -size);
         }
@@ -676,8 +624,6 @@ impl VolumeIndex {
             self.live_file_bytes = self.live_file_bytes.saturating_sub(size as u64);
         }
         self.records[idx as usize].mark_tombstone();
-        // A view that pages the live order counts visible rows; removing one shifts every
-        // later offset, so the order's version moves even though the column itself is intact.
         self.presorted.bump_version();
     }
 }

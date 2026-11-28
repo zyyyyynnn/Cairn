@@ -107,8 +107,6 @@ mod tests {
         );
     }
 
-    /// What a plain source-chain walk can still see, used to prove the Tantivy variants hide the
-    /// code from it.
     fn io_code_from_source(error: &(dyn Error + 'static)) -> Option<i32> {
         error
             .downcast_ref::<io::Error>()

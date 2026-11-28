@@ -69,9 +69,6 @@ pub fn cairn_service_main(_arguments: Vec<std::ffi::OsString>) {
         }
     };
 
-    // The data locations are secured before anything is read from them. If that cannot be done --
-    // for example because an unprivileged account pre-created them and their ownership cannot be
-    // restored here -- the service refuses to index instead of running on an uncontrolled store.
     let runtime = match ServiceRuntime::build() {
         Ok(runtime) => runtime,
         Err(err) => {
@@ -105,14 +102,10 @@ pub fn cairn_service_main(_arguments: Vec<std::ffi::OsString>) {
     let _ = status_handle.set_service_status(stopped_status(exit_code));
 }
 
-/// The SCM phases of a service start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StartupState {
-    /// Work is in progress; `checkpoint` advances while it runs.
     Pending { checkpoint: u32 },
-    /// The runtime was built; this is the SCM's signal of a successful start.
     Running,
-    /// Startup failed. The start must fail visibly instead of succeeding and stopping immediately.
     Failed { exit_code: u32 },
 }
 
@@ -172,8 +165,6 @@ fn stopped_status(exit_code: u32) -> ServiceStatus {
     }
 }
 
-/// Keeps the SCM informed while the data tree is secured and the first index is built: the initial
-/// pending status is followed by increasing checkpoints until the reporter is stopped.
 fn spawn_start_checkpoint_reporter(
     status_handle: ServiceStatusHandle,
 ) -> (mpsc::Sender<()>, JoinHandle<()>) {
@@ -198,8 +189,6 @@ fn spawn_start_checkpoint_reporter(
     (stop_tx, reporter)
 }
 
-/// Stops the checkpoint reporter before the final status is reported, so no stale `StartPending` can
-/// overwrite Running or Stopped.
 fn stop_start_checkpoint_reporter(sender: mpsc::Sender<()>, reporter: JoinHandle<()>) {
     let _ = sender.send(());
     let _ = reporter.join();

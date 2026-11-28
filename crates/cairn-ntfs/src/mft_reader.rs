@@ -443,10 +443,11 @@ fn detect_mft_layout<R: BlockReader + ?Sized>(reader: &mut R) -> Result<MftLayou
             head_len,
         )))
     } else {
-        // Delegates invalid OEM signature error formatting to NtfsBootSector::parse.
-        Err(VolumeError::BootSector(
-            NtfsBootSector::parse(&header[..512]).unwrap_err(),
-        ))
+        let mut oem_id = [0u8; 8];
+        oem_id.copy_from_slice(&header[3..11]);
+        Err(VolumeError::BootSector(BootSectorError::InvalidOemId(
+            oem_id,
+        )))
     }
 }
 

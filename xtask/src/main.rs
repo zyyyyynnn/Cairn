@@ -13,6 +13,7 @@ mod docs_check;
 mod hygiene_check;
 mod i18n_check;
 mod size_check;
+mod version_check;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -28,12 +29,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Run all fast repository gates (check-i18n, check-docs, check-size, check-hygiene)
+    /// Run all fast repository gates (check-i18n, check-docs, check-size, check-hygiene, version governance)
     Check {
         /// The workspace root to check.
         #[arg(default_value = ".")]
         workspace: PathBuf,
-        /// Only run documentation links and repository hygiene gates (for docs-only changes).
+        /// Only run documentation links, repository hygiene, and version gates (for docs-only changes).
         #[arg(long, default_value_t = false)]
         docs_only: bool,
     },
@@ -55,7 +56,7 @@ enum Commands {
         #[arg(default_value = ".")]
         workspace: PathBuf,
     },
-    /// Check workspace lint inheritance, ignored-test registry parity, comment markers, and copy symbols
+    /// Check workspace lint inheritance, ignored-test registry parity, comment markers, copy symbols, and version identities
     CheckHygiene {
         /// The workspace root to inspect.
         #[arg(default_value = ".")]
@@ -101,6 +102,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             docs_check::check_docs(&workspace)?;
             hygiene_check::check_hygiene(&workspace)?;
+            version_check::check_versions(&workspace)?;
         }
         Commands::CheckI18n { workspace } => {
             i18n_check::check_i18n(&workspace)?;
@@ -113,6 +115,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::CheckHygiene { workspace } => {
             hygiene_check::check_hygiene(&workspace)?;
+            version_check::check_versions(&workspace)?;
         }
         #[cfg(feature = "package")]
         Commands::Package { out_dir } => {
