@@ -26,6 +26,8 @@
 6. `cargo run --release -p xtask -- bench-query --check`（CI `Release / Engine` 在 release 编译后直接运行同机 `CairnXtask.exe bench-query --check`，执行全账本内存与查询延迟回归门禁）
 7. 版本治理：`cargo run -p xtask -- check` 校验当前产品版本字面量只允许出现在 `Cargo.toml`、`Cargo.lock` 与 `CHANGELOG.md`（若存在）；外部依赖版本仅在依赖名与版本相邻时豁免；成员 manifest 必须使用 `version.workspace = true`；`check` 与 `package` 同时校验数字三段式、前导零与 MSI 字段上限；`check` 同时校验 `release.md` §6.1 登记的来源路径存在。
 
+注释按 `prune-comments` 的逐次审计分类与 outcome 流程处理；公共 API 文档、live `SAFETY:` 与有效决策链接保留，清理结果以审计报告为准，不在仓库维护计数基线；私有/内部文档注释的可见性审计列为后续项。
+
 纯文档变更仅在 `ubuntu-latest` 执行 `check-docs`、`check-hygiene` 与版本治理（`--docs-only`），跳过所有 Windows 编译、测试与发布作业，`Code Quality & Static Analysis`、`Dependency Policy`、`Domain & System Test Suite` 与 `Installer Package` 均以最小开销通过。代码变更必须通过全部必需门禁，`Installer Package` 在 Release 构建与 `Test / Engine & Tooling` 完成后执行。
 
 `deny.toml` 只针对 `x86_64-pc-windows-msvc`；许可证白名单与 GPUI 栈的 unmaintained 例外均有理由记录。漏洞与 yanked 不设全局忽略，新增 ignore 必须附上游依据。

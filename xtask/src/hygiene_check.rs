@@ -1448,6 +1448,20 @@ mod tests {
     }
 
     #[test]
+    fn crlf_comment_markers_are_detected() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        seed_valid_workspace(temp.path());
+        fs::write(
+            temp.path().join("crates/demo/src/crlf.rs"),
+            "// TODO clean up\r\nfn f() {}\r\n",
+        )
+        .expect("crlf rs");
+
+        let err = check_hygiene(temp.path()).expect_err("CRLF marker must fail");
+        assert!(err.contains("TODO"), "{err}");
+    }
+
+    #[test]
     fn missing_forbid_unsafe_numbered_step_and_eng_stage_fail() {
         let temp = tempfile::tempdir().expect("tempdir");
         seed_valid_workspace(temp.path());
