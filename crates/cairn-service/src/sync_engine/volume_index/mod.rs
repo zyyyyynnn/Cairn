@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+//! Indexed record table of one volume: ingestion, journal changes, folder totals and compaction.
+
 mod presort;
 mod refresh;
 

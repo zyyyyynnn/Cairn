@@ -49,8 +49,8 @@ features = [
 [dev-dependencies]
 tempfile.workspace = true
 postcard.workspace = true
-# Black-box pipe integration tests (SPEC SVC-02, SVC-07) drive the real client library against the real
-# server; this is a dev-only dependency and does not change the runtime layering of the workspace.
+# Black-box pipe integration tests drive the real client library against the real server; this is
+# a dev-only dependency and does not change the runtime layering of the workspace.
 cairn-client.workspace = true
 
 [build-dependencies]

@@ -30,7 +30,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Run all fast repository gates (check-i18n, check-docs, check-size, check-hygiene, version-check)
+    /// Run all fast repository gates (check-i18n, check-docs, check-size, check-hygiene, version governance)
     Check {
         /// The workspace root to check.
         #[arg(default_value = ".")]

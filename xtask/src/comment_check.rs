@@ -220,10 +220,10 @@ fn scan_file(workspace: &Path, rel: &str, text: &str) -> FileScan {
     let mut violations = safety_violations(&scanned.comments, &scanned.code_lines);
     for (line, comment) in &scanned.comments {
         let body = comment_body(comment);
-        if let Some(link) = link_token(body)
-            && let Err(reason) = validate_link(workspace, link)
-        {
-            violations.push((*line, reason));
+        for link in link_tokens(body) {
+            if let Err(reason) = validate_link(workspace, link) {
+                violations.push((*line, reason));
+            }
         }
     }
     let blocks = comment_blocks(workspace, rel, &scanned.comments, &scanned.code_lines);
@@ -379,6 +379,15 @@ fn link_token(body: &str) -> Option<&str> {
     Some(token.trim_end_matches(['.', ',', ';', ':', '。', '，', '；', '：', '、', ')', '）']))
 }
 
+fn link_tokens(body: &str) -> impl Iterator<Item = &str> {
+    body.match_indices("See docs/engineering/")
+        .map(|(offset, _)| {
+            let rest = &body[offset + "See docs/engineering/".len()..];
+            let token = rest.split_whitespace().next().unwrap_or_default();
+            token.trim_end_matches(['.', ',', ';', ':', '。', '，', '；', '：', '、', ')', '）'])
+        })
+}
+
 fn link_only(workspace: &Path, body: &str) -> bool {
     let Some(token) = link_token(body) else {
         return false;
@@ -488,13 +497,24 @@ fn slugify(title: &str) -> String {
 }
 
 fn is_live_safety(code_lines: &[(usize, String)], end: usize) -> bool {
-    code_lines
+    let mut code = code_lines
         .iter()
         .filter(|(line, _)| *line > end)
         .map(|(_, code)| code.trim())
         .filter(|code| !code.is_empty() && !code.starts_with('#'))
-        .take(6)
-        .any(|code| contains_word(code, "unsafe"))
+        .take(2);
+    let Some(first) = code.next() else {
+        return false;
+    };
+    if contains_word(first, "unsafe") {
+        return true;
+    }
+    if first.starts_with("let ") && !first.ends_with(';') {
+        return code
+            .next()
+            .is_some_and(|next| next.trim_start().starts_with("unsafe"));
+    }
+    false
 }
 
 fn contains_word(haystack: &str, needle: &str) -> bool {
@@ -857,6 +877,46 @@ mod tests {
     }
 
     #[test]
+    fn links_after_prose_are_still_validated() {
+        let temp = workspace();
+        let mut text = source();
+        text.push_str("\n// Related: See docs/engineering/quality.md#12-静态检查与回归门禁.\n");
+        let path = write_source(&temp, &text);
+        check_comments(temp.path(), std::slice::from_ref(&path), true, true)
+            .expect("update baseline");
+
+        let broken = text.replace("#12-静态检查与回归门禁", "#missing-anchor");
+        write_source(&temp, &broken);
+        let err = check_comments(temp.path(), &[path], false, false).expect_err("dead link fails");
+        assert!(err.contains("anchor"), "{err}");
+    }
+
+    #[test]
+    fn crlf_comments_keep_the_same_baseline() {
+        let temp = workspace();
+        let path = write_source(&temp, &source().replace('\n', "\r\n"));
+        check_comments(temp.path(), std::slice::from_ref(&path), true, false)
+            .expect("update baseline");
+        check_comments(temp.path(), std::slice::from_ref(&path), false, false)
+            .expect("CRLF comments keep their identity");
+    }
+
+    #[test]
+    fn safety_must_attach_to_the_next_code_line() {
+        let temp = workspace();
+        let text = "// SAFETY: this is not attached to an unsafe operation.\n\
+             fn first() {}\n\
+             fn second() {}\n\
+             fn third() {}\n\
+             fn fourth() {}\n\
+             fn fifth() {}\n\
+             unsafe fn sixth() {}\n";
+        let path = write_source(&temp, text);
+        let err = check_comments(temp.path(), &[path], true, true).expect_err("orphan fails");
+        assert!(err.contains("orphan SAFETY"), "{err}");
+    }
+
+    #[test]
     fn strings_do_not_count_and_whitespace_suppression_fails() {
         let temp = workspace();
         let path = write_source(&temp, &source());
@@ -879,10 +939,15 @@ mod tests {
     #[test]
     fn inline_attributes_are_rejected_but_method_expect_is_not() {
         let temp = workspace();
-        let text = format!(
-            "{}\nfn helper(#[allow(unused)] x: u8) {{}}\nfn checked(value: Option<u8>) {{ let _ = value.expect(\"value\"); }}\n",
+        let method = format!(
+            "{}\nfn checked(value: Option<u8>) {{ let _ = value.expect(\"value\"); }}\n",
             source()
         );
+        let path = write_source(&temp, &method);
+        check_comments(temp.path(), std::slice::from_ref(&path), true, false)
+            .expect("a method named expect is not a lint suppression");
+
+        let text = format!("{method}fn helper(#[allow(unused)] x: u8) {{}}\n");
         let path = write_source(&temp, &text);
         let err = check_comments(temp.path(), &[path], false, false).expect_err("attribute fails");
         assert!(err.contains("lint suppression"), "{err}");
@@ -900,6 +965,87 @@ mod tests {
         let path = write_source(&temp, &text);
         let err = check_comments(temp.path(), &[path], false, false).expect_err("hash split fails");
         assert!(err.contains("lint suppression"), "{err}");
+    }
+
+    #[test]
+    fn baseline_and_debt_schema_are_validated() {
+        let temp = workspace();
+        let path = write_source(&temp, &source());
+        check_comments(temp.path(), std::slice::from_ref(&path), true, false)
+            .expect("update baseline");
+
+        let baseline_path = temp.path().join(BASELINE_FILE);
+        let original_baseline = fs::read_to_string(&baseline_path).expect("baseline text");
+        let baseline: serde_json::Value =
+            serde_json::from_str(&original_baseline).expect("baseline json");
+
+        let mut wrong_schema = baseline.clone();
+        wrong_schema["schema_version"] = serde_json::json!(2);
+        fs::write(
+            &baseline_path,
+            serde_json::to_string(&wrong_schema).expect("serialize"),
+        )
+        .expect("write");
+        let err = read_baseline(temp.path()).expect_err("schema mismatch fails");
+        assert!(err.contains("expected schema_version"), "{err}");
+
+        let mut duplicate = baseline.clone();
+        let item = duplicate["items"][0].clone();
+        duplicate["items"].as_array_mut().expect("items").push(item);
+        duplicate["files"] = serde_json::json!({"crates/demo/src/lib.rs": 2});
+        fs::write(
+            &baseline_path,
+            serde_json::to_string(&duplicate).expect("serialize"),
+        )
+        .expect("write");
+        let err = read_baseline(temp.path()).expect_err("duplicate ids fail");
+        assert!(err.contains("duplicate item ids"), "{err}");
+
+        let mut mismatched_sum = baseline.clone();
+        mismatched_sum["files"] = serde_json::json!({"crates/demo/src/lib.rs": 2});
+        fs::write(
+            &baseline_path,
+            serde_json::to_string(&mismatched_sum).expect("serialize"),
+        )
+        .expect("write");
+        let err = read_baseline(temp.path()).expect_err("sum mismatch fails");
+        assert!(err.contains("file counts sum"), "{err}");
+
+        fs::write(&baseline_path, original_baseline).expect("restore baseline");
+
+        let debt_path = temp.path().join(DEBT_FILE);
+        let original_debt = fs::read_to_string(&debt_path).expect("debt text");
+        let debt: serde_json::Value = serde_json::from_str(&original_debt).expect("debt json");
+
+        let mut wrong_schema = debt.clone();
+        wrong_schema["schema_version"] = serde_json::json!(2);
+        fs::write(
+            &debt_path,
+            serde_json::to_string(&wrong_schema).expect("serialize"),
+        )
+        .expect("write");
+        let err = read_debt(temp.path()).expect_err("debt schema fails");
+        assert!(err.contains("expected schema_version"), "{err}");
+
+        let mut wrong_count = debt.clone();
+        wrong_count["count"] = serde_json::json!(0);
+        fs::write(
+            &debt_path,
+            serde_json::to_string(&wrong_count).expect("serialize"),
+        )
+        .expect("write");
+        let err = read_debt(temp.path()).expect_err("debt count fails");
+        assert!(err.contains("count 0"), "{err}");
+
+        let mut wrong_tracking = debt;
+        wrong_tracking["tracking"] = serde_json::json!("README.md");
+        fs::write(
+            &debt_path,
+            serde_json::to_string(&wrong_tracking).expect("serialize"),
+        )
+        .expect("write");
+        let err = read_debt(temp.path()).expect_err("debt tracking fails");
+        assert!(err.contains("tracking must stay"), "{err}");
     }
 
     #[test]

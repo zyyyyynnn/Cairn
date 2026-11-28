@@ -6,14 +6,30 @@
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use toml::Value;
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            component => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
+}
 
 /// Discovers workspace member manifests, including path-dependency auto-members.
 pub fn workspace_members(workspace: &Path) -> Result<Vec<PathBuf>, String> {
     let root_path = workspace.join("Cargo.toml");
     let root = read_toml(&root_path)?;
+    let root_canonical = fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
+    let excluded = excluded_paths(workspace, &root, &root_canonical);
     let mut queue = Vec::new();
     if let Some(members) = root
         .get("workspace")
@@ -26,8 +42,21 @@ pub fn workspace_members(workspace: &Path) -> Result<Vec<PathBuf>, String> {
                     "Cargo.toml: workspace member glob `{member}` is not supported by the gates"
                 ));
             }
-            queue.push(workspace.join(member).join("Cargo.toml"));
+            queue.push(normalize_path(&workspace.join(member).join("Cargo.toml")));
         }
+    }
+    if let Some(dependencies) = root
+        .get("workspace")
+        .and_then(|workspace| workspace.get("dependencies"))
+        .and_then(Value::as_table)
+    {
+        queue_dependencies(
+            &root_path,
+            [dependencies],
+            &root_canonical,
+            &excluded,
+            &mut queue,
+        );
     }
     if queue.is_empty() {
         let crates = workspace.join("crates");
@@ -36,19 +65,18 @@ pub fn workspace_members(workspace: &Path) -> Result<Vec<PathBuf>, String> {
                 fs::read_dir(&crates).map_err(|err| format!("{}: {err}", crates.display()))?
             {
                 let entry = entry.map_err(|err| format!("{}: {err}", crates.display()))?;
-                let manifest = entry.path().join("Cargo.toml");
+                let manifest = normalize_path(&entry.path().join("Cargo.toml"));
                 if manifest.is_file() {
                     queue.push(manifest);
                 }
             }
         }
-        let xtask = workspace.join("xtask/Cargo.toml");
+        let xtask = normalize_path(&workspace.join("xtask/Cargo.toml"));
         if xtask.is_file() {
             queue.push(xtask);
         }
     }
 
-    let root_canonical = fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
     let mut seen = BTreeSet::new();
     let mut manifests = Vec::new();
     while let Some(manifest) = queue.pop() {
@@ -62,34 +90,86 @@ pub fn workspace_members(workspace: &Path) -> Result<Vec<PathBuf>, String> {
         }
         manifests.push(manifest.clone());
         let doc = read_toml(&manifest)?;
-        for section in ["dependencies", "dev-dependencies", "build-dependencies"] {
-            let Some(table) = doc.get(section).and_then(Value::as_table) else {
-                continue;
-            };
-            for dependency in table.values() {
-                let Some(path) = dependency
-                    .as_table()
-                    .and_then(|dependency| dependency.get("path"))
-                    .and_then(Value::as_str)
-                else {
-                    continue;
-                };
-                let parent = manifest.parent().expect("manifest has a parent");
-                let dependency_manifest = parent.join(path).join("Cargo.toml");
-                if !dependency_manifest.is_file() {
-                    continue;
-                }
-                let dependency_canonical = fs::canonicalize(&dependency_manifest)
-                    .unwrap_or_else(|_| dependency_manifest.clone());
-                if dependency_canonical.starts_with(&root_canonical) {
-                    queue.push(dependency_manifest);
-                }
-            }
-        }
+        queue_dependencies(
+            &manifest,
+            dependency_tables(&doc),
+            &root_canonical,
+            &excluded,
+            &mut queue,
+        );
     }
     manifests.sort();
     manifests.dedup();
     Ok(manifests)
+}
+
+fn dependency_tables(doc: &toml::Table) -> Vec<&toml::Table> {
+    let mut tables = Vec::new();
+    for section in ["dependencies", "dev-dependencies", "build-dependencies"] {
+        if let Some(table) = doc.get(section).and_then(Value::as_table) {
+            tables.push(table);
+        }
+    }
+    if let Some(targets) = doc.get("target").and_then(Value::as_table) {
+        for target in targets.values().filter_map(Value::as_table) {
+            for section in ["dependencies", "dev-dependencies", "build-dependencies"] {
+                if let Some(table) = target.get(section).and_then(Value::as_table) {
+                    tables.push(table);
+                }
+            }
+        }
+    }
+    tables
+}
+
+fn queue_dependencies<'a>(
+    manifest: &Path,
+    tables: impl IntoIterator<Item = &'a toml::Table>,
+    root_canonical: &Path,
+    excluded: &[PathBuf],
+    queue: &mut Vec<PathBuf>,
+) {
+    let parent = manifest.parent().expect("manifest has a parent");
+    for table in tables {
+        for dependency in table.values() {
+            let Some(path) = dependency
+                .as_table()
+                .and_then(|dependency| dependency.get("path"))
+                .and_then(Value::as_str)
+            else {
+                continue;
+            };
+            let dependency_manifest = normalize_path(&parent.join(path).join("Cargo.toml"));
+            if !dependency_manifest.is_file() {
+                continue;
+            }
+            let dependency_canonical = fs::canonicalize(&dependency_manifest)
+                .unwrap_or_else(|_| dependency_manifest.clone());
+            if !dependency_canonical.starts_with(root_canonical)
+                || excluded
+                    .iter()
+                    .any(|excluded| dependency_canonical.starts_with(excluded))
+            {
+                continue;
+            }
+            queue.push(dependency_manifest);
+        }
+    }
+}
+
+fn excluded_paths(workspace: &Path, root: &toml::Table, root_canonical: &Path) -> Vec<PathBuf> {
+    root.get("workspace")
+        .and_then(|workspace| workspace.get("exclude"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(|path| {
+            let candidate = workspace.join(path);
+            fs::canonicalize(&candidate).unwrap_or(candidate)
+        })
+        .filter(|path| path.starts_with(root_canonical))
+        .collect()
 }
 
 fn read_toml(path: &Path) -> Result<toml::Table, String> {
@@ -192,29 +272,47 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         fs::write(
             temp.path().join("Cargo.toml"),
-            "[workspace]\nmembers = [\"crates/demo\"]\n",
+            "[workspace]\nmembers = [\"crates/demo\"]\nexclude = [\"tools/excluded\"]\n[workspace.dependencies]\nroot_tool = { path = \"tools/root_tool\" }\n",
         )
         .expect("root");
         fs::create_dir_all(temp.path().join("crates/demo/src")).expect("demo");
-        fs::create_dir_all(temp.path().join("tools/tool/src")).expect("tool");
+        for tool in ["tool", "target_tool", "root_tool", "excluded"] {
+            fs::create_dir_all(temp.path().join(format!("tools/{tool}/src"))).expect(tool);
+            fs::write(
+                temp.path().join(format!("tools/{tool}/Cargo.toml")),
+                format!("[package]\nname = \"{tool}\"\n"),
+            )
+            .expect("tool manifest");
+        }
         fs::write(
             temp.path().join("crates/demo/Cargo.toml"),
-            "[package]\nname = \"demo\"\n\n[dependencies]\ntool = { path = \"../../tools/tool\" }\n",
+            "[package]\nname = \"demo\"\n\n[dependencies]\ntool = { path = \"../../tools/tool\" }\nexcluded = { path = \"../../tools/excluded\" }\n\n[target.'cfg(windows)'.dependencies]\ntarget_tool = { path = \"../../tools/target_tool\" }\n",
         )
         .expect("demo manifest");
-        fs::write(
-            temp.path().join("tools/tool/Cargo.toml"),
-            "[package]\nname = \"tool\"\n",
-        )
-        .expect("tool manifest");
 
         let members = workspace_members(temp.path()).expect("members");
-        assert_eq!(members.len(), 2, "{members:?}");
+        let names: Vec<String> = members
+            .iter()
+            .map(|manifest| {
+                manifest
+                    .strip_prefix(temp.path())
+                    .expect("member")
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+        assert_eq!(names.len(), 4, "{names:?}");
+        for expected in [
+            "crates/demo/Cargo.toml",
+            "tools/tool/Cargo.toml",
+            "tools/target_tool/Cargo.toml",
+            "tools/root_tool/Cargo.toml",
+        ] {
+            assert!(names.iter().any(|name| name == expected), "{names:?}");
+        }
         assert!(
-            members
-                .iter()
-                .any(|manifest| manifest.ends_with("tools/tool/Cargo.toml")),
-            "{members:?}"
+            !names.iter().any(|name| name.contains("excluded")),
+            "{names:?}"
         );
     }
 }

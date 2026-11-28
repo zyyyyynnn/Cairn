@@ -1051,7 +1051,7 @@ pub(crate) fn scan_rust_source(source: &str) -> ScannedSource {
                 buf.push(chars[i]);
                 i += 1;
             }
-            comments.push((start_line, buf));
+            push_comment(&mut comments, start_line, buf);
             continue;
         }
 
@@ -1063,7 +1063,7 @@ pub(crate) fn scan_rust_source(source: &str) -> ScannedSource {
             i += 2;
             while i < chars.len() && depth > 0 {
                 if chars[i] == '\n' {
-                    comments.push((cur_line, std::mem::take(&mut buf)));
+                    push_comment(&mut comments, cur_line, std::mem::take(&mut buf));
                     code_lines.push((line, std::mem::take(&mut cur_code)));
                     line += 1;
                     cur_line = line;
@@ -1080,7 +1080,7 @@ pub(crate) fn scan_rust_source(source: &str) -> ScannedSource {
                 }
             }
             if !buf.is_empty() {
-                comments.push((cur_line, buf));
+                push_comment(&mut comments, cur_line, buf);
             }
             continue;
         }
@@ -1098,6 +1098,13 @@ pub(crate) fn scan_rust_source(source: &str) -> ScannedSource {
         code_lines,
         block_comment_lines,
     }
+}
+
+fn push_comment(comments: &mut Vec<(usize, String)>, line: usize, mut text: String) {
+    if text.ends_with('\r') {
+        text.pop();
+    }
+    comments.push((line, text));
 }
 
 fn prev_is_boundary(chars: &[char], idx: usize) -> bool {
@@ -1204,7 +1211,12 @@ fn collect_rs_recursive(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), Stri
     for entry in entries {
         let entry = entry.map_err(|err| format!("{}: {err}", dir.display()))?;
         let path = entry.path();
-        if path.is_dir() {
+        let metadata =
+            fs::symlink_metadata(&path).map_err(|err| format!("{}: {err}", path.display()))?;
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        if metadata.is_dir() {
             if path.file_name().is_some_and(|name| name == "target") {
                 continue;
             }

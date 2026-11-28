@@ -187,7 +187,7 @@ fn scan_path(
         }
         Err(_) => return Ok(0),
     };
-    if has_product_version(&text, version, name) {
+    if has_product_version(&text, version) {
         violations.push(format!(
             "{rel}: product version `{version}` must live only in Cargo.toml, Cargo.lock, or CHANGELOG.md"
         ));
@@ -258,44 +258,9 @@ fn check_registry(workspace: &Path, violations: &mut Vec<String>) -> Result<(), 
     Ok(())
 }
 
-fn has_product_version(text: &str, version: &str, file_name: &str) -> bool {
-    let version_file = matches!(file_name, "VERSION" | "version");
-    let mut recent = [false; 2];
-    for line in text.lines() {
-        let context = product_context(line);
-        let version_line = version_key(line);
-        let hit = contains_version_literal(line, version)
-            && !external_context(line, version)
-            && (context
-                || (recent[0] || recent[1]) && version_line
-                || line.trim_start().starts_with('#')
-                || version_file);
-        if hit {
-            return true;
-        }
-        recent[0] = recent[1];
-        recent[1] = context;
-    }
-    false
-}
-
-fn product_context(line: &str) -> bool {
-    let lower = line.to_ascii_lowercase();
-    lower.contains("cairn")
-        || lower.contains("product version")
-        || lower.contains("release")
-        || lower.contains("tag")
-        || lower.contains("current version")
-        || line.contains("当前版本")
-        || line.contains("发布版本")
-        || line.contains("产品版本")
-        || line.contains("版本号")
-        || line.contains("版本：")
-}
-
-fn version_key(line: &str) -> bool {
-    let lower = line.to_ascii_lowercase();
-    lower.contains("version") || line.contains("版本") || lower.contains("tag")
+fn has_product_version(text: &str, version: &str) -> bool {
+    text.lines()
+        .any(|line| contains_version_literal(line, version) && !external_context(line, version))
 }
 
 fn external_context(line: &str, version: &str) -> bool {
@@ -533,6 +498,7 @@ mod tests {
                 "package.json",
                 format!("{{\n  \"name\": \"cairn-setup\",\n  \"version\": \"{version}\"\n}}\n"),
             ),
+            ("metadata.json", format!("{{\"version\":\"{version}\"}}\n")),
             ("NOTES.md", format!("当前版本：{version}\n")),
             ("VERSION", format!("{version}\n")),
             ("installer.ps1", format!("# Cairn installer {version}\n")),
@@ -568,6 +534,19 @@ mod tests {
         )
         .expect("readme");
         let err = check_versions(temp.path()).expect_err("product copy still fails");
+        assert!(err.contains("README.md"), "{err}");
+    }
+
+    #[test]
+    fn windows_mentions_do_not_exempt_a_product_version() {
+        let version = v();
+        let temp = workspace(&version);
+        fs::write(
+            temp.path().join("README.md"),
+            format!("Windows 11 23H2 (x64) / Cairn v{version}\n"),
+        )
+        .expect("readme");
+        let err = check_versions(temp.path()).expect_err("product copy fails");
         assert!(err.contains("README.md"), "{err}");
     }
 

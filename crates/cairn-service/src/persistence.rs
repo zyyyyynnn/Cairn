@@ -7,7 +7,8 @@
 
 use cairn_core::arena::NamePool;
 use cairn_core::index_file::{
-    HEADER_SIZE, IndexFileError, IndexHeader, RECORD_SIZE, decode_record, encode_record,
+    HEADER_SIZE, INDEX_MAGIC, IndexFileError, IndexHeader, RECORD_SIZE, decode_record,
+    encode_record,
 };
 use cairn_core::model::FileRecord;
 use crc32fast::Hasher;
@@ -89,7 +90,10 @@ pub(crate) fn atomic_write_bytes(target: &Path, bytes: &[u8]) -> Result<(), std:
 pub enum PersistenceError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("Invalid index file magic signature")]
+    #[error(
+        "Invalid index file magic signature: expected {}",
+        String::from_utf8_lossy(INDEX_MAGIC)
+    )]
     InvalidMagic,
     #[error("Unsupported index format version: {0}")]
     UnsupportedVersion(u32),

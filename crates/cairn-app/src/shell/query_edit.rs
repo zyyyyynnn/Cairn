@@ -321,8 +321,17 @@ mod query_edit_tests {
                         this.query.search_input.selection = 5..5;
                         let query_id = this.query.query_id();
 
-                        for key in ["left", "right", "home", "end"] {
+                        for (key, expected) in [
+                            ("left", 4..4),
+                            ("right", 5..5),
+                            ("home", 0..0),
+                            ("end", 5..5),
+                        ] {
                             this.handle_query_edit_key(&key_down(key), cx);
+                            assert_eq!(
+                                this.query.search_input.selection, expected,
+                                "{key} must move the caret"
+                            );
                         }
                         assert_eq!(
                             this.query.query_id(),
