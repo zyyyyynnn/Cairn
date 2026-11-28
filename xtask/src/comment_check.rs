@@ -2,13 +2,13 @@
 // Copyright (c) 2026 Cairn Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Comment-budget ratchet: enforces per-file and per-item budgets for non-exempt `//`
-//! comment blocks, validates live SAFETY directives and decision links, and rejects Rust
-//! lint suppressions and block comments.
+//! Comment-budget ratchet: enforces per-file counts and per-item identities for non-exempt
+//! comment blocks, validates live SAFETY directives and decision links, verifies open-debt
+//! parity, and rejects Rust lint suppressions and block comments.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -31,29 +31,21 @@ struct Baseline {
     items: Vec<Item>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 struct Item {
     id: String,
     file: String,
-    start: usize,
-    end: usize,
     kind: String,
-    text_hash: String,
-    visibility: String,
-    test_scope: String,
-    outcome: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct DebtItem {
-    id: String,
-    file: String,
-    start: usize,
-    end: usize,
-    kind: String,
-    text_hash: String,
-    visibility: String,
-    test_scope: String,
+struct Debt {
+    schema_version: u32,
+    unit: String,
+    count: usize,
+    owner: String,
+    tracking: String,
+    items: Vec<Item>,
 }
 
 struct FileScan {
@@ -69,13 +61,6 @@ pub(crate) fn check_comments(
     update_baseline: bool,
     allow_increase: bool,
 ) -> Result<usize, String> {
-    if !update_baseline
-        && !workspace.join(BASELINE_FILE).is_file()
-        && !workspace.join(".git").exists()
-    {
-        return Ok(0);
-    }
-
     let mut counts = BTreeMap::new();
     let mut items = Vec::new();
     let mut violations = Vec::new();
@@ -123,8 +108,8 @@ pub(crate) fn check_comments(
             for item in &items {
                 if !old_ids.contains(item.id.as_str()) {
                     increases.push(format!(
-                        "{}:{}: new or changed comment block",
-                        item.file, item.start
+                        "{}: new or changed {} comment",
+                        item.file, item.kind
                     ));
                 }
             }
@@ -134,6 +119,12 @@ pub(crate) fn check_comments(
                     increases.join("\n  ")
                 ));
             }
+        }
+        if existing.is_none() && workspace.join(".git").exists() && !allow_increase {
+            return Err(
+                "the comment baseline is missing in a Git workspace; pass --allow-increase to recreate it"
+                    .to_string(),
+            );
         }
         write_baseline(workspace, &counts, &items)?;
         write_debt(workspace, &items)?;
@@ -162,7 +153,8 @@ pub(crate) fn check_comments(
         return Ok(counts.values().sum());
     };
 
-    for rel in counts.keys().chain(old.files.keys()) {
+    let keys: BTreeSet<&String> = counts.keys().chain(old.files.keys()).collect();
+    for rel in keys {
         let current = counts.get(rel).copied().unwrap_or(0);
         let allowed = old.files.get(rel).copied().unwrap_or(0);
         if current > allowed {
@@ -180,10 +172,23 @@ pub(crate) fn check_comments(
     for item in &items {
         if !old_ids.contains(item.id.as_str()) {
             violations.push(format!(
-                "{}:{}: new or changed comment block (id {})",
-                item.file, item.start, item.id
+                "{}: new or changed {} comment (id {})",
+                item.file, item.kind, item.id
             ));
         }
+    }
+
+    let Some(debt) = read_debt(workspace)? else {
+        return Err(format!(
+            "{DEBT_FILE} is missing; run `check-comments --update` after the comments were cleaned"
+        ));
+    };
+    let old_items: BTreeSet<&Item> = old.items.iter().collect();
+    let debt_items: BTreeSet<&Item> = debt.items.iter().collect();
+    if debt_items != old_items {
+        violations.push(format!(
+            "{DEBT_FILE}: open debt items do not match {BASELINE_FILE}"
+        ));
     }
 
     if !violations.is_empty() {
@@ -207,7 +212,7 @@ fn scan_file(workspace: &Path, rel: &str, text: &str) -> FileScan {
             violations.push((*line, reason));
         }
     }
-    let blocks = non_exempt_blocks(workspace, rel, &scanned.comments, &scanned.code_lines);
+    let blocks = comment_blocks(workspace, rel, &scanned.comments, &scanned.code_lines);
     FileScan {
         blocks,
         suppressions: lint_suppressions(&scanned.code_lines),
@@ -221,29 +226,21 @@ fn safety_violations(
     code_lines: &[(usize, String)],
 ) -> Vec<(usize, String)> {
     let mut violations = Vec::new();
-    let mut index = 0;
-    while index < comments.len() {
-        let (start, text) = &comments[index];
-        let kind = comment_kind(text);
-        let mut end = index;
-        while end + 1 < comments.len()
-            && comments[end + 1].0 == comments[end].0 + 1
-            && comment_kind(&comments[end + 1].1) == kind
+    for group in comment_groups(comments) {
+        if group.kind == 0
+            && comments[group.start].1.trim_start().starts_with("SAFETY:")
+            && !is_live_safety(code_lines, comments[group.end].0)
         {
-            end += 1;
+            violations.push((
+                comments[group.start].0,
+                "orphan SAFETY directive on safe code".to_string(),
+            ));
         }
-        if kind == 0
-            && text.trim_start().starts_with("SAFETY:")
-            && !is_live_safety(code_lines, comments[end].0)
-        {
-            violations.push((*start, "orphan SAFETY directive on safe code".to_string()));
-        }
-        index = end + 1;
     }
     violations
 }
 
-fn non_exempt_blocks(
+fn comment_blocks(
     workspace: &Path,
     rel: &str,
     comments: &[(usize, String)],
@@ -251,10 +248,60 @@ fn non_exempt_blocks(
 ) -> Vec<Item> {
     let mut blocks = Vec::new();
     let mut occurrences: BTreeMap<String, usize> = BTreeMap::new();
+    let start_index = spdx_header_len(comments);
+    for group in comment_groups(&comments[start_index..]) {
+        let start = start_index + group.start;
+        let end = start_index + group.end;
+        let kind = group.kind;
+        let first = &comments[start].1;
+        let last_line = comments[end].0;
+        let body = comment_body(first);
+        let exempt = match kind {
+            0 => {
+                (body.trim_start().starts_with("SAFETY:") && is_live_safety(code_lines, last_line))
+                    || (end == start
+                        && link_token(body)
+                            .is_some_and(|link| validate_link(workspace, link).is_ok()))
+            }
+            _ => true,
+        };
+        if exempt {
+            continue;
+        }
+        let text = comments[start..=end]
+            .iter()
+            .map(|(_, line)| line.trim())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let kind_name = match kind {
+            1 => "doc",
+            2 => "inner",
+            _ => "line",
+        };
+        let key = format!("{rel}\u{0}{kind_name}\u{0}{text}");
+        let count = occurrences.entry(key.clone()).or_insert(0);
+        *count += 1;
+        let id = format!("C-{:016x}", fnv1a64(&format!("{key}\u{0}{count}")));
+        blocks.push(Item {
+            id,
+            file: rel.to_string(),
+            kind: kind_name.to_string(),
+        });
+    }
+    blocks
+}
+
+struct CommentGroup {
+    start: usize,
+    end: usize,
+    kind: u8,
+}
+
+fn comment_groups(comments: &[(usize, String)]) -> Vec<CommentGroup> {
+    let mut groups = Vec::new();
     let mut index = 0;
     while index < comments.len() {
-        let (start, text) = &comments[index];
-        let kind = comment_kind(text);
+        let kind = comment_kind(&comments[index].1);
         let mut end = index;
         while end + 1 < comments.len()
             && comments[end + 1].0 == comments[end].0 + 1
@@ -262,48 +309,31 @@ fn non_exempt_blocks(
         {
             end += 1;
         }
-        let end_line = comments[end].0;
-        if kind == 0 {
-            let first = text.trim_start();
-            let exempt = (*start <= 3
-                && (first.starts_with("Cairn -")
-                    || first.starts_with("Copyright")
-                    || first.starts_with("SPDX-")))
-                || (first.starts_with("SAFETY:") && is_live_safety(code_lines, end_line))
-                || link_token(first).is_some_and(|link| validate_link(workspace, link).is_ok());
-            if !exempt {
-                let text = comments[index..=end]
-                    .iter()
-                    .map(|(_, line)| line.trim())
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                let hash = format!("{:016x}", fnv1a64(&text));
-                let count = occurrences.entry(hash.clone()).or_insert(0);
-                *count += 1;
-                let id = format!(
-                    "C-{:016x}",
-                    fnv1a64(&format!("{rel}\u{0}{hash}\u{0}{count}"))
-                );
-                blocks.push(Item {
-                    id,
-                    file: rel.to_string(),
-                    start: *start,
-                    end: end_line,
-                    kind: "line".to_string(),
-                    text_hash: hash,
-                    visibility: "n/a".to_string(),
-                    test_scope: if is_test_path(rel) {
-                        "true".to_string()
-                    } else {
-                        "unknown".to_string()
-                    },
-                    outcome: "open".to_string(),
-                });
-            }
-        }
+        groups.push(CommentGroup {
+            start: index,
+            end,
+            kind,
+        });
         index = end + 1;
     }
-    blocks
+    groups
+}
+
+fn spdx_header_len(comments: &[(usize, String)]) -> usize {
+    let prefixes = [" Cairn -", " Copyright", " SPDX-"];
+    if comments.len() >= 3
+        && comments[0].0 == 1
+        && comments[1].0 == 2
+        && comments[2].0 == 3
+        && prefixes
+            .iter()
+            .zip(comments.iter().take(3))
+            .all(|(prefix, (_, text))| text.starts_with(*prefix))
+    {
+        3
+    } else {
+        0
+    }
 }
 
 fn comment_kind(text: &str) -> u8 {
@@ -330,7 +360,7 @@ fn comment_body(text: &str) -> &str {
 fn link_token(body: &str) -> Option<&str> {
     let rest = body.strip_prefix("See docs/engineering/")?;
     let token = rest.split_whitespace().next()?;
-    Some(token.trim_end_matches(['.', ',', ';']))
+    Some(token.trim_end_matches(['.', ',', ';', ':', '。', '，', '；', '：', '、', ')', '）']))
 }
 
 fn validate_link(workspace: &Path, link: &str) -> Result<(), String> {
@@ -338,14 +368,32 @@ fn validate_link(workspace: &Path, link: &str) -> Result<(), String> {
         return Err("decision link is empty".to_string());
     }
     let (path, anchor) = link.split_once('#').unwrap_or((link, ""));
-    if path.is_empty() {
-        return Err("decision link has no target path".to_string());
+    if path.is_empty() || path.contains('\\') || !path.ends_with(".md") {
+        return Err(format!(
+            "decision link `{link}` is not a docs/engineering `.md` path"
+        ));
     }
-    let target = workspace.join("docs/engineering").join(path);
+    if Path::new(path)
+        .components()
+        .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(format!(
+            "decision link `{link}` must stay below docs/engineering"
+        ));
+    }
+    let docs = workspace.join("docs/engineering");
+    let target = docs.join(path);
     if !target.is_file() {
         return Err(format!(
             "decision link target docs/engineering/{path} does not exist"
         ));
+    }
+    let docs = fs::canonicalize(&docs)
+        .map_err(|err| format!("cannot canonicalize docs/engineering: {err}"))?;
+    let target = fs::canonicalize(&target)
+        .map_err(|err| format!("cannot canonicalize docs/engineering/{path}: {err}"))?;
+    if !target.starts_with(&docs) {
+        return Err(format!("decision link `{link}` escapes docs/engineering"));
     }
     if anchor.is_empty() {
         return Ok(());
@@ -362,16 +410,43 @@ fn validate_link(workspace: &Path, link: &str) -> Result<(), String> {
 }
 
 fn heading_slugs(text: &str) -> BTreeSet<String> {
-    text.lines()
-        .filter_map(|line| {
-            let line = line.trim_start();
-            let hashes = line.chars().take_while(|ch| *ch == '#').count();
-            (1..=6).contains(&hashes).then(|| {
-                let title = line[hashes..].trim();
-                slugify(title)
-            })
-        })
-        .collect()
+    let mut slugs = BTreeSet::new();
+    let mut seen: BTreeMap<String, usize> = BTreeMap::new();
+    let mut fence: Option<String> = None;
+    for line in text.lines() {
+        let line = line.trim_start();
+        if let Some(marker) = &fence {
+            if line.starts_with(marker.as_str()) {
+                fence = None;
+            }
+            continue;
+        }
+        if line.starts_with("```") || line.starts_with("~~~") {
+            fence = Some(line[..3].to_string());
+            continue;
+        }
+        if line.starts_with("    ") || line.starts_with('\t') {
+            continue;
+        }
+        let hashes = line.chars().take_while(|ch| *ch == '#').count();
+        if !(1..=6).contains(&hashes) {
+            continue;
+        }
+        let title = line[hashes..].trim();
+        let base = slugify(title);
+        if base.is_empty() {
+            continue;
+        }
+        let count = seen.entry(base.clone()).or_insert(0);
+        let slug = if *count == 0 {
+            base
+        } else {
+            format!("{base}-{count}")
+        };
+        *count += 1;
+        slugs.insert(slug);
+    }
+    slugs
 }
 
 fn slugify(title: &str) -> String {
@@ -392,30 +467,81 @@ fn is_live_safety(code_lines: &[(usize, String)], end: usize) -> bool {
         .filter(|(line, _)| *line > end)
         .map(|(_, code)| code.trim())
         .filter(|code| !code.is_empty() && !code.starts_with('#'))
-        .take(4)
-        .any(|code| code.contains("unsafe"))
+        .take(6)
+        .any(|code| contains_word(code, "unsafe"))
+}
+
+fn contains_word(haystack: &str, needle: &str) -> bool {
+    let mut start = 0;
+    while let Some(offset) = haystack[start..].find(needle) {
+        let begin = start + offset;
+        let end = begin + needle.len();
+        let before = haystack[..begin].chars().next_back();
+        let after = haystack[end..].chars().next();
+        let boundary = |ch: Option<char>| ch.is_none_or(|ch| !(ch.is_alphanumeric() || ch == '_'));
+        if boundary(before) && boundary(after) {
+            return true;
+        }
+        start = end;
+    }
+    false
 }
 
 fn lint_suppressions(code_lines: &[(usize, String)]) -> Vec<usize> {
     let mut found = Vec::new();
     let mut in_attribute = false;
+    let mut depth = 0usize;
+    let mut buffer = String::new();
     for (line, code) in code_lines {
-        let compact: String = code.chars().filter(|ch| !ch.is_whitespace()).collect();
-        if compact.starts_with("#[") || compact.starts_with("#![") {
-            in_attribute = true;
+        let chars: Vec<char> = code.chars().filter(|ch| !ch.is_whitespace()).collect();
+        let mut index = 0;
+        while index < chars.len() {
+            if !in_attribute {
+                if chars[index] == '#' && index + 1 < chars.len() && chars[index + 1] == '[' {
+                    in_attribute = true;
+                    depth = 1;
+                    buffer.clear();
+                    index += 2;
+                } else if chars[index] == '#'
+                    && index + 2 < chars.len()
+                    && chars[index + 1] == '!'
+                    && chars[index + 2] == '['
+                {
+                    in_attribute = true;
+                    depth = 1;
+                    buffer.clear();
+                    index += 3;
+                } else {
+                    index += 1;
+                }
+                continue;
+            }
+            match chars[index] {
+                '[' => {
+                    depth += 1;
+                    buffer.push('[');
+                }
+                ']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        if buffer.contains("allow(") || buffer.contains("expect(") {
+                            found.push(*line);
+                        }
+                        in_attribute = false;
+                        buffer.clear();
+                    } else {
+                        buffer.push(']');
+                    }
+                }
+                ch => buffer.push(ch),
+            }
+            index += 1;
         }
-        if in_attribute && (compact.contains("allow(") || compact.contains("expect(")) {
-            found.push(*line);
-        }
-        if in_attribute && compact.ends_with(']') {
-            in_attribute = false;
+        if in_attribute {
+            buffer.push('\n');
         }
     }
     found
-}
-
-fn is_test_path(rel: &str) -> bool {
-    rel.contains("/tests/") || rel.ends_with("/tests.rs") || rel.ends_with("_tests.rs")
 }
 
 fn fnv1a64(text: &str) -> u64 {
@@ -440,12 +566,6 @@ fn read_baseline(workspace: &Path) -> Result<Option<Baseline>, String> {
         return Ok(None);
     }
     let text = fs::read_to_string(&path).map_err(|err| format!("{}: {err}", path.display()))?;
-    if !text.trim_start().starts_with('{') {
-        return Err(format!(
-            "{}: legacy baseline; remove it and run `check-comments --update`",
-            path.display()
-        ));
-    }
     let baseline: Baseline = serde_json::from_str(&text)
         .map_err(|err| format!("{}: invalid baseline JSON: {err}", path.display()))?;
     if baseline.schema_version != COMMENT_SCHEMA_VERSION || baseline.unit != BASELINE_UNIT {
@@ -454,7 +574,56 @@ fn read_baseline(workspace: &Path) -> Result<Option<Baseline>, String> {
             path.display()
         ));
     }
+    let ids: BTreeSet<&str> = baseline.items.iter().map(|item| item.id.as_str()).collect();
+    if ids.len() != baseline.items.len() {
+        return Err(format!("{}: duplicate item ids", path.display()));
+    }
+    let total: usize = baseline.files.values().sum();
+    if total != baseline.items.len() {
+        return Err(format!(
+            "{}: file counts sum to {total}, items are {}",
+            path.display(),
+            baseline.items.len()
+        ));
+    }
     Ok(Some(baseline))
+}
+
+fn read_debt(workspace: &Path) -> Result<Option<Debt>, String> {
+    let path = workspace.join(DEBT_FILE);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let text = fs::read_to_string(&path).map_err(|err| format!("{}: {err}", path.display()))?;
+    let debt: Debt = serde_json::from_str(&text)
+        .map_err(|err| format!("{}: invalid debt JSON: {err}", path.display()))?;
+    if debt.schema_version != COMMENT_SCHEMA_VERSION || debt.unit != BASELINE_UNIT {
+        return Err(format!(
+            "{}: expected schema_version {COMMENT_SCHEMA_VERSION} unit `{BASELINE_UNIT}`",
+            path.display()
+        ));
+    }
+    if debt.count != debt.items.len() {
+        return Err(format!(
+            "{}: count {} does not match {} items",
+            path.display(),
+            debt.count,
+            debt.items.len()
+        ));
+    }
+    let ids: BTreeSet<&str> = debt.items.iter().map(|item| item.id.as_str()).collect();
+    if ids.len() != debt.items.len() {
+        return Err(format!("{}: duplicate item ids", path.display()));
+    }
+    if let Some(link) = debt.tracking.strip_prefix("docs/engineering/") {
+        validate_link(workspace, link)?;
+    } else {
+        return Err(format!(
+            "{}: tracking must stay below docs/engineering",
+            path.display()
+        ));
+    }
+    Ok(Some(debt))
 }
 
 fn write_baseline(
@@ -473,34 +642,31 @@ fn write_baseline(
     let text = format!(
         "{{\n  \"schema_version\": {COMMENT_SCHEMA_VERSION},\n  \"unit\": \"{BASELINE_UNIT}\",\n  \"generated_by\": \"{GENERATED_BY}\",\n  \"files\": {files},\n  \"items\": [\n    {items}\n  ]\n}}\n"
     );
-    let path = workspace.join(BASELINE_FILE);
-    fs::write(&path, text).map_err(|err| format!("{}: {err}", path.display()))
+    write_atomic(&workspace.join(BASELINE_FILE), &text)
 }
 
 fn write_debt(workspace: &Path, items: &[Item]) -> Result<(), String> {
     let count = items.len();
     let items = items
         .iter()
-        .map(|item| {
-            serde_json::to_string(&DebtItem {
-                id: item.id.clone(),
-                file: item.file.clone(),
-                start: item.start,
-                end: item.end,
-                kind: item.kind.clone(),
-                text_hash: item.text_hash.clone(),
-                visibility: item.visibility.clone(),
-                test_scope: item.test_scope.clone(),
-            })
-        })
+        .map(serde_json::to_string)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|err| format!("cannot serialize debt items: {err}"))?
         .join(",\n    ");
     let text = format!(
         "{{\n  \"schema_version\": {COMMENT_SCHEMA_VERSION},\n  \"unit\": \"{BASELINE_UNIT}\",\n  \"count\": {count},\n  \"owner\": \"{DEBT_OWNER}\",\n  \"tracking\": \"{DEBT_TRACKING}\",\n  \"items\": [\n    {items}\n  ]\n}}\n"
     );
-    let path = workspace.join(DEBT_FILE);
-    fs::write(&path, text).map_err(|err| format!("{}: {err}", path.display()))
+    write_atomic(&workspace.join(DEBT_FILE), &text)
+}
+
+fn write_atomic(path: &Path, text: &str) -> Result<(), String> {
+    let temporary = path.with_extension("tmp");
+    fs::write(&temporary, text).map_err(|err| format!("{}: {err}", temporary.display()))?;
+    if fs::rename(&temporary, path).is_err() {
+        let _ = fs::remove_file(path);
+        fs::rename(&temporary, path).map_err(|err| format!("{}: {err}", path.display()))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -513,7 +679,7 @@ mod tests {
         fs::create_dir_all(&docs).expect("docs");
         fs::write(
             docs.join("quality.md"),
-            "# Quality\n\n### 1.2 static checks\n\n### 2.1 window\n",
+            "# Quality\n\n### 1.2 静态检查与回归门禁\n\n### 2.1 流式与虚拟化\n",
         )
         .expect("quality");
         temp
@@ -528,7 +694,7 @@ mod tests {
          const A: u8 = 1;\n\
          // SAFETY: the caller guarantees a live pointer.\n\
          unsafe { consume() };\n\
-         // See docs/engineering/quality.md#12-static-checks.\n\
+         // See docs/engineering/quality.md#12-静态检查与回归门禁.\n\
          const B: u8 = 2;\n"
             .to_string()
     }
@@ -601,36 +767,146 @@ mod tests {
     }
 
     #[test]
-    fn orphan_safety_and_dead_link_fail() {
+    fn orphan_safety_fails() {
         let temp = workspace();
         let path = write_source(&temp, &source());
         check_comments(temp.path(), std::slice::from_ref(&path), true, false)
             .expect("update baseline");
         let mut text = source();
         text.push_str("\n// SAFETY: not attached to unsafe code.\nconst C: u8 = 3;\n");
+        write_source(&temp, &text);
+        let err = check_comments(temp.path(), &[path], false, false).expect_err("orphan fails");
+        assert!(err.contains("orphan SAFETY"), "{err}");
+    }
+
+    #[test]
+    fn dead_link_fails() {
+        let temp = workspace();
+        let path = write_source(&temp, &source());
+        check_comments(temp.path(), std::slice::from_ref(&path), true, false)
+            .expect("update baseline");
+        let mut text = source();
         text.push_str("\n// See docs/engineering/missing.md#nope.\n");
         write_source(&temp, &text);
-        let err = check_comments(temp.path(), &[path], false, false).expect_err("directives fail");
+        let err = check_comments(temp.path(), &[path], false, false).expect_err("link fails");
+        assert!(err.contains("does not exist"), "{err}");
+    }
+
+    #[test]
+    fn link_traversal_and_multiline_narration_fail() {
+        let temp = workspace();
+        let path = write_source(&temp, &source());
+        check_comments(temp.path(), std::slice::from_ref(&path), true, false)
+            .expect("update baseline");
+        let mut text = source();
+        text.push_str("\n// See docs/engineering/../Cargo.toml#x.\n");
+        text.push_str("\n// See docs/engineering/quality.md#12-静态检查与回归门禁.\n// narration after a link\n");
+        write_source(&temp, &text);
+        let err = check_comments(temp.path(), &[path], false, false).expect_err("link paths fail");
         assert!(
-            err.contains("SAFETY") || err.contains("does not exist"),
+            err.contains("below docs/engineering") || err.contains("new or changed"),
             "{err}"
         );
     }
 
     #[test]
-    fn strings_do_not_count_but_whitespace_suppression_does() {
+    fn strings_do_not_count_and_whitespace_suppression_fails() {
         let temp = workspace();
         let path = write_source(&temp, &source());
         check_comments(temp.path(), std::slice::from_ref(&path), true, false)
             .expect("update baseline");
         let text = format!(
-            "{}\nconst STRING: &str = \"// not a comment #[allow(dead_code)]\";\n#[allow (dead_code)]\nfn helper() {{}}\n",
+            "{}\nconst STRING: &str = \"// not a comment #[allow(dead_code)]\";\n",
             source()
         );
+        write_source(&temp, &text);
+        check_comments(temp.path(), std::slice::from_ref(&path), true, false)
+            .expect("string-only update");
+        let text = format!("{text}#[allow (dead_code)]\nfn helper() {{}}\n");
         write_source(&temp, &text);
         let err =
             check_comments(temp.path(), &[path], false, false).expect_err("suppression fails");
         assert!(err.contains("lint suppression"), "{err}");
+    }
+
+    #[test]
+    fn inline_attributes_are_rejected_but_method_expect_is_not() {
+        let temp = workspace();
+        let text = format!(
+            "{}\nfn helper(#[allow(unused)] x: u8) {{}}\nfn checked(value: Option<u8>) {{ let _ = value.expect(\"value\"); }}\n",
+            source()
+        );
+        let path = write_source(&temp, &text);
+        let err = check_comments(temp.path(), &[path], false, false).expect_err("attribute fails");
+        assert!(err.contains("lint suppression"), "{err}");
+    }
+
+    #[test]
+    fn baseline_recreation_requires_allow_increase() {
+        let temp = workspace();
+        fs::create_dir_all(temp.path().join(".git")).expect("git dir");
+        let path = write_source(&temp, &source());
+        let err = check_comments(temp.path(), std::slice::from_ref(&path), true, false)
+            .expect_err("missing baseline in git fails");
+        assert!(err.contains("--allow-increase"), "{err}");
+        check_comments(temp.path(), std::slice::from_ref(&path), true, true)
+            .expect("explicit recreation");
+    }
+
+    #[test]
+    fn debt_is_read_and_must_match_the_baseline() {
+        let temp = workspace();
+        let path = write_source(&temp, &source());
+        check_comments(temp.path(), std::slice::from_ref(&path), true, false)
+            .expect("update baseline");
+        fs::remove_file(temp.path().join(DEBT_FILE)).expect("remove debt");
+        let err = check_comments(temp.path(), std::slice::from_ref(&path), false, false)
+            .expect_err("missing debt fails");
+        assert!(err.contains(DEBT_FILE), "{err}");
+        assert_eq!(baseline(&temp).files.len(), 1);
+        check_comments(temp.path(), &[path], true, false).expect("restore debt");
+    }
+
+    #[test]
+    fn spdx_headers_do_not_absorb_following_narration() {
+        let temp = workspace();
+        let text = "// Cairn - High-performance Windows file search engine\n\
+             // Copyright (c) 2026 Cairn Contributors\n\
+             // SPDX-License-Identifier: Apache-2.0\n\
+             // narration after the header\n\
+             const A: u8 = 1;\n";
+        let path = write_source(&temp, text);
+        check_comments(temp.path(), std::slice::from_ref(&path), true, false)
+            .expect("update baseline");
+        assert_eq!(baseline(&temp).files.values().sum::<usize>(), 1);
+    }
+
+    #[test]
+    fn safety_uses_tokens_not_substrings() {
+        let temp = workspace();
+        let path = write_source(&temp, &source());
+        check_comments(temp.path(), std::slice::from_ref(&path), true, false)
+            .expect("update baseline");
+        let mut text = source();
+        text.push_str(
+            "\n// SAFETY: unsafe_flag is not an unsafe operation.\nconst FLAG: bool = true;\n",
+        );
+        write_source(&temp, &text);
+        let err = check_comments(temp.path(), &[path], false, false).expect_err("orphan fails");
+        assert!(err.contains("orphan SAFETY"), "{err}");
+    }
+
+    #[test]
+    fn link_tokens_trim_punctuation_and_slugs_ignore_fences() {
+        assert_eq!(
+            link_token("See docs/engineering/quality.md#12-静态检查与回归门禁。"),
+            Some("quality.md#12-静态检查与回归门禁")
+        );
+        let slugs = heading_slugs("# A\n## A\n```\n## Fenced\n```\n## 3. 中文、标点\n");
+        assert!(slugs.contains("a"), "{slugs:?}");
+        assert!(slugs.contains("a-1"), "{slugs:?}");
+        assert!(!slugs.contains("fenced"), "{slugs:?}");
+        assert!(slugs.contains("3-中文标点"), "{slugs:?}");
     }
 
     #[test]
@@ -646,6 +922,9 @@ mod tests {
             .expect_err("increase refused");
         assert!(err.contains("refusing to raise"), "{err}");
         check_comments(temp.path(), &[path], true, true).expect("explicit increase");
-        assert_eq!(baseline(&temp).files.len(), 1);
+        let baseline = baseline(&temp);
+        assert_eq!(baseline.items.len(), 2);
+        let debt = read_debt(temp.path()).expect("read debt").expect("debt");
+        assert_eq!(debt.count, 2);
     }
 }

@@ -143,6 +143,7 @@ impl Drop for RestorePrivilege {
     }
 }
 
+// See docs/engineering/ipc-security.md#4-权限使用.
 fn apply_ownership_privileges() -> RestorePrivilege {
     #[cfg(windows)]
     let taken_here = {
@@ -846,6 +847,7 @@ mod windows_acl {
         })
     }
 
+    // See docs/engineering/ipc-security.md#4-权限使用.
     pub fn enforce(path: &Path) -> Result<(), DataDirectoryError> {
         if is_reparse_point(path) {
             return Err(DataDirectoryError::ReparsePoint {

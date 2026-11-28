@@ -16,21 +16,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const CAIRN_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-fn numeric_product_version(version: &str) -> Result<&str, Box<dyn Error>> {
-    let parts: Vec<&str> = version.split('.').collect();
-    if parts.len() == 3
-        && parts
-            .iter()
-            .all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()))
-    {
-        Ok(version)
-    } else {
-        Err(format!(
-            "workspace version `{version}` must be MAJOR.MINOR.PATCH numeric for MSI ProductVersion"
-        )
-        .into())
-    }
+fn validate_package_version() -> Result<(), Box<dyn Error>> {
+    crate::versioning::msi_version(CAIRN_VERSION)
+        .map_err(|err| -> Box<dyn Error> { err.into() })?;
+    let tag = crate::versioning::release_tag_from_env()
+        .map_err(|err| -> Box<dyn Error> { err.into() })?;
+    crate::versioning::validate_release_tag(tag.as_deref(), CAIRN_VERSION)
+        .map_err(|err| -> Box<dyn Error> { err.into() })
 }
+
 pub const SETUP_EXE_NAME: &str = "CairnSetup.exe";
 pub const UNINSTALLER_NAME: &str = "CairnUninstall.exe";
 pub const MSI_NAME: &str = "cairn.msi";
@@ -71,6 +65,7 @@ pub const LOGO_NAME: &str = "cairn-64.png";
 /// Binaries are read from `CAIRN_BIN_DIR` when set, otherwise from `target/release` of the
 /// workspace. The WiX executable is taken from `CAIRN_WIX` when set, otherwise from `PATH`.
 pub fn run_package<P: AsRef<Path>>(out_dir: P) -> Result<(), Box<dyn Error>> {
+    validate_package_version()?;
     let workspace_root = workspace_root();
     let bin_dir = std::env::var_os("CAIRN_BIN_DIR").map_or_else(
         || workspace_root.join("target").join("release"),
@@ -463,7 +458,8 @@ fn run_command(command: &mut Command, what: &str) -> Result<(), Box<dyn Error>> 
 }
 
 fn generate_wix_template(wxs_path: &Path) -> Result<(), Box<dyn Error>> {
-    let product_version = numeric_product_version(CAIRN_VERSION)?;
+    let product_version = crate::versioning::msi_version(CAIRN_VERSION)
+        .map_err(|err| -> Box<dyn Error> { err.into() })?;
     let wxs_content = format!(
         r#"<?xml version="1.0" encoding="utf-8"?>
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
@@ -709,17 +705,6 @@ pub fn sha256_digest(data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn msi_version_requires_three_numeric_parts() {
-        assert_eq!(numeric_product_version("1.2.3").expect("valid"), "1.2.3");
-        for bad in ["1.2", "1.2.3-beta", "1.2.3+build", "1.2.x"] {
-            assert!(
-                numeric_product_version(bad).is_err(),
-                "`{bad}` must be rejected for MSI"
-            );
-        }
-    }
 
     #[test]
     fn the_install_guard_command_keeps_quoted_paths_parseable() {

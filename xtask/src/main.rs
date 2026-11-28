@@ -30,7 +30,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Run all fast repository gates (check-i18n, check-docs, check-size, check-hygiene)
+    /// Run all fast repository gates (check-i18n, check-docs, check-size, check-hygiene, version-check)
     Check {
         /// The workspace root to check.
         #[arg(default_value = ".")]
@@ -57,7 +57,7 @@ enum Commands {
         #[arg(default_value = ".")]
         workspace: PathBuf,
     },
-    /// Check workspace lint inheritance, ignored-test registry parity, comment markers, and copy symbols
+    /// Check workspace lint inheritance, ignored-test registry parity, comment markers, copy symbols, and version identities
     CheckHygiene {
         /// The workspace root to inspect.
         #[arg(default_value = ".")]

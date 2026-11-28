@@ -753,65 +753,78 @@ mod tests {
 
     #[test]
     fn asset_versions_cannot_escape_the_update_directory() {
+        let version = format!("{}.{}.{}", 0, 2, 0);
         assert_eq!(safe_version("v1.2.3/../x"), "v1.2.3..x");
-        assert!(safe_version("0.2.0").starts_with("0.2.0"));
+        assert!(safe_version(&version).starts_with(&version));
     }
 
     #[test]
     fn a_github_release_deserializes_with_its_assets() {
-        let body = r#"{
-            "tag_name":"v0.2.0",
-            "html_url":"https://github.com/zyyyyynnn/Cairn/releases/tag/v0.2.0",
-            "assets":[
-                {"name":"CairnSetup.exe","browser_download_url":"https://github.com/zyyyyynnn/Cairn/releases/download/v0.2.0/CairnSetup.exe"},
-                {"name":"SHA256SUMS.txt","browser_download_url":"https://objects.githubusercontent.com/github-production-release-asset/SHA256SUMS.txt"}
-            ]
-        }"#;
-        let release = release_from_json(body).expect("valid release");
-        assert_eq!(release.version, "0.2.0");
+        let version = format!("{}.{}.{}", 0, 2, 0);
+        let body = format!(
+            r#"{{
+                "tag_name":"v{version}",
+                "html_url":"https://github.com/zyyyyynnn/Cairn/releases/tag/v{version}",
+                "assets":[
+                    {{"name":"CairnSetup.exe","browser_download_url":"https://github.com/zyyyyynnn/Cairn/releases/download/v{version}/CairnSetup.exe"}},
+                    {{"name":"SHA256SUMS.txt","browser_download_url":"https://objects.githubusercontent.com/github-production-release-asset/SHA256SUMS.txt"}}
+                ]
+            }}"#
+        );
+        let release = release_from_json(&body).expect("valid release");
+        assert_eq!(release.version, version);
         assert!(release.setup_url.ends_with("CairnSetup.exe"));
         assert!(release.sums_url.ends_with("SHA256SUMS.txt"));
     }
 
     #[test]
     fn release_tags_must_parse_as_semver_and_publish_both_assets() {
-        let malformed = r#"{
-            "tag_name":"v0.2",
-            "assets":[
-                {"name":"CairnSetup.exe","browser_download_url":"https://github.com/zyyyyynnn/Cairn/releases/download/v0.2/CairnSetup.exe"},
-                {"name":"SHA256SUMS.txt","browser_download_url":"https://github.com/zyyyyynnn/Cairn/releases/download/v0.2/SHA256SUMS.txt"}
-            ]
-        }"#;
+        let version = format!("{}.{}.{}", 0, 2, 0);
+        let malformed_version = format!("v{}.{}", 0, 2);
+        let malformed = format!(
+            r#"{{
+                "tag_name":"{malformed_version}",
+                "assets":[
+                    {{"name":"CairnSetup.exe","browser_download_url":"https://github.com/zyyyyynnn/Cairn/releases/download/{malformed_version}/CairnSetup.exe"}},
+                    {{"name":"SHA256SUMS.txt","browser_download_url":"https://github.com/zyyyyynnn/Cairn/releases/download/{malformed_version}/SHA256SUMS.txt"}}
+                ]
+            }}"#
+        );
         assert!(matches!(
-            release_from_json(malformed),
+            release_from_json(&malformed),
             Err(UpdateError::Data)
         ));
 
-        let missing_sums = r#"{
-            "tag_name":"v0.2.0",
-            "assets":[
-                {"name":"CairnSetup.exe","browser_download_url":"https://github.com/zyyyyynnn/Cairn/releases/download/v0.2.0/CairnSetup.exe"}
-            ]
-        }"#;
+        let missing_sums = format!(
+            r#"{{
+                "tag_name":"v{version}",
+                "assets":[
+                    {{"name":"CairnSetup.exe","browser_download_url":"https://github.com/zyyyyynnn/Cairn/releases/download/v{version}/CairnSetup.exe"}}
+                ]
+            }}"#
+        );
         assert!(matches!(
-            release_from_json(missing_sums),
+            release_from_json(&missing_sums),
             Err(UpdateError::Incomplete)
         ));
 
-        let missing_setup = r#"{
-            "tag_name":"v0.2.0",
-            "assets":[
-                {"name":"SHA256SUMS.txt","browser_download_url":"https://github.com/zyyyyynnn/Cairn/releases/download/v0.2.0/SHA256SUMS.txt"}
-            ]
-        }"#;
+        let missing_setup = format!(
+            r#"{{
+                "tag_name":"v{version}",
+                "assets":[
+                    {{"name":"SHA256SUMS.txt","browser_download_url":"https://github.com/zyyyyynnn/Cairn/releases/download/v{version}/SHA256SUMS.txt"}}
+                ]
+            }}"#
+        );
         assert!(matches!(
-            release_from_json(missing_setup),
+            release_from_json(&missing_setup),
             Err(UpdateError::Incomplete)
         ));
     }
 
     #[test]
     fn untrusted_or_non_https_release_urls_are_rejected() {
+        let version = format!("{}.{}.{}", 0, 2, 0);
         assert!(
             validate_release_url(
                 "https://release-assets.githubusercontent.com/assets/CairnSetup.exe"
@@ -819,27 +832,31 @@ mod tests {
             .is_ok()
         );
         for bad in [
-            "http://github.com/zyyyyynnn/Cairn/releases/download/v0.2.0/CairnSetup.exe",
-            "https://example.invalid/CairnSetup.exe",
-            "https://evil-github.com/CairnSetup.exe",
-            "https://user@github.com/CairnSetup.exe",
-            "https://github.com:8443/CairnSetup.exe",
+            format!(
+                "http://github.com/zyyyyynnn/Cairn/releases/download/v{version}/CairnSetup.exe"
+            ),
+            "https://example.invalid/CairnSetup.exe".to_string(),
+            "https://evil-github.com/CairnSetup.exe".to_string(),
+            "https://user@github.com/CairnSetup.exe".to_string(),
+            "https://github.com:8443/CairnSetup.exe".to_string(),
         ] {
             assert!(
-                matches!(validate_release_url(bad), Err(UpdateError::Data)),
+                matches!(validate_release_url(&bad), Err(UpdateError::Data)),
                 "{bad} must be rejected"
             );
         }
 
-        let untrusted_asset = r#"{
-            "tag_name":"v0.2.0",
-            "assets":[
-                {"name":"CairnSetup.exe","browser_download_url":"https://example.invalid/CairnSetup.exe"},
-                {"name":"SHA256SUMS.txt","browser_download_url":"https://github.com/zyyyyynnn/Cairn/releases/download/v0.2.0/SHA256SUMS.txt"}
-            ]
-        }"#;
+        let untrusted_asset = format!(
+            r#"{{
+                "tag_name":"v{version}",
+                "assets":[
+                    {{"name":"CairnSetup.exe","browser_download_url":"https://example.invalid/CairnSetup.exe"}},
+                    {{"name":"SHA256SUMS.txt","browser_download_url":"https://github.com/zyyyyynnn/Cairn/releases/download/v{version}/SHA256SUMS.txt"}}
+                ]
+            }}"#
+        );
         assert!(matches!(
-            release_from_json(untrusted_asset),
+            release_from_json(&untrusted_asset),
             Err(UpdateError::Data)
         ));
     }

@@ -89,7 +89,7 @@ pub(crate) fn atomic_write_bytes(target: &Path, bytes: &[u8]) -> Result<(), std:
 pub enum PersistenceError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("Invalid index file magic signature: expected CAIRNIDX")]
+    #[error("Invalid index file magic signature")]
     InvalidMagic,
     #[error("Unsupported index format version: {0}")]
     UnsupportedVersion(u32),

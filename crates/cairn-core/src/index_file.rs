@@ -26,7 +26,7 @@ pub const RECORD_SIZE: usize = size_of::<FileRecord>();
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum IndexFileError {
-    #[error("invalid index file magic signature: expected CAIRNIDX")]
+    #[error("invalid index file magic signature")]
     InvalidMagic,
     #[error("unsupported index format version: {0}")]
     UnsupportedVersion(u32),
