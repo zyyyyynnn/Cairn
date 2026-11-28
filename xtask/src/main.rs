@@ -62,7 +62,7 @@ enum Commands {
         #[arg(default_value = ".")]
         workspace: PathBuf,
     },
-    /// Package the GPUI setup (CairnSetup.exe), WiX MSI, and SHA256 checksums
+    /// Package the GPUI setup (CairnSetup.exe), WiX MSI, and SHA256 checksums (REL-01, REL-02, REL-04)
     #[cfg(feature = "package")]
     Package {
         #[arg(short, long, default_value = "dist")]
